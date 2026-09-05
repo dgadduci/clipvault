@@ -28,8 +28,10 @@ fn bootstrap_in(dir: &TempDir) -> AppContext {
     let clock = Arc::new(FixedClock {
         instant: datetime!(2026-01-02 03:04:05 UTC),
     });
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     AppBootstrap::new()
         .with_clock(clock)
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap")
 }
@@ -79,8 +81,10 @@ fn fake_clock_overrides_system_clock() {
     let clock = Arc::new(FixedClock {
         instant: datetime!(2030-12-31 23:59:59 UTC),
     });
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock)
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
 

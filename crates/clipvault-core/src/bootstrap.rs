@@ -41,6 +41,46 @@ pub enum BootstrapError {
 
     #[error("platform error: {0}")]
     Platform(#[from] PlatformError),
+
+    /// The bootstrap was asked to build an [`AppContext`] without an
+    /// explicit [`PlatformAdapters`] bundle. The previous design
+    /// silently fell back to [`DefaultPlatform::detect`], which
+    /// resolved `data_dir` to `~/.clipvault` regardless of where the
+    /// SQLite file lived. A test pointing the database at a tempdir
+    /// and exercising `delete_entry`, `clear_non_favorites` or
+    /// `apply_retention` could therefore ask the asset collector to
+    /// sweep the developer's real PNG assets (audit captured the
+    /// regression at 11:20:44 with four `unlink` calls against
+    /// `~/.clipvault/assets/clipboard/*.png`).
+    ///
+    /// The fix refuses the build and forces every caller — shell or
+    /// test — to either inject a [`PlatformAdapters`] bundle with a
+    /// `PlatformInfo` whose `data_dir` is the same namespace as the
+    /// database, or opt into the host-detected platform explicitly
+    /// through
+    /// [`AppBootstrap::with_default_platform_adapters`]. The two
+    /// paths mirror the two safe directions:
+    ///
+    /// - **Production shells** use the host's `~/.clipvault`. Call
+    ///   `with_default_platform_adapters` so the resolved
+    ///   `PlatformInfo` and the SQLite path agree.
+    /// - **Tests** use a `tempfile::TempDir`. Call
+    ///   `with_platform_adapters` with a synthetic `PlatformInfo`
+    ///   that points `home_dir` and `data_dir` at the tempdir (see
+    ///   `crate::test_support::IsolatedTestHarness` for the shared
+    ///   helper).
+    ///
+    /// Either path guarantees that `ClipboardAssetStore::root()` and
+    /// `RichTextAssetStore::root()` resolve inside the same
+    /// namespace the SQLite file lives in, so the asset collector
+    /// cannot reach a different filesystem root.
+    #[error(
+        "AppBootstrap requires explicit PlatformAdapters; refusing to auto-detect the host data \
+         directory. Call `with_platform_adapters` (tests) or `with_default_platform_adapters` \
+         (production shells) before `bootstrap_at`, `bootstrap_default` or \
+         `bootstrap_with_database`."
+    )]
+    MissingPlatformAdapters,
 }
 
 /// Knobs the shell can pass in. Most callers only need the defaults.
@@ -304,6 +344,28 @@ impl AppBootstrap {
         self
     }
 
+    /// Inject a `PlatformAdapters` bundle built from the host's
+    /// detected platform — the bundle the production Tauri shell
+    /// wires against `~/.clipvault` at first launch. The method
+    /// exists to opt into the host detection explicitly so the
+    /// bootstrap cannot silently fall back to it after the
+    /// `MissingPlatformAdapters` guard was added.
+    ///
+    /// Tests that point the database at a tempdir MUST NOT call
+    /// this helper: doing so would resolve `data_dir` to
+    /// `~/.clipvault` and reintroduce the cross-namespace asset
+    /// deletion the guard prevents. Tests should build a synthetic
+    /// [`PlatformAdapters`] via [`Self::with_platform_adapters`]
+    /// (the canonical helper lives in
+    /// [`crate::test_support`]).
+    pub fn with_default_platform_adapters(mut self) -> Result<Self, BootstrapError> {
+        let detected_platform = DefaultPlatform::detect()?;
+        let detected_capabilities = clipvault_platform::detect_capabilities(&detected_platform);
+        let adapters = PlatformAdapters::stub(&detected_platform, detected_capabilities);
+        self.options.platform_adapters = Some(adapters);
+        Ok(self)
+    }
+
     /// Open the database at `path`, run the built-in migrations and build
     /// the [`AppContext`].
     pub fn bootstrap_at(self, path: impl AsRef<Path>) -> Result<AppContext, BootstrapError> {
@@ -333,16 +395,19 @@ impl AppBootstrap {
 
     fn finish(self, mut database: Database, path: PathBuf) -> Result<AppContext, BootstrapError> {
         let _ = path; // future-proofing: tracked here so callers can introspect
-        let detected_platform = DefaultPlatform::detect()?;
-        let detected_capabilities = clipvault_platform::detect_capabilities(&detected_platform);
-        // Build or reuse the platform adapters bundle first so the
-        // context can adopt the caller-supplied `PlatformInfo` instead
-        // of the host-detected one. This is what tests rely on to
-        // exercise non-host display servers.
-        let platform_adapters = match self.options.platform_adapters {
-            Some(adapters) => adapters,
-            None => PlatformAdapters::stub(&detected_platform, detected_capabilities),
-        };
+                      // Hard guard: refuse to build a context without explicit
+                      // `PlatformAdapters`. The previous behaviour auto-detected the
+                      // host platform and resolved `data_dir` to `~/.clipvault`,
+                      // which let a test pointing the database at a tempdir sweep
+                      // real PNG assets through the collector. See
+                      // `BootstrapError::MissingPlatformAdapters` for the full
+                      // context. The shell MUST call `with_default_platform_adapters`
+                      // (production) or `with_platform_adapters` (tests) before
+                      // reaching this branch.
+        let platform_adapters = self
+            .options
+            .platform_adapters
+            .ok_or(BootstrapError::MissingPlatformAdapters)?;
         // Cache the provider handle so the history service can enrich
         // captures with metadata without holding a separate reference.
         let app_metadata_provider = platform_adapters.app_metadata();

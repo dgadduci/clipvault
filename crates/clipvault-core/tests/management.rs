@@ -23,11 +23,21 @@ fn tempdir() -> TempDir {
     tempfile::tempdir().expect("tempdir")
 }
 
+/// Build an [`AppContext`] whose `PlatformAdapters` bundle points
+/// `home_dir` / `data_dir` inside the tempdir. Required since the
+/// destructive operations exercised below (`delete_entry`,
+/// `clear_non_favorites`, `apply_retention`) all funnel through the
+/// asset collector; without the isolated harness the collector
+/// would sweep `~/.clipvault/assets/clipboard/*.png` because the
+/// host-detected platform would point the asset stores at the real
+/// user directory.
 fn bootstrap_with_clock(clock: Arc<dyn Clock>) -> (TempDir, AppContext) {
     let dir = tempdir();
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock)
         .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new()))
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     (dir, context)
@@ -309,9 +319,15 @@ fn each_retention_policy_survives_a_second_bootstrap() {
         ("days_30", RetentionPolicy::Days30),
         ("days_90", RetentionPolicy::Days90),
     ] {
-        // First bootstrap seeds the default.
+        // First bootstrap seeds the default. The harness wires an
+        // isolated `PlatformAdapters` bundle so the asset collector
+        // cannot reach the developer's real `~/.clipvault`.
+        let adapters =
+            clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
         let ctx1 = AppBootstrap::new()
             .with_clock(clock.clone())
+            .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new()))
+            .with_platform_adapters(adapters)
             .bootstrap_at(&db_path)
             .expect("first bootstrap");
         set_retention(&ctx1, raw, recent);
@@ -320,8 +336,12 @@ fn each_retention_policy_survives_a_second_bootstrap() {
         drop(ctx1);
 
         // Second bootstrap must observe the user choice intact.
+        let adapters =
+            clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
         let ctx2 = AppBootstrap::new()
             .with_clock(clock.clone())
+            .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new()))
+            .with_platform_adapters(adapters)
             .bootstrap_at(&db_path)
             .expect("second bootstrap");
         let reader = LocalSettingsReader::new(ctx2.clone(), clock.clone());
@@ -341,8 +361,14 @@ fn bootstrap_seeds_default_only_when_key_missing() {
     let db_path = dir.path().join("clipvault.db");
 
     // Empty database: the first bootstrap must seed the default.
+    // The harness wires an isolated `PlatformAdapters` bundle so
+    // the asset collector cannot reach the developer's real
+    // `~/.clipvault`.
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let ctx1 = AppBootstrap::new()
         .with_clock(clock.clone())
+        .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new()))
+        .with_platform_adapters(adapters)
         .bootstrap_at(&db_path)
         .expect("first bootstrap");
     let reader = LocalSettingsReader::new(ctx1.clone(), clock.clone());
@@ -354,8 +380,11 @@ fn bootstrap_seeds_default_only_when_key_missing() {
     drop(ctx1);
 
     // Second bootstrap must NOT touch the existing key.
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let ctx2 = AppBootstrap::new()
         .with_clock(clock.clone())
+        .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new()))
+        .with_platform_adapters(adapters)
         .bootstrap_at(&db_path)
         .expect("second bootstrap");
     let reader = LocalSettingsReader::new(ctx2, clock);

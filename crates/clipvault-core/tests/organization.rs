@@ -6,6 +6,19 @@
 //! services that need to react to it) and assert the typed outcomes.
 //! The clipboard payload, hashes and asset references never enter
 //! any of these tests: the change is metadata-only by construction.
+//!
+//! Every test in this file uses
+//! [`clipvault_core::test_support::isolated_harness_at`]. The shared
+//! helper wires `PlatformAdapters` whose `home_dir` / `data_dir` live
+//! inside the tempdir, so the destructive paths the suite exercises
+//! (`delete_entry`, `clear_non_favorites`, `apply_retention`) cannot
+//! reach the developer's real `~/.clipvault/assets/clipboard`. The
+//! regression that motivated this note was caught by a filesystem
+//! audit at 11:20:44: the previous `bootstrap_at(tempdir.db)` helper
+//! fell back to `DefaultPlatform::detect()` and pointed the asset
+//! stores at the real `~/.clipvault`, so every
+//! `clear_non_favorites` / `delete_entry` / `apply_retention` test
+//! emitted `unlink` calls against `~/.clipvault/assets/clipboard/*.png`.
 
 use std::sync::Arc;
 
@@ -33,12 +46,28 @@ impl Clock for FixedClock {
 
 fn bootstrap_with_clock(when: time::OffsetDateTime) -> (TempDir, AppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(Arc::new(FixedClock { instant: when }))
         .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new()))
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     (dir, context)
+}
+
+/// Reopen a previously bootstrapped context with the same isolated
+/// harness so restart-cycle tests never touch the real
+/// `~/.clipvault`. The clock is re-anchored to `when` so the
+/// migration / upsert round-trip is deterministic.
+fn reopen_isolated_context(dir: &TempDir, when: time::OffsetDateTime) -> AppContext {
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
+    AppBootstrap::new()
+        .with_clock(Arc::new(FixedClock { instant: when }))
+        .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new()))
+        .with_platform_adapters(adapters)
+        .bootstrap_at(dir.path().join("clipvault.db"))
+        .expect("reopen")
 }
 
 fn insert_entry(context: &AppContext, content: &str, when: time::OffsetDateTime) -> i64 {
@@ -1484,11 +1513,10 @@ fn reopen_bootstrap(dir: &TempDir, when: time::OffsetDateTime) -> clipvault_core
     // mode. The closure also hands back a freshly constructed
     // `AppContext` so the assertions below exercise the same code
     // path the GUI uses after the window is closed and re-opened.
-    AppBootstrap::new()
-        .with_clock(Arc::new(FixedClock { instant: when }))
-        .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new()))
-        .bootstrap_at(dir.path().join("clipvault.db"))
-        .expect("reopen")
+    // The harness is rebuilt with an isolated `PlatformAdapters`
+    // bundle pointing at the tempdir so the asset collector cannot
+    // reach the real `~/.clipvault`.
+    reopen_isolated_context(dir, when)
 }
 
 #[test]
@@ -1899,13 +1927,13 @@ fn image_row_remains_in_unfiltered_recent_entries_after_assignments() {
 /// Build a fresh [`AppContext`] on top of an existing database file
 /// by tearing the previous one down and bootstrapping again. Mirrors
 /// the desktop restart loop: SQLite keeps the data, the asset store
-/// keeps the bytes, the context is rebuilt from scratch.
+/// keeps the bytes, the context is rebuilt from scratch. The
+/// harness is rebuilt with an isolated `PlatformAdapters` bundle so
+/// the asset collector cannot reach the real `~/.clipvault` even
+/// when the test thread re-enters `bootstrap_at` with the same
+/// database path.
 fn reopen_context_from(dir: &TempDir, when: time::OffsetDateTime) -> AppContext {
-    AppBootstrap::new()
-        .with_clock(Arc::new(FixedClock { instant: when }))
-        .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new()))
-        .bootstrap_at(dir.path().join("clipvault.db"))
-        .expect("rebootstrap")
+    reopen_isolated_context(dir, when)
 }
 
 #[test]

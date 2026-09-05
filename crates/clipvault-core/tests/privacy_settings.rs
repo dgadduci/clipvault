@@ -34,9 +34,11 @@ fn bootstrap_with_gate(gate: PrivacyGate) -> (TempDir, clipvault_core::AppContex
         instant: datetime!(2026-01-02 03:04:05 UTC),
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(FakeClipboard::with_text("placeholder"));
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock)
         .with_clipboard(clipboard)
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     // Re-create the history service with the privacy gate so every
@@ -249,9 +251,11 @@ fn watcher_with_blacklist_does_not_persist_blacklisted_source() {
         "very-secret-1password-payload",
     ));
     let dir = tempdir();
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock.clone())
         .with_clipboard(clipboard.clone())
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
 
@@ -325,9 +329,11 @@ fn watcher_skips_persistence_when_probe_cache_is_empty() {
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(clipvault_core::FakeClipboard::new());
     let dir = tempdir();
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock.clone())
         .with_clipboard(clipboard.clone())
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     let history = TextHistoryService::new(
@@ -651,9 +657,11 @@ fn record_payload_does_not_log_payload_hash_or_source_app() {
     let clipboard: Arc<dyn Clipboard> =
         Arc::new(clipvault_core::FakeClipboard::with_text("placeholder"));
     let dir = tempdir();
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock.clone())
         .with_clipboard(clipboard.clone())
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     let history = TextHistoryService::new(
@@ -768,9 +776,11 @@ fn active_app_cache_empty_allows_capture_and_reports_pending() {
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(clipvault_core::FakeClipboard::new());
     let dir = tempdir();
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock)
         .with_clipboard(clipboard)
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     let history = TextHistoryService::new(
@@ -823,9 +833,11 @@ fn active_app_cache_updated_with_blacklisted_discards_capture() {
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(clipvault_core::FakeClipboard::new());
     let dir = tempdir();
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let _context = AppBootstrap::new()
         .with_clock(clock.clone())
         .with_clipboard(clipboard.clone())
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
 
@@ -889,9 +901,11 @@ fn active_app_refresh_failure_records_outcome_and_keeps_cache_value() {
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(clipvault_core::FakeClipboard::new());
     let dir = tempdir();
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock.clone())
         .with_clipboard(clipboard.clone())
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     let state = clipvault_core::ActiveAppDiagnosticsState::new(
@@ -959,9 +973,11 @@ fn settings_update_propagates_to_privacy_gate_atomically() {
         "ignored-by-default",
     ));
     let dir = tempdir();
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock.clone())
         .with_clipboard(clipboard.clone())
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     // Replace the bootstrap's gate with the one this test manages so
@@ -1041,9 +1057,11 @@ fn capture_loop_refresh_before_tick_keeps_cache_fresh() {
         "cv-sync-refresh-payload",
     ));
     let dir = tempdir();
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock.clone())
         .with_clipboard(clipboard.clone())
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     // Drive the refresh exactly the way the shell loop does it:
@@ -1111,9 +1129,11 @@ fn unknown_source_preserves_allow_rule_under_sync_refresh() {
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(clipvault_core::FakeClipboard::new());
     let dir = tempdir();
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock.clone())
         .with_clipboard(clipboard.clone())
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     cached.refresh_with(Some(clipvault_platform::ActiveApplication::new("", "")));
@@ -1173,8 +1193,8 @@ fn sync_refresh_failure_transitions_pending_to_failed() {
     let clipboard: Arc<dyn Clipboard> = Arc::new(clipvault_core::FakeClipboard::new());
     let probe: Arc<dyn ActiveApplicationProbe> = Arc::new(StubProbe);
     let info = clipvault_platform::PlatformInfo {
-        home_dir: std::path::PathBuf::from("/tmp"),
-        data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+        home_dir: dir.path().to_path_buf(),
+        data_dir: dir.path().join("data"),
         os_family: clipvault_platform::OsFamily::Macos,
         display_server: clipvault_platform::DisplayServer::Unknown,
     };
@@ -1271,8 +1291,8 @@ fn sync_refresh_failure_records_timeout_outcome() {
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(clipvault_core::FakeClipboard::new());
     let info = clipvault_platform::PlatformInfo {
-        home_dir: std::path::PathBuf::from("/tmp"),
-        data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+        home_dir: dir.path().to_path_buf(),
+        data_dir: dir.path().join("data"),
         os_family: clipvault_platform::OsFamily::Macos,
         display_server: clipvault_platform::DisplayServer::Unknown,
     };
@@ -1333,8 +1353,8 @@ fn diagnostics_loop_started_is_sticky_across_refreshes() {
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(clipvault_core::FakeClipboard::new());
     let info = clipvault_platform::PlatformInfo {
-        home_dir: std::path::PathBuf::from("/tmp"),
-        data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+        home_dir: dir.path().to_path_buf(),
+        data_dir: dir.path().join("data"),
         os_family: clipvault_platform::OsFamily::Macos,
         display_server: clipvault_platform::DisplayServer::Unknown,
     };
@@ -1752,8 +1772,8 @@ fn sync_refresh_failure_does_not_log_payload_or_identifier() {
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(clipvault_core::FakeClipboard::new());
     let info = clipvault_platform::PlatformInfo {
-        home_dir: std::path::PathBuf::from("/tmp"),
-        data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+        home_dir: dir.path().to_path_buf(),
+        data_dir: dir.path().join("data"),
         os_family: clipvault_platform::OsFamily::Macos,
         display_server: clipvault_platform::DisplayServer::Unknown,
     };
@@ -1841,8 +1861,8 @@ fn failure_kind_distinguishes_schedule_from_timeout() {
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(clipvault_core::FakeClipboard::new());
     let info = clipvault_platform::PlatformInfo {
-        home_dir: std::path::PathBuf::from("/tmp"),
-        data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+        home_dir: dir.path().to_path_buf(),
+        data_dir: dir.path().join("data"),
         os_family: clipvault_platform::OsFamily::Macos,
         display_server: clipvault_platform::DisplayServer::Unknown,
     };
@@ -1919,8 +1939,8 @@ fn snapshot_failure_kind_round_trips_through_active_app_diagnostics() {
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(clipvault_core::FakeClipboard::new());
     let info = clipvault_platform::PlatformInfo {
-        home_dir: std::path::PathBuf::from("/tmp"),
-        data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+        home_dir: dir.path().to_path_buf(),
+        data_dir: dir.path().join("data"),
         os_family: clipvault_platform::OsFamily::Macos,
         display_server: clipvault_platform::DisplayServer::Unknown,
     };
@@ -1981,8 +2001,8 @@ fn ok_outcome_has_no_failure_kind_field() {
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(clipvault_core::FakeClipboard::new());
     let info = clipvault_platform::PlatformInfo {
-        home_dir: std::path::PathBuf::from("/tmp"),
-        data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+        home_dir: dir.path().to_path_buf(),
+        data_dir: dir.path().join("data"),
         os_family: clipvault_platform::OsFamily::Macos,
         display_server: clipvault_platform::DisplayServer::Unknown,
     };
@@ -2054,8 +2074,8 @@ fn integration_textedit_blacklist_via_main_queue_outcome_discards_capture() {
         "cv-main-queue-textedit-payload-7741",
     ));
     let info = clipvault_platform::PlatformInfo {
-        home_dir: std::path::PathBuf::from("/tmp"),
-        data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+        home_dir: dir.path().to_path_buf(),
+        data_dir: dir.path().join("data"),
         os_family: clipvault_platform::OsFamily::Macos,
         display_server: clipvault_platform::DisplayServer::Unknown,
     };

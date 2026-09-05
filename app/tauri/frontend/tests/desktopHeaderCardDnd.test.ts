@@ -647,10 +647,14 @@ test("App.svelte keeps the layout compact: no large empty band beneath the rail"
   assert.match(source, /minmax\(0, 1fr\)/);
 });
 
-test("OrganizationSidebar keeps a fixed-height scrolled collection viewport", () => {
-  // The list must remain inside the panel's fixed-height viewport so
-  // adding collections does not grow the desktop. The rows remain
-  // descendants of that viewport and are still drop targets.
+test("OrganizationSidebar stretches to the workspace height and keeps its scroller", () => {
+  // The desktop-toolbar-layout change replaces the previous
+  // fixed-height contract with a stretch-based one: the desktop
+  // grid now uses `align-items: stretch` and the sidebar grows
+  // through `height: 100%` so it matches the right column
+  // (toolbar + status + rail) without a second fixed-height
+  // token. The collection list keeps its own vertical scroller
+  // so adding collections cannot grow the desktop.
   const source = loadSource("src/OrganizationSidebar.svelte");
   assert.equal(
     /\.collection-list\s*\{[^}]*overflow-y:\s*auto/.test(source),
@@ -662,12 +666,17 @@ test("OrganizationSidebar keeps a fixed-height scrolled collection viewport", ()
       source,
     ),
     false,
-    "the panel does not need a max-height separate from its fixed height",
+    "the panel does not need a max-height separate from its stretch",
   );
   assert.match(
     source,
-    /\.sidebar\s*\{[^}]*height:\s*var\(\s*--cv-card-rail-height/,
-    "the panel must use the card rail height",
+    /\.sidebar\s*\{[^}]*height:\s*100%/,
+    "the panel must stretch to the workspace height",
+  );
+  assert.match(
+    source,
+    /\.sidebar\s*\{[^}]*min-height:\s*0/,
+    "the panel must allow shrinking below its intrinsic content",
   );
 });
 

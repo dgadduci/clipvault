@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-05
+goal: Reubicar la búsqueda y compactar las acciones globales en un menú, alineando el panel de colecciones con la superficie de cards sin alterar sus contratos funcionales.

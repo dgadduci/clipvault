@@ -394,33 +394,75 @@ test("HistoryCard pin control renders a minimalist local pushpin SVG", () => {
   // with their own data-testid hook.
   assert.match(source, /<svg[\s\S]*?history-card-pin-filled/);
   assert.match(source, /<svg[\s\S]*?history-card-pin-outline/);
-  // The geometry inside each pin variant must use a circle (the
-  // head) plus a line (the shaft) plus a clearly visible bottom
-  // tip — the unmistakable thumbtack / pushpin signature the spec
-  // pins. The point is rendered through either `<polygon>` or
-  // `<polyline>`; the test accepts either so a future visual
-  // refinement of the tip cannot drift the contract.
+  // The geometry inside each pin variant is a single `<path>`
+  // (drawn vertically, then rotated 45° around the viewport
+  // centre). The previous `<circle>` + `<line>` + `<polygon>`
+  // composition read as a magnifying glass / key and must never
+  // come back; a single continuous path is the unmistakable
+  // thumbtack signature the spec pins.
+  //
+  // The matcher anchors on the `<svg` immediately preceding the
+  // pin's unique `data-testid` so it does not bleed into the
+  // other inline SVGs the card renders (content-type icon,
+  // title-edit confirm / cancel, metadata clock / size, thumbnail
+  // loading and fallback, delete menu icon).
   const filledSvg = source.match(
-    /<svg[\s\S]*?history-card-pin-filled[\s\S]*?<\/svg>/,
+    /<svg\b[^>]*\bdata-testid="history-card-pin-filled"[\s\S]*?<\/svg>/,
   );
   assert.ok(filledSvg, "filled pin svg must be defined");
-  assert.match(filledSvg?.[0] ?? "", /<circle\b/);
-  assert.match(filledSvg?.[0] ?? "", /<line\b/);
+  assert.equal(
+    /<circle\b/.test(filledSvg?.[0] ?? ""),
+    false,
+    "filled pin must not declare a <circle> (circle + line + polygon = magnifying glass)",
+  );
+  assert.equal(
+    /<line\b/.test(filledSvg?.[0] ?? ""),
+    false,
+    "filled pin must not declare a <line> (circle + line + polygon = magnifying glass)",
+  );
+  assert.equal(
+    /<polygon\b/.test(filledSvg?.[0] ?? ""),
+    false,
+    "filled pin must not declare a <polygon> (circle + line + polygon = magnifying glass)",
+  );
   assert.match(
     filledSvg?.[0] ?? "",
-    /<(?:polygon|polyline)\b/,
-    "the bottom point must be a polygon or polyline so the tip is visible",
+    /<path\b[^>]*\bd="[^"]+"/,
+    "filled pin must declare a single <path> carrying a non-empty 'd' attribute",
+  );
+  assert.match(
+    filledSvg?.[0] ?? "",
+    /<g[^>]*\btransform="rotate\(45 12 12\)"/,
+    "filled pin must tilt the silhouette 45° around the viewport centre",
   );
   const outlineSvg = source.match(
-    /<svg[\s\S]*?history-card-pin-outline[\s\S]*?<\/svg>/,
+    /<svg\b[^>]*\bdata-testid="history-card-pin-outline"[\s\S]*?<\/svg>/,
   );
   assert.ok(outlineSvg, "outline pin svg must be defined");
-  assert.match(outlineSvg?.[0] ?? "", /<circle\b/);
-  assert.match(outlineSvg?.[0] ?? "", /<line\b/);
+  assert.equal(
+    /<circle\b/.test(outlineSvg?.[0] ?? ""),
+    false,
+    "outline pin must not declare a <circle>",
+  );
+  assert.equal(
+    /<line\b/.test(outlineSvg?.[0] ?? ""),
+    false,
+    "outline pin must not declare a <line>",
+  );
+  assert.equal(
+    /<polygon\b/.test(outlineSvg?.[0] ?? ""),
+    false,
+    "outline pin must not declare a <polygon>",
+  );
   assert.match(
     outlineSvg?.[0] ?? "",
-    /<(?:polygon|polyline)\b/,
-    "the bottom point must be a polygon or polyline so the tip is visible",
+    /<path\b[^>]*\bd="[^"]+"/,
+    "outline pin must declare a single <path> carrying a non-empty 'd' attribute",
+  );
+  assert.match(
+    outlineSvg?.[0] ?? "",
+    /<g[^>]*\btransform="rotate\(45 12 12\)"/,
+    "outline pin must tilt the silhouette 45° around the viewport centre",
   );
   // No remote resources, no emoji, no fallback glyphs.
   assert.equal(/src=["']https?:/.test(source), false);

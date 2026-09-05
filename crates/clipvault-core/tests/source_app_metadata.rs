@@ -63,9 +63,11 @@ fn bootstrap_with_metadata_provider(
     let clipboard: Arc<dyn Clipboard> = Arc::new(FakeClipboard::with_text(
         "placeholder so the bootstrap succeeds",
     ));
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock.clone())
         .with_clipboard(clipboard.clone())
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
 

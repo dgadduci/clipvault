@@ -27,12 +27,15 @@ function loadSource(...segments: string[]): string {
   return readFileSync(path.join(FRONTEND_ROOT, ...segments), "utf8");
 }
 
-test("OrganizationSidebar keeps the collection list in a fixed internal scroller", () => {
+test("OrganizationSidebar keeps the collection list in a bounded internal scroller", () => {
   const source = loadSource("src/OrganizationSidebar.svelte");
-  // The panel has the same fixed height as the card rail and the
-  // list owns the vertical scroll. This prevents collections from
-  // growing the desktop while keeping each visible row a DOM drop
-  // target.
+  // The desktop-toolbar-layout change introduced a shared-height
+  // workspace: the grid now uses `align-items: stretch` and the
+  // sidebar grows with `height: 100%` to match the right column
+  // (toolbar + status + rail). The list below remains the only
+  // internal vertical scroller so adding collections cannot grow
+  // the desktop or move the drop targets outside the visible
+  // panel.
   assert.equal(
     /\.collection-list\s*\{[^}]*overflow-y:\s*auto/.test(source),
     true,
@@ -46,35 +49,45 @@ test("OrganizationSidebar keeps the collection list in a fixed internal scroller
   assert.equal(
     /\.sidebar\s*\{[^}]*overflow:\s*hidden/.test(source),
     true,
-    "the fixed panel must clip around its internal viewport",
+    "the panel must clip around its internal viewport",
   );
-  assert.equal(
-    /\.sidebar\s*\{[^}]*height:\s*var\(\s*--cv-card-rail-height/.test(
-      source,
-    ),
-    true,
-    "the panel must pin its height to the rail token",
+  // The panel no longer pins to the fixed rail token: it stretches
+  // to the row height the grid owns through `height: 100%`. The
+  // `min-height: 0` guard is the structural piece that lets the
+  // panel shrink below its intrinsic content (many collections)
+  // without pushing the row taller than the rail.
+  assert.match(
+    source,
+    /\.sidebar\s*\{[^}]*height:\s*100%/,
+    "the panel must stretch to the workspace height",
+  );
+  assert.match(
+    source,
+    /\.sidebar\s*\{[^}]*min-height:\s*0/,
+    "the panel must allow shrinking below its intrinsic content",
   );
   assert.equal(
     /\.sidebar\s*\{[^}]*max-height:\s*var\(\s*--cv-card-rail-height/.test(
       source,
     ),
     false,
-    "the panel does not need a second max-height constraint",
+    "the panel does not need a max-height separate from its stretch",
   );
 });
 
-test("OrganizationSidebar panel pins its grid alignment through align-self and flex-shrink", () => {
+test("OrganizationSidebar panel opts out of flex shrinking inside the workspace", () => {
   const source = loadSource("src/OrganizationSidebar.svelte");
-  // The defensive `align-self: flex-start` and `flex-shrink: 0`
-  // guards prevent a regression that switched `.layout` to
-  // `align-items: stretch` (or moved the panel inside a flex
-  // container that allowed shrinking) from silently growing the
-  // panel to match the search-status bar.
-  assert.match(
+  // The `flex-shrink: 0` guard prevents a regression that places
+  // the panel inside a flex container (the right column or a
+  // future responsive row) from silently shrinking the sidebar
+  // below its content. The `align-self: flex-start` override the
+  // previous change shipped is gone on purpose: the grid now uses
+  // `align-items: stretch` and the panel sizes itself with
+  // `height: 100%`.
+  assert.doesNotMatch(
     source,
     /\.sidebar\s*\{[^}]*align-self:\s*flex-start/,
-    "the sidebar must opt out of the grid track stretch",
+    "the sidebar must not opt out of the grid stretch",
   );
   assert.match(
     source,
@@ -127,12 +140,14 @@ test("OrganizationSidebar keeps the header and the new-collection icon visible a
   );
 });
 
-test("Desktop layout pins the sidebar to the rail token", () => {
+test("Desktop layout stretches both columns to the rail height", () => {
   const source = loadSource("src/App.svelte");
-  // The grid token is declared on `:root` so the rail and the
-  // sidebar share it. The layout grid MUST use `align-items:
-  // flex-start` so a future contributor cannot accidentally lift
-  // the sidebar to match a tall right column.
+  // The grid token is declared on `:root` so the rail still pins
+  // its own height. The desktop-toolbar-layout change moved the
+  // toolbar inside the right column and adopted
+  // `align-items: stretch` so the sidebar fills the row height the
+  // right column owns (toolbar + status + rail) — no second
+  // fixed-height token is needed.
   assert.match(
     source,
     /--cv-card-rail-height:\s*calc\(var\(--cv-card-size/,
@@ -140,8 +155,8 @@ test("Desktop layout pins the sidebar to the rail token", () => {
   );
   assert.match(
     source,
-    /\.layout\s*\{[^}]*align-items:\s*flex-start/,
-    "the desktop grid must align items to the start",
+    /\.layout\s*\{[^}]*align-items:\s*stretch/,
+    "the desktop grid must stretch both columns to the same height",
   );
   // The search-status bar MUST NOT lift the grid row when its
   // message wraps.

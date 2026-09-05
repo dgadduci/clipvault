@@ -638,11 +638,16 @@
 
 <style>
   .sidebar {
-    /* Keep the panel aligned with the fixed card rail. The collection
-     * list below is the only internal scroller, so adding collections
-     * does not grow the desktop or move the drop targets outside the
-     * visible panel. */
-    align-self: flex-start;
+    /* Stretch the panel to match the right column the grid owns.
+     * The `.layout` grid sets `align-items: stretch`, so each row
+     * item fills the row's available height — paired with
+     * `height: 100%` here, the collection panel grows to the same
+     * visible height as the search + status + rail column without
+     * introducing a second fixed-height token. `min-height: 0` is
+     * the structural guard that lets the panel shrink below its
+     * intrinsic content (a long list of collections) so the row
+     * height is driven by the rail, not by the panel content. The
+     * collection list below is the only internal scroller. */
     background: #161b22;
     border: 1px solid #30363d;
     border-radius: 10px;
@@ -651,7 +656,7 @@
     flex-direction: column;
     gap: 0.45rem;
     width: 100%;
-    height: var(--cv-card-rail-height, calc(240px + 2.75rem));
+    height: 100%;
     min-height: 0;
     box-sizing: border-box;
     flex-shrink: 0;

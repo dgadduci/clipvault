@@ -252,9 +252,14 @@ mod tests {
     fn build_context(tempdir: &tempfile::TempDir) -> AppContext {
         let clock: Arc<dyn Clock> = Arc::new(crate::clock::SystemClock);
         let clipboard: Arc<dyn crate::Clipboard> = Arc::new(crate::FakeClipboard::new());
+        let adapters = crate::test_support::build_isolated_adapters(
+            tempdir.path(),
+            &tempdir.path().join("data"),
+        );
         let context = crate::AppBootstrap::new()
             .with_clock(clock)
             .with_clipboard(clipboard)
+            .with_platform_adapters(adapters)
             .bootstrap_at(tempdir.path().join("clipvault.db"))
             .expect("bootstrap");
         context

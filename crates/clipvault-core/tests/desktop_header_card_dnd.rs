@@ -42,20 +42,25 @@ impl Clock for FixedClock {
 
 fn bootstrap_with_clock(when: time::OffsetDateTime) -> (TempDir, AppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(Arc::new(FixedClock { instant: when }))
         .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new()))
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     (dir, context)
 }
 
 fn bootstrap_existing(path: &std::path::Path) -> AppContext {
+    let dir = path.parent().expect("parent").to_path_buf();
+    let adapters = clipvault_core::build_isolated_adapters(&dir, &dir.join("data"));
     AppBootstrap::new()
         .with_clock(Arc::new(FixedClock {
             instant: datetime!(2026-01-02 03:04:05 UTC),
         }))
         .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new()))
+        .with_platform_adapters(adapters)
         .bootstrap_at(path)
         .expect("reopen")
 }

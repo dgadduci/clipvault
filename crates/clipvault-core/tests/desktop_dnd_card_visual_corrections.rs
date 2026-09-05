@@ -48,9 +48,11 @@ impl Clock for FixedClock {
 
 fn bootstrap_with_clock(when: time::OffsetDateTime) -> (TempDir, AppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(Arc::new(FixedClock { instant: when }))
         .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new()))
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     (dir, context)
@@ -359,13 +361,19 @@ fn image_entry_survives_drop_pin_unpin_and_organization_round() {
     assert_eq!(size, 4096);
 
     // Simulate a restart. The image bytes are still discoverable
-    // through the same references the desktop uses.
+    // through the same references the desktop uses. The harness is
+    // rebuilt with an isolated `PlatformAdapters` bundle so the
+    // asset collector cannot reach the developer's real
+    // `~/.clipvault` even when the test thread re-enters
+    // `bootstrap_at` with the same database path.
     drop(context);
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let reopened = AppBootstrap::new()
         .with_clock(Arc::new(FixedClock {
             instant: datetime!(2026-01-02 03:04:06 UTC),
         }))
         .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new()))
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("reopen");
     let (asset2, mime2, width2, height2, size2) = image_metadata(&reopened, entry_id);

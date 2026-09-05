@@ -29,6 +29,7 @@ pub mod rich_text;
 pub mod search;
 pub mod settings;
 pub mod settings_service;
+pub mod test_support;
 pub mod watcher;
 
 pub use active_app_diagnostics::{
@@ -37,9 +38,9 @@ pub use active_app_diagnostics::{
 pub use bootstrap::{AppBootstrap, AppContext, BootstrapError, BootstrapOptions};
 pub use clipboard::{Clipboard, ClipboardError, FakeClipboard};
 pub use clipboard_assets::{
-    asset_ref_for_hash, decode_png, normalize_image, sha256_hex, AssetError, ClipboardAssetStore,
-    NormalizedImage, StoreOutcome, CLIPBOARD_ASSETS_DIR, CLIPBOARD_ASSET_EXTENSION,
-    MAX_CLIPBOARD_ASSET_BYTES,
+    asset_ref_for_hash, decode_png, normalize_image, sha256_hex, AssetDiagnostic,
+    AssetDiagnosticKind, AssetError, ClipboardAssetStore, NormalizedImage, StoreOutcome,
+    CLIPBOARD_ASSETS_DIR, CLIPBOARD_ASSET_EXTENSION, MAX_CLIPBOARD_ASSET_BYTES,
 };
 pub use clipvault_db::{Collection, CollectionKind, Tag};
 pub use clipvault_platform::{
@@ -76,9 +77,9 @@ pub use history::{
 pub use ignored_apps::{normalize_identifier, IgnoredAppEntry, IgnoredAppError, PickAndAddOutcome};
 pub use ignored_apps_service::{IgnoredAppsService, IgnoredAppsServiceError};
 pub use management::{
-    ClearOutcome, DeleteOutcome, HistoryManagementService, LocalSettingsReader,
-    ManagementServiceError, RetentionOutcome, RetentionPolicy, RetentionPreview, SetFavoriteResult,
-    SettingsReader, DEFAULT_RETENTION, RETENTION_SETTING_KEY,
+    AssetCollectionOutcome, ClearOutcome, DeleteOutcome, HistoryManagementService,
+    LocalSettingsReader, ManagementServiceError, RetentionOutcome, RetentionPolicy,
+    RetentionPreview, SetFavoriteResult, SettingsReader, DEFAULT_RETENTION, RETENTION_SETTING_KEY,
 };
 pub use organization::{
     OrganizationService, OrganizationServiceError, OrganizationSidebarSnapshot,
@@ -107,4 +108,8 @@ pub use settings::{
     HOTKEY_SETTING_STORAGE_KEY, MAX_IDENTIFIER_LENGTH,
 };
 pub use settings_service::{SettingsService, SettingsServiceError};
+pub use test_support::{
+    build_isolated_adapters, fixed_clock, isolated_harness, isolated_harness_at,
+    isolated_harness_with_clock, FixedClock, IsolatedTestHarness,
+};
 pub use watcher::{CaptureWatcher, WatchTickOutcome};

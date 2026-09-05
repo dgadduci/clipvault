@@ -36,9 +36,11 @@ fn bootstrap_with_text(text: &str) -> (TempDir, AppContext, TextHistoryService) 
         instant: datetime!(2026-01-02 03:04:05 UTC),
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(FakeClipboard::with_text(text));
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock)
         .with_clipboard(clipboard.clone())
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     let gate = PrivacyGate::from_probe(Arc::new(NoopActiveApplicationProbe), vec![]);
@@ -165,9 +167,11 @@ fn blacklisted_capture_never_reaches_detector() {
     let clipboard: Arc<dyn Clipboard> = Arc::new(FakeClipboard::with_text(
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signaturehere",
     ));
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock)
         .with_clipboard(clipboard.clone())
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     let gate = PrivacyGate::from_probe(
@@ -199,9 +203,11 @@ fn search_finds_classified_entries() {
         instant: datetime!(2026-01-02 03:04:05 UTC),
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(FakeClipboard::new());
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock)
         .with_clipboard(clipboard)
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
 
@@ -258,9 +264,11 @@ fn search_includes_every_textual_variant() {
         instant: datetime!(2026-01-02 03:04:05 UTC),
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(FakeClipboard::new());
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock)
         .with_clipboard(clipboard)
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
 

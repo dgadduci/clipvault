@@ -233,9 +233,18 @@ mod tests {
         tempfile::tempdir().expect("tempdir")
     }
 
+    /// Build an [`AppContext`] whose asset stores live inside a
+    /// `tempfile::TempDir`. Required because the watcher funnels
+    /// captured payloads through the asset collector when an image
+    /// lands; without the isolated harness the collector would
+    /// sweep `~/.clipvault/assets/clipboard/*.png` (the regression
+    /// caught by the 11:20:44 audit).
     fn bootstrap_default() -> AppContext {
         let dir = tempdir();
+        let adapters =
+            crate::test_support::build_isolated_adapters(dir.path(), &dir.path().join("data"));
         AppBootstrap::new()
+            .with_platform_adapters(adapters)
             .bootstrap_at(dir.path().join("clipvault.db"))
             .expect("bootstrap")
     }

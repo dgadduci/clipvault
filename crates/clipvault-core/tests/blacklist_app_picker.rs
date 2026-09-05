@@ -82,9 +82,11 @@ fn bootstrap_with_gate(gate: PrivacyGate) -> (TempDir, clipvault_core::AppContex
         instant: datetime!(2026-01-02 03:04:05 UTC),
     });
     let clipboard: Arc<dyn Clipboard> = Arc::new(FakeClipboard::with_text("placeholder"));
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(clock)
         .with_clipboard(clipboard)
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     // The bootstrap hands the gate we just built to the
@@ -266,12 +268,16 @@ fn migration_0006_is_additive_and_reads_legacy_rows() {
     }
     // The bootstrap reads the same row through the metadata
     // service: a pre-existing user can restart ClipVault and see
-    // the row without losing it.
+    // the row without losing it. The harness wires an isolated
+    // `PlatformAdapters` bundle so the asset collector cannot reach
+    // the developer's real `~/.clipvault`.
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     let context = AppBootstrap::new()
         .with_clock(Arc::new(FixedClock {
             instant: datetime!(2026-01-02 03:04:05 UTC),
         }) as Arc<dyn Clock>)
         .with_clipboard(Arc::new(FakeClipboard::new()) as Arc<dyn Clipboard>)
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     let service =
@@ -362,6 +368,10 @@ fn picker_service_list_returns_legacy_and_picker_rows_together() {
             instant: datetime!(2026-01-02 03:04:05 UTC),
         }) as Arc<dyn Clock>)
         .with_clipboard(Arc::new(FakeClipboard::new()) as Arc<dyn Clipboard>)
+        .with_platform_adapters(clipvault_core::build_isolated_adapters(
+            dir.path(),
+            &dir.path().join("data"),
+        ))
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap");
     let service =

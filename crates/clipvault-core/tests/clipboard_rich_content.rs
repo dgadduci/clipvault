@@ -1167,19 +1167,541 @@ fn collector_reclaims_an_asset_orphaned_by_an_interrupted_capture() {
         .context
         .management()
         .collect_unreferenced_assets(&h.context);
-    assert_eq!(removed, 1);
+    assert_eq!(removed.assets_removed_count, 1);
+    assert!(removed.image_reference_query_succeeded);
+    assert!(!removed.image_collection_skipped);
     assert!(h.store.read_bytes(&live_ref).is_ok());
     assert_eq!(
         h.store.read_bytes(&orphan_ref).unwrap_err(),
         AssetError::NotFound
     );
     // Idempotent: a second pass removes nothing.
-    assert_eq!(
-        h.context
-            .management()
-            .collect_unreferenced_assets(&h.context),
-        0
+    let again = h
+        .context
+        .management()
+        .collect_unreferenced_assets(&h.context);
+    assert_eq!(again.assets_removed_count, 0);
+    assert!(again.image_reference_query_succeeded);
+}
+
+// ---------------------------------------------------------------------
+// 6a. Collector safety: a failing reference query MUST NOT delete any
+// asset, even though the row in `clipboard_entries` still references it.
+// These tests pin the regression reported on
+// `clipboard-legacy-image-assets`: an `Err` from
+// `referenced_asset_refs` was previously collapsed to an empty
+// `BTreeSet`, causing the collector to wipe every PNG under
+// `<data_dir>/assets/clipboard/` on startup. The fix splits the
+// `Ok(empty_set)` and `Err(...)` branches so a failed query leaves the
+// assets untouched.
+// ---------------------------------------------------------------------
+
+/// Rename the `clipboard_entries` table so the next
+/// `referenced_asset_refs` / `referenced_rich_asset_refs` query
+/// fails (the SQL targets `clipboard_entries`, which no longer
+/// exists). The rename is reversible so tests that need a working
+/// table afterwards can call [`repair_clipboard_table`] to put it
+/// back.
+fn damage_clipboard_table(h: &Harness) {
+    h.context
+        .database()
+        .lock()
+        .connection_mut()
+        .execute_batch("ALTER TABLE clipboard_entries RENAME TO clipboard_entries_damaged;")
+        .expect("rename table");
+}
+
+/// Restore the `clipboard_entries` name after [`damage_clipboard_table`].
+/// Only call this once per harness — a second call would try to rename
+/// a table that no longer exists.
+fn repair_clipboard_table(h: &Harness) {
+    h.context
+        .database()
+        .lock()
+        .connection_mut()
+        .execute_batch("ALTER TABLE clipboard_entries_damaged RENAME TO clipboard_entries;")
+        .expect("restore table");
+}
+
+#[test]
+fn failing_image_reference_query_keeps_every_image_asset_on_disk() {
+    // The asset directory contains two files: one is referenced by a
+    // row in `clipboard_entries`, the other is an orphan. The
+    // collector runs after the table is dropped, so the live reference
+    // query fails. The contract: NOT A SINGLE FILE is removed.
+    let h = harness(vec![]);
+    let (_id, live_ref) = store_image(&h, 0x70);
+
+    // Inject an extra orphan PNG the harness did not register.
+    let orphan = clipvault_core::normalize_image(&bitmap(4, 4, 0x71)).expect("normalize");
+    let orphan_ref = h
+        .store
+        .store_image(&orphan)
+        .expect("write orphan")
+        .asset_ref()
+        .to_string();
+
+    damage_clipboard_table(&h);
+
+    let outcome = h
+        .context
+        .management()
+        .collect_unreferenced_assets(&h.context);
+    assert!(
+        outcome.image_reference_query_failed,
+        "the image reference query must report failure"
     );
+    assert!(
+        outcome.image_collection_skipped,
+        "the image collector must skip deletion when the query fails"
+    );
+    assert!(
+        !outcome.image_reference_query_succeeded,
+        "the image reference query must NOT be marked as successful"
+    );
+    assert_eq!(
+        outcome.assets_removed_count, 0,
+        "no file may be reclaimed while the live set is unknown"
+    );
+
+    assert!(
+        h.store.read_bytes(&live_ref).is_ok(),
+        "a referenced image must survive a failing query"
+    );
+    assert!(
+        h.store.read_bytes(&orphan_ref).is_ok(),
+        "an orphan image must also survive a failing query — the collector cannot prove it is unreferenced"
+    );
+}
+
+#[test]
+fn apply_retention_with_a_failing_reference_query_keeps_every_asset() {
+    // The startup / shutdown retention pass must call
+    // `collect_unreferenced_assets` and survive a SQLite failure
+    // without losing any PNG. The harness models the startup path:
+    // rows are persisted, retention runs with `Forever` so the DELETE
+    // never fires, the table is renamed to break the live-set query,
+    // and the assets must remain untouched.
+    let h = harness(vec![]);
+    let (_live_id, live_ref) = store_image(&h, 0x72);
+    let orphan = clipvault_core::normalize_image(&bitmap(4, 4, 0x73)).expect("normalize");
+    let orphan_ref = h
+        .store
+        .store_image(&orphan)
+        .expect("write orphan")
+        .asset_ref()
+        .to_string();
+
+    damage_clipboard_table(&h);
+
+    // `Forever` short-circuits the DELETE so the test only exercises
+    // the `collect_unreferenced_assets` step; that step must observe
+    // the missing table, skip deletion and preserve every file on
+    // disk.
+    let outcome = h
+        .context
+        .management()
+        .apply_retention(&h.context, &FixedRetention(RetentionPolicy::Forever))
+        .expect("retention must not error when the query fails");
+    assert_eq!(outcome.policy, RetentionPolicy::Forever);
+    assert_eq!(
+        outcome.removed, 0,
+        "Forever never purges; the only pass is the asset collector"
+    );
+
+    assert!(
+        h.store.read_bytes(&live_ref).is_ok(),
+        "a referenced image must survive a failing retention pass"
+    );
+    assert!(
+        h.store.read_bytes(&orphan_ref).is_ok(),
+        "an orphan image must also survive a failing retention pass"
+    );
+}
+
+#[test]
+fn failing_reference_query_reports_metadata_only_diagnostics() {
+    // The diagnostic surface must surface `reference_query_failed`,
+    // `image_collection_skipped` and a zero `assets_removed_count`
+    // without leaking paths, hashes or row identifiers.
+    let h = harness(vec![]);
+    let (_id, live_ref) = store_image(&h, 0x74);
+
+    damage_clipboard_table(&h);
+
+    let outcome = h
+        .context
+        .management()
+        .collect_unreferenced_assets(&h.context);
+
+    assert!(outcome.image_reference_query_failed);
+    assert!(outcome.image_collection_skipped);
+    assert!(!outcome.image_reference_query_succeeded);
+    assert_eq!(outcome.assets_removed_count, 0);
+
+    // The serialised form must stay metadata-only: no asset_ref, no
+    // absolute path, no hash. Snake_case keys are the documented
+    // public contract.
+    let json = serde_json::to_string(&outcome).expect("serialise");
+    assert!(json.contains("\"image_reference_query_failed\":true"));
+    assert!(json.contains("\"image_collection_skipped\":true"));
+    assert!(json.contains("\"assets_removed_count\":0"));
+    assert!(
+        !json.contains(&live_ref),
+        "diagnostics must never carry the live asset reference"
+    );
+    assert!(
+        !json.contains("png"),
+        "diagnostics must never carry the asset extension"
+    );
+}
+
+#[test]
+fn successful_query_with_referenced_assets_keeps_every_file() {
+    // The happy path stays intact: a query that returns the live set
+    // must NOT touch a referenced file even when the namespace also
+    // contains an orphan.
+    let h = harness(vec![]);
+    let (_live_id, live_ref) = store_image(&h, 0x75);
+    let orphan = clipvault_core::normalize_image(&bitmap(4, 4, 0x76)).expect("normalize");
+    let orphan_ref = h
+        .store
+        .store_image(&orphan)
+        .expect("write orphan")
+        .asset_ref()
+        .to_string();
+
+    let outcome = h
+        .context
+        .management()
+        .collect_unreferenced_assets(&h.context);
+
+    assert!(outcome.image_reference_query_succeeded);
+    assert!(!outcome.image_reference_query_failed);
+    assert!(!outcome.image_collection_skipped);
+    assert_eq!(outcome.assets_removed_count, 1);
+    assert!(h.store.read_bytes(&live_ref).is_ok());
+    assert_eq!(
+        h.store.read_bytes(&orphan_ref).unwrap_err(),
+        AssetError::NotFound
+    );
+}
+
+#[test]
+fn successful_query_with_no_references_removes_only_orphans() {
+    // The empty-set case is the legitimate reclaim path: a successful
+    // query that returns no rows means the database confirms nothing
+    // is referenced, so the collector can safely remove the orphans
+    // left over from an interrupted capture.
+    let h = harness(vec![]);
+    let orphan = clipvault_core::normalize_image(&bitmap(4, 4, 0x77)).expect("normalize");
+    let orphan_ref = h
+        .store
+        .store_image(&orphan)
+        .expect("write orphan")
+        .asset_ref()
+        .to_string();
+    assert_eq!(h.assets_on_disk().len(), 1);
+
+    // Drop the row that would have referenced the asset so the live
+    // set is genuinely empty.
+    h.context
+        .database()
+        .lock()
+        .connection_mut()
+        .execute_batch("DELETE FROM clipboard_entries;")
+        .expect("delete");
+
+    let outcome = h
+        .context
+        .management()
+        .collect_unreferenced_assets(&h.context);
+    assert!(outcome.image_reference_query_succeeded);
+    assert!(!outcome.image_reference_query_failed);
+    assert!(!outcome.image_collection_skipped);
+    assert_eq!(outcome.assets_removed_count, 1);
+    assert_eq!(
+        h.store.read_bytes(&orphan_ref).unwrap_err(),
+        AssetError::NotFound
+    );
+}
+
+#[test]
+fn shared_asset_survives_every_pass_including_failing_query() {
+    // Two rows share the same asset. A failing reference query must
+    // not delete the file because the collector cannot prove the
+    // other row does not need it.
+    let h = harness(vec![]);
+    let (first_id, shared_ref) = store_image(&h, 0x78);
+    let shared_hash = h.record(first_id).content_hash.clone();
+
+    {
+        let mut db = h.context.database().lock();
+        let mut repo = EntryRepository::new(db.connection_mut());
+        let shared = clipvault_db::NewEntry {
+            content: clipvault_db::IMAGE_CONTENT_SENTINEL.to_string(),
+            content_type: ContentType::Image,
+            content_size: 128,
+            content_hash: format!("{shared_hash}-variant"),
+            source_app: None,
+            created_at: datetime!(2026-01-02 03:04:05 UTC),
+            last_seen_at: datetime!(2026-01-02 03:04:05 UTC),
+            asset_ref: Some(shared_ref.clone()),
+            mime_type: Some(clipvault_db::IMAGE_MIME_PNG.to_string()),
+            payload_width: Some(6),
+            payload_height: Some(6),
+            rich_text_hash: None,
+            rich_html_ref: None,
+            rich_rtf_ref: None,
+            rich_preview_ref: None,
+            rich_html_size: None,
+            rich_rtf_size: None,
+        };
+        repo.insert_or_touch(shared).expect("shared row");
+    }
+
+    damage_clipboard_table(&h);
+
+    let outcome = h
+        .context
+        .management()
+        .collect_unreferenced_assets(&h.context);
+    assert!(outcome.image_reference_query_failed);
+    assert!(outcome.image_collection_skipped);
+    assert_eq!(outcome.assets_removed_count, 0);
+    assert!(
+        h.store.read_bytes(&shared_ref).is_ok(),
+        "a shared asset must survive a failing query"
+    );
+}
+
+#[test]
+fn fresh_capture_survives_a_previous_failed_collection_pass() {
+    // After a failed pass leaves files on disk, a brand-new capture
+    // must continue to be persisted normally and remain visible.
+    // The rename trick simulates the transient SQLite failure without
+    // removing the schema: after the failed pass we restore the name
+    // and confirm the next capture goes through the regular pipeline.
+    let h = harness(vec![]);
+    let (_id, _ref) = store_image(&h, 0x79);
+
+    damage_clipboard_table(&h);
+    let failed = h
+        .context
+        .management()
+        .collect_unreferenced_assets(&h.context);
+    assert!(failed.image_reference_query_failed);
+    assert_eq!(failed.assets_removed_count, 0);
+    repair_clipboard_table(&h);
+
+    // The next capture goes through the regular history pipeline.
+    let (fresh_id, fresh_ref) = store_image(&h, 0x7A);
+    let fresh_record = h.record(fresh_id);
+    assert_eq!(fresh_record.asset_ref.as_deref(), Some(fresh_ref.as_str()));
+    assert!(h.store.read_bytes(&fresh_ref).is_ok());
+}
+
+#[test]
+fn startup_retention_pass_with_a_failing_query_keeps_every_asset() {
+    // The Tauri `setup` callback runs `run_retention` on startup. The
+    // contract: a SQLite failure in that pass must NOT cause the
+    // startup path to delete any asset. We model the startup pass
+    // through `apply_retention` with `Forever` (the DELETE short-
+    // circuits) so the only work performed is the asset collector.
+    let h = harness(vec![]);
+    let (_live_id, live_ref) = store_image(&h, 0x7B);
+    let orphan = clipvault_core::normalize_image(&bitmap(4, 4, 0x7C)).expect("normalize");
+    let orphan_ref = h
+        .store
+        .store_image(&orphan)
+        .expect("write orphan")
+        .asset_ref()
+        .to_string();
+
+    damage_clipboard_table(&h);
+    let outcome = h
+        .context
+        .management()
+        .apply_retention(&h.context, &FixedRetention(RetentionPolicy::Forever))
+        .expect("startup pass must not error when the query fails");
+    assert_eq!(outcome.policy, RetentionPolicy::Forever);
+    repair_clipboard_table(&h);
+
+    assert!(
+        h.store.read_bytes(&live_ref).is_ok(),
+        "a referenced image must survive a failing startup retention pass"
+    );
+    assert!(
+        h.store.read_bytes(&orphan_ref).is_ok(),
+        "an orphan image must also survive a failing startup retention pass"
+    );
+}
+
+#[test]
+fn shutdown_retention_pass_with_a_failing_query_keeps_every_asset() {
+    // The Tauri `RunEvent::ExitRequested` handler runs the same
+    // `run_retention` helper on shutdown. A SQLite failure must NOT
+    // cause the shutdown path to delete any asset either.
+    let h = harness(vec![]);
+    let (_live_id, live_ref) = store_image(&h, 0x7D);
+    let orphan = clipvault_core::normalize_image(&bitmap(4, 4, 0x7E)).expect("normalize");
+    let orphan_ref = h
+        .store
+        .store_image(&orphan)
+        .expect("write orphan")
+        .asset_ref()
+        .to_string();
+
+    damage_clipboard_table(&h);
+    let outcome = h
+        .context
+        .management()
+        .apply_retention(&h.context, &FixedRetention(RetentionPolicy::Forever))
+        .expect("shutdown pass must not error when the query fails");
+    assert_eq!(outcome.policy, RetentionPolicy::Forever);
+    repair_clipboard_table(&h);
+
+    assert!(
+        h.store.read_bytes(&live_ref).is_ok(),
+        "a referenced image must survive a failing shutdown retention pass"
+    );
+    assert!(
+        h.store.read_bytes(&orphan_ref).is_ok(),
+        "an orphan image must also survive a failing shutdown retention pass"
+    );
+}
+
+#[test]
+fn failing_rich_text_reference_query_keeps_every_rich_asset_on_disk() {
+    // The rich-text collector uses a different query and the same
+    // skip-on-failure contract. The harness ships with a rich-text
+    // asset store wired by `AppBootstrap`. We write a rich payload
+    // directly through the rich store, register a row that references
+    // it, then rename the table and confirm the collector preserves
+    // every file.
+    use clipvault_core::{canonical_rich_text_hash, RichTextAssetStore, RichTextPayload};
+    let h = harness(vec![]);
+
+    // The image store root is `<data_dir>/assets/clipboard`; the rich
+    // store root is `<data_dir>/assets/rich-text`. Walk back two
+    // parents to recover the harness data directory.
+    let data_dir = h
+        .store
+        .root()
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("data dir parent")
+        .to_path_buf();
+    let rich_store = RichTextAssetStore::new(data_dir);
+
+    let plain = "hello rich text";
+    let html = "<p>hello <b>rich</b></p>";
+    let payload =
+        RichTextPayload::new(plain.to_string(), Some(html.to_string()), None).expect("payload");
+    let rich_hash = canonical_rich_text_hash(&payload);
+    let outcome = rich_store.store(&rich_hash, &payload).expect("store rich");
+
+    // Register a row that points at the rich-text HTML reference.
+    let rich_html_ref = outcome.html_ref().expect("html ref").to_string();
+    {
+        let mut db = h.context.database().lock();
+        let mut repo = EntryRepository::new(db.connection_mut());
+        let rich_row = clipvault_db::NewEntry {
+            content: plain.to_string(),
+            content_type: ContentType::Html,
+            content_size: plain.len() as i64,
+            content_hash: format!("rich::{rich_hash}"),
+            source_app: None,
+            created_at: datetime!(2026-01-02 03:04:05 UTC),
+            last_seen_at: datetime!(2026-01-02 03:04:05 UTC),
+            asset_ref: None,
+            mime_type: None,
+            payload_width: None,
+            payload_height: None,
+            rich_text_hash: Some(rich_hash.clone()),
+            rich_html_ref: Some(rich_html_ref.clone()),
+            rich_rtf_ref: outcome.rtf_ref().map(str::to_owned),
+            rich_preview_ref: outcome.preview_ref().map(str::to_owned),
+            rich_html_size: Some(html.len() as i64),
+            rich_rtf_size: None,
+        };
+        repo.insert_or_touch(rich_row).expect("insert rich row");
+    }
+
+    // Now break the table and verify the rich-text collector skips.
+    damage_clipboard_table(&h);
+    let collected = h
+        .context
+        .management()
+        .collect_unreferenced_assets(&h.context);
+    assert!(
+        collected.rich_reference_query_failed,
+        "the rich-text reference query must report failure"
+    );
+    assert!(
+        collected.rich_collection_skipped,
+        "the rich-text collector must skip deletion when the query fails"
+    );
+    assert!(!collected.rich_reference_query_succeeded);
+    assert_eq!(
+        collected.assets_removed_count, 0,
+        "no rich-text asset may be reclaimed while the live set is unknown"
+    );
+
+    assert!(
+        rich_store.read_bytes(&rich_html_ref).is_ok(),
+        "the rich-text HTML asset must survive a failing query"
+    );
+}
+
+#[test]
+fn asset_collection_outcome_serialises_with_snake_case_fields() {
+    // The frontend / log shippers rely on the snake_case contract.
+    let outcome = clipvault_core::AssetCollectionOutcome {
+        image_reference_query_succeeded: true,
+        image_reference_query_failed: false,
+        image_collection_skipped: false,
+        rich_reference_query_succeeded: false,
+        rich_reference_query_failed: true,
+        rich_collection_skipped: true,
+        assets_removed_count: 4,
+    };
+    let json = serde_json::to_string(&outcome).expect("serialise");
+    assert!(
+        json.contains("\"image_reference_query_succeeded\":true"),
+        "got {json}"
+    );
+    assert!(
+        json.contains("\"image_reference_query_failed\":false"),
+        "got {json}"
+    );
+    assert!(
+        json.contains("\"image_collection_skipped\":false"),
+        "got {json}"
+    );
+    assert!(
+        json.contains("\"rich_reference_query_failed\":true"),
+        "got {json}"
+    );
+    assert!(
+        json.contains("\"rich_collection_skipped\":true"),
+        "got {json}"
+    );
+    assert!(json.contains("\"assets_removed_count\":4"), "got {json}");
+}
+
+#[test]
+fn asset_collection_outcome_default_reports_no_diagnostics() {
+    // The default value models the row-only test harness: no asset
+    // stores, no queries, no deletions.
+    let outcome = clipvault_core::AssetCollectionOutcome::default();
+    assert!(!outcome.image_reference_query_succeeded);
+    assert!(!outcome.image_reference_query_failed);
+    assert!(!outcome.image_collection_skipped);
+    assert!(!outcome.rich_reference_query_succeeded);
+    assert!(!outcome.rich_reference_query_failed);
+    assert!(!outcome.rich_collection_skipped);
+    assert_eq!(outcome.assets_removed_count, 0);
 }
 
 // ---------------------------------------------------------------------

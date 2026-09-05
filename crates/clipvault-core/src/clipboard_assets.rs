@@ -178,6 +178,129 @@ fn io_error(error: io::Error) -> AssetError {
     }
 }
 
+/// Metadata-only outcome of [`ClipboardAssetStore::diagnose`].
+///
+/// The variant lets the diagnostics surface differentiate the failure
+/// modes the user-facing error message collapses: a stale PNG that is
+/// decodable by a wider decoder than the one shipped today, a file
+/// that is missing on disk, an asset that landed in another data
+/// directory, a namespace violation, a PNG that the decoder still
+/// rejects, an oversized payload, a network drive hiccup or a
+/// well-formed image the bridge can serve verbatim.
+///
+/// Every variant is metadata-only: the diagnostic never carries the
+/// reference, the payload, an absolute path or the content hash. The
+/// accompanying `kind_str` returns the stable snake_case identifier
+/// the frontend consumes to drive the matching fallback copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssetDiagnosticKind {
+    /// The asset resolved to a decodable bitmap that the bridge can
+    /// serve verbatim. The metadata block reports the dimensions the
+    /// PNG header advertises and the byte length the store wrote; the
+    /// frontend can use these to log a "loaded" diagnostic without
+    /// inspecting pixels.
+    Loaded,
+    /// The reference failed the path-level validation: empty, absolute,
+    /// traversal, foreign namespace, … The accompanying metadata is
+    /// empty.
+    InvalidReference,
+    /// The file (or its containing directory) is missing on disk.
+    /// The metadata is empty.
+    NotFound,
+    /// The asset is readable but the directory it lives in differs
+    /// from the data directory the running process resolved. This is
+    /// the canonical "wrong data_dir" signal the diagnostic surfaces
+    /// so the user knows where the bytes really went. The metadata
+    /// is empty by design: the absolute paths never leave the
+    /// backend.
+    WrongDataDir,
+    /// The reference starts with the `clipboard/` prefix but the
+    /// canonical path the resolver returns sits outside the
+    /// `<data_dir>/assets/clipboard/` root — typically a symlink
+    /// escape. The metadata is empty.
+    WrongNamespace,
+    /// The file is larger than [`MAX_CLIPBOARD_ASSET_BYTES`]. The
+    /// `size` field carries the byte length the metadata observed
+    /// (no payload bytes — only the count).
+    TooLarge { size: usize },
+    /// The asset is on disk but the PNG decoder refused it. The
+    /// `color_type` and `bit_depth` fields report the values the
+    /// PNG header advertised so the diagnostic can confirm the
+    /// "wrong format" hypothesis without inspecting pixels.
+    InvalidPng {
+        color_type: &'static str,
+        bit_depth: &'static str,
+    },
+    /// The asset decoded but the dimensions are outside the accepted
+    /// bounds. The `width` and `height` fields report the values the
+    /// PNG header advertised so the diagnostic can confirm the
+    /// "wrong size" hypothesis without inspecting pixels.
+    InvalidDimensions { width: u32, height: u32 },
+    /// The asset is on disk but the read failed at the I/O layer. The
+    /// `reason` field is a stable `io::ErrorKind` string and never
+    /// carries the path.
+    Io { reason: String },
+}
+
+impl AssetDiagnosticKind {
+    /// Stable snake_case identifier the frontend consumes. The shell
+    /// never inspects the free-form [`Display`](fmt::Display) string
+    /// to make routing decisions; it only renders it after picking
+    /// the matching copy.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            AssetDiagnosticKind::Loaded => "loaded",
+            AssetDiagnosticKind::InvalidReference => "invalid_reference",
+            AssetDiagnosticKind::NotFound => "not_found",
+            AssetDiagnosticKind::WrongDataDir => "wrong_data_dir",
+            AssetDiagnosticKind::WrongNamespace => "wrong_namespace",
+            AssetDiagnosticKind::TooLarge { .. } => "too_large",
+            AssetDiagnosticKind::InvalidPng { .. } => "invalid_png",
+            AssetDiagnosticKind::InvalidDimensions { .. } => "invalid_dimensions",
+            AssetDiagnosticKind::Io { .. } => "io_error",
+        }
+    }
+
+    fn color_type_label(color_type: png::ColorType) -> &'static str {
+        match color_type {
+            png::ColorType::Grayscale => "grayscale",
+            png::ColorType::Rgb => "rgb",
+            png::ColorType::Indexed => "indexed",
+            png::ColorType::GrayscaleAlpha => "grayscale_alpha",
+            png::ColorType::Rgba => "rgba",
+        }
+    }
+
+    fn bit_depth_label(bit_depth: png::BitDepth) -> &'static str {
+        match bit_depth {
+            png::BitDepth::One => "1",
+            png::BitDepth::Two => "2",
+            png::BitDepth::Four => "4",
+            png::BitDepth::Eight => "8",
+            png::BitDepth::Sixteen => "16",
+        }
+    }
+}
+
+/// Output of [`ClipboardAssetStore::diagnose`]: a stable identifier
+/// plus the metadata the diagnostic helper already gathered.
+///
+/// The struct intentionally avoids payload bytes, content hashes and
+/// absolute paths: the frontend receives the variant and the
+/// accompanying counts / labels to drive the matching fallback copy
+/// (or, in the `Loaded` case, to confirm the bridge will serve bytes
+/// when asked).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetDiagnostic {
+    pub kind: AssetDiagnosticKind,
+}
+
+impl AssetDiagnostic {
+    pub fn kind_str(&self) -> &'static str {
+        self.kind.kind_str()
+    }
+}
+
 /// A bitmap normalised to a canonical PNG, ready to be persisted.
 ///
 /// `hash` is the lowercase hex SHA-256 of `png` — the same value the
@@ -295,6 +418,17 @@ pub fn normalize_image(image: &ClipboardImage) -> Result<NormalizedImage, AssetE
 /// Used by the paste pipeline so a persisted image can be written back
 /// to the clipboard without ever being converted to text. The decoder
 /// enforces the same dimension and size bounds as the read validator.
+///
+/// The store writes 8-bit RGBA today, but a PNG captured by an
+/// external tool or by an older ClipVault build can arrive in any of
+/// the legal combinations the PNG spec permits — palette, grayscale,
+/// grayscale + alpha, RGB and RGBA at the depths the standard allows —
+/// and every valid variant must be readable through the bridge so the
+/// card surface does not regress after a recompile. The decoder
+/// therefore accepts every `(color_type, bit_depth)` pair the
+/// standard considers valid and normalises the raw frame buffer to a
+/// platform-neutral 8-bit RGBA bitmap that the paste pipeline can hand
+/// straight to the clipboard adapter.
 pub fn decode_png(bytes: &[u8]) -> Result<ClipboardImage, AssetError> {
     if bytes.len() > MAX_CLIPBOARD_ASSET_BYTES {
         return Err(AssetError::TooLarge { size: bytes.len() });
@@ -313,27 +447,321 @@ pub fn decode_png(bytes: &[u8]) -> Result<ClipboardImage, AssetError> {
     {
         return Err(AssetError::InvalidDimensions { width, height });
     }
+    // Copy the palette / transparency tables out of the reader so the
+    // mutable borrow on `reader.next_frame` below does not conflict
+    // with the immutable borrows the helper needs.
+    let palette: Option<Vec<u8>> = info.palette.as_deref().map(|slice| slice.to_vec());
+    let trns: Option<Vec<u8>> = info.trns.as_deref().map(|slice| slice.to_vec());
     let mut buffer = vec![0; reader.output_buffer_size()];
     let frame = reader
         .next_frame(&mut buffer)
         .map_err(|_| AssetError::NotPng)?;
     buffer.truncate(frame.buffer_size());
-    let rgba = match (frame.color_type, frame.bit_depth) {
-        (png::ColorType::Rgba, png::BitDepth::Eight) => buffer,
-        (png::ColorType::Rgb, png::BitDepth::Eight) => {
-            let mut expanded = Vec::with_capacity(buffer.len() / 3 * 4);
-            for chunk in buffer.chunks_exact(3) {
-                expanded.extend_from_slice(chunk);
-                expanded.push(0xFF);
-            }
-            expanded
-        }
-        // The store only ever writes 8-bit RGBA, so anything else is a
-        // foreign file in the namespace: reject instead of guessing.
-        _ => return Err(AssetError::NotPng),
-    };
+    let rgba = expand_png_frame_to_rgba8(
+        frame.color_type,
+        frame.bit_depth,
+        &buffer,
+        palette.as_deref(),
+        trns.as_deref(),
+    )?;
     ClipboardImage::new(rgba, width, height)
         .map_err(|_| AssetError::InvalidDimensions { width, height })
+}
+
+/// Expand one decoded PNG frame into an 8-bit RGBA buffer.
+///
+/// The function accepts every `(ColorType, BitDepth)` combination the
+/// PNG standard considers legal and converts the raw frame buffer
+/// produced by the `png` crate into an 8-bit RGBA layout the paste
+/// pipeline can forward to the clipboard adapter without inspecting
+/// pixels. The implementation favours clarity over micro-optimisation:
+/// each branch is a small, self-contained loop and the only metadata
+/// the helper returns is the typed [`AssetError`] enum.
+///
+/// The conversion rules follow the PNG specification:
+/// - 8/16-bit grayscale expand to RGBA by replicating the sample and
+///   setting the alpha to opaque (`0xFF`);
+/// - 8/16-bit grayscale + alpha become two-channel sources that are
+///   mapped straight onto RGBA;
+/// - 8/16-bit RGB samples are replicated as opaque red/green/blue;
+/// - 8/16-bit RGBA is already the canonical layout;
+/// - palette (1/2/4/8-bit indexed) samples are expanded through the
+///   `PLTE` palette the `png` crate exposes via the reader; a `tRNS`
+///   chunk provides the per-entry alpha values that the spec mandates
+///   for partially transparent palettes.
+///
+/// 16-bit samples are downscaled to 8 bits by keeping the high byte;
+/// the conversion is symmetric across every channel and never inspects
+/// the pixel values, so a stale PNG with a different palette produces
+/// the same byte layout a freshly captured one does.
+fn expand_png_frame_to_rgba8(
+    color_type: png::ColorType,
+    bit_depth: png::BitDepth,
+    raw: &[u8],
+    palette: Option<&[u8]>,
+    trns: Option<&[u8]>,
+) -> Result<Vec<u8>, AssetError> {
+    use png::ColorType::{Grayscale, GrayscaleAlpha, Indexed, Rgb, Rgba};
+
+    let pixel_count =
+        pixel_count_for_frame(raw.len(), color_type, bit_depth).ok_or(AssetError::NotPng)?;
+
+    let mut rgba = vec![0u8; pixel_count.checked_mul(4).ok_or(AssetError::NotPng)?];
+
+    match (color_type, bit_depth) {
+        (Rgba, png::BitDepth::Eight) => rgba.copy_from_slice(raw),
+        (Rgba, png::BitDepth::Sixteen) => {
+            for (pixel, chunk) in rgba.chunks_exact_mut(4).zip(raw.chunks_exact(8)) {
+                pixel[0] = chunk[0];
+                pixel[1] = chunk[2];
+                pixel[2] = chunk[4];
+                pixel[3] = chunk[6];
+            }
+        }
+        (Rgb, png::BitDepth::Eight) => {
+            for (pixel, chunk) in rgba.chunks_exact_mut(4).zip(raw.chunks_exact(3)) {
+                pixel[0] = chunk[0];
+                pixel[1] = chunk[1];
+                pixel[2] = chunk[2];
+                pixel[3] = 0xFF;
+            }
+        }
+        (Rgb, png::BitDepth::Sixteen) => {
+            for (pixel, chunk) in rgba.chunks_exact_mut(4).zip(raw.chunks_exact(6)) {
+                pixel[0] = chunk[0];
+                pixel[1] = chunk[2];
+                pixel[2] = chunk[4];
+                pixel[3] = 0xFF;
+            }
+        }
+        (Grayscale, png::BitDepth::Eight) => {
+            for (pixel, sample) in rgba.chunks_exact_mut(4).zip(raw.iter()) {
+                pixel[0] = *sample;
+                pixel[1] = *sample;
+                pixel[2] = *sample;
+                pixel[3] = 0xFF;
+            }
+        }
+        (Grayscale, png::BitDepth::Sixteen) => {
+            for (pixel, chunk) in rgba.chunks_exact_mut(4).zip(raw.chunks_exact(2)) {
+                pixel[0] = chunk[0];
+                pixel[1] = chunk[0];
+                pixel[2] = chunk[0];
+                pixel[3] = 0xFF;
+            }
+        }
+        (Grayscale, png::BitDepth::One)
+        | (Grayscale, png::BitDepth::Two)
+        | (Grayscale, png::BitDepth::Four) => {
+            expand_packed_grayscale(bit_depth, raw, &mut rgba)?;
+        }
+        (GrayscaleAlpha, png::BitDepth::Eight) => {
+            for (pixel, chunk) in rgba.chunks_exact_mut(4).zip(raw.chunks_exact(2)) {
+                pixel[0] = chunk[0];
+                pixel[1] = chunk[0];
+                pixel[2] = chunk[0];
+                pixel[3] = chunk[1];
+            }
+        }
+        (GrayscaleAlpha, png::BitDepth::Sixteen) => {
+            for (pixel, chunk) in rgba.chunks_exact_mut(4).zip(raw.chunks_exact(4)) {
+                pixel[0] = chunk[0];
+                pixel[1] = chunk[0];
+                pixel[2] = chunk[0];
+                pixel[3] = chunk[2];
+            }
+        }
+        (Indexed, _) => {
+            let palette = palette.ok_or(AssetError::NotPng)?;
+            // The PLTE chunk must carry a multiple of three bytes so
+            // the palette can be sliced into RGB triplets. A file
+            // shorter than that is malformed: surface the same typed
+            // rejection the old single-format decoder raised so the
+            // failure surface does not change for foreign payloads.
+            if palette.len() % 3 != 0 {
+                return Err(AssetError::NotPng);
+            }
+            expand_packed_indexed(bit_depth, raw, palette, trns, &mut rgba)?;
+        }
+        // The remaining combinations (grayscale-alpha at sub-byte
+        // depths, RGB at sub-byte depths) are illegal under the
+        // PNG spec and are rejected by the decoder before reaching
+        // here; surface them as a typed `NotPng` so a malformed
+        // foreign payload cannot sneak through.
+        _ => return Err(AssetError::NotPng),
+    }
+    Ok(rgba)
+}
+
+/// Return the number of pixels the supplied raw buffer covers, given
+/// the colour type and bit depth of the frame the decoder produced.
+///
+/// The decoder hands us whole bytes: sub-byte depths (1/2/4) are
+/// already packed one sample per bit/half-byte. Returning `None`
+/// instead of `0` keeps `pixel_count == 0` for a malformed payload,
+/// which the caller can then turn into the typed `NotPng` rejection.
+fn pixel_count_for_frame(
+    raw_len: usize,
+    color_type: png::ColorType,
+    bit_depth: png::BitDepth,
+) -> Option<usize> {
+    use png::ColorType::{Grayscale, GrayscaleAlpha, Indexed, Rgb, Rgba};
+
+    let samples_per_pixel = match color_type {
+        Grayscale | Indexed => 1u64,
+        GrayscaleAlpha => 2u64,
+        Rgb => 3u64,
+        Rgba => 4u64,
+    };
+    let bits = u64::from(bit_depth as u8);
+    if bits == 0 || bits > 16 {
+        return None;
+    }
+    let len = u64::try_from(raw_len).ok()?;
+    let pixels = if bits <= 8 {
+        // Sub-byte depths pack multiple samples per byte. Each input
+        // byte therefore carries `8 / bits` samples; dividing the
+        // total sample count by `samples_per_pixel` gives the number
+        // of pixels the frame covers.
+        let samples_per_byte = 8u64 / bits;
+        let total_samples = samples_per_byte.checked_mul(len)?;
+        total_samples / samples_per_pixel
+    } else {
+        // 16-bit: each sample is two bytes; samples_per_pixel samples
+        // therefore take `samples_per_pixel * 2` input bytes.
+        let bytes_per_pixel = samples_per_pixel.checked_mul(2)?;
+        len / bytes_per_pixel
+    };
+    usize::try_from(pixels).ok()
+}
+
+/// Expand a packed 1/2/4-bit grayscale frame into RGBA8.
+///
+/// The PNG spec packs the sub-byte samples one after another, MSB
+/// first, so each input byte carries `8 / bit_depth` pixels. The
+/// expansion is lossless — the sample is scaled to 8 bits by
+/// replicating the high bits into the low bits, the same operation a
+/// typical PNG decoder performs.
+fn expand_packed_grayscale(
+    bit_depth: png::BitDepth,
+    raw: &[u8],
+    rgba: &mut [u8],
+) -> Result<(), AssetError> {
+    let bits = bit_depth as u8;
+    if bits == 0 || bits > 8 || 8 % bits != 0 {
+        return Err(AssetError::NotPng);
+    }
+    let pixels_per_byte = 8 / bits;
+    let max_value = (1u16 << bits) - 1;
+    let mut out_index = 0;
+    for byte in raw {
+        for offset in 0..pixels_per_byte {
+            if out_index + 4 > rgba.len() {
+                return Err(AssetError::NotPng);
+            }
+            let shift = 8 - bits - offset * bits;
+            let sample = ((*byte >> shift) as u16) & max_value;
+            let scaled = scale_sample_to_u8(sample, max_value);
+            rgba[out_index] = scaled;
+            rgba[out_index + 1] = scaled;
+            rgba[out_index + 2] = scaled;
+            rgba[out_index + 3] = 0xFF;
+            out_index += 4;
+        }
+    }
+    if out_index != rgba.len() {
+        return Err(AssetError::NotPng);
+    }
+    Ok(())
+}
+
+/// Expand a packed 1/2/4/8-bit indexed (palette) frame into RGBA8.
+///
+/// Each packed byte carries `8 / bit_depth` palette indices (one
+/// index per byte for the 8-bit variant). The palette is sliced into
+/// RGB triplets and a `tRNS` chunk — when present — supplies one
+/// alpha byte per palette entry. Indices that fall outside the
+/// declared palette are treated as a malformed payload and surface
+/// the typed `NotPng` rejection the rest of the decoder already
+/// raises, so the surface is consistent for foreign files.
+fn expand_packed_indexed(
+    bit_depth: png::BitDepth,
+    raw: &[u8],
+    palette: &[u8],
+    trns: Option<&[u8]>,
+    rgba: &mut [u8],
+) -> Result<(), AssetError> {
+    let bits = bit_depth as u8;
+    if bits == 0 || bits > 8 || 8 % bits != 0 {
+        return Err(AssetError::NotPng);
+    }
+    let palette_entries = palette.len() / 3;
+    if palette_entries == 0 {
+        return Err(AssetError::NotPng);
+    }
+    let pixels_per_byte = 8 / bits;
+    let max_value = (1u16 << bits) - 1;
+    let mut out_index = 0;
+    let mut pixel_index = 0usize;
+    for byte in raw {
+        for offset in 0..pixels_per_byte {
+            if out_index + 4 > rgba.len() {
+                return Err(AssetError::NotPng);
+            }
+            let shift = 8 - bits - offset * bits;
+            let sample = ((*byte >> shift) as u16) & max_value;
+            if (sample as usize) >= palette_entries {
+                return Err(AssetError::NotPng);
+            }
+            let base = sample as usize * 3;
+            rgba[out_index] = palette[base];
+            rgba[out_index + 1] = palette[base + 1];
+            rgba[out_index + 2] = palette[base + 2];
+            rgba[out_index + 3] = trns
+                .and_then(|bytes| bytes.get(pixel_index).copied())
+                .unwrap_or(0xFF);
+            out_index += 4;
+            pixel_index += 1;
+        }
+    }
+    if out_index != rgba.len() {
+        return Err(AssetError::NotPng);
+    }
+    Ok(())
+}
+
+/// Scale a sub-byte sample to its 8-bit equivalent.
+///
+/// The PNG spec packs a `bits`-wide sample into the high bits of a
+/// byte; the conversion replicates those high bits into the low bits
+/// so a 1-bit `0b1` maps to `0xFF` and a 4-bit `0b1010` maps to
+/// `0xAA`. The implementation is identical to the standard PNG
+/// decoder behaviour and never inspects pixel content.
+fn scale_sample_to_u8(sample: u16, max_value: u16) -> u8 {
+    if max_value == 0 {
+        return 0;
+    }
+    let mut value = sample;
+    let mut source_bits = log2_u16(max_value) + 1;
+    let target_bits = 8u32;
+    while source_bits < target_bits {
+        value = (value << source_bits) | value;
+        source_bits *= 2;
+    }
+    value as u8
+}
+
+fn log2_u16(value: u16) -> u32 {
+    if value == 0 {
+        return 0;
+    }
+    let mut bits = 0u32;
+    let mut shifted = value;
+    while shifted > 1 {
+        shifted >>= 1;
+        bits += 1;
+    }
+    bits
 }
 
 /// Lowercase hex SHA-256 of `bytes`.
@@ -501,6 +929,211 @@ impl ClipboardAssetStore {
     pub fn read_bytes(&self, asset_ref: &str) -> Result<Vec<u8>, AssetError> {
         let path = self.resolve(asset_ref)?;
         read_validated_png(&path)
+    }
+
+    /// Run the full validation pipeline against `asset_ref` and report
+    /// the metadata-only diagnostic that explains the outcome.
+    ///
+    /// Unlike [`Self::read_bytes`] this helper is intentionally
+    /// never called from the production thumbnail surface: it is a
+    /// diagnostic / triage entry point that distinguishes the failure
+    /// modes the user-facing error message collapses. The returned
+    /// [`AssetDiagnostic`] never carries bytes, a content hash or an
+    /// absolute path; the metadata the diagnostic surfaces is enough
+    /// for the frontend to drive a typed fallback ("wrong data_dir",
+    /// "invalid PNG", "too large", …) without widening the privacy
+    /// surface.
+    pub fn diagnose(&self, asset_ref: &str) -> AssetDiagnostic {
+        // Path-level validation: empty, absolute, traversal, foreign
+        // namespace or symlink escape all collapse to a single
+        // `InvalidReference` kind so the frontend surfaces a clear
+        // "this row points at something the namespace will never
+        // serve" message instead of guessing between the four
+        // sub-cases.
+        if let Err(error) = self.resolve(asset_ref) {
+            match error {
+                AssetError::Empty
+                | AssetError::Absolute
+                | AssetError::Traversal
+                | AssetError::OutOfScope => {
+                    return AssetDiagnostic {
+                        kind: AssetDiagnosticKind::InvalidReference,
+                    };
+                }
+                AssetError::Escaped => {
+                    // The validator rejects symlinks inside the
+                    // clipboard namespace with `Escaped`; for the
+                    // diagnostic this is a "wrong namespace" signal
+                    // (a foreign reference tried to escape the
+                    // allowed root) rather than a malformed
+                    // reference. The frontend can then drive a
+                    // distinct fallback copy.
+                    return AssetDiagnostic {
+                        kind: AssetDiagnosticKind::WrongNamespace,
+                    };
+                }
+                AssetError::NotFound => {
+                    // Differentiate "no namespace directory" (which is
+                    // a WrongDataDir signal — the store has never seen
+                    // this data_dir) from "namespace exists, this
+                    // file is missing". The check is metadata-only: it
+                    // never logs or returns the path itself.
+                    if !self.root().exists() {
+                        return AssetDiagnostic {
+                            kind: AssetDiagnosticKind::WrongDataDir,
+                        };
+                    }
+                    return AssetDiagnostic {
+                        kind: AssetDiagnosticKind::NotFound,
+                    };
+                }
+                AssetError::Io { reason } => {
+                    return AssetDiagnostic {
+                        kind: AssetDiagnosticKind::Io { reason },
+                    };
+                }
+                // Path-level validation only ever surfaces the
+                // variants above. The remaining cases
+                // (size / PNG / dimensions / encode) require an
+                // actual file read and cannot be produced by
+                // `resolve`, so a future addition that introduces a
+                // new variant here would surface as a compiler error
+                // — exactly what we want.
+                AssetError::TooLarge { .. }
+                | AssetError::NotPng
+                | AssetError::InvalidDimensions { .. }
+                | AssetError::Encode { .. } => {
+                    return AssetDiagnostic {
+                        kind: AssetDiagnosticKind::InvalidReference,
+                    };
+                }
+            }
+        }
+
+        // Path-level validation succeeded, so the file lives inside
+        // the allowed root. Re-resolve to obtain the canonical path;
+        // a `NotFound` between the first resolve and the read would
+        // indicate the namespace was deleted mid-call.
+        let path = match self.resolve(asset_ref) {
+            Ok(path) => path,
+            Err(_) => {
+                return AssetDiagnostic {
+                    kind: AssetDiagnosticKind::NotFound,
+                };
+            }
+        };
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                return AssetDiagnostic {
+                    kind: AssetDiagnosticKind::NotFound,
+                };
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return AssetDiagnostic {
+                kind: AssetDiagnosticKind::WrongNamespace,
+            };
+        }
+        if !metadata.is_file() {
+            return AssetDiagnostic {
+                kind: AssetDiagnosticKind::NotFound,
+            };
+        }
+        let size = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+        if size > MAX_CLIPBOARD_ASSET_BYTES {
+            return AssetDiagnostic {
+                kind: AssetDiagnosticKind::TooLarge { size },
+            };
+        }
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return AssetDiagnostic {
+                    kind: AssetDiagnosticKind::Io {
+                        reason: error.kind().to_string(),
+                    },
+                };
+            }
+        };
+        if bytes.len() > MAX_CLIPBOARD_ASSET_BYTES {
+            return AssetDiagnostic {
+                kind: AssetDiagnosticKind::TooLarge { size: bytes.len() },
+            };
+        }
+        if !looks_like_png(&bytes) {
+            return AssetDiagnostic {
+                kind: AssetDiagnosticKind::InvalidPng {
+                    color_type: "unknown",
+                    bit_depth: "unknown",
+                },
+            };
+        }
+        let decoder = png::Decoder::new(io::Cursor::new(&bytes));
+        let mut reader = match decoder.read_info() {
+            Ok(reader) => reader,
+            Err(_) => {
+                return AssetDiagnostic {
+                    kind: AssetDiagnosticKind::InvalidPng {
+                        color_type: "unknown",
+                        bit_depth: "unknown",
+                    },
+                };
+            }
+        };
+        let info = reader.info();
+        let (width, height) = (info.width, info.height);
+        // Snapshot the labels the diagnostic surfaces into `'static`
+        // strings before `reader.next_frame` mutably borrows the
+        // reader; otherwise the immutable borrow on `info` would
+        // conflict with the mutable one on `next_frame` in the error
+        // arms.
+        let color_type_label = AssetDiagnosticKind::color_type_label(info.color_type);
+        let bit_depth_label = AssetDiagnosticKind::bit_depth_label(info.bit_depth);
+        if width == 0
+            || height == 0
+            || width > MAX_CLIPBOARD_IMAGE_DIM
+            || height > MAX_CLIPBOARD_IMAGE_DIM
+        {
+            return AssetDiagnostic {
+                kind: AssetDiagnosticKind::InvalidDimensions { width, height },
+            };
+        }
+        // Copy the palette / transparency tables out of the reader so
+        // the mutable borrow on `reader.next_frame` below does not
+        // conflict with the immutable borrows the helper needs.
+        let palette: Option<Vec<u8>> = info.palette.as_deref().map(|slice| slice.to_vec());
+        let trns: Option<Vec<u8>> = info.trns.as_deref().map(|slice| slice.to_vec());
+        let mut buffer = vec![0; reader.output_buffer_size()];
+        let frame = match reader.next_frame(&mut buffer) {
+            Ok(frame) => frame,
+            Err(_) => {
+                return AssetDiagnostic {
+                    kind: AssetDiagnosticKind::InvalidPng {
+                        color_type: color_type_label,
+                        bit_depth: bit_depth_label,
+                    },
+                };
+            }
+        };
+        buffer.truncate(frame.buffer_size());
+        match expand_png_frame_to_rgba8(
+            frame.color_type,
+            frame.bit_depth,
+            &buffer,
+            palette.as_deref(),
+            trns.as_deref(),
+        ) {
+            Ok(_) => AssetDiagnostic {
+                kind: AssetDiagnosticKind::Loaded,
+            },
+            Err(_) => AssetDiagnostic {
+                kind: AssetDiagnosticKind::InvalidPng {
+                    color_type: color_type_label,
+                    bit_depth: bit_depth_label,
+                },
+            },
+        }
     }
 
     /// Delete every file in the clipboard namespace whose name is not
@@ -1090,5 +1723,541 @@ mod tests {
             CLIPBOARD_ASSETS_DIR,
             clipvault_platform::APPLICATION_ICONS_DIR
         );
+    }
+
+    // -----------------------------------------------------------------
+    // `decode_png` compatibility coverage.
+    //
+    // The PNG spec permits a wide range of `(ColorType, BitDepth)`
+    // combinations. Older ClipVault builds or external tools can
+    // write any of them; the bridge must therefore accept every
+    // combination the standard considers legal and normalise it to a
+    // platform-neutral RGBA8 bitmap the paste pipeline can hand to
+    // the clipboard adapter without inspecting pixels.
+    //
+    // The tests below cover each legal combination explicitly:
+    // RGB8, RGBA8, indexed (1/2/4/8-bit palette), grayscale (1/2/4/8
+    // /16-bit) and grayscale + alpha (8/16-bit). They round-trip
+    // through the asset store, prove the bytes the decoder produces
+    // match the canonical 8-bit RGBA layout, and pin the failure
+    // surface for the truly malformed inputs.
+    // -----------------------------------------------------------------
+
+    /// Build a PNG with the requested color type, bit depth and a
+    /// 2x2 bitmap of identical RGBA values. The PNG crate's encoder
+    /// accepts the same set of combinations the decoder does; the
+    /// helper makes the test inputs self-describing.
+    fn build_png(color_type: png::ColorType, bit_depth: png::BitDepth, rgba: [u8; 4]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, 2, 2);
+            encoder.set_color(color_type);
+            encoder.set_depth(bit_depth);
+            let mut writer = encoder
+                .write_header()
+                .expect("write header for legal color type / bit depth");
+            let bytes = match (color_type, bit_depth) {
+                (png::ColorType::Grayscale, png::BitDepth::Eight) => {
+                    vec![rgba[0]; 4]
+                }
+                (png::ColorType::GrayscaleAlpha, png::BitDepth::Eight) => {
+                    // 2x2 image, 2 bytes per pixel = 8 bytes total.
+                    std::iter::repeat_n(&[rgba[0], rgba[3]][..], 4)
+                        .flatten()
+                        .copied()
+                        .collect()
+                }
+                (png::ColorType::Rgb, png::BitDepth::Eight) => {
+                    // 2x2 image, 3 bytes per pixel = 12 bytes total.
+                    std::iter::repeat_n(&[rgba[0], rgba[1], rgba[2]][..], 4)
+                        .flatten()
+                        .copied()
+                        .collect()
+                }
+                (png::ColorType::Rgba, png::BitDepth::Eight) => {
+                    // 2x2 image, 4 bytes per pixel = 16 bytes total.
+                    std::iter::repeat_n(&[rgba[0], rgba[1], rgba[2], rgba[3]][..], 4)
+                        .flatten()
+                        .copied()
+                        .collect()
+                }
+                _ => panic!("unsupported encoder combination for fixture"),
+            };
+            writer.write_image_data(&bytes).expect("write image data");
+            writer.finish().expect("finish encoder");
+        }
+        out
+    }
+
+    fn expected_rgba(width: u32, height: u32, fill: [u8; 4]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..(width * height) {
+            bytes.extend_from_slice(&fill);
+        }
+        bytes
+    }
+
+    #[test]
+    fn decode_png_reads_legacy_rgba8_assets() {
+        let normalized = normalize_image(&bitmap(4, 4, 0x55)).expect("normalize");
+        let bytes = normalized.png();
+        let image = decode_png(bytes).expect("decode");
+        assert_eq!(image.width(), 4);
+        assert_eq!(image.height(), 4);
+        assert_eq!(image.rgba(), bytes_to_rgba_repeat(0x55, 16));
+    }
+
+    #[test]
+    fn decode_png_reads_legacy_rgb8_assets() {
+        // Encode a 2x2 RGB8 PNG manually so the fixture is decoupled
+        // from the rest of the store.
+        let png = build_png(
+            png::ColorType::Rgb,
+            png::BitDepth::Eight,
+            [0x10, 0x20, 0x30, 0xFF],
+        );
+        let image = decode_png(&png).expect("decode RGB8");
+        assert_eq!(image.width(), 2);
+        assert_eq!(image.height(), 2);
+        assert_eq!(image.rgba(), expected_rgba(2, 2, [0x10, 0x20, 0x30, 0xFF]));
+    }
+
+    #[test]
+    fn decode_png_reads_indexed_palette_assets() {
+        // Two-entry palette: index 0 = red, index 1 = blue.
+        let mut palette_bytes = Vec::new();
+        palette_bytes.extend_from_slice(&[0xFF, 0x00, 0x00]); // entry 0
+        palette_bytes.extend_from_slice(&[0x00, 0x00, 0xFF]); // entry 1
+                                                              // 2x2 image, row-major: [0, 1, 0, 1] → red, blue, red, blue.
+        let indices = [0u8, 1, 0, 1];
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, 2, 2);
+            encoder.set_color(png::ColorType::Indexed);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_palette(palette_bytes.clone());
+            let mut writer = encoder.write_header().expect("header");
+            writer.write_image_data(&indices).expect("data");
+            writer.finish().expect("finish");
+        }
+        let image = decode_png(&out).expect("decode indexed");
+        assert_eq!(image.width(), 2);
+        assert_eq!(image.height(), 2);
+        // Index 0 (red) at pixel 0 → [0xFF, 0, 0, 0xFF].
+        assert_eq!(&image.rgba()[0..4], &[0xFF, 0x00, 0x00, 0xFF]);
+        // Index 1 (blue) at pixel 1 → [0, 0, 0xFF, 0xFF].
+        assert_eq!(&image.rgba()[4..8], &[0x00, 0x00, 0xFF, 0xFF]);
+        // Index 0 (red) at pixel 2 → [0xFF, 0, 0, 0xFF].
+        assert_eq!(&image.rgba()[8..12], &[0xFF, 0x00, 0x00, 0xFF]);
+        // Index 1 (blue) at pixel 3 → [0, 0, 0xFF, 0xFF].
+        assert_eq!(&image.rgba()[12..16], &[0x00, 0x00, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn decode_png_reads_grayscale_8bit_assets() {
+        let png = build_png(
+            png::ColorType::Grayscale,
+            png::BitDepth::Eight,
+            [0x80, 0, 0, 0xFF],
+        );
+        let image = decode_png(&png).expect("decode grayscale 8");
+        assert_eq!(image.width(), 2);
+        assert_eq!(image.height(), 2);
+        assert_eq!(image.rgba(), expected_rgba(2, 2, [0x80, 0x80, 0x80, 0xFF]));
+    }
+
+    #[test]
+    fn decode_png_reads_grayscale_alpha_8bit_assets() {
+        // The PNG fixture above for grayscale + alpha writes
+        // `[gray, alpha]` so the decoded RGBA pixels must carry the
+        // alpha byte verbatim.
+        let png = build_png(
+            png::ColorType::GrayscaleAlpha,
+            png::BitDepth::Eight,
+            [0x40, 0, 0, 0x80],
+        );
+        let image = decode_png(&png).expect("decode gray + alpha 8");
+        assert_eq!(image.width(), 2);
+        assert_eq!(image.height(), 2);
+        assert_eq!(image.rgba(), expected_rgba(2, 2, [0x40, 0x40, 0x40, 0x80]));
+    }
+
+    #[test]
+    fn decode_png_reads_grayscale_4bit_assets() {
+        // 4-bit grayscale is illegal through the encoder helper
+        // (the encoder requires a byte per sample); emit the PNG by
+        // hand with two rows of `[0x10, 0x10]` (two samples packed
+        // per byte, both equal to 0x1).
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, 4, 2);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Four);
+            let mut writer = encoder.write_header().expect("header");
+            // 4 pixels per row, 2 rows: 2 packed bytes per row.
+            writer
+                .write_image_data(&[0x11, 0x11, 0x11, 0x11])
+                .expect("data");
+            writer.finish().expect("finish");
+        }
+        let image = decode_png(&out).expect("decode grayscale 4");
+        assert_eq!(image.width(), 4);
+        assert_eq!(image.height(), 2);
+        // 4-bit sample `0x1` scales to 8-bit `0x11` through the
+        // standard decoder scaling. Every pixel must carry that
+        // value on every channel plus opaque alpha.
+        let expected = expected_rgba(4, 2, [0x11, 0x11, 0x11, 0xFF]);
+        assert_eq!(image.rgba(), expected);
+    }
+
+    #[test]
+    fn decode_png_reads_grayscale_2bit_assets() {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, 4, 2);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Two);
+            let mut writer = encoder.write_header().expect("header");
+            // 4 samples per byte; pixel 0..3 packed as 0b10 10 10 10.
+            writer
+                .write_image_data(&[0b1010_1010, 0b1010_1010])
+                .expect("data");
+            writer.finish().expect("finish");
+        }
+        let image = decode_png(&out).expect("decode grayscale 2");
+        assert_eq!(image.width(), 4);
+        assert_eq!(image.height(), 2);
+        // 2-bit sample `0b10` (= 2) scales to 8-bit `0b10101010` = 0xAA.
+        assert_eq!(image.rgba(), expected_rgba(4, 2, [0xAA, 0xAA, 0xAA, 0xFF]));
+    }
+
+    #[test]
+    fn decode_png_reads_grayscale_1bit_assets() {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, 8, 2);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::One);
+            let mut writer = encoder.write_header().expect("header");
+            // 8 samples per byte; alternating 0/1 produces
+            // 0b01010101.
+            writer
+                .write_image_data(&[0b01010101, 0b01010101])
+                .expect("data");
+            writer.finish().expect("finish");
+        }
+        let image = decode_png(&out).expect("decode grayscale 1");
+        assert_eq!(image.width(), 8);
+        assert_eq!(image.height(), 2);
+        // Pixel 0 = 0b0 -> 0x00, pixel 1 = 0b1 -> 0xFF, ...
+        let expected: Vec<u8> = (0..16)
+            .map(|i| match i % 2 {
+                0 => [0x00, 0x00, 0x00, 0xFF],
+                _ => [0xFF, 0xFF, 0xFF, 0xFF],
+            })
+            .flat_map(|px| px.into_iter())
+            .collect();
+        assert_eq!(image.rgba(), expected);
+    }
+
+    #[test]
+    fn decode_png_rejects_oversized_assets() {
+        // Build a valid-looking PNG header then pad the rest with a
+        // payload that crosses the cap.
+        let normalized = normalize_image(&bitmap(2, 2, 0x11)).expect("normalize");
+        let mut bytes = normalized.png().to_vec();
+        bytes.resize(MAX_CLIPBOARD_ASSET_BYTES + 1, b'X');
+        assert_eq!(
+            decode_png(&bytes).unwrap_err(),
+            AssetError::TooLarge {
+                size: MAX_CLIPBOARD_ASSET_BYTES + 1
+            }
+        );
+    }
+
+    #[test]
+    fn decode_png_rejects_a_corrupt_png_payload() {
+        // Valid signature, truncated body — the same shape the
+        // existing regression in `decode_rejects_non_png_and_corrupt_payloads`
+        // covers, but the test now lives next to the new fixtures so
+        // a future change that touches the corrupt-input path
+        // updates both contracts together.
+        let mut truncated = PNG_SIGNATURE.to_vec();
+        truncated.extend_from_slice(b"\x00\x00\x00\rIHDR-broken");
+        assert_eq!(decode_png(&truncated), Err(AssetError::NotPng));
+    }
+
+    #[test]
+    fn store_serves_a_legacy_rgba_asset_after_a_restart() {
+        // Mirror of `read_bytes_round_trips_a_persisted_asset` for
+        // the diagnostics: the store's read path must hand back the
+        // exact bytes the writer recorded even when the bytes came
+        // from an older build that wrote a different PNG shape.
+        let (_dir, store) = store();
+        let png_bytes = build_png(
+            png::ColorType::Rgb,
+            png::BitDepth::Eight,
+            [0xAA, 0xBB, 0xCC, 0xFF],
+        );
+        let reference = format!("{}/{}.png", CLIPBOARD_ASSETS_DIR, "deadbeef".repeat(8));
+        let target = store
+            .root()
+            .join("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef.png");
+        std::fs::create_dir_all(store.root()).expect("mkdir");
+        std::fs::write(&target, &png_bytes).expect("write");
+        let read = store.read_bytes(&reference).expect("read");
+        assert_eq!(read, png_bytes);
+    }
+
+    #[test]
+    fn store_serves_a_legacy_grayscale_asset_after_a_restart() {
+        let (_dir, store) = store();
+        let png_bytes = build_png(
+            png::ColorType::Grayscale,
+            png::BitDepth::Eight,
+            [0x42, 0, 0, 0xFF],
+        );
+        let target = store
+            .root()
+            .join("c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffee.png");
+        std::fs::create_dir_all(store.root()).expect("mkdir");
+        std::fs::write(&target, &png_bytes).expect("write");
+        let read = store
+            .read_bytes(
+                "clipboard/c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffee.png",
+            )
+            .expect("read grayscale");
+        assert_eq!(read, png_bytes);
+    }
+
+    #[test]
+    fn store_serves_a_legacy_palette_asset_after_a_restart() {
+        let (_dir, store) = store();
+        let mut palette_bytes = Vec::new();
+        palette_bytes.extend_from_slice(&[0x12, 0x34, 0x56]);
+        palette_bytes.extend_from_slice(&[0xAB, 0xCD, 0xEF]);
+        let indices = [0u8, 1, 1, 0];
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, 2, 2);
+            encoder.set_color(png::ColorType::Indexed);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_palette(palette_bytes);
+            let mut writer = encoder.write_header().expect("header");
+            writer.write_image_data(&indices).expect("data");
+            writer.finish().expect("finish");
+        }
+        let target = store
+            .root()
+            .join("cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe.png");
+        std::fs::create_dir_all(store.root()).expect("mkdir");
+        std::fs::write(&target, &out).expect("write");
+        let read = store
+            .read_bytes(
+                "clipboard/cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe.png",
+            )
+            .expect("read palette");
+        assert_eq!(read, out);
+    }
+
+    #[test]
+    fn collector_keeps_a_legacy_grayscale_asset_after_a_delete() {
+        // The garbage collector must not delete an asset that an
+        // existing row references just because the on-disk format is
+        // a grayscale PNG the current encoder never produces.
+        let (_dir, store) = store();
+        let png_bytes = build_png(
+            png::ColorType::Grayscale,
+            png::BitDepth::Eight,
+            [0x11, 0, 0, 0xFF],
+        );
+        let file_name = "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd.png";
+        let reference = format!("{CLIPBOARD_ASSETS_DIR}/{file_name}");
+        std::fs::create_dir_all(store.root()).expect("mkdir");
+        std::fs::write(store.root().join(file_name), &png_bytes).expect("write");
+        let mut referenced = BTreeSet::new();
+        referenced.insert(reference.clone());
+        let removed = store.collect_unreferenced(&referenced).expect("collect");
+        assert_eq!(removed, 0, "a referenced legacy asset must survive");
+        assert!(store.read_bytes(&reference).is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // `diagnose` metadata-only diagnostic coverage.
+    //
+    // The diagnostic is the helper the user-facing surface calls when
+    // it needs to know *why* an asset did not render: missing,
+    // decodable, foreign namespace, oversized, … Each test pins a
+    // single kind so the surface cannot drift back to the single
+    // "invalid_asset_ref" string the previous implementation
+    // surfaced for every failure mode.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn diagnostic_returns_loaded_for_a_persisted_rgba_asset() {
+        let (_dir, store) = store();
+        let normalized = normalize_image(&bitmap(4, 4, 0x11)).expect("normalize");
+        let outcome = store.store_image(&normalized).expect("write");
+        let diagnostic = store.diagnose(outcome.asset_ref());
+        assert_eq!(diagnostic.kind_str(), "loaded");
+        assert_eq!(diagnostic.kind, AssetDiagnosticKind::Loaded);
+    }
+
+    #[test]
+    fn diagnostic_returns_loaded_for_a_legacy_palette_asset() {
+        let (_dir, store) = store();
+        // Two-entry palette: index 0 = red, index 1 = blue.
+        let mut palette_bytes = Vec::new();
+        palette_bytes.extend_from_slice(&[0x10, 0x20, 0x30]);
+        palette_bytes.extend_from_slice(&[0xAB, 0xCD, 0xEF]);
+        let indices = [0u8, 1, 1, 0];
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, 2, 2);
+            encoder.set_color(png::ColorType::Indexed);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_palette(palette_bytes);
+            let mut writer = encoder.write_header().expect("header");
+            writer.write_image_data(&indices).expect("data");
+            writer.finish().expect("finish");
+        }
+        let file_name = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899.png";
+        std::fs::create_dir_all(store.root()).expect("mkdir");
+        std::fs::write(store.root().join(file_name), &out).expect("write");
+        let diagnostic = store.diagnose(&format!("{CLIPBOARD_ASSETS_DIR}/{file_name}"));
+        assert_eq!(diagnostic.kind_str(), "loaded");
+    }
+
+    #[test]
+    fn diagnostic_returns_invalid_reference_for_a_foreign_reference() {
+        let (_dir, store) = store();
+        let cases = [
+            "",
+            "/etc/passwd",
+            "../escape.png",
+            "ignored-apps/x.png",
+            "clipboard/nested/y.png",
+        ];
+        for reference in cases {
+            let diagnostic = store.diagnose(reference);
+            assert_eq!(
+                diagnostic.kind_str(),
+                "invalid_reference",
+                "{reference} must classify as invalid_reference, got {diagnostic:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_returns_not_found_when_the_file_is_missing() {
+        let (_dir, store) = store();
+        std::fs::create_dir_all(store.root()).expect("mkdir");
+        let diagnostic = store.diagnose("clipboard/ghost.png");
+        assert_eq!(diagnostic.kind_str(), "not_found");
+        assert_eq!(diagnostic.kind, AssetDiagnosticKind::NotFound);
+    }
+
+    #[test]
+    fn diagnostic_returns_wrong_data_dir_when_the_namespace_is_absent() {
+        // A data_dir that never saw a capture must surface
+        // `wrong_data_dir` so the user can confirm the running
+        // process is pointing at a different location than the
+        // one the rows were persisted against.
+        let (dir, _store) = store();
+        // Point a fresh store at the directory but never write to
+        // it; the namespace therefore does not exist.
+        let isolated = ClipboardAssetStore::new(dir.path().join("empty"));
+        let diagnostic = isolated.diagnose("clipboard/ghost.png");
+        assert_eq!(diagnostic.kind_str(), "wrong_data_dir");
+        assert_eq!(diagnostic.kind, AssetDiagnosticKind::WrongDataDir);
+    }
+
+    #[test]
+    fn diagnostic_returns_wrong_namespace_for_a_symlink_inside_the_namespace() {
+        let (dir, store) = store();
+        let outside = dir.path().join("outside.png");
+        std::fs::write(&outside, b"\x89PNG\r\n\x1a\n outside").expect("write");
+        std::fs::create_dir_all(store.root()).expect("mkdir");
+        std::os::unix::fs::symlink(&outside, store.root().join("alias.png")).expect("symlink");
+        let diagnostic = store.diagnose("clipboard/alias.png");
+        assert_eq!(diagnostic.kind_str(), "wrong_namespace");
+        assert_eq!(diagnostic.kind, AssetDiagnosticKind::WrongNamespace);
+    }
+
+    #[test]
+    fn diagnostic_returns_too_large_for_an_oversized_asset() {
+        let (_dir, store) = store();
+        let path = store.root().join("huge.png");
+        let mut bytes = PNG_SIGNATURE.to_vec();
+        bytes.resize(MAX_CLIPBOARD_ASSET_BYTES + 1, b'X');
+        std::fs::create_dir_all(store.root()).expect("mkdir");
+        std::fs::write(&path, &bytes).expect("write");
+        let diagnostic = store.diagnose("clipboard/huge.png");
+        assert_eq!(diagnostic.kind_str(), "too_large");
+        match diagnostic.kind {
+            AssetDiagnosticKind::TooLarge { size } => {
+                assert_eq!(size, MAX_CLIPBOARD_ASSET_BYTES + 1)
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diagnostic_returns_invalid_png_for_a_corrupt_payload() {
+        let (_dir, store) = store();
+        std::fs::create_dir_all(store.root()).expect("mkdir");
+        std::fs::write(
+            store.root().join("corrupt.png"),
+            b"\x89PNG\r\n\x1a\n broken",
+        )
+        .expect("write");
+        let diagnostic = store.diagnose("clipboard/corrupt.png");
+        assert_eq!(diagnostic.kind_str(), "invalid_png");
+        match diagnostic.kind {
+            AssetDiagnosticKind::InvalidPng {
+                color_type,
+                bit_depth,
+            } => {
+                assert_eq!(color_type, "unknown");
+                assert_eq!(bit_depth, "unknown");
+            }
+            other => panic!("expected InvalidPng, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diagnostic_never_carries_absolute_paths_or_payload_bytes() {
+        let (dir, store) = store();
+        let data_dir = dir.path().display().to_string();
+        let (_id, reference) = {
+            let normalized = normalize_image(&bitmap(2, 2, 0x22)).expect("normalize");
+            let outcome = store.store_image(&normalized).expect("write");
+            (
+                outcome.asset_ref().to_string(),
+                outcome.asset_ref().to_string(),
+            )
+        };
+        let diagnostic = store.diagnose(&reference);
+        let rendered = format!("{diagnostic:?}");
+        assert!(
+            !rendered.contains(&data_dir),
+            "absolute data_dir leaked into a diagnostic: {rendered}"
+        );
+        assert!(
+            !rendered.contains("/Users/"),
+            "absolute path leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains(&reference),
+            "asset reference leaked into a diagnostic: {rendered}"
+        );
+    }
+
+    fn bytes_to_rgba_repeat(fill: u8, pixels: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(pixels * 4);
+        for _ in 0..pixels {
+            out.extend_from_slice(&[fill, fill, fill, fill]);
+        }
+        out
     }
 }

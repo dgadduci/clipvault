@@ -53,9 +53,11 @@ fn bootstrap_with_clock_and_clipboard(
     clock: Arc<dyn Clock>,
     clipboard: Arc<dyn Clipboard>,
 ) -> AppContext {
+    let adapters = clipvault_core::build_isolated_adapters(dir.path(), &dir.path().join("data"));
     AppBootstrap::new()
         .with_clock(clock)
         .with_clipboard(clipboard)
+        .with_platform_adapters(adapters)
         .bootstrap_at(dir.path().join("clipvault.db"))
         .expect("bootstrap")
 }

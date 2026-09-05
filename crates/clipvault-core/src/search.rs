@@ -225,9 +225,12 @@ mod tests {
         let mut db = db;
         db.run_migrations(&clipvault_db::builtin_migrations())
             .expect("migrate");
+        let adapters =
+            crate::test_support::build_isolated_adapters(dir.path(), &dir.path().join("data"));
         let bootstrap = AppBootstrap::new()
             .with_clock(Arc::new(SequenceClock::new(stamps)))
-            .with_clipboard(Arc::new(crate::clipboard::FakeClipboard::new()));
+            .with_clipboard(Arc::new(crate::clipboard::FakeClipboard::new()))
+            .with_platform_adapters(adapters);
         bootstrap
             .bootstrap_with_database(db, dir.path().join("clipvault.db"))
             .expect("bootstrap")

@@ -1175,75 +1175,64 @@
         <svg
           aria-hidden="true"
           focusable="false"
-          width="14"
-          height="14"
-          viewBox="0 0 16 16"
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
           data-testid="history-card-pin-filled"
         >
           <!--
-            Filled pushpin / chincheta. The glyph mirrors a classic
-            bulletin-board thumbtack: a solid round head resting on a
-            short vertical shaft that ends in a clearly visible
-            triangular point. The shape is centred on the viewport
-            so the affordance looks balanced inside the 1.45rem
-            button. No star, bookmark, check, heart or emoji glyph is
-            ever rendered.
+            Filled diagonal chincheta. The whole silhouette is
+            traced by a single `<path>` (drawn vertically, then
+            tilted 45° around the viewport centre by the
+            `<g transform="rotate(45 12 12)">` group) so the
+            wide rounded head, the short neck, the tapered body
+            and the sharp tip read as one continuous thumbtack.
+            The previous circle + line + polygon composition was
+            a magnifying glass; the new path keeps the wide
+            rounded head in the upper-right, the tip in the
+            lower-left and the silhouette inside the dark button
+            background so the yellow fill stays legible. No
+            star, bookmark, check, heart, emoji or textual
+            fallback is rendered.
           -->
-          <circle cx="8" cy="5" r="3" fill="currentColor" />
-          <line
-            x1="8"
-            y1="8"
-            x2="8"
-            y2="12.5"
-            stroke="currentColor"
-            stroke-width="1.6"
-            stroke-linecap="round"
-          />
-          <polygon
-            points="6,12 10,12 8,14"
-            fill="currentColor"
-          />
+          <g transform="rotate(45 12 12)">
+            <path
+              d="M 3 8 C 3 1 21 1 21 8 C 21 10.5 19 11.5 16 11.5 L 12 22 L 8 11.5 C 5 11.5 3 10.5 3 8 Z"
+              fill="currentColor"
+              stroke="currentColor"
+              stroke-width="0.6"
+              stroke-linejoin="round"
+            />
+          </g>
         </svg>
       {:else}
         <svg
           aria-hidden="true"
           focusable="false"
-          width="14"
-          height="14"
-          viewBox="0 0 16 16"
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
           data-testid="history-card-pin-outline"
         >
           <!--
-            Outline pushpin / chincheta. Same head + shaft + tip
-            geometry as the filled variant but rendered with
-            stroke-only paths so the unpinned affordance stays
-            visually distinct from the pinned one. The outline
-            silhouette is centred on the viewport and the tip keeps
-            a clear, sharp V so the thumbtack reads at a glance.
-            No star, bookmark, check, heart or emoji glyph is
-            rendered.
+            Outline diagonal chincheta. Same path as the filled
+            variant rendered with `fill="none"` and a single
+            `currentColor` stroke so the unpinned affordance stays
+            visually distinct from the pinned one while keeping the
+            exact same tilted silhouette and the sharp tip in the
+            lower-left. No star, bookmark, check, heart, emoji or
+            textual fallback is rendered.
           -->
-          <circle
-            cx="8"
-            cy="5"
-            r="3"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.2"
-          />
-          <line
-            x1="8"
-            y1="8"
-            x2="8"
-            y2="12.5"
-            stroke="currentColor"
-            stroke-width="1.2"
-            stroke-linecap="round"
-          />
-          <polygon
-            points="6,12 10,12 8,14"
-            fill="currentColor"
-          />
+          <g transform="rotate(45 12 12)">
+            <path
+              d="M 3 8 C 3 1 21 1 21 8 C 21 10.5 19 11.5 16 11.5 L 12 22 L 8 11.5 C 5 11.5 3 10.5 3 8 Z"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linejoin="round"
+              stroke-linecap="round"
+            />
+          </g>
         </svg>
       {/if}
     </button>
@@ -1698,35 +1687,50 @@
     padding: 0.25rem 0.55rem;
     font-size: 0.85rem;
     line-height: 1;
+    /*
+     * The pin button hosts a 18x18 SVG so the chincheta stays
+     * legible without spilling past the rail. We pin both
+     * action buttons to the same min-height so the ellipsis
+     * trigger and the pin stay aligned when the chincheta path
+     * is bigger than the text line-box of `.menu-trigger`.
+     */
+    min-height: 1.65rem;
+    box-sizing: border-box;
   }
 
   /*
-   * Pin button: outlined local pin glyph when unpinned, filled
-   * (filled+highlighted) when the entry is pinned. The
-   * accent + fg colours keep the affordance discoverable while the
-   * SVG itself is the only visual element rendered inside the
-   * button — no glyphs, no emojis, no external resources.
+   * Pin button: outlined local chincheta glyph when unpinned, filled
+   * (filled + highlighted) when the entry is pinned. The button
+   * background stays dark in both states so the yellow fill stays
+   * legible on the dark surface and the outline keeps its lavender
+   * tint. The SVG itself is the only visual element rendered inside
+   * the button — no glyphs, no emojis, no external resources.
    */
   .card-actions :global(.pin) {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: #93c5fd;
+    color: #aab4c8;
     transition: color 0.15s ease, background 0.15s ease;
   }
   .card-actions :global(.pin[aria-pressed="true"]) {
-    background: #facc15;
-    color: #1f2937;
+    color: #f5c542;
   }
   .card-actions :global(.pin:hover:not(:disabled)) {
-    background: rgba(147, 197, 253, 0.18);
+    background: rgba(170, 180, 200, 0.18);
+    color: #c9d1de;
   }
   .card-actions :global(.pin[aria-pressed="true"]:hover:not(:disabled)) {
-    background: #eab308;
+    background: rgba(245, 197, 66, 0.18);
+    color: #ffd34d;
   }
   .card-actions :global(.pin:focus-visible) {
     outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.45));
     outline-offset: 2px;
+  }
+  .card-actions :global(.pin:disabled) {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .card-actions :global(.menu-trigger[aria-expanded="true"]) {

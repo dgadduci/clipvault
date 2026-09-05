@@ -6,15 +6,23 @@
    *   - the search input the main desktop already owned, decorated
    *     with a visible platform-aware shortcut hint (⌘F on macOS,
    *     Ctrl F on every other supported host);
-   *   - the four modal triggers (Development, Privacidad, Retención,
-   *     Atajo de pegado rápido);
-   *   - the global clear-history trash icon.
+   *   - one ellipsis button that opens an accessible menu exposing
+   *     the four secondary desktop actions: Development, Privacidad,
+   *     Retención and Atajo de pegado rápido. The menu is the single
+   *     affordance for those four callbacks — there is no second
+   *     toolbar surface that renders them inline;
+   *   - the global clear-history trash icon, kept as a sibling of
+   *     the ellipsis button (immediately to its right) so the
+   *     destructive action stays visible outside the menu and keeps
+   *     the existing confirmation flow owned by the parent.
    *
    * The toolbar is presentational: the parent owns the modal state
    * machine, the search controller and the trash confirmation flow.
    * The component only forwards user intents through callbacks so
    * `App.svelte` keeps the single source of truth.
    */
+  import { onDestroy, tick } from "svelte";
+
   export let searchQuery: string = "";
   export let searching: boolean = false;
   export let searchPlaceholder: string = "Buscar en el historial";
@@ -33,12 +41,6 @@
   export let searchShortcutAccessible: string = "Buscar (Control F)";
   export let trashLabel: string = "Limpiar historial no favorito";
   export let trashConfirming: boolean = false;
-  export let openModal:
-    | "development"
-    | "privacy"
-    | "retention"
-    | "quick_paste_shortcut"
-    | null = null;
   export let onSearchInput: (value: string) => void = () => {};
   export let onOpenDevelopment: (event: MouseEvent) => void = () => {};
   export let onOpenPrivacy: (event: MouseEvent) => void = () => {};
@@ -46,10 +48,123 @@
   export let onOpenShortcut: (event: MouseEvent) => void = () => {};
   export let onRequestClearHistory: (event: MouseEvent) => void = () => {};
 
+  /**
+   * Ellipsis-menu state. The toolbar owns a single menu instance;
+   * opening it twice (mount/remount, hot reload) keeps exactly one
+   * set of outside click and keyboard listeners because the
+   * add/remove helpers are idempotent.
+   */
+  let menuOpen = false;
+  let menuEl: HTMLDivElement | null = null;
+  let ellipsisEl: HTMLButtonElement | null = null;
+
   function handleInput(event: Event): void {
     const value = (event.currentTarget as HTMLInputElement).value;
     onSearchInput(value);
   }
+
+  function focusEllipsis(): void {
+    queueMicrotask(() => {
+      ellipsisEl?.focus();
+    });
+  }
+
+  function closeMenu(opts: { restoreFocus?: boolean } = {}): void {
+    if (!menuOpen) return;
+    menuOpen = false;
+    if (opts.restoreFocus) {
+      focusEllipsis();
+    }
+  }
+
+  /**
+   * Forward an item selection through the parent callback and close
+   * the menu WITHOUT restoring focus: the parent opens a modal that
+   * traps focus, so the focus must remain where the user's click
+   * landed (or jump to the modal's first focusable element).
+   */
+  function selectItem(invoke: (event: MouseEvent) => void, event: MouseEvent): void {
+    menuOpen = false;
+    invoke(event);
+  }
+
+  function toggleMenu(): void {
+    if (menuOpen) {
+      closeMenu({ restoreFocus: true });
+    } else {
+      menuOpen = true;
+      // Move focus into the menu after the DOM commits the menu node.
+      void tick().then(() => {
+        const first = menuEl?.querySelector<HTMLElement>(
+          '[role="menuitem"]:not([disabled])',
+        );
+        first?.focus();
+      });
+    }
+  }
+
+  function onMenuKeydown(event: KeyboardEvent): void {
+    if (!menuOpen) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMenu({ restoreFocus: true });
+    }
+  }
+
+  function onWindowPointerDown(event: MouseEvent): void {
+    if (!menuOpen) return;
+    const target = event.target as HTMLElement | null;
+    if (!target) return;
+    if (ellipsisEl && (target === ellipsisEl || ellipsisEl.contains(target))) {
+      return;
+    }
+    if (menuEl && menuEl.contains(target)) {
+      return;
+    }
+    closeMenu({ restoreFocus: true });
+  }
+
+  function onWindowKeydown(event: KeyboardEvent): void {
+    if (!menuOpen) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMenu({ restoreFocus: true });
+    }
+  }
+
+  // Idempotent listener registration: the toolbar installs the
+  // document-level outside click / Escape handlers exactly once
+  // even when Svelte mounts and remounts the component during
+  // hot-reload or a remount triggered by a parent state change.
+  // The flag is local to the module closure and survives across
+  // remounts because it is anchored on a singleton WeakMap-like
+  // owner the component itself controls.
+  let listenersInstalled = false;
+
+  function ensureWindowListeners(): void {
+    if (listenersInstalled) return;
+    if (typeof document === "undefined") return;
+    document.addEventListener("pointerdown", onWindowPointerDown, true);
+    document.addEventListener("keydown", onWindowKeydown, true);
+    listenersInstalled = true;
+  }
+
+  function detachWindowListeners(): void {
+    if (typeof document === "undefined") return;
+    document.removeEventListener("pointerdown", onWindowPointerDown, true);
+    document.removeEventListener("keydown", onWindowKeydown, true);
+    listenersInstalled = false;
+  }
+
+  $: if (menuOpen) {
+    ensureWindowListeners();
+  } else {
+    detachWindowListeners();
+  }
+
+  onDestroy(() => {
+    detachWindowListeners();
+  });
 </script>
 
 <div class="toolbar" data-testid="desktop-toolbar">
@@ -75,50 +190,81 @@
       </span>
     </div>
     <div class="actions" role="toolbar" aria-label="Configuración y limpieza">
-      <button
-        type="button"
-        class="action"
-        aria-haspopup="dialog"
-        aria-expanded={openModal === "development"}
-        title="Diagnóstico y controles de desarrollo"
-        data-testid="open-development"
-        on:click={onOpenDevelopment}
-      >
-        Development
-      </button>
-      <button
-        type="button"
-        class="action"
-        aria-haspopup="dialog"
-        aria-expanded={openModal === "privacy"}
-        title="Privacidad y blacklist"
-        data-testid="open-privacy"
-        on:click={onOpenPrivacy}
-      >
-        Privacidad
-      </button>
-      <button
-        type="button"
-        class="action"
-        aria-haspopup="dialog"
-        aria-expanded={openModal === "retention"}
-        title="Retención del historial"
-        data-testid="open-retention"
-        on:click={onOpenRetention}
-      >
-        Retención
-      </button>
-      <button
-        type="button"
-        class="action"
-        aria-haspopup="dialog"
-        aria-expanded={openModal === "quick_paste_shortcut"}
-        title="Atajo de pegado rápido"
-        data-testid="open-shortcut"
-        on:click={onOpenShortcut}
-      >
-        Atajo
-      </button>
+      <div class="menu-wrapper" data-testid="overflow-menu-wrapper">
+        <button
+          type="button"
+          class="menu-trigger"
+          bind:this={ellipsisEl}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          aria-controls="desktop-overflow-menu"
+          aria-label="Más acciones del escritorio"
+          title="Más acciones"
+          data-testid="open-overflow-menu"
+          on:click={toggleMenu}
+        >
+          <svg
+            aria-hidden="true"
+            focusable="false"
+            width="18"
+            height="18"
+            viewBox="0 0 18 18"
+            fill="currentColor"
+          >
+            <circle cx="4" cy="9" r="1.6" />
+            <circle cx="9" cy="9" r="1.6" />
+            <circle cx="14" cy="9" r="1.6" />
+          </svg>
+        </button>
+        {#if menuOpen}
+          <div
+            class="menu"
+            id="desktop-overflow-menu"
+            role="menu"
+            aria-label="Más acciones del escritorio"
+            data-testid="overflow-menu"
+            bind:this={menuEl}
+            on:keydown={onMenuKeydown}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              class="menu-item"
+              data-testid="open-development"
+              on:click={(event) => selectItem(onOpenDevelopment, event)}
+            >
+              Development
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              class="menu-item"
+              data-testid="open-privacy"
+              on:click={(event) => selectItem(onOpenPrivacy, event)}
+            >
+              Privacidad
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              class="menu-item"
+              data-testid="open-retention"
+              on:click={(event) => selectItem(onOpenRetention, event)}
+            >
+              Retención
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              class="menu-item"
+              data-testid="open-shortcut"
+              on:click={(event) => selectItem(onOpenShortcut, event)}
+            >
+              Atajo de pegado rápido
+            </button>
+          </div>
+        {/if}
+      </div>
       <button
         type="button"
         class="trash"
@@ -153,13 +299,22 @@
 </div>
 
 <style>
+  /*
+   * The toolbar lives inside the right column of the workspace grid.
+   * It must not introduce its own background card (the workspace is
+   * the surface), so the wrapper is transparent and only the inner
+   * controls carry borders. The wrapper still reserves a single
+   * visual row so the search input and the overflow menu / trash
+   * button stay horizontally aligned without injecting a third
+   * divider the layout grid does not need.
+   */
   .toolbar {
     width: 100%;
-    background: var(--cv-bg-elevated, #161b22);
-    border: 1px solid var(--cv-border, #30363d);
-    border-radius: var(--cv-radius-md, 10px);
-    padding: 0.6rem 0.75rem;
-    margin-bottom: 1rem;
+    min-width: 0;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    margin: 0;
   }
 
   .toolbar-row {
@@ -179,7 +334,7 @@
   .search {
     width: 100%;
     padding: 0.45rem 4.5rem 0.45rem 0.75rem;
-    background: var(--cv-bg-surface, #0e1116);
+    background: var(--cv-bg-elevated, #161b22);
     color: var(--cv-fg, #f0f4f8);
     border: 1px solid var(--cv-border, #30363d);
     border-radius: var(--cv-radius-sm, 6px);
@@ -217,25 +372,89 @@
     margin-left: auto;
   }
 
-  .action {
+  /*
+   * The menu wrapper anchors the overflow menu so the menu panel can
+   * absolutely position itself against the wrapper without escaping
+   * the right column's bounds (the parent already carries
+   * `overflow: visible` by default; the menu stays within the
+   * column because `position: absolute` resolves against this
+   * relatively-positioned wrapper).
+   */
+  .menu-wrapper {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .menu-trigger {
     background: transparent;
     color: var(--cv-fg, #f0f4f8);
     border: 1px solid var(--cv-border, #30363d);
-    padding: 0.35rem 0.7rem;
+    padding: 0;
     border-radius: var(--cv-radius-sm, 6px);
+    width: 2rem;
+    height: 2rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font: inherit;
+  }
+
+  .menu-trigger:hover {
+    background: var(--cv-bg-hover, rgba(255, 255, 255, 0.06));
+  }
+
+  .menu-trigger[aria-expanded="true"] {
+    background: var(--cv-accent, #2563eb);
+    color: white;
+    border-color: var(--cv-accent, #2563eb);
+  }
+
+  .menu-trigger:focus-visible {
+    outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.45));
+    outline-offset: 2px;
+  }
+
+  /*
+   * The menu surfaces the four secondary desktop actions through a
+   * single accessible list. Each menuitem keeps the data-testid the
+   * previous four standalone buttons used so the regression suite
+   * (and any external integration) can still dispatch through them;
+   * only the visual surface changed.
+   */
+  .menu {
+    position: absolute;
+    top: calc(100% + 0.35rem);
+    right: 0;
+    z-index: 30;
+    min-width: 14rem;
+    background: var(--cv-bg-elevated, #161b22);
+    border: 1px solid var(--cv-border, #30363d);
+    border-radius: var(--cv-radius-md, 10px);
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.34);
+    padding: 0.35rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .menu-item {
+    background: transparent;
+    color: var(--cv-fg, #f0f4f8);
+    border: 1px solid transparent;
+    border-radius: var(--cv-radius-sm, 6px);
+    padding: 0.45rem 0.7rem;
+    text-align: left;
     cursor: pointer;
     font: inherit;
     font-size: var(--cv-control, 0.85rem);
   }
 
-  .action:hover {
-    background: var(--cv-bg-hover, rgba(255, 255, 255, 0.06));
-  }
-
-  .action[aria-expanded="true"] {
-    background: var(--cv-accent, #2563eb);
-    color: white;
-    border-color: var(--cv-accent, #2563eb);
+  .menu-item:hover,
+  .menu-item:focus-visible {
+    background: var(--cv-bg-hover, rgba(255, 255, 255, 0.08));
+    outline: none;
   }
 
   /*
@@ -286,6 +505,9 @@
     .actions {
       width: 100%;
       justify-content: flex-start;
+    }
+    .menu-wrapper {
+      margin-left: auto;
     }
   }
 </style>

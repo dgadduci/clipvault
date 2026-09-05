@@ -1074,20 +1074,6 @@
     </p>
     <button type="button" on:click={() => void refresh()}>Reintentar</button>
   {:else if diagnostics}
-    <DesktopToolbar
-      searchQuery={searchQuery}
-      searching={searching}
-      openModal={openModal}
-      searchShortcut={searchShortcutLabelText}
-      searchShortcutAccessible={searchShortcutAccessibleText}
-      onSearchInput={handleSearchInput}
-      onOpenDevelopment={onOpenDevelopment}
-      onOpenPrivacy={onOpenPrivacy}
-      onOpenRetention={onOpenRetention}
-      onOpenShortcut={onOpenShortcut}
-      onRequestClearHistory={onRequestClearHistory}
-    />
-
     <div class="layout">
       <OrganizationSidebar
         collections={organization?.collections ?? []}
@@ -1098,7 +1084,19 @@
         on:delete={(e) => handleDeleteCollection(e)}
         on:card-drop={(e) => handleCardDrop(e)}
       />
-      <div class="layout-main">
+      <div class="layout-main" data-testid="layout-main">
+        <DesktopToolbar
+          searchQuery={searchQuery}
+          searching={searching}
+          searchShortcut={searchShortcutLabelText}
+          searchShortcutAccessible={searchShortcutAccessibleText}
+          onSearchInput={handleSearchInput}
+          onOpenDevelopment={onOpenDevelopment}
+          onOpenPrivacy={onOpenPrivacy}
+          onOpenRetention={onOpenRetention}
+          onOpenShortcut={onOpenShortcut}
+          onRequestClearHistory={onRequestClearHistory}
+        />
         <p
           class="search-status muted"
           data-testid="search-status"
@@ -1379,12 +1377,20 @@
    * expand to fit every card, breaking the horizontal scroll). With
    * `0` as the minimum the rail can shrink to its container width
    * and the cards stay at their fixed `--cv-card-size`.
+   *
+   * `align-items: stretch` makes the sidebar fill the row height
+   * the right column owns; `OrganizationSidebar.svelte` then sizes
+   * its panel with `height: 100%` so the two columns stay visually
+   * aligned without the layout needing a second fixed-height token.
+   * Adding many collections cannot grow the row because the sidebar
+   * carries `min-height: 0` on its internal list and only the list
+   * owns the vertical scroller.
    */
   .layout {
     display: grid;
     grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
     gap: 1rem;
-    align-items: flex-start;
+    align-items: stretch;
     width: 100%;
     min-width: 0;
   }
@@ -1395,6 +1401,12 @@
     gap: 1rem;
     min-width: 0;
     width: 100%;
+    /* `min-height: 0` is the structural guard that keeps the right
+     * column from expanding the grid row beyond the rail's fixed
+     * square. The history-card rail keeps its
+     * `height: var(--cv-card-rail-height)` so the row only grows
+     * through the toolbar + status line, never the desktop body. */
+    min-height: 0;
   }
 
   /*

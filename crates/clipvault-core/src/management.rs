@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use thiserror::Error;
 use time::OffsetDateTime;
 use tracing::warn;
@@ -246,6 +245,64 @@ pub struct RetentionOutcome {
     pub removed: usize,
 }
 
+/// Diagnostics describing a single pass of
+/// [`HistoryManagementService::collect_unreferenced_assets`].
+///
+/// The collector is split into two independent passes — one for the
+/// image namespace and one for the rich-text namespace — and every
+/// pass MUST distinguish three outcomes:
+///
+/// 1. `reference_query_succeeded = true` and `reference_query_failed
+///    = false`: the live reference set is trustworthy. The collector
+///    was allowed to delete unreferenced files; `assets_removed_count`
+///    reports how many it actually removed (zero means the namespace
+///    was already clean).
+/// 2. `reference_query_succeeded = false` and `reference_query_failed
+///    = true`: SQLite could not produce a trustworthy live reference
+///    set (lock contention, WAL read failure, busy connection,
+///    incomplete migration, …). The collector MUST NOT delete anything;
+///    `assets_removed_count` is forced to zero and
+///    `*_collection_skipped = true` is set so operators can correlate
+///    the asset state with the SQLite failure.
+/// 3. The asset store is `None` (the bootstrap did not wire one, only
+///    the case in row-only tests). All booleans collapse to `false`
+///    and `assets_removed_count` is `0`; the live-set query still
+///    ran so a row-mutation caller can still observe a SQLite
+///    failure through `reference_query_failed`.
+///
+/// The struct is metadata-only: it never carries an `asset_ref`, an
+/// absolute path, a content hash, a snippet, the policy kind, or the
+/// raw error message. Errors are surfaced through stable snake_case
+/// fields (`reference_query_failed` / `*_collection_skipped`) so logs
+/// can match the documentation without parsing free-form strings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct AssetCollectionOutcome {
+    /// The image-namespace (`<data_dir>/assets/clipboard`) reference
+    /// query returned a trustworthy `BTreeSet<String>`.
+    pub image_reference_query_succeeded: bool,
+    /// The image-namespace reference query failed. When `true` the
+    /// image collector MUST have skipped deletion entirely.
+    pub image_reference_query_failed: bool,
+    /// The image collector was skipped because the live reference set
+    /// was unavailable. `assets_removed_count` is forced to `0` for
+    /// the image namespace when this flag is `true`.
+    pub image_collection_skipped: bool,
+    /// The rich-text-namespace reference query returned a trustworthy
+    /// `BTreeSet<String>`.
+    pub rich_reference_query_succeeded: bool,
+    /// The rich-text-namespace reference query failed. When `true` the
+    /// rich-text collector MUST have skipped deletion entirely.
+    pub rich_reference_query_failed: bool,
+    /// The rich-text collector was skipped because the live reference
+    /// set was unavailable.
+    pub rich_collection_skipped: bool,
+    /// Total number of assets (images + rich-text) the collector
+    /// actually deleted on disk during this pass. Zero is the only
+    /// legal value when either skip flag is `true`.
+    pub assets_removed_count: usize,
+}
+
 /// Service that exposes the management operations. Cheap to clone:
 /// it only carries shared `Arc`s.
 #[derive(Clone)]
@@ -291,68 +348,104 @@ impl HistoryManagementService {
     ///
     /// The collector runs **after** the data mutation has committed and
     /// derives the live reference set from SQLite, so an asset shared by
-    /// another row is never a candidate. The operation is idempotent
-    /// and non-fatal: a filesystem failure is logged (metadata only)
-    /// and reported as `0` collected, because losing a few orphaned
-    /// bytes must never turn a successful delete into an error the user
-    /// sees.
+    /// another row is never a candidate.
     ///
-    /// Returns the number of assets removed.
-    pub fn collect_unreferenced_assets(&self, context: &AppContext) -> usize {
-        let mut total = 0;
+    /// **A SQLite failure is never collapsed into an empty reference
+    /// set.** That mistake was the root cause of the regression in
+    /// which every PNG under `<data_dir>/assets/clipboard/` was
+    /// deleted on startup even though SQLite still referenced it: the
+    /// collector saw `Ok(empty_set)` and `Err(database_error)` as the
+    /// same case. The two paths are now separated:
+    ///
+    /// - `Ok(set)` (possibly empty): the collector runs and removes
+    ///   only files whose name is not in `set`. An empty set is a
+    ///   legitimate, trustworthy result (the database confirms nothing
+    ///   is referenced) and lets the collector reclaim orphaned
+    ///   `.tmp` files and any other unreferenced residue.
+    /// - `Err(...)`: the collector is **skipped**. We do not know
+    ///   which files are still referenced, so we cannot safely delete
+    ///   any of them. The orphan stays on disk and the next successful
+    ///   pass will reclaim it.
+    ///
+    /// Returns an [`AssetCollectionOutcome`] describing the pass. The
+    /// `assets_removed_count` field reports the actual number of
+    /// files reclaimed; the skip flags explain why the count is zero
+    /// when nothing was deleted. The diagnostics are metadata-only: no
+    /// `asset_ref`, no absolute path, no error payload, no snippet of
+    /// clipboard content.
+    pub fn collect_unreferenced_assets(&self, context: &AppContext) -> AssetCollectionOutcome {
+        let mut outcome = AssetCollectionOutcome::default();
+
         if let Some(store) = self.asset_store.as_ref() {
-            let referenced = {
+            let image_result = {
                 let mut db = context.database().lock();
                 let repo = EntryRepository::new(db.connection_mut());
-                match repo.referenced_asset_refs() {
-                    Ok(refs) => refs,
-                    Err(error) => {
-                        // Without a trustworthy live set we must not delete
-                        // anything: a partial set would remove assets that
-                        // are still referenced.
-                        warn!(error = %error, "asset collection skipped: reference query failed");
-                        BTreeSet::new()
+                repo.referenced_asset_refs()
+            };
+            match image_result {
+                Ok(refs) => {
+                    outcome.image_reference_query_succeeded = true;
+                    match store.collect_unreferenced(&refs) {
+                        Ok(removed) => outcome.assets_removed_count += removed,
+                        Err(error) => {
+                            // Filesystem failure: keep the live-set
+                            // query as successful (the next pass can
+                            // retry) and log a metadata-only reason.
+                            warn!(
+                                reason = error.kind_str(),
+                                "image asset collection failed; orphans remain for the next pass"
+                            );
+                        }
                     }
                 }
-            };
-            match store.collect_unreferenced(&referenced) {
-                Ok(removed) => total += removed,
-                Err(error) => {
+                Err(_) => {
+                    outcome.image_reference_query_failed = true;
+                    outcome.image_collection_skipped = true;
+                    // The query was attempted and failed: log a stable
+                    // metadata-only marker so operators can correlate a
+                    // missing PNG with a SQLite failure without exposing
+                    // paths, hashes or payload bytes.
                     warn!(
-                        reason = error.kind_str(),
-                        "asset collection failed; orphans remain for the next pass"
+                        error_kind = "image_reference_query_failed",
+                        "image asset collection skipped: reference query failed; assets preserved on disk"
                     );
+                    // Deliberate no-op: do NOT call `collect_unreferenced`
+                    // without a trustworthy live set.
                 }
             }
         }
 
         if let Some(rich_store) = self.rich_asset_store.as_ref() {
-            let referenced = {
+            let rich_result = {
                 let mut db = context.database().lock();
                 let repo = EntryRepository::new(db.connection_mut());
-                match repo.referenced_rich_asset_refs() {
-                    Ok(refs) => refs,
-                    Err(error) => {
-                        warn!(
-                            error = %error,
-                            "rich asset collection skipped: reference query failed"
-                        );
-                        BTreeSet::new()
+                repo.referenced_rich_asset_refs()
+            };
+            match rich_result {
+                Ok(refs) => {
+                    outcome.rich_reference_query_succeeded = true;
+                    match rich_store.collect_unreferenced(&refs) {
+                        Ok(removed) => outcome.assets_removed_count += removed,
+                        Err(error) => {
+                            warn!(
+                                reason = error.kind_str(),
+                                "rich asset collection failed; orphans remain for the next pass"
+                            );
+                        }
                     }
                 }
-            };
-            match rich_store.collect_unreferenced(&referenced) {
-                Ok(removed) => total += removed,
-                Err(error) => {
+                Err(_) => {
+                    outcome.rich_reference_query_failed = true;
+                    outcome.rich_collection_skipped = true;
                     warn!(
-                        reason = error.kind_str(),
-                        "rich asset collection failed; orphans remain for the next pass"
+                        error_kind = "rich_reference_query_failed",
+                        "rich asset collection skipped: reference query failed; assets preserved on disk"
                     );
                 }
             }
         }
 
-        total
+        outcome
     }
 
     /// Toggle (or set) the favorite flag for the supplied entry. The
@@ -743,9 +836,12 @@ mod tests {
         let mut db = db;
         db.run_migrations(&clipvault_db::builtin_migrations())
             .expect("migrate");
+        let adapters =
+            crate::test_support::build_isolated_adapters(dir.path(), &dir.path().join("data"));
         let bootstrap = AppBootstrap::new()
             .with_clock(Arc::new(StaticClock::new(time::OffsetDateTime::UNIX_EPOCH)))
-            .with_clipboard(Arc::new(crate::clipboard::FakeClipboard::new()));
+            .with_clipboard(Arc::new(crate::clipboard::FakeClipboard::new()))
+            .with_platform_adapters(adapters);
         bootstrap
             .bootstrap_with_database(db, dir.path().join("clipvault.db"))
             .expect("bootstrap")
@@ -757,11 +853,14 @@ mod tests {
         let mut db = db;
         db.run_migrations(&clipvault_db::builtin_migrations())
             .expect("migrate");
+        let adapters =
+            crate::test_support::build_isolated_adapters(dir.path(), &dir.path().join("data"));
         let bootstrap = AppBootstrap::new()
             .with_clock(Arc::new(StaticClock::new(
                 datetime!(2026-01-02 03:04:05 UTC),
             )))
-            .with_clipboard(Arc::new(crate::clipboard::FakeClipboard::new()));
+            .with_clipboard(Arc::new(crate::clipboard::FakeClipboard::new()))
+            .with_platform_adapters(adapters);
         let context = bootstrap
             .bootstrap_with_database(db, dir.path().join("clipvault.db"))
             .expect("bootstrap");
