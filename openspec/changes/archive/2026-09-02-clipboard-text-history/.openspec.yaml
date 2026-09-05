@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-02
+goal: Implementar la captura local de texto, persistencia SQLite y prevención de
+  duplicados definidos por el spec clipboard-text-history

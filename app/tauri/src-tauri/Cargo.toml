@@ -1,0 +1,66 @@
+[package]
+name = "clipvault-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Tauri 2 desktop shell for ClipVault (thin adapter over clipvault-core)"
+
+[[bin]]
+name = "clipvault-app"
+path = "src/main.rs"
+
+[lib]
+name = "clipvault_app"
+path = "src/lib.rs"
+
+[features]
+default = ["custom-protocol", "clipboard-arboard", "hotkey-global"]
+custom-protocol = ["tauri/custom-protocol"]
+clipboard-arboard = []
+hotkey-global = []
+linux-x11 = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+clipvault-core = { path = "../../../crates/clipvault-core" }
+clipvault-db = { path = "../../../crates/clipvault-db" }
+clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
+    "clipboard-arboard",
+    "hotkey-global",
+] }
+
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot = { workspace = true }
+time = { workspace = true }
+arboard = { workspace = true }
+global-hotkey = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+clipvault-core = { path = "../../../crates/clipvault-core", features = [
+    "macos-native",
+] }
+clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
+    "clipboard-arboard",
+    "hotkey-global",
+    "macos-native",
+] }
+objc2-foundation = { workspace = true }
+
+[target.'cfg(all(target_os = "linux", not(target_os = "macos")))'.dependencies]
+clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
+    "clipboard-arboard",
+    "hotkey-global",
+    "linux-x11",
+] }
+
+[dev-dependencies]
+tempfile = "3"

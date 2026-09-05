@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-02
+goal: Entregar la base desktop local de ClipVault conforme al spec
+  desktop-foundation, sin capturar clipboard ni exponer historial.

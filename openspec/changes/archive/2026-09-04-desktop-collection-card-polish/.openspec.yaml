@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-04
+goal: Mejorar la interacción del panel de colecciones, los metadatos visibles de las cards y el acceso rápido a la búsqueda sin afectar la persistencia ni la carga de imágenes.

@@ -1,0 +1,39 @@
+# Build artifacts
+/target
+**/target
+**/*.rs.bk
+# Tauri generated files
+**/gen/schemas
+app/tauri/src-tauri/gen
+
+# Frontend
+**/node_modules
+**/dist
+**/.svelte-kit
+**/.vite
+
+# IDE
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Local runtime data
+.clipvault
+
+# Local agent/tooling state
+/.codex/
+/.opencode/node_modules/
+/.opencode/package.json
+/.opencode/package-lock.json
+
+# Local databases and runtime logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example

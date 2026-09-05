@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-04
+goal: Corregir el drop de cards a colecciones y mejorar el feedback visual, el pin, el icono de aplicación y el espacio inferior del desktop sin regresiones.

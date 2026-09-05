@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-09-02
+goal: Entregar la ventana rápida de ClipVault (quick-paste) con hotkey
+  global por plataforma, listener único en el frontend principal, búsqueda
+  local, pegado al aplicativo activo y ocultamiento previo al paste para
+  preservar el foco del target.

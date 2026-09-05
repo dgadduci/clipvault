@@ -1,0 +1,16 @@
+//! Cross-platform clock abstraction so tests can freeze time deterministically.
+
+use time::OffsetDateTime;
+
+pub trait Clock: Send + Sync {
+    fn now(&self) -> OffsetDateTime;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> OffsetDateTime {
+        OffsetDateTime::now_utc()
+    }
+}

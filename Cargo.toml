@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/clipvault-core",
+    "crates/clipvault-db",
+    "crates/clipvault-platform",
+    "crates/clipvault-search",
+    "app/tauri/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dirs = "5.0"
+time = { version = "0.3", features = ["macros", "formatting", "serde", "serde-well-known"] }
+rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
+parking_lot = "0.12"
+arboard = "3"
+# Canonical PNG encode/decode for the `clipboard-rich-content` asset
+# store. `png` is the same small, mature, pure-Rust codec that already
+# ships in the dependency graph transitively (through `image`, which
+# `arboard`'s image-data feature pulls in, and through `tauri`'s icon
+# handling), so surfacing it as a direct dependency of the core adds no
+# new third-party code to the build. See `design.md` §10.
+png = "0.17"
+# SHA-256 for the deterministic asset name / dedupe key. Already
+# present in the graph via `tauri`; RustCrypto's `sha2` is the
+# reference implementation and has no transitive surface beyond
+# `digest`.
+sha2 = "0.10"
+global-hotkey = "0.6"
+x11rb = "0.13"
+objc2 = "0.6"
+# `NSBitmapImageRep`, `NSImage` and `NSGraphicsContext` are required by
+# the macOS application picker to downscale the bundle icon to
+# `<= MAX_ICON_DIM` (256) before writing it as PNG. `NSGraphics` and
+# `NSImageRep` are pulled in transitively to expose `NSSize`,
+# `NSCompositingOperation` and the colour-space name constants the
+# bitmap allocator requires. `objc2-core-graphics` features cover the
+# `CGContext`/`CGImage` calls used to redraw the scaled bitmap.
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSApplication", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSGraphicsContext", "NSGraphics"] }
+objc2-core-graphics = { version = "0.3", features = ["CGContext", "CGImage"] }
+objc2-foundation = { version = "0.3", features = ["NSString"] }
+dispatch2 = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true

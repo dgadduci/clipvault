@@ -1,0 +1,50 @@
+[package]
+name = "clipvault-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Platform adapters and trait boundaries for ClipVault"
+
+[features]
+default = []
+# Real clipboard backed by `arboard` (cross-platform).
+clipboard-arboard = ["dep:arboard"]
+# Real hotkey manager backed by `global-hotkey` (cross-platform).
+hotkey-global = ["dep:global-hotkey"]
+# macOS native APIs (NSWorkspace, CGEvent) via `objc2`.
+macos-native = [
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-core-graphics",
+    "dep:objc2-foundation",
+    "dep:dispatch2",
+    "dep:block2",
+]
+# Linux X11 active app + synthetic paste via `x11rb`.
+linux-x11 = ["dep:x11rb"]
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
+parking_lot = { workspace = true }
+
+arboard = { workspace = true, optional = true }
+global-hotkey = { workspace = true, optional = true }
+x11rb = { workspace = true, optional = true, features = ["allow-unsafe-code", "xtest"] }
+objc2 = { workspace = true, optional = true }
+objc2-app-kit = { workspace = true, optional = true }
+objc2-core-graphics = { workspace = true, optional = true }
+objc2-foundation = { workspace = true, optional = true }
+# Already pulled in transitively by `objc2-core-foundation`; surfaced
+# here so the macOS main-queue refresher can build its dispatch timer
+# without forcing every platform build to compile it.
+dispatch2 = { version = "0.3", optional = true, features = ["std", "alloc", "block2", "objc2"] }
+block2 = { version = "0.6", optional = true }
+
+[dev-dependencies]
+tempfile = "3.10"
+serde_json = { workspace = true }

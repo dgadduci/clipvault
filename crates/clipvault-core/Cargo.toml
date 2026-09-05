@@ -1,0 +1,48 @@
+[package]
+name = "clipvault-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Business-logic core for ClipVault, free of GUI and Tauri dependencies"
+
+[features]
+# Forward the `macos-native` feature to `clipvault-platform/macos-native`
+# so the `cfg(feature = "macos-native")` check inside
+# `ignored_apps_service::pick_and_add_with_default_picker` actually
+# resolves the `MacOsApplicationPicker` symbol from the platform crate.
+#
+# The core itself never links objc2 directly; it relies on the platform
+# crate to surface the adapter when this feature is enabled. Declaring
+# the feature here as an empty list (the previous wiring) silently kept
+# the cfg false on every build, so `pick_and_add_with_default_picker`
+# always fell through to the `IgnoredAppError::BackendUnavailable`
+# branch with "macos-native feature not enabled" — the regression the
+# picker report surfaced on macOS.
+#
+# Downstream crates (the Tauri shell) must enable this feature on the
+# `clipvault-core` dependency on macOS builds so the forwarding actually
+# fires. The forwarding also keeps `cargo build -p clipvault-core
+# --features macos-native` compilable on macOS, which is the build
+# the regression test in `ignored_apps_service.rs` exercises.
+macos-native = ["clipvault-platform/macos-native"]
+
+[dependencies]
+clipvault-db = { path = "../clipvault-db" }
+clipvault-platform = { path = "../clipvault-platform" }
+clipvault-search = { path = "../clipvault-search" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+time = { workspace = true }
+parking_lot = { workspace = true }
+png = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"
+rusqlite = { workspace = true }

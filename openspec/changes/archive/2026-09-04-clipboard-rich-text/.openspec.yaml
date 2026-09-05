@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-04
+goal: Capturar, mostrar y pegar texto enriquecido localmente, conservando sus representaciones HTML/RTF y ofreciendo siempre un pegado de texto plano.

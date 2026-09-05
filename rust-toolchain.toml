@@ -1,0 +1,8 @@
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
+
+[toolchain.target]
+# aarch64-apple-darwin is the dev machine; other targets are added in the
+# release pipeline.
