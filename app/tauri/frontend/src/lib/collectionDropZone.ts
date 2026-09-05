@@ -42,7 +42,7 @@
 //   - `dragover` and `drop` always `preventDefault` once a row
 //          resolves so the browser fires the matching `drop`. The
 //          helper falls back to the in-memory drag session the
-//          card opened on `dragstart` so a WebKit/Tauri drag that
+//          controller opened after pointer/mouse activation so a WebKit/Tauri drag that
 //          drops the DataTransfer still opts the row in.
 //   - `dragleave` only clears the highlight when the related
 //          target is outside the viewport; moving the pointer
@@ -315,7 +315,7 @@ export function createCollectionDropZoneHandlers(
     // representations are missing (the WebKit/Tauri path that
     // filters the DataTransfer entirely) the helper consults
     // the in-memory drag session the card opened in
-    // `dragstart`.
+    // pointer/mouse activation.
     const privatePayload =
       event.dataTransfer?.getData(CLIPVAULT_ENTRY_MIME) ?? null;
     const textPayload = event.dataTransfer?.getData("text/plain") ?? null;

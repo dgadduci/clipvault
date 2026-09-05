@@ -27,7 +27,8 @@ const TEXT_PLAIN = "text/plain";
 /**
  * Pure predicate: returns `true` when the event carries a
  * ClipVault payload (private MIME, `text/plain` fallback or the
- * in-memory drag session the card opens on `dragstart`).
+ * in-memory drag session the card controller opens after pointer/mouse
+ * activation).
  *
  * The function is intentionally tolerant of the WebKit/Tauri
  * quirk that strips `dataTransfer.types`: when the `types`

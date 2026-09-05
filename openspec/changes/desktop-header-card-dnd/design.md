@@ -15,7 +15,11 @@ eliminar el nombre accesible del documento o de la ventana Tauri.
 El drag-and-drop se implementa entre el frontend y usa únicamente un
 identificador numérico de entry. El payload de DataTransfer debe usar un MIME
 propio de ClipVault y nunca el contenido, snippet, hash, asset_ref, ruta o
-bytes de la captura.
+bytes de la captura. En WebKit/Tauri el camino principal es un controlador de
+puntero con una sesión en memoria; el controlador conserva un fallback de
+mousedown/mousemove/mouseup para WebViews que entregan el gesto de mouse
+pero no una secuencia completa de Pointer Events. La captura del puntero se
+libera siempre al terminar, cancelar o abandonar el gesto.
 
 Una card textual o de imagen puede iniciar un drag. Una colección de usuario
 es un drop target. Al arrastrar sobre ella se muestra feedback visual y al

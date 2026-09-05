@@ -1384,6 +1384,7 @@
     position: relative;
     user-select: none;
     -webkit-user-select: none;
+    touch-action: none;
   }
 
   .card-header {

@@ -364,12 +364,12 @@ test("pointer drag source ignores interactive card controls", () => {
   const source = stripComments(loadSource("src/lib/pointerDragAndDrop.ts"));
   assert.match(
     source,
-    /INTERACTIVE_SELECTOR/,
+    /INTERACTIVE_SELECTORS/,
     "the pointer bridge must inspect the original event target",
   );
   assert.match(
     source,
-    /target\.closest\(INTERACTIVE_SELECTOR\)/,
+    /target\.closest\(selector\)/,
     "interactive controls must not become drag sources",
   );
 });

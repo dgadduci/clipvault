@@ -35,14 +35,14 @@
 //   - `acceptsDragOver` opts a row into the `drop` event by
 //     accepting EITHER the private MIME, the versioned
 //     `text/plain` fallback OR an active in-memory drag session
-//     opened by the card on `dragstart`. The session fallback is the
+//     opened by the local pointer/mouse controller after activation. The session fallback is the
 //     safety net for the WebKit/Tauri quirk that leaves
 //     `DataTransfer.types` empty during `dragover` and `drop`; the
 //     session only exists for drags the card itself started, so a
 //     foreign drag from another app cannot impersonate a card.
 //   - `beginDragSession` / `endDragSession` own the in-memory
-//     session that bridges the WebKit/Tauri gap. The card calls
-//     `beginDragSession(entry.id)` in `dragstart` and the sidebar
+//     session that bridges the WebKit/Tauri gap. The pointer/mouse controller calls
+//     `beginDragSession(entry.id)` after activation and the sidebar
 //     consults / clears it during `dragover`, `drop` and the
 //     document-level `dragend`. A session that is left dangling
 //     after a cancel is cleared by the global `dragend` listener so
@@ -83,7 +83,8 @@ export const CLIPVAULT_ENTRY_MIME = "application/x.clipvault-entry-id";
 export const CLIPVAULT_ENTRY_TEXT_PREFIX = "clipvault-entry:v1:";
 
 /**
- * In-memory drag session the card opens on `dragstart` and the
+ * In-memory drag session the pointer/mouse controller opens after
+ * activation and the
  * sidebar consults on `dragover` / `drop` when `DataTransfer.types`
  * is empty or only exposes an unexpected MIME. The session only
  * stores an opaque entry id; clipboard content, snippets, hashes,
@@ -148,7 +149,7 @@ export function endDragSession(token?: number): void {
 
 /**
  * `true` when an in-memory drag session is currently active, i.e.
- * the card opened a session in `dragstart` and the sidebar did not
+ * the controller opened a session after activation and the sidebar did not
  * yet observe the matching `dragend` or `drop`. Used as the last
  * fallback in `acceptsDragOver` and as a defensive guard in the
  * drop handler.
@@ -295,7 +296,7 @@ export function parseDragTextPayload(
  * the private MIME first, falls back to the versioned text/plain
  * payload and finally — when both representations are unavailable —
  * consults the in-memory drag session opened by the card on
- * `dragstart`. The third branch only resolves when the session is
+ * pointer/mouse activation. The third branch only resolves when the session is
  * currently active so a foreign drag without an open session still
  * reduces to `null` and the sidebar treats it as a safe no-op.
  *
@@ -454,7 +455,7 @@ export function isDragPayload(types: readonly string[] | DOMStringList | null | 
  * `text/plain` fallback AND the in-memory drag session so a
  * WebKit/Tauri drag that drops the DataTransfer entirely still
  * opts the row in. The session fallback is safe because it is only
- * opened by the card on `dragstart`; a foreign drag from another
+ * opened by the local pointer/mouse controller; a foreign drag from another
  * app cannot open a session and therefore cannot impersonate a card.
  *
  * The helper never inspects the payload contents; it only checks
@@ -472,8 +473,8 @@ export function acceptsDragOver(event: {
       return true;
     }
   }
-  // The session fallback only fires when the card itself opened the
-  // session in `dragstart`. A foreign drag (file from Finder,
+  // The session fallback only fires when the local pointer/mouse
+  // controller opened the session. A foreign drag (file from Finder,
   // selection from another webview, …) cannot open the session and
   // therefore reduces to `false` so the sidebar stays inert.
   return hasActiveDragSession();

@@ -53,15 +53,14 @@
   `parseDragPayload(raw)` que sólo aceptan/leen un único campo
   `id` numérico entero. Cobertura:
   `tests/desktopHeaderCardDnd.test.ts`.
-- [x] 3.2 Hacer cards textuales e imagen draggable sin alterar su preview,
-  thumbnail o acciones. Causa raíz: el navegador opta una card en
-  HTML5 drag and drop sólo cuando el elemento expone
-  `draggable="true"`. Corrección: `HistoryCard.svelte` añade
-  `draggable="true"` al `<article>` y registra `onCardDragStart` /
-  `onCardDragEnd`. El guard `isInteractiveDragTarget` cancela el drag
-  cuando el usuario pulsa un botón, el menú o el editor de título.
-  El payload se serializa con `setData(CLIPVAULT_ENTRY_MIME, …)` y un
-  fallback `text/plain`.
+- [x] 3.2 Hacer cards textuales e imagen arrastrables sin alterar su
+  preview, thumbnail o acciones. Corrección: `HistoryCard.svelte` conserva
+  el identificador `data-entry-id` y el controlador singleton de
+  `pointerDragAndDrop.ts` inicia el gesto en la superficie no interactiva
+  de la card, con fallback mousedown/mousemove/mouseup para WebKit/Tauri.
+  La card permanece con `draggable="false"` para evitar el drag HTML5
+  nativo, selección de texto y previews inconsistentes; botones, menú y
+  editor de título quedan excluidos.
 - [x] 3.3 Hacer colecciones de usuario drop targets con feedback y cleanup.
   Causa raíz: las filas del sidebar deben escuchar `dragenter`,
   `dragover`, `dragleave` y `drop`. Corrección: `OrganizationSidebar.svelte`
@@ -156,19 +155,13 @@
   `combineMemberships rejects invalid entry or target ids without
   mutating`, `combineMemberships appends Historial only when
   missing from current`.
-- [x] 5.2 Tests frontend de dragstart, dragover, drop, cancel, invalidación y
-  cleanup. Cobertura: `HistoryCard renders the article with
-  draggable="true"`, `HistoryCard::onCardDragStart only sets the
-  ClipVault private MIME`, `HistoryCard::onCardDragStart cancels
-  when the user grabs an interactive child`,
-  `OrganizationSidebar wires dragenter/dragover/dragleave/drop on
-  user rows`, `OrganizationSidebar installs a global dragend
-  listener`, `OrganizationSidebar rejects Historial as a drop
-  target`, `OrganizationSidebar dispatches card-drop with the
-  entry id and the collection id`, `isDragPayload only matches
-  the ClipVault private MIME`, `acceptsDragOver returns true
-  only when the drag carries our payload`, `isDropTarget only
-  accepts user collections`.
+- [x] 5.2 Tests frontend del gesto pointer/mouse, activación, drop,
+  cancelación, invalidación y cleanup. Cobertura: `HistoryCard` conserva
+  los identificadores de la card, el controlador singleton registra los
+  eventos una sola vez, ignora controles interactivos, crea el ghost,
+  resuelve filas scrolleables, despacha un único card-drop, preserva
+  Historial y cubre pointercancel, blur, Escape, pointer capture y el
+  fallback mousedown/mousemove/mouseup.
 - [x] 5.3 Tests de alternativa de teclado y estados accesibles de drop target.
   Cobertura: `OrganizationSidebar wires dragenter/dragover/dragleave/drop
   on user rows`, `OrganizationSidebar rejects Historial as a drop
@@ -234,3 +227,68 @@
   con muchas colecciones) requieren un entorno gráfico fuera
   del alcance del runner automatizado.
 - [x] 6.9 Revisar diff y dejar el cambio sin sincronizar ni archivar.
+
+## 7. Auditoría de regresión reportada
+
+- [x] 7.1 Auditar el bundle frontend (`dist/`) y `tauri.conf.json` para
+  confirmar que Tauri sirve el bundle reconstruido desde
+  `app/tauri/frontend/`. Resultado: el bundle expone los strings
+  `clipvault-pointer-drag-over`, `clipvault-pointer-drop` y
+  `cv-pointer-drag-ghost`; `tauri.conf.json` mantiene
+  `frontendDist: "../frontend/dist"`. Sin reemplazo.
+- [x] 7.2 Confirmar que `installPointerDragController(document)` se invoca
+  desde `onMount` en `App.svelte` y que su cleanup queda
+  registrado en `onDestroy`. Sin regresión: la función es
+  idempotente y no queda detrás de ninguna condición.
+- [x] 7.3 Verificar que `HistoryCard.svelte` conserva `data-testid="history-card"`
+  y `data-entry-id={entry.id}` sin overlay que intercepte
+  `pointerdown`. Sin regresión.
+- [x] 7.4 Confirmar que `INTERACTIVE_SELECTOR` cubre sólo elementos
+  interactivos y no bloquea la card completa. Sin regresión.
+- [x] 7.5 Confirmar que los listeners `pointerdown`, `pointermove`,
+  `pointerup`, `pointercancel` se registran en `document` con
+  captura y que `blur` se registra en `doc.defaultView`. Sin
+  regresión.
+- [x] 7.6 Confirmar que `resolveDropRowFromTarget` /
+  `resolveDropRowFromPoint` resuelven correctamente la fila bajo
+  el cursor incluso cuando la lista está scrolleada. Sin regresión.
+- [x] 7.7 Confirmar que el ghost declara `pointer-events: none` para no
+  interceptar `elementFromPoint`. Sin regresión; cobertura
+  añadida en `pointerDragAndDrop.test.ts`.
+- [x] 7.8 Confirmar que el drop llega a `App.svelte::handleCardDrop` y
+  ejecuta `entryCollectionsSetCommand`. Sin regresión.
+- [x] 7.9 Auditar los cambios recientes (`desktop-toolbar-layout`,
+  `clipboard-legacy-image-assets`, layout) para detectar
+  interferencias con el flujo pointer-based. Sin regresión: el
+  listener `pointerdown` de la toolbar sólo se registra con
+  `menuOpen === true`.
+- [x] 7.10 Añadir pruebas frontend que cubren: pointerdown sobre una
+  card, activación por distancia mínima, creación del ghost,
+  ausencia de selección de texto, pointermove sobre una colección,
+  cambio visual de la colección objetivo, pointerup/drop sobre
+  colección scrolleable, llamada única a `entry_collections_set`,
+  preservación de Historial y membresías existentes, rechazo de
+  drops externos, cancelación con `pointercancel`, `blur` y Escape,
+  cleanup y no duplicación de listeners, card de texto e imagen,
+  y funcionamiento tras refrescar / buscar / cambiar de
+  colección. Cobertura añadida en
+  `pointerDragAndDrop.test.ts`; el resto ya estaba cubierto por
+  `desktopDndCardVisualCorrections.test.ts` y
+  `desktopDndCardVisualCorrections.integration.test.ts`.
+- [x] 7.11 Documentar la auditoría y las pruebas añadidas en
+  `regression-audit.md` dentro de este cambio.
+
+## 8. Compatibilidad de eventos en WebKit/Tauri
+
+- [x] 8.1 Mantener el controlador pointer-based existente y agregar un
+  fallback de mouse para WebViews que entregan mousedown/mousemove/
+  mouseup sin completar Pointer Events.
+- [x] 8.2 Capturar y liberar el puntero de la card para conservar los eventos
+  durante el movimiento y liberar también los gestos que no superan el
+  umbral de activación.
+- [x] 8.3 Cancelar el drag con Escape y limpiar sesión, ghost, selección y
+  pointer capture sin duplicar listeners.
+- [x] 8.4 Agregar regresiones frontend para mouse fallback, pointer capture,
+  cancelación, cards de texto e imagen y drop único.
+- [x] 8.5 Ejecutar check, tests, build y revisar el diff. La prueba manual
+  en macOS/Tauri queda pendiente de ejecución interactiva.
