@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-05
+goal: Permitir filtrar las cards por la aplicación fuente dentro del alcance activo, combinando el filtro con la búsqueda y mostrando iconos y nombres locales en un combobox accesible.
