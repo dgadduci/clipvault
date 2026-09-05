@@ -39,8 +39,23 @@
    * the cosmetic glyph alone.
    */
   export let searchShortcutAccessible: string = "Buscar (Control F)";
-  export let trashLabel: string = "Limpiar historial no favorito";
+  /**
+   * Visible label of the global clear-history trash icon. The
+   * accessible name and the `title` tooltip both reuse the same
+   * string so the button never surfaces two different wordings for
+   * the same destructive shortcut.
+   */
+  export let trashLabel: string = "Eliminar capturas no organizadas";
   export let trashConfirming: boolean = false;
+  /**
+   * Visibility flag for the trash button. The parent owns the
+   * computed value so the toolbar stays presentational: when
+   * `false`, the button is absent from the DOM, the keyboard tab
+   * order and the accessibility tree, not just `display: none` or
+   * `disabled`. The trash therefore never reaches a user-collection
+   * view where the destructive branch would be misleading.
+   */
+  export let showClearHistory: boolean = true;
   export let onSearchInput: (value: string) => void = () => {};
   export let onOpenDevelopment: (event: MouseEvent) => void = () => {};
   export let onOpenPrivacy: (event: MouseEvent) => void = () => {};
@@ -265,35 +280,37 @@
           </div>
         {/if}
       </div>
-      <button
-        type="button"
-        class="trash"
-        aria-label={trashLabel}
-        title={trashLabel}
-        aria-busy={trashConfirming}
-        data-testid="trash-clear-history"
-        data-cv-danger="clear-history"
-        on:click={onRequestClearHistory}
-      >
-        <svg
-          aria-hidden="true"
-          focusable="false"
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.6"
-          stroke-linecap="round"
-          stroke-linejoin="round"
+      {#if showClearHistory}
+        <button
+          type="button"
+          class="trash"
+          aria-label={trashLabel}
+          title={trashLabel}
+          aria-busy={trashConfirming}
+          data-testid="trash-clear-history"
+          data-cv-danger="clear-history"
+          on:click={onRequestClearHistory}
         >
-          <path d="M4 7h16" />
-          <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-          <path d="M6 7l.8 12.2a2 2 0 0 0 2 1.8h6.4a2 2 0 0 0 2-1.8L18 7" />
-          <path d="M10 11v6" />
-          <path d="M14 11v6" />
-        </svg>
-      </button>
+          <svg
+            aria-hidden="true"
+            focusable="false"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M4 7h16" />
+            <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+            <path d="M6 7l.8 12.2a2 2 0 0 0 2 1.8h6.4a2 2 0 0 0 2-1.8L18 7" />
+            <path d="M10 11v6" />
+            <path d="M14 11v6" />
+          </svg>
+        </button>
+      {/if}
     </div>
   </div>
 </div>

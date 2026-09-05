@@ -143,8 +143,19 @@
   $: activeCollection = organization?.collections.find(
     (c) => c.id === selectedCollectionId,
   ) ?? null;
+  /**
+   * The `Historial` view is the absence of a selected collection id
+   * (the rail renders the recent-entries feed) OR the active
+   * collection is a system-kind row. The previous helper only
+   * matched the second branch and missed the default state the rest
+   * of the desktop already relies on; this correction keeps every
+   * consumer of `activeCollectionIsHistory` consistent with the
+   * `selectedCollectionId === null` contract the rail already
+   * honours, without hardcoding any numeric id.
+   */
   $: activeCollectionIsHistory =
-    activeCollection !== null && activeCollection.kind === "system";
+    selectedCollectionId === null ||
+    (activeCollection !== null && activeCollection.kind === "system");
   $: isFiltering = searchQuery.trim().length > 0;
   $: if (diagnostics) {
     shortcutPlatform = searchShortcutPlatform(diagnostics.platform_os);
@@ -1090,6 +1101,7 @@
           searching={searching}
           searchShortcut={searchShortcutLabelText}
           searchShortcutAccessible={searchShortcutAccessibleText}
+          showClearHistory={activeCollectionIsHistory}
           onSearchInput={handleSearchInput}
           onOpenDevelopment={onOpenDevelopment}
           onOpenPrivacy={onOpenPrivacy}
@@ -1178,12 +1190,12 @@
           </button>
         </div>
       {:else}
-        <h2 id="confirm-title">Limpiar historial sin colección</h2>
+        <h2 id="confirm-title">Eliminar capturas no organizadas</h2>
         <p data-testid="confirm-clear-summary">
-          {confirmation.count} captura{confirmation.count === 1 ? "" : "s"} no favorita{confirmation.count === 1 ? "" : "s"} y sin colección secundaria se eliminarán.
+          {confirmation.count} captura{confirmation.count === 1 ? "" : "s"} no favorita{confirmation.count === 1 ? "" : "s"} y sin colecciones de usuario se eliminarán.
         </p>
         <p class="muted">
-          Los favoritos, las entradas agrupadas en una colección secundaria y las que están en varias colecciones se conservan.
+          Las capturas favoritas y las asociadas a una o más colecciones de usuario se conservan.
         </p>
         <div class="row">
           <button
@@ -1193,7 +1205,7 @@
             on:click={() => runClearHistory()}
             disabled={!unorganizedClearableCountLoaded}
           >
-            Limpiar historial sin colección
+            Eliminar capturas no organizadas
           </button>
           <button
             type="button"
