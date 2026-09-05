@@ -291,7 +291,13 @@
 - [x] 8.4 Agregar regresiones frontend para mouse fallback, pointer capture,
   cancelación, cards de texto e imagen y drop único.
 - [x] 8.5 Ejecutar check, tests, build y revisar el diff. La prueba manual
-  en macOS/Tauri queda pendiente de ejecución interactiva.
+  en macOS/Tauri queda registrada en 8.7.
 - [x] 8.6 Permitir iniciar el drag desde el título visible sin bloquear su
   doble clic/teclado para editar, manteniendo excluidos los controles reales
   del editor. Añadida regresión para el título y actualizado el harness DOM.
+- [ ] 8.7 Verificar manualmente en macOS/Tauri que el drag iniciado desde el
+  cuerpo y desde el título muestra el ghost, no selecciona texto y agrega la
+  card a una colección scrolleable. El drag general ya fue confirmado por el
+  usuario; queda comprobar específicamente el inicio desde el título después
+  de reconstruir el binario. La verificación de
+  `platform-permission-guidance` permanece fuera de este cambio.

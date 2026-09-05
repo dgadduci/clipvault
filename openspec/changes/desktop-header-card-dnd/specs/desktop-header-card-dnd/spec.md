@@ -30,10 +30,37 @@ ClipVault SHALL allow a card to be dragged onto a user collection to add that
 collection membership using the existing organization command and SHALL
 transport only an opaque entry identifier.
 
+The drag source SHALL use the local pointer controller with a mouse fallback
+for WebKit/Tauri sessions where HTML5 DataTransfer events are incomplete. It
+SHALL activate only after the pointer crosses the configured movement
+threshold, prevent accidental text selection while active, and clean up the
+ghost, session, pointer capture and visual feedback on every completion or
+cancellation path.
+
 #### Scenario: Drag a card to a user collection
 
 - **WHEN** the user drags a valid text or image card onto a user collection
 - **THEN** the target collection is added to the entry and the card remains in Historial and all previously assigned collections
+
+#### Scenario: Drag begins on the visible card title
+
+- **WHEN** the user begins the drag on the visible title of a text or image card and moves beyond the activation threshold
+- **THEN** the same pointer/mouse drag flow starts and the title is accepted as a valid card surface
+
+#### Scenario: Title editing remains available
+
+- **WHEN** the user clicks, double-clicks, presses Enter or presses F2 on the title without crossing the drag threshold
+- **THEN** the existing title focus and editing behavior remains available, while title editor inputs and confirmation/cancellation buttons never start a drag
+
+#### Scenario: WebKit/Tauri mouse fallback completes the drop
+
+- **WHEN** a WebKit/Tauri session emits `mousedown`, `mousemove` and `mouseup` without a complete Pointer Events sequence
+- **THEN** ClipVault creates the same metadata-only drag session and applies the drop exactly once
+
+#### Scenario: Active drag prevents text selection
+
+- **WHEN** a card is moved beyond the activation threshold while its preview or neighboring cards contain text
+- **THEN** the drag ghost is visible, text selection remains disabled, and the pointer can reach a scrolled collection target
 
 #### Scenario: Drop is idempotent
 

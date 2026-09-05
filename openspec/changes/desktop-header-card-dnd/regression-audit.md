@@ -231,12 +231,14 @@ desregistrado y no puede interferir con el flujo pointer-based.
   listeners con `useCapture: true` se ejecutan en la fase target/bubble del
   polyfill, lo cual es suficiente para verificar la lógica del controlador
   pero no cubre la semántica exacta de captura en navegadores reales.
-La prueba manual del gesto sobre el binario Tauri en macOS sigue pendiente.
+La prueba manual específica del gesto iniciado desde el título sobre el
+binario Tauri en macOS sigue pendiente.
 Los tests frontend verifican los dos canales de entrada, pero no sustituyen
 la interacción con el mouse en la ventana real.
 
-La superficie del título visible también está cubierta como origen válido del
-drag. Su doble clic y sus controles de edición permanecen fuera del gesto:
+La superficie del título visible también está cubierta automáticamente como
+origen válido del drag. Su doble clic y sus controles de edición permanecen
+fuera del gesto:
 el controlador sólo activa el drag después de superar el umbral y no bloquea
 el `mousedown` inicial del título.
 
