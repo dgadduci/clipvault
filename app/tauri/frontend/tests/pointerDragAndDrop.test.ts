@@ -999,3 +999,361 @@ test("title surface starts a drag without disabling its click and double-click p
     restore();
   }
 });
+
+test("pointerdown on title does not capture the pointer so dblclick still reaches the title", { concurrency: false }, () => {
+  // The regression that broke title editing: capturing the pointer
+  // during `pointerdown` retargets the subsequent `click` /
+  // `dblclick` events to the capturing element, so the title's
+  // `on:dblclick` handler never fires. The fix is to defer the
+  // capture until the activation threshold is crossed.
+  const { document, restore } = installDomPolyfill();
+  try {
+    __resetDragSessionForTests();
+    __resetPointerDragForTests();
+    const card = document.createElement("article");
+    card.setAttribute("data-testid", "history-card");
+    card.setAttribute("data-entry-id", "61");
+    const title = document.createElement("div");
+    title.setAttribute("data-testid", "history-card-title");
+    title.setAttribute("role", "button");
+    card.appendChild(title);
+    document.body.appendChild(card);
+
+    let captured = 0;
+    let released = 0;
+    (
+      card as unknown as {
+        setPointerCapture(pointerId: number): void;
+        releasePointerCapture(pointerId: number): void;
+      }
+    ).setPointerCapture = () => {
+      captured += 1;
+    };
+    (
+      card as unknown as {
+        setPointerCapture(pointerId: number): void;
+        releasePointerCapture(pointerId: number): void;
+      }
+    ).releasePointerCapture = () => {
+      released += 1;
+    };
+
+    const cleanup = installPointerDragController(
+      document as unknown as Document,
+    );
+
+    // pointerdown on the title MUST NOT call setPointerCapture.
+    // The controller keeps ownership through document-level
+    // listeners instead of the captured element so the click /
+    // dblclick sequence still reaches the title.
+    title.dispatchEvent(
+      new PointerEventImpl("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 33,
+        clientX: 5,
+        clientY: 5,
+      }),
+    );
+    assert.equal(captured, 0);
+    // A subsequent pointerup without movement must not capture
+    // either, and must release nothing (the controller never
+    // owned the capture to begin with).
+    title.dispatchEvent(
+      new PointerEventImpl("pointerup", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 33,
+        clientX: 5,
+        clientY: 5,
+      }),
+    );
+    assert.equal(captured, 0);
+    assert.equal(released, 0);
+    assert.equal(isPointerDragActive(), false);
+    cleanup();
+  } finally {
+    restore();
+  }
+});
+
+test("pointer drag from title captures the pointer only after the activation threshold is crossed", { concurrency: false }, () => {
+  // The companion regression: the title MUST still be a valid drag
+  // source once the gesture crosses the activation distance. The
+  // capture is installed lazily inside `updatePendingDrag`, not on
+  // `pointerdown`, so the click / dblclick path stays open.
+  const { document, restore } = installDomPolyfill();
+  try {
+    __resetDragSessionForTests();
+    __resetPointerDragForTests();
+    const card = document.createElement("article");
+    card.setAttribute("data-testid", "history-card");
+    card.setAttribute("data-entry-id", "62");
+    const title = document.createElement("div");
+    title.setAttribute("data-testid", "history-card-title");
+    title.setAttribute("role", "button");
+    card.appendChild(title);
+    document.body.appendChild(card);
+
+    let captured = 0;
+    let released = 0;
+    (
+      card as unknown as {
+        setPointerCapture(pointerId: number): void;
+        releasePointerCapture(pointerId: number): void;
+      }
+    ).setPointerCapture = () => {
+      captured += 1;
+    };
+    (
+      card as unknown as {
+        setPointerCapture(pointerId: number): void;
+        releasePointerCapture(pointerId: number): void;
+      }
+    ).releasePointerCapture = () => {
+      released += 1;
+    };
+
+    let droppedEntryId: number | null = null;
+    document.addEventListener(POINTER_DROP_EVENT, (event) => {
+      droppedEntryId = (event as CustomEvent<{ entryId: number }>).detail.entryId;
+    });
+    const dropTarget = document.createElement("div");
+    document.body.appendChild(dropTarget);
+    document.hitTestElement = dropTarget;
+    const cleanup = installPointerDragController(
+      document as unknown as Document,
+    );
+
+    title.dispatchEvent(
+      new PointerEventImpl("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 34,
+        clientX: 5,
+        clientY: 5,
+      }),
+    );
+    assert.equal(captured, 0, "pointerdown on title must not install capture");
+
+    // Small move below threshold: still no capture, still no drag.
+    title.dispatchEvent(
+      new PointerEventImpl("pointermove", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 34,
+        clientX: 7,
+        clientY: 7,
+      }),
+    );
+    assert.equal(captured, 0);
+    assert.equal(isPointerDragActive(), false);
+
+    // Cross the activation threshold: the controller installs
+    // the capture and activates the drag in the same update.
+    title.dispatchEvent(
+      new PointerEventImpl("pointermove", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 34,
+        clientX: 60,
+        clientY: 60,
+      }),
+    );
+    assert.equal(captured, 1, "the controller must capture the pointer when the threshold is crossed");
+    assert.equal(isPointerDragActive(), true);
+
+    title.dispatchEvent(
+      new PointerEventImpl("pointerup", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 34,
+        clientX: 60,
+        clientY: 60,
+      }),
+    );
+
+    assert.equal(droppedEntryId, 62);
+    assert.equal(released, 1, "the controller must release the capture after the drop");
+    assert.equal(isPointerDragActive(), false);
+    assert.equal(hasActiveDragSession(), false);
+    cleanup();
+  } finally {
+    restore();
+  }
+});
+
+test("mouse fallback drag from title does not install capture but still drops on a collection", { concurrency: false }, () => {
+  // The WebKit/Tauri compatibility path must mirror the pointer
+  // behaviour: the title click / dblclick sequence is not
+  // captured up front, and the drag activates only after the
+  // threshold is crossed.
+  const { document, restore } = installDomPolyfill();
+  try {
+    __resetDragSessionForTests();
+    __resetPointerDragForTests();
+    const card = document.createElement("article");
+    card.setAttribute("data-testid", "history-card");
+    card.setAttribute("data-entry-id", "63");
+    const title = document.createElement("div");
+    title.setAttribute("data-testid", "history-card-title");
+    title.setAttribute("role", "button");
+    card.appendChild(title);
+    document.body.appendChild(card);
+
+    let captured = 0;
+    (
+      card as unknown as {
+        setPointerCapture(pointerId: number): void;
+      }
+    ).setPointerCapture = () => {
+      captured += 1;
+    };
+
+    let droppedEntryId: number | null = null;
+    document.addEventListener(POINTER_DROP_EVENT, (event) => {
+      droppedEntryId = (event as CustomEvent<{ entryId: number }>).detail.entryId;
+    });
+    const dropTarget = document.createElement("div");
+    document.body.appendChild(dropTarget);
+    document.hitTestElement = dropTarget;
+    const cleanup = installPointerDragController(
+      document as unknown as Document,
+    );
+
+    title.dispatchEvent(
+      new MouseEventImpl("mousedown", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        clientX: 5,
+        clientY: 5,
+      }),
+    );
+    assert.equal(captured, 0, "mousedown on title must not install capture");
+
+    title.dispatchEvent(
+      new MouseEventImpl("mousemove", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        clientX: 60,
+        clientY: 60,
+      }),
+    );
+    assert.equal(isPointerDragActive(), true);
+    // The mouse fallback does not call setPointerCapture because
+    // there is no pointer id to bind the capture to. The pointer
+    // capture path is reserved for pointerdown / pointermove.
+    assert.equal(captured, 0);
+
+    title.dispatchEvent(
+      new MouseEventImpl("mouseup", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        clientX: 60,
+        clientY: 60,
+      }),
+    );
+    assert.equal(droppedEntryId, 63);
+    assert.equal(isPointerDragActive(), false);
+    cleanup();
+  } finally {
+    restore();
+  }
+});
+
+test("title dblclick below the activation threshold never creates a drag session or ghost", { concurrency: false }, () => {
+  // The original regression guard: a click / dblclick that never
+  // crosses the threshold must NOT leave any drag session behind
+  // and must NOT paint the ghost, otherwise the user-visible
+  // gesture looks like a failed drag instead of a successful
+  // click. The pointer capture stays uninstalled so the title's
+  // native `dblclick` listener still receives the event.
+  const { document, restore } = installDomPolyfill();
+  try {
+    __resetDragSessionForTests();
+    __resetPointerDragForTests();
+    const card = document.createElement("article");
+    card.setAttribute("data-testid", "history-card");
+    card.setAttribute("data-entry-id", "64");
+    const title = document.createElement("div");
+    title.setAttribute("data-testid", "history-card-title");
+    title.setAttribute("role", "button");
+    card.appendChild(title);
+    document.body.appendChild(card);
+
+    let captured = 0;
+    (
+      card as unknown as {
+        setPointerCapture(pointerId: number): void;
+      }
+    ).setPointerCapture = () => {
+      captured += 1;
+    };
+
+    const cleanup = installPointerDragController(
+      document as unknown as Document,
+    );
+
+    // First click.
+    title.dispatchEvent(
+      new PointerEventImpl("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 35,
+        clientX: 5,
+        clientY: 5,
+      }),
+    );
+    title.dispatchEvent(
+      new PointerEventImpl("pointerup", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 35,
+        clientX: 5,
+        clientY: 5,
+      }),
+    );
+
+    // Second click — same coordinates, well below the threshold.
+    title.dispatchEvent(
+      new PointerEventImpl("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 36,
+        clientX: 5,
+        clientY: 5,
+      }),
+    );
+    title.dispatchEvent(
+      new PointerEventImpl("pointerup", {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 36,
+        clientX: 5,
+        clientY: 5,
+      }),
+    );
+
+    // The controller must not have captured the pointer or
+    // started a session, because the gesture never crossed the
+    // activation threshold. The native dblclick event the title
+    // installs in production is delivered by the real DOM; the
+    // polyfill does not synthesise it from sequential pointer
+    // events, but it MUST NOT have been silently claimed as a
+    // drag.
+    assert.equal(captured, 0);
+    assert.equal(isPointerDragActive(), false);
+    assert.equal(hasActiveDragSession(), false);
+    assert.equal(
+      document.body.querySelector(".cv-pointer-drag-ghost"),
+      null,
+      "a sub-threshold click must never produce a ghost element",
+    );
+    cleanup();
+  } finally {
+    restore();
+  }
+});

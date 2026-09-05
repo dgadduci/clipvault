@@ -52,6 +52,27 @@ interface PendingPointerDrag {
   sessionToken: number | null;
   ghost: HTMLElement | null;
   sourceElement: Element | null;
+  /**
+   * Whether `setPointerCapture` is meaningful for this gesture.
+   * The mouse fallback has no real pointer id so capturing would
+   * either fail or call `setPointerCapture(1)` on a synthetic id;
+   * in either case the capture adds no value because the
+   * document-level listeners already own every move / up event.
+   * Pointer-driven gestures set this to `true`.
+   */
+  captureAllowed: boolean;
+  /**
+   * Whether the pointer has already been captured on the source
+   * element. For non-title drag surfaces the capture is installed
+   * synchronously during `pointerdown` so the controller keeps
+   * ownership of the gesture even if the cursor leaves the card
+   * boundary. For the title surface the capture is deferred until
+   * the activation threshold is crossed so the native click and
+   * double-click sequence still reaches the title element; the
+   * flag guarantees the controller only releases pointer capture
+   * when it actually owns it.
+   */
+  captureInstalled: boolean;
 }
 
 let pendingDrag: PendingPointerDrag | null = null;
@@ -213,14 +234,19 @@ function finishPendingDrag(): void {
   if (!current) return;
   if (!current.active) {
     // A click that never crossed the activation threshold still may have
-    // installed pointer capture. Release it so the next click is not
-    // redirected to a stale card.
-    releasePointer(current.sourceElement, current.pointerId);
+    // installed pointer capture (for non-title sources). Title sources
+    // defer the capture until the drag activates, so the flag tracks
+    // whether we actually own the capture and need to release it.
+    if (current.captureInstalled) {
+      releasePointer(current.sourceElement, current.pointerId);
+    }
     return;
   }
   setSelectionBlocked(installedDocument, false);
   removeDragGhost(current.ghost);
-  releasePointer(current.sourceElement, current.pointerId);
+  if (current.captureInstalled) {
+    releasePointer(current.sourceElement, current.pointerId);
+  }
   endDragSession(current.sessionToken ?? undefined);
   if (installedDocument) {
     dispatchDragEnd(installedDocument, current.entryId);
@@ -231,6 +257,7 @@ function startPendingDrag(
   event: DragCoordinates,
   target: Element,
   pointerId: number,
+  captureAllowed: boolean,
 ): Element | null {
   const card = closestElement(target, CARD_SELECTOR);
   if (!card || isInteractiveTarget(target)) return null;
@@ -250,6 +277,8 @@ function startPendingDrag(
     sessionToken: null,
     ghost: null,
     sourceElement: card,
+    captureAllowed,
+    captureInstalled: false,
   };
   return card;
 }
@@ -258,7 +287,7 @@ function onPointerDown(event: PointerEvent): void {
   if (event.button !== 0 && event.pointerType !== "touch") return;
   const target = event.target;
   if (!(target instanceof Element)) return;
-  const card = startPendingDrag(event, target, event.pointerId);
+  const card = startPendingDrag(event, target, event.pointerId, true);
   if (!card) return;
   // Prevent the browser's text-selection gesture from painting text across
   // neighbouring cards while the pointer is waiting for the activation
@@ -266,7 +295,21 @@ function onPointerDown(event: PointerEvent): void {
   // Leave the title's native click/double-click path untouched until the
   // gesture actually crosses the activation threshold.
   if (!isTitleTarget(target)) event.preventDefault();
-  capturePointer(card, event.pointerId);
+  // Capture the pointer immediately on non-title surfaces so the
+  // controller keeps ownership of the gesture even if the cursor
+  // leaves the card boundary while waiting for the threshold. The
+  // title surface MUST NOT be captured here: `setPointerCapture`
+  // retargets the subsequent `click`/`dblclick` events to the
+  // capturing element, which would silently swallow the title
+  // editor's double-click path. Capture is installed later, in
+  // `updatePendingDrag`, only when the gesture actually crosses
+  // the activation threshold.
+  if (!isTitleTarget(target)) {
+    capturePointer(card, event.pointerId);
+    if (pendingDrag) {
+      pendingDrag.captureInstalled = true;
+    }
+  }
 }
 
 function updatePendingDrag(event: DragCoordinates): void {
@@ -283,6 +326,20 @@ function updatePendingDrag(event: DragCoordinates): void {
     }
     current.active = true;
     current.sessionToken = token;
+    // The drag just became a real drag. If the controller deferred
+    // pointer capture for this surface (e.g. the title surface to
+    // preserve the native click/dblclick path), install the capture
+    // now so subsequent move / up events keep delivering to the
+    // source element even when the cursor leaves the card boundary.
+    // The mouse fallback never installs capture: it has no real
+    // pointer id, the document-level listeners already own every
+    // move / up event and a stray `setPointerCapture(1)` would
+    // retarget click / dblclick on the title just like the bug the
+    // pointer path used to have.
+    if (current.captureAllowed && !current.captureInstalled) {
+      capturePointer(current.sourceElement, current.pointerId);
+      current.captureInstalled = true;
+    }
     if (installedDocument) {
       setSelectionBlocked(installedDocument, true);
       current.ghost = createDragGhost(installedDocument);
@@ -314,9 +371,17 @@ function onMouseDown(event: MouseEvent): void {
   if (pendingDrag || event.button !== 0) return;
   const target = event.target;
   if (!(target instanceof Element)) return;
-  const card = startPendingDrag(event, target, 1);
+  const card = startPendingDrag(event, target, 1, false);
   if (!card) return;
   if (!isTitleTarget(target)) event.preventDefault();
+  // The mouse fallback never installs pointer capture on
+  // `pointerdown` (there is no pointerId to capture), so the title
+  // surface keeps its native click/double-click path here too.
+  // Capture is irrelevant for the mouse fallback: the listeners
+  // already live on the document, so the up / move events always
+  // reach `onMouseMove` and `onMouseUp` regardless of cursor
+  // position. `captureInstalled` therefore stays `false` for mouse
+  // fallback drags; `finishPendingDrag` honours the flag.
 }
 
 function onMouseMove(event: MouseEvent): void {

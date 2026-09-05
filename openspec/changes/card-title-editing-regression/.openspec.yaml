@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-05
+goal: Restaurar la edición de títulos por doble click y desde el menú de cada card, resolviendo la competencia entre el gesto de edición y el drag-and-drop.

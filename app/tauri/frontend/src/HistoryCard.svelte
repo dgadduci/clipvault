@@ -1261,9 +1261,19 @@
           type="button"
           role="menuitem"
           class="menu-item"
+          data-testid="history-card-edit-title"
+          on:click={() => startEditTitle()}
+          disabled={titleBusy}
+        >
+          Editar título
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          class="menu-item"
           data-testid="history-card-restore-title"
           on:click={() => void restoreDefaultTitle()}
-          disabled={titleBusy}
+          disabled={titleBusy || (entry.title ?? "") === ""}
         >
           Restaurar título
         </button>
