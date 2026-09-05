@@ -235,9 +235,14 @@ La prueba manual del gesto sobre el binario Tauri en macOS sigue pendiente.
 Los tests frontend verifican los dos canales de entrada, pero no sustituyen
 la interacción con el mouse en la ventana real.
 
+La superficie del título visible también está cubierta como origen válido del
+drag. Su doble clic y sus controles de edición permanecen fuera del gesto:
+el controlador sólo activa el drag después de superar el umbral y no bloquea
+el `mousedown` inicial del título.
+
 ## Verificación
 
-- `cd app/tauri/frontend && npm test` → 505 tests, 0 fallos.
+- `cd app/tauri/frontend && npm test` → 506 tests, 0 fallos.
 - `cd app/tauri/frontend && npm run check` → 0 errores, sólo warnings
   cosméticos sobre selectores CSS no usados.
 - `cd app/tauri/frontend && npm run build` → bundle reconstruido sin

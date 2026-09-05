@@ -82,6 +82,38 @@ Antes de entregar:
 3. Confirmar que no se añadieron secretos ni archivos generados innecesarios.
 4. Informar qué se verificó, qué no fue necesario probar y qué quedó pendiente.
 
+## Baselines funcionales protegidos
+
+- Antes de modificar una funcionalidad que ya fue verificada manualmente,
+  revisar `git status --short`, `git diff --check` y el diff del cambio activo.
+  El código existente se considera trabajo del usuario y no debe ser
+  reemplazado por una reimplementación amplia sin justificarlo en OpenSpec.
+- El drag and drop de cards es un baseline protegido. Toda implementación
+  futura debe conservar el controlador singleton de
+  `app/tauri/frontend/src/lib/pointerDragAndDrop.ts`, el fallback
+  `mousedown`/`mousemove`/`mouseup` para WebKit/Tauri, pointer capture y su
+  liberación, ghost con `pointer-events: none`, bloqueo de selección de texto,
+  `touch-action: none`, cancelación por Escape/blur/pointercancel, exclusión
+  de controles interactivos y drop sobre colecciones scrolleables.
+- Las cards deben conservar `data-testid="history-card"`,
+  `data-entry-id`, `draggable="false"` y sus acciones de pin, menú y título.
+  El payload de drag solo puede transportar el identificador opaco de la
+  entrada; nunca contenido, snippets, hashes, referencias de assets, rutas ni
+  bytes de imágenes.
+- Antes de entregar cualquier cambio que toque cards, layout, colecciones o
+  listeners, ejecutar las regresiones frontend de drag and drop además de los
+  checks y builds afectados. Si una regresión falla, detener la entrega y
+  corregirla antes de continuar.
+- Los assets persistidos de imágenes y sus referencias no deben borrarse,
+  renombrarse ni limpiarse durante compilaciones, tests, actualizaciones de
+  OpenSpec o tareas de Git. Los tests que escriban imágenes deben usar
+  directorios temporales y no `~/.clipvault`.
+- Para la prueba manual de Tauri, cerrar cualquier instancia anterior antes
+  de arrancar la nueva build desde el workspace; una build vieja abierta
+  puede hacer que el usuario pruebe un bundle desactualizado. La versión
+  funcional debe quedar guardada en un commit/tag antes de iniciar el cambio
+  siguiente.
+
 ## Git y alcance
 
 - Mantener commits y cambios acotados al objetivo del cambio OpenSpec.

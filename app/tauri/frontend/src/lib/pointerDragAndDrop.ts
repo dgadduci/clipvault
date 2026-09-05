@@ -22,11 +22,11 @@ export const POINTER_DROP_EVENT = "clipvault-pointer-drop";
 export const POINTER_DRAG_END_EVENT = "clipvault-pointer-drag-end";
 
 const CARD_SELECTOR = '[data-testid="history-card"]';
+const TITLE_SELECTOR = '[data-testid="history-card-title"]';
 const INTERACTIVE_SELECTORS = [
   "[data-testid='history-card-menu']",
   "[data-testid='history-card-menu-trigger']",
   "[data-testid='history-card-pin']",
-  "[data-testid='history-card-title']",
   "[role='button']",
   "[role='menuitem']",
   "input",
@@ -101,10 +101,39 @@ function dispatchDragEnd(doc: Document, entryId: number): void {
   );
 }
 
+function closestElement(target: Element, selector: string): Element | null {
+  let current: Element | null = target;
+  while (current) {
+    if (current.matches(selector)) return current;
+    const parent: {
+      matches?: (value: string) => boolean;
+    } | null = current.parentNode as unknown as {
+      matches?: (value: string) => boolean;
+    } | null;
+    current = parent?.matches ? (parent as unknown as Element) : null;
+  }
+  return null;
+}
+
 function isInteractiveTarget(target: Element): boolean {
+  // The title is a drag surface even though it has role=button for keyboard
+  // title editing. Keep the actual editor controls interactive while allowing
+  // a drag to begin on the displayed title itself.
+  if (closestElement(target, TITLE_SELECTOR)) {
+    return (
+      closestElement(target, "input") !== null ||
+      closestElement(target, "button") !== null ||
+      closestElement(target, "textarea") !== null ||
+      closestElement(target, "[contenteditable='true']") !== null
+    );
+  }
   return INTERACTIVE_SELECTORS.some(
-    (selector) => target.closest(selector) !== null,
+    (selector) => closestElement(target, selector) !== null,
   );
+}
+
+function isTitleTarget(target: Element): boolean {
+  return closestElement(target, TITLE_SELECTOR) !== null;
 }
 
 function createDragGhost(doc: Document): HTMLElement {
@@ -203,7 +232,7 @@ function startPendingDrag(
   target: Element,
   pointerId: number,
 ): Element | null {
-  const card = target.closest(CARD_SELECTOR);
+  const card = closestElement(target, CARD_SELECTOR);
   if (!card || isInteractiveTarget(target)) return null;
   const rawId = card.getAttribute("data-entry-id");
   const entryId = rawId === null ? Number.NaN : Number(rawId);
@@ -234,7 +263,9 @@ function onPointerDown(event: PointerEvent): void {
   // Prevent the browser's text-selection gesture from painting text across
   // neighbouring cards while the pointer is waiting for the activation
   // threshold. This is a card drag source, not a text-selection surface.
-  event.preventDefault();
+  // Leave the title's native click/double-click path untouched until the
+  // gesture actually crosses the activation threshold.
+  if (!isTitleTarget(target)) event.preventDefault();
   capturePointer(card, event.pointerId);
 }
 
@@ -285,7 +316,7 @@ function onMouseDown(event: MouseEvent): void {
   if (!(target instanceof Element)) return;
   const card = startPendingDrag(event, target, 1);
   if (!card) return;
-  event.preventDefault();
+  if (!isTitleTarget(target)) event.preventDefault();
 }
 
 function onMouseMove(event: MouseEvent): void {

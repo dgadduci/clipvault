@@ -292,3 +292,6 @@
   cancelación, cards de texto e imagen y drop único.
 - [x] 8.5 Ejecutar check, tests, build y revisar el diff. La prueba manual
   en macOS/Tauri queda pendiente de ejecución interactiva.
+- [x] 8.6 Permitir iniciar el drag desde el título visible sin bloquear su
+  doble clic/teclado para editar, manteniendo excluidos los controles reales
+  del editor. Añadida regresión para el título y actualizado el harness DOM.

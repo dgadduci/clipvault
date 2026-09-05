@@ -512,6 +512,9 @@ class DomElement implements DomElementLike {
   hasAttribute(name: string): boolean {
     return this.attributes.has(name);
   }
+  matches(selector: string): boolean {
+    return matchesSelector(this, selector);
+  }
   contains(other: DomElement | null): boolean {
     if (other === null) return false;
     if (other === this) return true;

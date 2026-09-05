@@ -369,7 +369,7 @@ test("pointer drag source ignores interactive card controls", () => {
   );
   assert.match(
     source,
-    /target\.closest\(selector\)/,
+    /closestElement\(target, selector\)/,
     "interactive controls must not become drag sources",
   );
 });

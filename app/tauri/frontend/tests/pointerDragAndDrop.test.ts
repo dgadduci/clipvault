@@ -935,3 +935,67 @@ test("pointer and mouse paths ignore interactive card controls", { concurrency: 
     restore();
   }
 });
+
+test("title surface starts a drag without disabling its click and double-click path", { concurrency: false }, () => {
+  const { document, restore } = installDomPolyfill();
+  try {
+    __resetDragSessionForTests();
+    __resetPointerDragForTests();
+    const card = document.createElement("article");
+    card.setAttribute("data-testid", "history-card");
+    card.setAttribute("data-entry-id", "60");
+    const title = document.createElement("div");
+    title.setAttribute("data-testid", "history-card-title");
+    title.setAttribute("role", "button");
+    card.appendChild(title);
+    document.body.appendChild(card);
+
+    let droppedEntryId: number | null = null;
+    document.addEventListener(POINTER_DROP_EVENT, (event) => {
+      droppedEntryId = (event as CustomEvent<{ entryId: number }>).detail.entryId;
+    });
+    const dropTarget = document.createElement("div");
+    document.body.appendChild(dropTarget);
+    document.hitTestElement = dropTarget;
+    const cleanup = installPointerDragController(
+      document as unknown as Document,
+    );
+
+    const mouseDown = new MouseEventImpl("mousedown", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      clientX: 5,
+      clientY: 5,
+    });
+    title.dispatchEvent(mouseDown);
+    assert.equal(mouseDown.defaultPrevented, false);
+
+    title.dispatchEvent(
+      new MouseEventImpl("mousemove", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        clientX: 60,
+        clientY: 60,
+      }),
+    );
+    assert.equal(isPointerDragActive(), true);
+    title.dispatchEvent(
+      new MouseEventImpl("mouseup", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        clientX: 60,
+        clientY: 60,
+      }),
+    );
+
+    assert.equal(droppedEntryId, 60);
+    assert.equal(isPointerDragActive(), false);
+    assert.equal(hasActiveDragSession(), false);
+    cleanup();
+  } finally {
+    restore();
+  }
+});

@@ -21,7 +21,10 @@ mousedown/mousemove/mouseup para WebViews que entregan el gesto de mouse
 pero no una secuencia completa de Pointer Events. La captura del puntero se
 libera siempre al terminar, cancelar o abandonar el gesto.
 
-Una card textual o de imagen puede iniciar un drag. Una colección de usuario
+Una card textual o de imagen puede iniciar un drag desde toda su superficie,
+incluido el título visible. El título conserva su edición por doble clic,
+Enter o F2 cuando el gesto no supera el umbral; los inputs y botones del
+editor siguen siendo controles y no inician el drag. Una colección de usuario
 es un drop target. Al arrastrar sobre ella se muestra feedback visual y al
 soltar:
 
