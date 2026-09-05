@@ -27,6 +27,8 @@ import type {
   Settings,
   SettingsOpenResponse,
   SettingsUpdate,
+  SourceAppFilter,
+  SourceApplicationsSnapshot,
   Tag,
   WatchTickResponse,
 } from "../types.ts";
@@ -87,12 +89,18 @@ export const recentEntriesCommand: ClipvaultCommandArg<
 
 export const recentEntriesFilteredCommand: ClipvaultCommandArg<
   EntryRecord[],
-  { limit?: number; collectionId?: number | null; tagIds?: number[] }
+  {
+    limit?: number;
+    collectionId?: number | null;
+    tagIds?: number[];
+    sourceApp?: SourceAppFilter | null;
+  }
 > = (args) =>
   invoke<EntryRecord[]>("clipvault_recent_entries_filtered", {
     limit: args.limit ?? 50,
     collectionId: args.collectionId ?? null,
     tagIds: args.tagIds ?? [],
+    sourceApp: args.sourceApp ?? null,
   });
 
 export const searchEntriesCommand: ClipvaultCommandArg<
@@ -102,11 +110,37 @@ export const searchEntriesCommand: ClipvaultCommandArg<
     limit?: number;
     collectionId?: number | null;
     tagIds?: number[];
+    sourceApp?: SourceAppFilter | null;
   }
 > = (args) =>
   invoke<SearchResponse>("clipvault_search_entries", {
     query: args.query,
     limit: args.limit ?? 50,
+    collectionId: args.collectionId ?? null,
+    tagIds: args.tagIds ?? [],
+    sourceApp: args.sourceApp ?? null,
+  });
+
+/**
+ * List the source applications represented in the active collection
+ * scope. The result feeds the combobox the desktop toolbar renders
+ * between the search input and the configuration menu. `collection_id`
+ * follows the same convention the recents/search filters use: `null`
+ * matches the system `Historial` collection. `tag_ids` mirrors the
+ * AND-combined tag filter so the combobox can reflect whichever
+ * secondary facet the user has applied.
+ *
+ * The response is metadata-only: no clipboard content, hashes,
+ * snippets or asset references ever cross the bridge. Stale responses
+ * (a collection switch that landed while the query was in flight) can
+ * be detected through the embedded `scope` field and dropped before
+ * they pollute the combobox.
+ */
+export const sourceApplicationsCommand: ClipvaultCommandArg<
+  SourceApplicationsSnapshot,
+  { collectionId?: number | null; tagIds?: number[] }
+> = (args) =>
+  invoke<SourceApplicationsSnapshot>("clipvault_source_applications", {
     collectionId: args.collectionId ?? null,
     tagIds: args.tagIds ?? [],
   });
@@ -484,6 +518,10 @@ export type {
   Settings,
   SettingsOpenResponse,
   SettingsUpdate,
+  SourceAppFilter,
+  SourceApplicationOption,
+  SourceApplicationsScope,
+  SourceApplicationsSnapshot,
   Tag,
   WatchTickResponse,
 } from "../types";

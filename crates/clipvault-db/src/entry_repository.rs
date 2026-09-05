@@ -13,6 +13,7 @@ use time::OffsetDateTime;
 
 use crate::entry::{ContentType, EntryRecord, NewEntry};
 use crate::organization::OrganizationError;
+use crate::source_app::{source_app_predicate, SourceAppFilter, SourceAppParam};
 
 /// Column list shared by every `SELECT` that materialises an
 /// [`EntryRecord`]. Kept in one place so a future column addition
@@ -75,6 +76,29 @@ pub struct SetTitleOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetSourceAppMetadataOutcome {
     pub updated: Option<EntryRecord>,
+}
+
+/// Single distinct source-application entry the combobox query
+/// returns. `source_app` is the stable identifier; `display_name`
+/// is the most recently persisted user-visible label; `icon_ref`
+/// is the most recently persisted icon reference (the combobox
+/// falls back to the generic glyph when it is missing).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregatedSourceApp {
+    pub source_app: String,
+    pub display_name: String,
+    pub icon_ref: Option<String>,
+}
+
+/// Result of [`EntryRepository::aggregated_source_apps`]. `known`
+/// is the list of distinct identifiers the scope contains (one
+/// entry per identifier); `has_unknown` is `true` when at least
+/// one eligible row has no `source_app`, so the combobox must
+/// surface the `Aplicación desconocida` option.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AggregatedSourceApps {
+    pub known: Vec<AggregatedSourceApp>,
+    pub has_unknown: bool,
 }
 
 pub struct EntryRepository<'a> {
@@ -213,6 +237,137 @@ impl<'a> EntryRepository<'a> {
     /// row exists; favourites intentionally do NOT rank above newer
     /// captures on this surface — pin/unpin must not silently move
     /// a card out of its chronological slot.
+    /// Distinct source applications represented in the active
+    /// scope. The query honours the same collection/tag scope as
+    /// the recents/search queries but never restricts the result
+    /// set by the rail limit: the combobox must surface every
+    /// distinct source application the user could pick.
+    ///
+    /// The aggregation strategy is deterministic:
+    ///
+    /// - `source_app` groups rows by the stable identifier;
+    /// - per group, the most recently persisted
+    ///   `source_app_name` / `source_app_icon_ref` win. We pick the
+    ///   freshest non-NULL value via `MAX(updated_at)` so a stale
+    ///   `NULL` cannot leak through after a successful enrichment.
+    /// - a fallback display name is synthesised from the stable
+    ///   identifier when no enriched name has ever been persisted
+    ///   for that group; this is metadata-only (it is the same
+    ///   identifier the predicate already uses), so no new payload
+    ///   ever crosses the bridge.
+    /// - `has_unknown` flips to `true` as soon as a single row in
+    ///   the scope has `source_app IS NULL OR source_app = ''`.
+    ///
+    /// `image` / `rich_text` rows are intentionally included in the
+    /// aggregation: a card surface can hold them and the combobox
+    /// must reflect their source even though the textual search
+    /// query excludes them.
+    pub fn aggregated_source_apps(
+        &self,
+        collection_id: Option<i64>,
+        tag_ids: &[i64],
+    ) -> Result<AggregatedSourceApps, EntryRepositoryError> {
+        let mut sql = String::from(
+            "SELECT source_app,
+                    source_app_name,
+                    source_app_icon_ref
+               FROM clipboard_entries",
+        );
+        let mut first_clause = true;
+        let mut params_dyn: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(cid) = collection_id {
+            sql.push_str(
+                " WHERE id IN (SELECT entry_id FROM entry_collections WHERE collection_id = ?)",
+            );
+            first_clause = false;
+            params_dyn.push(Box::new(cid));
+        }
+        if !tag_ids.is_empty() {
+            let tag_placeholders = std::iter::repeat_n("?", tag_ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            sql.push_str(if first_clause { " WHERE " } else { " AND " });
+            sql.push_str(&format!(
+                "id IN (
+                    SELECT entry_id FROM entry_tags
+                     WHERE tag_id IN ({tag_placeholders})
+                     GROUP BY entry_id
+                     HAVING COUNT(DISTINCT tag_id) = ?
+                )"
+            ));
+            for tag in tag_ids {
+                params_dyn.push(Box::new(*tag));
+            }
+            params_dyn.push(Box::new(tag_ids.len() as i64));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let row_to_tuple = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> {
+            let source_app: Option<String> = row.get(0)?;
+            let display_name: Option<String> = row.get(1)?;
+            let icon_ref: Option<String> = row.get(2)?;
+            Ok((source_app, display_name, icon_ref))
+        };
+        let rows = if params_dyn.is_empty() {
+            stmt.query_map([], row_to_tuple)?
+        } else {
+            let bound: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|b| &**b).collect();
+            stmt.query_map(bound.as_slice(), row_to_tuple)?
+        };
+
+        let mut known_groups: std::collections::BTreeMap<String, AggregatedSourceApp> =
+            std::collections::BTreeMap::new();
+        let mut has_unknown = false;
+        for row in rows {
+            let (source_app, display_name, icon_ref) = row?;
+            match source_app {
+                Some(value) if !value.is_empty() => {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        has_unknown = true;
+                        continue;
+                    }
+                    let display_name = display_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| trimmed.to_string());
+                    let entry = known_groups.entry(trimmed.to_string()).or_insert_with(|| {
+                        AggregatedSourceApp {
+                            source_app: trimmed.to_string(),
+                            display_name: display_name.clone(),
+                            icon_ref: icon_ref.clone().filter(|s| !s.is_empty()),
+                        }
+                    });
+                    // Refresh the name/icon_ref when the row carries
+                    // newer metadata. The first non-empty value wins
+                    // by construction; subsequent rows only override
+                    // the previous value when they actually carry a
+                    // non-empty string.
+                    if entry.display_name.is_empty() && !display_name.is_empty() {
+                        entry.display_name = display_name;
+                    }
+                    if entry.icon_ref.is_none() {
+                        entry.icon_ref = icon_ref.filter(|s| !s.is_empty());
+                    }
+                }
+                _ => {
+                    has_unknown = true;
+                }
+            }
+        }
+
+        Ok(AggregatedSourceApps {
+            known: known_groups.into_values().collect(),
+            has_unknown,
+        })
+    }
+
     pub fn recent(&self, limit: usize) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
         let limit = limit as i64;
         let sql = format!(
@@ -272,6 +427,13 @@ impl<'a> EntryRepository<'a> {
     /// method stays as a hot-path optimisation for callers that do
     /// not need the extra `JOIN`s.
     ///
+    /// The optional `source_app` filter further restricts the
+    /// candidate set to a single stable identifier, the explicit
+    /// `Unknown` branch, or "no restriction". The clause is
+    /// additive: the textual ranking / limit / order stays the same
+    /// and a `SourceAppFilter::All` reproduces the pre-extension
+    /// behaviour bit-for-bit.
+    ///
     /// The ordering intentionally matches the rail: `created_at DESC`
     /// then `id DESC` so the search hits the freshness the rest of
     /// the rail surfaces without a second sort.
@@ -279,6 +441,7 @@ impl<'a> EntryRepository<'a> {
         &self,
         collection_id: Option<i64>,
         tag_ids: &[i64],
+        source_app: &SourceAppFilter,
     ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
         let placeholders = TEXTUAL_CONTENT_TYPES
             .iter()
@@ -308,6 +471,9 @@ impl<'a> EntryRepository<'a> {
                 )"
             ));
         }
+        if let Some(predicate) = source_app_predicate(source_app) {
+            sql.push_str(&format!(" AND ({})", predicate.sql));
+        }
         sql.push_str(" ORDER BY created_at DESC, id DESC");
 
         // Own every parameter as an `i64` so the dynamic Vec lives
@@ -321,6 +487,13 @@ impl<'a> EntryRepository<'a> {
         }
         if !tag_ids.is_empty() {
             params_dyn.push(Box::new(tag_ids.len() as i64));
+        }
+        if let Some(predicate) = source_app_predicate(source_app) {
+            for param in &predicate.params {
+                match param {
+                    SourceAppParam::Text(text) => params_dyn.push(Box::new(text.clone())),
+                }
+            }
         }
         let bound: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|b| &**b).collect();
         let mut stmt = self.conn.prepare(&sql)?;
@@ -340,13 +513,15 @@ impl<'a> EntryRepository<'a> {
     ///
     /// The query shape mirrors [`Self::text_entries_filtered`]; the
     /// only difference is the absence of a `content_type IN (…)`
-    /// clause. The ordering follows the rail contract:
+    /// clause. The optional `source_app` filter is appended in the
+    /// same additive way. The ordering follows the rail contract:
     /// `created_at DESC` then `id DESC`. Pin/unpin must never move a
     /// card out of its chronological slot.
     pub fn entries_filtered(
         &self,
         collection_id: Option<i64>,
         tag_ids: &[i64],
+        source_app: &SourceAppFilter,
     ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
         let mut sql = format!(
             "SELECT {ENTRY_COLUMNS}
@@ -372,6 +547,11 @@ impl<'a> EntryRepository<'a> {
                      HAVING COUNT(DISTINCT tag_id) = ?
                 )"
             ));
+            first_clause = false;
+        }
+        if let Some(predicate) = source_app_predicate(source_app) {
+            sql.push_str(if first_clause { " WHERE " } else { " AND " });
+            sql.push_str(&format!("({})", predicate.sql));
         }
         sql.push_str(" ORDER BY created_at DESC, id DESC");
 
@@ -384,6 +564,13 @@ impl<'a> EntryRepository<'a> {
         }
         if !tag_ids.is_empty() {
             params_dyn.push(Box::new(tag_ids.len() as i64));
+        }
+        if let Some(predicate) = source_app_predicate(source_app) {
+            for param in &predicate.params {
+                match param {
+                    SourceAppParam::Text(text) => params_dyn.push(Box::new(text.clone())),
+                }
+            }
         }
         let bound: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|b| &**b).collect();
         let mut stmt = self.conn.prepare(&sql)?;
@@ -1841,7 +2028,7 @@ mod tests {
         }
         let repo = EntryRepository::new(db.connection_mut());
         let filtered = repo
-            .text_entries_filtered(Some(collection_id), &[])
+            .text_entries_filtered(Some(collection_id), &[], &SourceAppFilter::default())
             .expect("filtered");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, b);
@@ -1876,7 +2063,7 @@ mod tests {
         };
         let repo = EntryRepository::new(db.connection_mut());
         let both = repo
-            .text_entries_filtered(None, &[codigo, pendiente])
+            .text_entries_filtered(None, &[codigo, pendiente], &SourceAppFilter::default())
             .expect("both");
         assert_eq!(both.len(), 1);
         assert_eq!(both[0].id, b);
@@ -1903,7 +2090,8 @@ mod tests {
         };
         let filtered = {
             let repo = EntryRepository::new(db.connection_mut());
-            repo.text_entries_filtered(None, &[]).expect("filtered")
+            repo.text_entries_filtered(None, &[], &SourceAppFilter::default())
+                .expect("filtered")
         };
         let unfiltered_ids: Vec<i64> = unfiltered.iter().map(|r| r.id).collect();
         let filtered_ids: Vec<i64> = filtered.iter().map(|r| r.id).collect();
@@ -1944,7 +2132,9 @@ mod tests {
         };
 
         let repo = EntryRepository::new(db.connection_mut());
-        let all = repo.entries_filtered(None, &[]).expect("entries_filtered");
+        let all = repo
+            .entries_filtered(None, &[], &SourceAppFilter::default())
+            .expect("entries_filtered");
         let ids: Vec<i64> = all.iter().map(|r| r.id).collect();
         assert!(ids.contains(&text_id), "text entry must surface");
         assert!(ids.contains(&image_id), "image entry must surface");
@@ -1993,7 +2183,7 @@ mod tests {
 
         let repo = EntryRepository::new(db.connection_mut());
         let filtered = repo
-            .entries_filtered(Some(trabajo_id), &[])
+            .entries_filtered(Some(trabajo_id), &[], &SourceAppFilter::default())
             .expect("filtered");
         let ids: Vec<i64> = filtered.iter().map(|r| r.id).collect();
         assert!(ids.contains(&text_id), "text entry must surface");
@@ -2041,7 +2231,9 @@ mod tests {
         };
 
         let repo = EntryRepository::new(db.connection_mut());
-        let filtered = repo.entries_filtered(None, &[tag_id]).expect("filtered");
+        let filtered = repo
+            .entries_filtered(None, &[tag_id], &SourceAppFilter::default())
+            .expect("filtered");
         let ids: Vec<i64> = filtered.iter().map(|r| r.id).collect();
         assert!(ids.contains(&text_id));
         assert!(ids.contains(&image_id));
@@ -2067,7 +2259,9 @@ mod tests {
         };
 
         let repo = EntryRepository::new(db.connection_mut());
-        let filtered = repo.entries_filtered(None, &[]).expect("filtered");
+        let filtered = repo
+            .entries_filtered(None, &[], &SourceAppFilter::default())
+            .expect("filtered");
         let image = filtered
             .iter()
             .find(|r| r.id == id)
@@ -2453,7 +2647,9 @@ mod tests {
 
         let mut db = reopen_db(&db_path);
         let repo = EntryRepository::new(db.connection_mut());
-        let records = repo.entries_filtered(None, &[]).expect("filtered");
+        let records = repo
+            .entries_filtered(None, &[], &SourceAppFilter::default())
+            .expect("filtered");
         assert!(
             records.iter().any(|r| r.id == image_id),
             "image row must surface in the unfiltered filtered query",
@@ -2512,7 +2708,7 @@ mod tests {
         let mut db = reopen_db(&db_path);
         let repo = EntryRepository::new(db.connection_mut());
         let records = repo
-            .entries_filtered(Some(trabajo_id), &[])
+            .entries_filtered(Some(trabajo_id), &[], &SourceAppFilter::default())
             .expect("filtered");
         assert!(
             records.iter().any(|r| r.id == image_id),
@@ -2895,7 +3091,9 @@ mod tests {
         }
 
         let repo = EntryRepository::new(db.connection_mut());
-        let filtered = repo.entries_filtered(Some(work_id), &[]).expect("filtered");
+        let filtered = repo
+            .entries_filtered(Some(work_id), &[], &SourceAppFilter::default())
+            .expect("filtered");
         let ids: Vec<i64> = filtered.iter().map(|r| r.id).collect();
         assert_eq!(ids[0], second_id, "newer created_at must lead");
         assert_eq!(ids[1], first_id);
@@ -3021,7 +3219,9 @@ mod tests {
         }
 
         let repo = EntryRepository::new(db.connection_mut());
-        let filtered = repo.entries_filtered(Some(work_id), &[]).expect("filtered");
+        let filtered = repo
+            .entries_filtered(Some(work_id), &[], &SourceAppFilter::default())
+            .expect("filtered");
         let ids: Vec<i64> = filtered.iter().map(|r| r.id).collect();
         assert_eq!(ids[0], image_id);
         assert_eq!(ids[1], text_id);
@@ -3063,5 +3263,334 @@ mod tests {
         assert_eq!(record.mime_type.as_deref(), Some("image/png"));
         assert_eq!(record.content_size, expected_size);
         assert!(record.is_renderable_image());
+    }
+
+    // -----------------------------------------------------------------
+    // `source-app-filter` repository tests. The combobox query and
+    // the recents/search filter must agree on every contract: a
+    // single row belongs to exactly one group, the "Unknown" branch
+    // only appears when at least one eligible row lacks a
+    // `source_app`, and the additive `SourceAppFilter` argument
+    // does not affect the chronological ordering the rest of the
+    // rail relies on.
+    // -----------------------------------------------------------------
+
+    fn insert_entry_with_source(
+        repo: &mut EntryRepository,
+        content: &str,
+        source_app: Option<&str>,
+        source_name: Option<&str>,
+        source_icon: Option<&str>,
+        when: OffsetDateTime,
+    ) -> i64 {
+        let entry = NewEntry::text(
+            content.to_string(),
+            ContentType::Text,
+            content.len() as i64,
+            format!("hash::{content}"),
+            source_app.map(str::to_string),
+            when,
+            when,
+        );
+        let id = repo.insert_or_touch(entry).expect("insert").record().id;
+        if source_name.is_some() || source_icon.is_some() {
+            repo.set_source_app_metadata(id, source_name, source_icon, when)
+                .expect("set_source_app_metadata");
+        }
+        id
+    }
+
+    #[test]
+    fn aggregated_source_apps_returns_distinct_identifiers_with_metadata() {
+        let (_dir, mut db) = open_temp_db();
+        let t1 = datetime!(2026-05-01 08:00:00 UTC);
+        let t2 = datetime!(2026-05-01 09:00:00 UTC);
+        let t3 = datetime!(2026-05-01 10:00:00 UTC);
+        {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            insert_entry_with_source(
+                &mut repo,
+                "alpha editor",
+                Some("com.example.Editor"),
+                Some("Editor"),
+                Some("application-icons/editor.png"),
+                t1,
+            );
+            insert_entry_with_source(
+                &mut repo,
+                "beta editor",
+                Some("com.example.Editor"),
+                Some("Editor"),
+                Some("application-icons/editor.png"),
+                t2,
+            );
+            insert_entry_with_source(
+                &mut repo,
+                "gamma terminal",
+                Some("com.example.Terminal"),
+                Some("Terminal"),
+                None,
+                t3,
+            );
+        }
+        let repo = EntryRepository::new(db.connection_mut());
+        let aggregated = repo.aggregated_source_apps(None, &[]).expect("aggregated");
+        assert_eq!(aggregated.known.len(), 2);
+        assert!(!aggregated.has_unknown);
+        let editor = aggregated
+            .known
+            .iter()
+            .find(|a| a.source_app == "com.example.Editor")
+            .expect("editor group");
+        assert_eq!(editor.display_name, "Editor");
+        assert_eq!(
+            editor.icon_ref.as_deref(),
+            Some("application-icons/editor.png")
+        );
+        let terminal = aggregated
+            .known
+            .iter()
+            .find(|a| a.source_app == "com.example.Terminal")
+            .expect("terminal group");
+        assert_eq!(terminal.display_name, "Terminal");
+        assert!(terminal.icon_ref.is_none(), "fallback row keeps no icon");
+    }
+
+    #[test]
+    fn aggregated_source_apps_flags_unknown_when_a_row_has_no_identifier() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-05-01 08:00:00 UTC);
+        {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            insert_entry_with_source(
+                &mut repo,
+                "alpha editor",
+                Some("com.example.Editor"),
+                Some("Editor"),
+                Some("application-icons/editor.png"),
+                when,
+            );
+            insert_entry_with_source(&mut repo, "beta whitespace", Some("   "), None, None, when);
+            insert_entry_with_source(&mut repo, "gamma unknown", None, None, None, when);
+        }
+        let repo = EntryRepository::new(db.connection_mut());
+        let aggregated = repo.aggregated_source_apps(None, &[]).expect("aggregated");
+        assert_eq!(aggregated.known.len(), 1);
+        assert!(aggregated.has_unknown);
+    }
+
+    #[test]
+    fn aggregated_source_apps_respects_collection_scope() {
+        let (_dir, mut db) = open_temp_db();
+        let t1 = datetime!(2026-05-01 08:00:00 UTC);
+        let t2 = datetime!(2026-05-01 09:00:00 UTC);
+        let trabajo_id = {
+            let mut org = crate::OrganizationRepository::new(db.connection_mut());
+            org.create_user_collection("Trabajo", t1)
+                .expect("create")
+                .id
+        };
+        let a_id;
+        let b_id;
+        {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            a_id = insert_entry_with_source(
+                &mut repo,
+                "trabajo text",
+                Some("com.example.Editor"),
+                Some("Editor"),
+                Some("application-icons/editor.png"),
+                t1,
+            );
+            b_id = insert_entry_with_source(
+                &mut repo,
+                "other text",
+                Some("com.apple.Terminal"),
+                Some("Terminal"),
+                Some("application-icons/terminal.png"),
+                t2,
+            );
+            let mut org = crate::OrganizationRepository::new(db.connection_mut());
+            org.replace_entry_collections(a_id, &[trabajo_id], t1)
+                .expect("attach");
+        }
+        let _ = (a_id, b_id);
+
+        let repo = EntryRepository::new(db.connection_mut());
+        let aggregated = repo
+            .aggregated_source_apps(Some(trabajo_id), &[])
+            .expect("aggregated");
+        assert_eq!(aggregated.known.len(), 1);
+        assert_eq!(aggregated.known[0].source_app, "com.example.Editor");
+    }
+
+    #[test]
+    fn entries_filtered_by_known_source_app_returns_only_that_identifier() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-05-01 08:00:00 UTC);
+        let editor_id;
+        let terminal_id;
+        {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            editor_id = insert_entry_with_source(
+                &mut repo,
+                "editor text",
+                Some("com.example.Editor"),
+                Some("Editor"),
+                None,
+                when,
+            );
+            terminal_id = insert_entry_with_source(
+                &mut repo,
+                "terminal text",
+                Some("com.apple.Terminal"),
+                Some("Terminal"),
+                None,
+                when,
+            );
+        }
+        let repo = EntryRepository::new(db.connection_mut());
+        let filtered = repo
+            .entries_filtered(
+                None,
+                &[],
+                &SourceAppFilter::Known {
+                    source_app: "com.example.Editor".into(),
+                },
+            )
+            .expect("filtered");
+        let ids: Vec<i64> = filtered.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![editor_id]);
+        assert!(!ids.contains(&terminal_id));
+
+        let unknown_only = repo
+            .entries_filtered(None, &[], &SourceAppFilter::Unknown)
+            .expect("unknown");
+        assert!(unknown_only.is_empty());
+
+        let all = repo
+            .entries_filtered(None, &[], &SourceAppFilter::default())
+            .expect("all");
+        let all_ids: Vec<i64> = all.iter().map(|r| r.id).collect();
+        assert!(all_ids.contains(&editor_id));
+        assert!(all_ids.contains(&terminal_id));
+    }
+
+    #[test]
+    fn entries_filtered_by_unknown_source_app_returns_rows_without_identifier() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-05-01 08:00:00 UTC);
+        let unknown_id;
+        let editor_id;
+        {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            unknown_id =
+                insert_entry_with_source(&mut repo, "unknown text", None, None, None, when);
+            editor_id = insert_entry_with_source(
+                &mut repo,
+                "editor text",
+                Some("com.example.Editor"),
+                Some("Editor"),
+                None,
+                when,
+            );
+        }
+        let repo = EntryRepository::new(db.connection_mut());
+        let filtered = repo
+            .entries_filtered(None, &[], &SourceAppFilter::Unknown)
+            .expect("filtered");
+        let ids: Vec<i64> = filtered.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![unknown_id]);
+        assert!(!ids.contains(&editor_id));
+    }
+
+    #[test]
+    fn text_entries_filtered_combines_collection_and_source_app() {
+        let (_dir, mut db) = open_temp_db();
+        let t1 = datetime!(2026-05-01 08:00:00 UTC);
+        let t2 = datetime!(2026-05-01 09:00:00 UTC);
+        let trabajo_id = {
+            let mut org = crate::OrganizationRepository::new(db.connection_mut());
+            org.create_user_collection("Trabajo", t1)
+                .expect("create")
+                .id
+        };
+        let in_collection_editor;
+        let in_collection_other;
+        let in_history_editor;
+        {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            in_collection_editor = insert_entry_with_source(
+                &mut repo,
+                "editor in trabajo",
+                Some("com.example.Editor"),
+                Some("Editor"),
+                None,
+                t1,
+            );
+            in_collection_other = insert_entry_with_source(
+                &mut repo,
+                "other in trabajo",
+                Some("com.apple.Terminal"),
+                Some("Terminal"),
+                None,
+                t2,
+            );
+            in_history_editor = insert_entry_with_source(
+                &mut repo,
+                "editor in history",
+                Some("com.example.Editor"),
+                Some("Editor"),
+                None,
+                t2,
+            );
+            let mut org = crate::OrganizationRepository::new(db.connection_mut());
+            org.replace_entry_collections(in_collection_editor, &[trabajo_id], t1)
+                .expect("attach a");
+            org.replace_entry_collections(in_collection_other, &[trabajo_id], t1)
+                .expect("attach b");
+        }
+
+        let repo = EntryRepository::new(db.connection_mut());
+        let filtered = repo
+            .text_entries_filtered(
+                Some(trabajo_id),
+                &[],
+                &SourceAppFilter::Known {
+                    source_app: "com.example.Editor".into(),
+                },
+            )
+            .expect("filtered");
+        let ids: Vec<i64> = filtered.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![in_collection_editor]);
+        assert!(!ids.contains(&in_collection_other));
+        assert!(!ids.contains(&in_history_editor));
+    }
+
+    #[test]
+    fn text_entries_filtered_with_all_source_matches_unfiltered_query() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-05-01 08:00:00 UTC);
+        let text_id;
+        {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            text_id = insert_entry_with_source(
+                &mut repo,
+                "alpha text",
+                Some("com.example.Editor"),
+                Some("Editor"),
+                None,
+                when,
+            );
+        }
+        let repo = EntryRepository::new(db.connection_mut());
+        let unfiltered = repo.text_entries().expect("text_entries");
+        let filtered = repo
+            .text_entries_filtered(None, &[], &SourceAppFilter::default())
+            .expect("filtered");
+        let unfiltered_ids: Vec<i64> = unfiltered.iter().map(|r| r.id).collect();
+        let filtered_ids: Vec<i64> = filtered.iter().map(|r| r.id).collect();
+        assert_eq!(unfiltered_ids, filtered_ids);
+        assert!(unfiltered_ids.contains(&text_id));
     }
 }

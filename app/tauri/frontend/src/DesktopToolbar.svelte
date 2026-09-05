@@ -22,6 +22,10 @@
    * `App.svelte` keeps the single source of truth.
    */
   import { onDestroy, tick } from "svelte";
+  import SourceAppFilter from "./SourceAppFilter.svelte";
+  import type { SourceApplicationOption } from "./types.ts";
+
+  type SourceAppFilterValue = import("./types.ts").SourceAppFilter;
 
   export let searchQuery: string = "";
   export let searching: boolean = false;
@@ -56,12 +60,26 @@
    * view where the destructive branch would be misleading.
    */
   export let showClearHistory: boolean = true;
+  /**
+   * Source-application filter the combobox renders. The toolbar is
+   * still presentational: the parent owns the canonical state so
+   * the same filter can be composed with collection, query and
+   * tag facets inside `App.svelte`.
+   */
+  export let sourceAppFilter: SourceAppFilterValue = { kind: "all" };
+  /**
+   * Options the combobox renders. The parent loads them through
+   * `sourceApplicationsCommand`; the toolbar only forwards them
+   * to the combobox.
+   */
+  export let sourceAppOptions: SourceApplicationOption[] = [];
   export let onSearchInput: (value: string) => void = () => {};
   export let onOpenDevelopment: (event: MouseEvent) => void = () => {};
   export let onOpenPrivacy: (event: MouseEvent) => void = () => {};
   export let onOpenRetention: (event: MouseEvent) => void = () => {};
   export let onOpenShortcut: (event: MouseEvent) => void = () => {};
   export let onRequestClearHistory: (event: MouseEvent) => void = () => {};
+  export let onSourceAppFilterChange: (next: SourceAppFilterValue) => void = () => {};
 
   /**
    * Ellipsis-menu state. The toolbar owns a single menu instance;
@@ -204,6 +222,11 @@
         {searchShortcut}
       </span>
     </div>
+    <SourceAppFilter
+      selected={sourceAppFilter}
+      options={sourceAppOptions}
+      onChange={onSourceAppFilterChange}
+    />
     <div class="actions" role="toolbar" aria-label="Configuración y limpieza">
       <div class="menu-wrapper" data-testid="overflow-menu-wrapper">
         <button

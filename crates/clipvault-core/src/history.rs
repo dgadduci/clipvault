@@ -15,8 +15,8 @@ use thiserror::Error;
 use tracing::warn;
 
 use clipvault_db::{
-    EntryOutcome, EntryRepository, EntryRepositoryError, NewEntry, IMAGE_CONTENT_SENTINEL,
-    IMAGE_MIME_PNG,
+    EntryOutcome, EntryRepository, EntryRepositoryError, NewEntry, SourceAppFilter,
+    IMAGE_CONTENT_SENTINEL, IMAGE_MIME_PNG,
 };
 use clipvault_platform::{
     ApplicationMetadataError, ApplicationMetadataProvider, ClipboardImage, ClipboardPayload,
@@ -563,17 +563,25 @@ impl TextHistoryService {
     /// [`clipvault_db::EntryRepository::text_entries_filtered`] for
     /// the local search engine that deliberately never inspects
     /// image bytes.
+    ///
+    /// The optional `source_app` filter is appended to the same
+    /// additive query the rest of the filter set drives: a
+    /// `SourceAppFilter::All` reproduces the pre-extension
+    /// behaviour bit-for-bit; `Known(identifier)` and `Unknown`
+    /// restrict the candidate set without disturbing the
+    /// chronological ordering.
     pub fn recent_entries_with_filter(
         &self,
         context: &AppContext,
         collection_id: Option<i64>,
         tag_ids: &[i64],
+        source_app: &SourceAppFilter,
         limit: usize,
     ) -> Result<Vec<clipvault_db::EntryRecord>, HistoryServiceError> {
         let records = {
             let mut db = context.database().lock();
             let repo = EntryRepository::new(db.connection_mut());
-            repo.entries_filtered(collection_id, tag_ids)?
+            repo.entries_filtered(collection_id, tag_ids, source_app)?
         };
         // `entries_filtered` already enforces the ordering contract.
         // Truncate to the requested limit so the rail stays

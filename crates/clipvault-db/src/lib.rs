@@ -14,6 +14,7 @@ mod ignored_apps;
 mod migration;
 mod organization;
 mod registry;
+pub mod source_app;
 
 pub use app_settings::{AppSetting, AppSettingsError, AppSettingsRepository};
 pub use database::{
@@ -21,8 +22,8 @@ pub use database::{
 };
 pub use entry::{ContentType, EntryRecord, NewEntry, IMAGE_CONTENT_SENTINEL, IMAGE_MIME_PNG};
 pub use entry_repository::{
-    EntryOutcome, EntryRepository, EntryRepositoryError, SetFavoriteOutcome,
-    SetSourceAppMetadataOutcome, SetTitleOutcome, TEXTUAL_CONTENT_TYPES,
+    AggregatedSourceApp, AggregatedSourceApps, EntryOutcome, EntryRepository, EntryRepositoryError,
+    SetFavoriteOutcome, SetSourceAppMetadataOutcome, SetTitleOutcome, TEXTUAL_CONTENT_TYPES,
 };
 pub use error::{DbError, DbResult};
 pub use ignored_apps::{IgnoredApp, IgnoredAppRepository, IgnoredAppsError};
@@ -33,6 +34,7 @@ pub use organization::{
     MAX_ORGANIZATION_NAME_CHARS,
 };
 pub use registry::builtin_migrations;
+pub use source_app::SourceAppFilter;
 
 pub const DEFAULT_FOLDER: &str = ".clipvault";
 pub const DEFAULT_DB_FILE: &str = "clipvault.db";

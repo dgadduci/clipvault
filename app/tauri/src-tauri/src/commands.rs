@@ -315,20 +315,27 @@ pub fn clipvault_recent_entries(
 
 /// Recent entries restricted by collection and/or tags. The arguments
 /// mirror the search filter shape: `collection_id == None` and an
-/// empty `tag_ids` reproduce the unfiltered "Historial" view.
+/// empty `tag_ids` reproduce the unfiltered "Historial" view. The
+/// optional `source_app` argument applies the source-application
+/// filter on top of the existing facets without changing ranking,
+/// limits or ordering. `None` is treated as [`SourceAppFilter::All`]
+/// so existing callers (which never passed a value) keep producing
+/// the same row set bit-for-bit.
 #[tauri::command]
 pub fn clipvault_recent_entries_filtered(
     state: State<'_, SharedState>,
     limit: Option<usize>,
     collection_id: Option<i64>,
     tag_ids: Option<Vec<i64>>,
+    source_app: Option<clipvault_core::SourceAppFilter>,
 ) -> Result<Vec<clipvault_db::EntryRecord>, CommandError> {
     let limit = limit.unwrap_or(50).min(500);
     let tag_ids = tag_ids.unwrap_or_default();
+    let source_app = source_app.unwrap_or_default();
     let records = state
         .context()
         .history()
-        .recent_entries_with_filter(state.context(), collection_id, &tag_ids, limit)
+        .recent_entries_with_filter(state.context(), collection_id, &tag_ids, &source_app, limit)
         .map_err(|err| CommandError::new("history_error", err.to_string()))?;
     Ok(records)
 }
@@ -347,8 +354,11 @@ pub struct SearchResponse {
 /// set to the entries associated with that collection (passing the
 /// `Historial` collection id has no effect because every entry
 /// belongs to it), `tag_ids` is AND-combined so the entry must
-/// carry every supplied tag. Both filters are silently ignored when
-/// the corresponding argument is `None` / empty.
+/// carry every supplied tag, and `source_app` applies the
+/// `source-app-filter` facet. All three filters are silently
+/// ignored when the corresponding argument is `None` / empty, so a
+/// `None` source-app reproduces the pre-extension behaviour
+/// bit-for-bit.
 #[tauri::command]
 pub fn clipvault_search_entries(
     state: State<'_, SharedState>,
@@ -356,12 +366,14 @@ pub fn clipvault_search_entries(
     limit: Option<usize>,
     collection_id: Option<i64>,
     tag_ids: Option<Vec<i64>>,
+    source_app: Option<clipvault_core::SourceAppFilter>,
 ) -> Result<SearchResponse, CommandError> {
     let limit = limit.unwrap_or(clipvault_core::SEARCH_DEFAULT_LIMIT);
     let engine_query = clipvault_core::SearchQuery { text: query, limit };
     let filter = clipvault_core::SearchFilter {
         collection_id,
         tag_ids: tag_ids.unwrap_or_default(),
+        source_app: source_app.unwrap_or_default(),
     };
     let outcome = state
         .context()
@@ -381,6 +393,32 @@ pub fn clipvault_history_count(
     Ok(clipvault_core::DiagnosticsService::history_count(
         state.context(),
     ))
+}
+
+/// List the source applications represented in the active
+/// collection scope. The result feeds the combobox the desktop
+/// toolbar renders between the search input and the configuration
+/// menu: the frontend never inspects clipboard content, hashes or
+/// asset references — the snapshot only carries metadata
+/// (display name, optional icon reference, fallback flag).
+///
+/// `collection_id == None` matches the `Historial` system
+/// collection: every entry belongs to it by construction, so the
+/// query returns the union of all applications the user has ever
+/// seen. `tag_ids` is AND-combined, mirroring the recents/search
+/// filters so the combobox can mirror whichever secondary facet
+/// the user has applied.
+#[tauri::command]
+pub fn clipvault_source_applications(
+    state: State<'_, SharedState>,
+    collection_id: Option<i64>,
+    tag_ids: Option<Vec<i64>>,
+) -> Result<clipvault_core::SourceApplicationsSnapshot, CommandError> {
+    let tag_ids = tag_ids.unwrap_or_default();
+    let scope = clipvault_core::SourceApplicationsScope::new(collection_id, &tag_ids);
+    clipvault_core::SourceApplicationsQuery::new()
+        .load(state.context(), &scope)
+        .map_err(|err| CommandError::new("history_error", err.to_string()))
 }
 
 /// Manual watcher tick driven by the **Tick capture** button. The

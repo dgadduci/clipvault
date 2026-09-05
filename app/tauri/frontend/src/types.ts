@@ -416,5 +416,68 @@ export interface OrganizationSnapshot {
   tags: Tag[];
 }
 
+// ---------------------------------------------------------------------------
+// `source-app-filter` capability.
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire-level filter the combobox sends on every recents/search request.
+ * The discriminator prevents the frontend from collapsing the "Unknown"
+ * branch into the "All" branch: both surface a different rail set and the
+ * user can target either on purpose.
+ *
+ * - `all`: no restriction; the recents/search query applies the rest of the
+ *   filter set as usual.
+ * - `known`: pin the candidate set to a single stable `source_app`
+ *   identifier. The identifier is opaque; it MUST NOT be rendered as
+ *   visible text by the combobox.
+ * - `unknown`: rows whose `source_app` is `null` or empty.
+ */
+export type SourceAppFilter =
+  | { kind: "all" }
+  | { kind: "known"; source_app: string }
+  | { kind: "unknown" };
+
+/**
+ * Single metadata-only entry the combobox renders. `source_app` is the
+ * stable internal identifier used by every equality predicate; the
+ * frontend treats it as opaque and never displays it. `display_name` is
+ * the user-visible label. `icon_ref` is the relative reference under
+ * `application-icons/` resolved through the existing icon bridge.
+ * `fallback` is `true` when the combobox must render the generic glyph
+ * because no persisted icon was found.
+ */
+export interface SourceApplicationOption {
+  source_app: string | null;
+  display_name: string;
+  icon_ref: string | null;
+  fallback: boolean;
+}
+
+/**
+ * Metadata describing the scope a `SourceApplicationsSnapshot` was
+ * computed against. Returned alongside the options so the frontend can
+ * detect a stale response (a collection switch that landed while the
+ * query was in flight, for example) and drop it without polluting the
+ * combobox.
+ */
+export interface SourceApplicationsScope {
+  collection_id: number | null;
+  tag_ids: number[];
+}
+
+/**
+ * Result of `clipvault_source_applications`. `Todas` is always the
+ * first option; `Aplicación desconocida` follows when the scope
+ * actually contains rows with no source identifier. The remaining
+ * entries are the known applications, ordered case-insensitive by
+ * `display_name` and using the stable identifier as the deterministic
+ * tiebreaker.
+ */
+export interface SourceApplicationsSnapshot {
+  options: SourceApplicationOption[];
+  scope: SourceApplicationsScope;
+}
+
 export type ClipvaultCommand<T> = () => Promise<T>;
 export type ClipvaultCommandArg<T, A> = (arg: A) => Promise<T>;

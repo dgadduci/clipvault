@@ -10,6 +10,9 @@
     PasteResponse,
     PlatformGuidance,
     SearchResponse,
+    SourceAppFilter,
+    SourceApplicationOption,
+    SourceApplicationsSnapshot,
     Tag,
   } from "./types";
   import {
@@ -27,11 +30,11 @@
     entryTagsSetCommand,
     organizationSnapshotCommand,
     platformCapabilitiesCommand,
-    recentEntriesCommand,
     recentEntriesFilteredCommand,
     refreshCapabilitiesCommand,
     searchEntriesCommand,
     setFavoriteCommand,
+    sourceApplicationsCommand,
     unorganizedClearableCountCommand,
   } from "./lib/tauri";
   import { retryGuidance } from "./lib/guidance";
@@ -120,6 +123,25 @@
   let organization: OrganizationSnapshot | null = null;
   let selectedCollectionId: number | null = null;
   let historyCollectionId: number | null = null;
+  /**
+   * Source-application filter the desktop toolbar's combobox owns.
+   * `SourceAppFilter::All` is the absence of a restriction; the
+   * other two variants pin the rail/search to a single stable
+   * identifier or the synthetic `Unknown` branch. The state lives
+   * on the parent so the same filter can be composed with the
+   * collection, query and tag facets every recents/search request
+   * consumes.
+   */
+  let sourceAppFilter: SourceAppFilter = { kind: "all" };
+  /**
+   * Options the toolbar combobox renders. Loaded through
+   * `sourceApplicationsCommand` against the active collection
+   * scope; a stale response (a collection switch that landed while
+   * the bridge call was in flight) is detected through the
+   * embedded `scope` and dropped silently.
+   */
+  let sourceAppOptions: SourceApplicationOption[] = [];
+  let sourceAppOptionsLoading = false;
   let entryOrganization: Map<number, { tags: Tag[]; collections: Collection[] }> =
     new Map();
   type EntryOrganizationHydration = "pending" | "loaded" | "error";
@@ -177,6 +199,7 @@
           organization.collections.find((c) => c.kind === "system")?.id ?? null;
       }
       await refreshEntries();
+      await refreshSourceAppOptions();
       await refreshUnorganizedClearableCount();
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -185,14 +208,32 @@
     }
   }
 
+  /**
+   * Load the entries the rail renders. The same filtered command
+   * backs every scope — Historial and a user collection alike — so
+   * the source-app combobox selection reaches the backend on the
+   * bootstrap path. The previous implementation branched on
+   * `selectedCollectionId === null` and fell back to the unfiltered
+   * `recentEntriesCommand`, which silently dropped the
+   * `sourceAppFilter` while the active view was Historial (the
+   * default). The combobox kept loading its options correctly
+   * because `refreshSourceAppOptions` already uses the explicit
+   * `activeCollectionIsHistory ? null : selectedCollectionId`
+   * scope; the rail needed the same pattern.
+   *
+   * `activeCollectionIsHistory` is the documented scope helper: it
+   * returns `true` for the default Historial view (`selectedCollectionId
+   * === null`) and for a collection whose kind is `system`. Mapping
+   * the `true` branch to `collectionId: null` keeps the wire contract
+   * the `clipvault_recent_entries_filtered` command already expects
+   * for Historial and removes the need to hardcode any numeric id.
+   */
   async function loadEntries(): Promise<EntryRecord[]> {
-    if (selectedCollectionId === null) {
-      return recentEntriesCommand({ limit: RAIL_LIMIT });
-    }
     return recentEntriesFilteredCommand({
       limit: RAIL_LIMIT,
-      collectionId: selectedCollectionId,
+      collectionId: activeCollectionIsHistory ? null : selectedCollectionId,
       tagIds: [],
+      sourceApp: sourceAppFilter,
     });
   }
 
@@ -392,6 +433,26 @@
     }
   }
 
+  /**
+   * Handler the toolbar's source-app combobox dispatches. The
+   * toolbar is fully presentational: it owns no state of its own
+   * and forwards every selection through this callback so the
+   * parent can compose it with the rest of the recents/search
+   * request and immediately re-run the active query.
+   */
+  async function handleSourceAppFilterChange(next: SourceAppFilter): Promise<void> {
+    if (
+      next.kind === sourceAppFilter.kind &&
+      (next.kind !== "known" ||
+        (sourceAppFilter.kind === "known" &&
+          next.source_app === sourceAppFilter.source_app))
+    ) {
+      return;
+    }
+    sourceAppFilter = next;
+    await refreshEntries();
+  }
+
   async function refreshUnorganizedClearableCount(): Promise<void> {
     if (unorganizedClearableCountLoading) {
       return;
@@ -417,6 +478,43 @@
     } catch (err) {
       organizationError =
         err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  /**
+   * Reload the source-application combobox options against the
+   * active collection scope. The bridge call is anchored on a
+   * monotonic token so a stale response (a collection switch that
+   * landed while the bridge call was in flight) never overwrites a
+   * fresher snapshot — the guard mirrors the one
+   * `performSearch` already uses.
+   */
+  let sourceAppOptionsToken = 0;
+  async function refreshSourceAppOptions(): Promise<void> {
+    if (sourceAppOptionsLoading) {
+      return;
+    }
+    sourceAppOptionsLoading = true;
+    const token = ++sourceAppOptionsToken;
+    try {
+      const snapshot: SourceApplicationsSnapshot = await sourceApplicationsCommand({
+        collectionId: activeCollectionIsHistory ? null : selectedCollectionId,
+        tagIds: [],
+      });
+      if (token !== sourceAppOptionsToken) {
+        return;
+      }
+      sourceAppOptions = snapshot.options;
+    } catch (err) {
+      if (token === sourceAppOptionsToken) {
+        organizationError = `Source-app options unavailable: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+      }
+    } finally {
+      if (token === sourceAppOptionsToken) {
+        sourceAppOptionsLoading = false;
+      }
     }
   }
 
@@ -458,10 +556,17 @@
     event: CustomEvent<{ collectionId: number | null }>,
   ): Promise<void> {
     selectedCollectionId = event.detail.collectionId;
-    // Changing collection MUST re-execute the active search so the
-    // rail keeps showing results scoped to the new selection. The
-    // search already debounces the input; we pass `silent` so the
-    // UI does not flash a `loading` state mid-navigation.
+    // Switching collection MUST reset the source-app filter to
+    // `Todas` and reload the option list so the user does not
+    // carry a criterion that has no meaning in the new scope
+    // (the design document pins this contract).
+    if (sourceAppFilter.kind !== "all") {
+      sourceAppFilter = { kind: "all" };
+    }
+    // Reload the combobox options for the new scope and refresh
+    // the rail so the cards reflect the new active collection
+    // without stale options or stale rows.
+    await refreshSourceAppOptions();
     await refreshEntries();
   }
 
@@ -844,6 +949,7 @@
               ? selectedCollectionId
               : null,
           tagIds: [],
+          sourceApp: sourceAppFilter,
         });
         return response;
       },
@@ -960,6 +1066,7 @@
 
   async function handleHistoryUpdated(): Promise<void> {
     try {
+      await refreshSourceAppOptions();
       await refreshEntries();
       await refreshUnorganizedClearableCount();
     } catch (err) {
@@ -1102,12 +1209,15 @@
           searchShortcut={searchShortcutLabelText}
           searchShortcutAccessible={searchShortcutAccessibleText}
           showClearHistory={activeCollectionIsHistory}
+          sourceAppFilter={sourceAppFilter}
+          sourceAppOptions={sourceAppOptions}
           onSearchInput={handleSearchInput}
           onOpenDevelopment={onOpenDevelopment}
           onOpenPrivacy={onOpenPrivacy}
           onOpenRetention={onOpenRetention}
           onOpenShortcut={onOpenShortcut}
           onRequestClearHistory={onRequestClearHistory}
+          onSourceAppFilterChange={(next) => handleSourceAppFilterChange(next)}
         />
         <p
           class="search-status muted"

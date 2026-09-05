@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use clipvault_core::{
     AppBootstrap, AppContext, Clock, DeleteOutcome, OrganizationServiceError, SearchFilter,
+    SourceAppFilter,
 };
 use clipvault_db::{
     ContentType, EntryRepository, NewEntry, OrganizationError, OrganizationRepository,
@@ -444,6 +445,7 @@ fn search_filter_by_collection_preserves_ranking() {
             &SearchFilter {
                 collection_id: Some(trabajo_id),
                 tag_ids: Vec::new(),
+                source_app: SourceAppFilter::default(),
             },
         )
         .expect("search");
@@ -488,6 +490,7 @@ fn search_filter_by_multiple_tags_uses_and_semantics() {
             &SearchFilter {
                 collection_id: None,
                 tag_ids: vec![codigo, pendiente],
+                source_app: SourceAppFilter::default(),
             },
         )
         .expect("search");
@@ -1400,7 +1403,13 @@ fn recent_entries_with_filter_returns_image_rows_for_collection() {
 
     let filtered = context
         .history()
-        .recent_entries_with_filter(&context, Some(trabajo_id), &[], 50)
+        .recent_entries_with_filter(
+            &context,
+            Some(trabajo_id),
+            &[],
+            &SourceAppFilter::default(),
+            50,
+        )
         .expect("filtered recent entries");
     let ids: Vec<i64> = filtered.iter().map(|r| r.id).collect();
     assert!(
@@ -1472,7 +1481,13 @@ fn recent_entries_with_filter_for_history_includes_image_rows() {
         .expect("history");
     let filtered = context
         .history()
-        .recent_entries_with_filter(&context, Some(history_id), &[], 50)
+        .recent_entries_with_filter(
+            &context,
+            Some(history_id),
+            &[],
+            &SourceAppFilter::default(),
+            50,
+        )
         .expect("filtered");
     let ids: Vec<i64> = filtered.iter().map(|r| r.id).collect();
     assert!(ids.contains(&text_id));
@@ -1699,7 +1714,7 @@ fn image_entry_tags_persist_across_close_and_reopen() {
     // working.
     let row = reopened
         .history()
-        .recent_entries_with_filter(&reopened, None, &[], 50)
+        .recent_entries_with_filter(&reopened, None, &[], &SourceAppFilter::default(), 50)
         .expect("rail")
         .into_iter()
         .find(|r| r.id == image_id)
@@ -1824,7 +1839,7 @@ fn assigning_tags_to_image_preserves_asset_ref_and_payload() {
 
     let row = context
         .history()
-        .recent_entries_with_filter(&context, None, &[], 50)
+        .recent_entries_with_filter(&context, None, &[], &SourceAppFilter::default(), 50)
         .expect("rail")
         .into_iter()
         .find(|r| r.id == image_id)
@@ -1860,7 +1875,7 @@ fn assigning_collection_to_image_preserves_asset_ref_and_payload() {
 
     let row = context
         .history()
-        .recent_entries_with_filter(&context, None, &[], 50)
+        .recent_entries_with_filter(&context, None, &[], &SourceAppFilter::default(), 50)
         .expect("rail")
         .into_iter()
         .find(|r| r.id == image_id)
@@ -1903,7 +1918,7 @@ fn image_row_remains_in_unfiltered_recent_entries_after_assignments() {
 
     let recent = context
         .history()
-        .recent_entries_with_filter(&context, None, &[], 50)
+        .recent_entries_with_filter(&context, None, &[], &SourceAppFilter::default(), 50)
         .expect("rail");
     let ids: Vec<i64> = recent.iter().map(|r| r.id).collect();
     assert!(ids.contains(&image_id));
@@ -1987,7 +2002,7 @@ fn recent_entries_with_filter_returns_image_rows_after_context_restart() {
     let context = reopen_context_from(&dir, when);
     let rows = context
         .history()
-        .recent_entries_with_filter(&context, None, &[], 50)
+        .recent_entries_with_filter(&context, None, &[], &SourceAppFilter::default(), 50)
         .expect("unfiltered rail after reopen");
     let unfiltered_ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
     assert!(
@@ -1997,7 +2012,13 @@ fn recent_entries_with_filter_returns_image_rows_after_context_restart() {
 
     let scoped = context
         .history()
-        .recent_entries_with_filter(&context, Some(trabajo_id), &[], 50)
+        .recent_entries_with_filter(
+            &context,
+            Some(trabajo_id),
+            &[],
+            &SourceAppFilter::default(),
+            50,
+        )
         .expect("scoped rail after reopen");
     let scoped_ids: Vec<i64> = scoped.iter().map(|r| r.id).collect();
     assert!(

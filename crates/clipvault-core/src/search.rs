@@ -8,7 +8,7 @@
 //! re-use directly (e.g. when the future `quick-paste` change wires
 //! the action).
 
-use clipvault_db::{EntryRecord, EntryRepository, EntryRepositoryError};
+use clipvault_db::{EntryRecord, EntryRepository, EntryRepositoryError, SourceAppFilter};
 use clipvault_search::{
     LocalSearchEngine, SearchDocument, SearchEngine, SearchHit, SearchQuery, SearchResults,
 };
@@ -65,11 +65,16 @@ pub struct SearchServiceOutcome {
 /// `collection_id == None` means "no collection filter" — equivalent
 /// to selecting `Historial`. `tag_ids` is AND-combined: empty means
 /// "no tag filter", otherwise the entry must carry every supplied
-/// tag.
+/// tag. `source_app` is the `source-app-filter` capability's third
+/// facet: `All` is the absence of a restriction, `Known` pins the
+/// candidate set to a single stable identifier, and `Unknown` keeps
+/// the rows whose `source_app` is `NULL` or empty. All three facets
+/// are AND-combined and applied before the ranking engine runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchFilter {
     pub collection_id: Option<i64>,
     pub tag_ids: Vec<i64>,
+    pub source_app: SourceAppFilter,
 }
 
 /// Service that wires the entry repository to the search engine.
@@ -114,10 +119,17 @@ impl SearchService {
         let records = {
             let mut db = context.database().lock();
             let repo = EntryRepository::new(db.connection_mut());
-            if filter.collection_id.is_none() && filter.tag_ids.is_empty() {
+            let no_filters = filter.collection_id.is_none()
+                && filter.tag_ids.is_empty()
+                && matches!(filter.source_app, SourceAppFilter::All);
+            if no_filters {
                 repo.text_entries()?
             } else {
-                repo.text_entries_filtered(filter.collection_id, &filter.tag_ids)?
+                repo.text_entries_filtered(
+                    filter.collection_id,
+                    &filter.tag_ids,
+                    &filter.source_app,
+                )?
             }
         };
 

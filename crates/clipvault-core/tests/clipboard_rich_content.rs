@@ -20,8 +20,8 @@ use clipvault_core::{
     ClipboardBackendError, ClipboardImage, ClipboardPayload, DisplayServer, FakeActiveApplication,
     FakeClipboardBackend, FakeHotkeyManager, FakePasteController, FakeSettingsNavigator,
     FakeTrayController, HistoryOutcome, OsFamily, PasteMode, PasteOutcome, PlatformAdapters,
-    PlatformInfo, PlatformIssueKind, RetentionPolicy, SettingsReader, WatchTickOutcome,
-    CLIPBOARD_WRITE_IMAGE_CAPABILITY,
+    PlatformInfo, PlatformIssueKind, RetentionPolicy, SettingsReader, SourceAppFilter,
+    WatchTickOutcome, CLIPBOARD_WRITE_IMAGE_CAPABILITY,
 };
 use clipvault_db::{ContentType, EntryRepository};
 use tempfile::TempDir;
@@ -635,7 +635,7 @@ fn recent_entries_with_filter_returns_image_rows_in_history_after_restart() {
     let reopened = reopen_context(&db_path, &data_dir, when);
     let records = reopened
         .history()
-        .recent_entries_with_filter(&reopened, None, &[], 50)
+        .recent_entries_with_filter(&reopened, None, &[], &SourceAppFilter::default(), 50)
         .expect("recent_entries_with_filter");
     assert_eq!(records.len(), 1);
     let record = &records[0];

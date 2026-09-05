@@ -29,6 +29,7 @@ pub mod rich_text;
 pub mod search;
 pub mod settings;
 pub mod settings_service;
+pub mod source_app;
 pub mod test_support;
 pub mod watcher;
 
@@ -42,6 +43,7 @@ pub use clipboard_assets::{
     AssetDiagnosticKind, AssetError, ClipboardAssetStore, NormalizedImage, StoreOutcome,
     CLIPBOARD_ASSETS_DIR, CLIPBOARD_ASSET_EXTENSION, MAX_CLIPBOARD_ASSET_BYTES,
 };
+pub use clipvault_db::SourceAppFilter;
 pub use clipvault_db::{Collection, CollectionKind, Tag};
 pub use clipvault_platform::{
     checked_rgba_len, default_linux_binding, default_macos_binding, detect_capabilities,
@@ -108,6 +110,10 @@ pub use settings::{
     HOTKEY_SETTING_STORAGE_KEY, MAX_IDENTIFIER_LENGTH,
 };
 pub use settings_service::{SettingsService, SettingsServiceError};
+pub use source_app::{
+    SourceApplicationOption, SourceApplicationsError, SourceApplicationsQuery,
+    SourceApplicationsScope, SourceApplicationsSnapshot,
+};
 pub use test_support::{
     build_isolated_adapters, fixed_clock, isolated_harness, isolated_harness_at,
     isolated_harness_with_clock, FixedClock, IsolatedTestHarness,

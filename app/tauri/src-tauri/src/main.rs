@@ -171,6 +171,7 @@ fn main() {
             commands::clipvault_entry_upsert_tag,
             commands::clipvault_entry_remove_from_collection,
             commands::clipvault_history_collection_id,
+            commands::clipvault_source_applications,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ClipVault")
