@@ -10,6 +10,7 @@ import type {
   ClipvaultCommand,
   ClipvaultCommandArg,
   Collection,
+  CopyResponse,
   DatabasePath,
   DeleteResponse,
   Diagnostics,
@@ -150,6 +151,26 @@ export const pasteEntryCommand: ClipvaultCommandArg<
   { id: number; mode?: "plain" | "rich" | null }
 > = (args) =>
   invoke<PasteResponse>("clipvault_paste_entry", {
+    entryId: args.id,
+    mode: args.mode ?? null,
+  });
+
+/**
+ * Copy-only keyboard command used by Quick Paste.
+ *
+ * Forwards `id` and the optional `mode` argument to
+ * `clipvault_copy_entry`. The backend writes the type-appropriate
+ * representation (plain, rich, image) to the system clipboard and
+ * arms the suppression registry so the next watcher tick does not
+ * create a history card as a side effect. The command NEVER
+ * invokes any synthetic paste controller and NEVER clears the
+ * clipboard after writing it.
+ */
+export const copyEntryCommand: ClipvaultCommandArg<
+  CopyResponse,
+  { id: number; mode?: "plain" | "rich" | null }
+> = (args) =>
+  invoke<CopyResponse>("clipvault_copy_entry", {
     entryId: args.id,
     mode: args.mode ?? null,
   });
@@ -502,6 +523,7 @@ export type {
   CaptureResponse,
   ClearResponse,
   Collection,
+  CopyResponse,
   DeleteResponse,
   Diagnostics,
   EntryRecord,

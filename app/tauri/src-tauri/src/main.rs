@@ -131,6 +131,7 @@ fn main() {
             commands::clipvault_capture_tick,
             commands::clipvault_platform_capabilities,
             commands::clipvault_paste_entry,
+            commands::clipvault_copy_entry,
             commands::clipvault_active_application,
             commands::clipvault_active_app_diagnostics,
             commands::clipvault_refresh_active_app_diagnostics,

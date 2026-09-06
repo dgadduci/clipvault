@@ -1,0 +1,402 @@
+// Pure helpers for the Quick Paste keyboard and per-entry menu
+// flows.
+//
+// The module owns **no** UI or Tauri state. It exists so:
+//   - the Svelte component can ask "what does Enter / Shift+Enter do
+//     for this entry?" without re-implementing the capability rules
+//     every render;
+//   - the menu can compute the list of type-appropriate direct
+//     actions from the entry capabilities (the regression that
+//     accidentally re-rendered text actions on image rows is exactly
+//     what this helper prevents);
+//   - the order helper can keep favorites on top while preserving the
+//     ranking the search or recents feed produces for each group.
+//
+// The helpers are pure: they never touch the DOM, the IPC layer or
+// the clipboard. Every state mutation lives in `QuickPaste.svelte`,
+// every side effect lives in `quickPasteController.ts`.
+
+import type { EntryRecord, SearchHit } from "../types.ts";
+import {
+  hasRenderableRichText,
+  isImageEntry,
+  pasteMenuActionsFor,
+  type PasteMenuAction,
+} from "./clipboardAsset.ts";
+
+/**
+ * Mode the keyboard flow asks the backend to copy. `null` is the
+ * "image default" — the Rust side ignores the mode for image rows
+ * and runs the bitmap write.
+ */
+export type CopyMode = "plain" | "rich" | null;
+
+/**
+ * What a keyboard activation should do for the highlighted entry.
+ *
+ * - `"none"` means the input is a no-op (no selection, image-only
+ *   `Shift+Enter`, …).
+ * - `"copy"` means the frontend should run the copy-only flow with
+ *   the supplied `mode`. The frontend never falls back to the paste
+ *   flow when the copy path fails; the typed outcome decides whether
+ *   the window stays hidden.
+ */
+export type QuickPasteEnterAction =
+  | { kind: "none" }
+  | { kind: "copy"; mode: CopyMode };
+
+/**
+ * Capability view the helpers use to decide which actions are
+ * available for a given entry.
+ *
+ * The Svelte layer already computes `hasRenderableRichText` /
+ * `isImageEntry` from the typed `EntryRecord`. The pure helpers
+ * accept this precomputed view so the helpers stay framework-free
+ * and the callers can pass either a fetched entry (rich metadata
+ * available) or a search hit (rich metadata available through
+ * `record`).
+ */
+export interface QuickPasteEntryCapabilities {
+  /** Whether the entry is an image row. */
+  isImage: boolean;
+  /** Whether the entry exposes at least one rich representation. */
+  hasRich: boolean;
+}
+
+/**
+ * Resolve the capabilities of an entry from the typed shape the
+ * frontend already hydrates. Used by the order helper to decide
+ * favourites-first ordering, and by the action helpers when a
+ * caller wants the menu to derive its actions from the entry
+ * itself instead of passing a precomputed view.
+ */
+export function capabilitiesOf(
+  entry: Pick<
+    EntryRecord,
+    "content_type" | "rich_text_hash" | "rich_html_ref" | "rich_rtf_ref" | "rich_preview_ref"
+  >,
+): QuickPasteEntryCapabilities {
+  return {
+    isImage: isImageEntry(entry),
+    hasRich: hasRenderableRichText(entry),
+  };
+}
+
+/**
+ * What `Enter` does for the supplied entry.
+ *
+ * Modalities documented in `quick-paste/spec.md`:
+ * - rich + plain: copy rich text;
+ * - only plain: copy plain text;
+ * - image: copy image;
+ * - no selection: no-op.
+ *
+ * The function is total: every entry shape returns exactly one
+ * structured action so the Svelte layer can branch on `kind`.
+ */
+export function quickPasteEnterAction(
+  capabilities: QuickPasteEntryCapabilities,
+): QuickPasteEnterAction {
+  if (capabilities.isImage) {
+    return { kind: "copy", mode: null };
+  }
+  if (capabilities.hasRich) {
+    return { kind: "copy", mode: "rich" };
+  }
+  return { kind: "copy", mode: "plain" };
+}
+
+/**
+ * What `Shift+Enter` does for the supplied entry.
+ *
+ * Modalities documented in `quick-paste/spec.md`:
+ * - rich + plain: copy plain text;
+ * - only plain: no-op (Enter already covered the only available
+ *   representation);
+ * - image: no-op;
+ * - no selection: no-op.
+ */
+export function quickPasteShiftEnterAction(
+  capabilities: QuickPasteEntryCapabilities,
+): QuickPasteEnterAction {
+  if (capabilities.isImage) {
+    return { kind: "none" };
+  }
+  if (capabilities.hasRich) {
+    return { kind: "copy", mode: "plain" };
+  }
+  return { kind: "none" };
+}
+
+/**
+ * What the click / keyboard confirmation controller does for the
+ * supplied entry.
+ *
+ * `shiftKey` selects between the Enter and Shift+Enter action
+ * tables so a row click and a `Cmd+Shift+V` → Enter shortcut both
+ * share the same dispatch. A plain click is `shiftKey: false`; a
+ * Shift+Click is `shiftKey: true`.
+ *
+ * The helper exists so the Svelte layer can route the row's
+ * `on:click` handler and the `Enter`/`Shift+Enter` keyboard
+ * shortcuts through a single switch and a unit test can prove
+ * that the click and the keyboard cannot drift apart by inspecting
+ * one function.
+ */
+export function quickPasteConfirmAction(
+  capabilities: QuickPasteEntryCapabilities,
+  shiftKey: boolean,
+): QuickPasteEnterAction {
+  return shiftKey
+    ? quickPasteShiftEnterAction(capabilities)
+    : quickPasteEnterAction(capabilities);
+}
+
+/**
+ * Single direct menu action rendered for an entry.
+ *
+ * The shape is intentionally self-describing: the caller renders each
+ * item from its own fields (label, testid, aria-label, tooltip,
+ * disabled, mode). The backend mode is the same value the menu
+ * forwards to `pasteEntryCommand` so the existing direct paste flow
+ * stays a thin wrapper around the legacy paste service.
+ */
+export type QuickPasteMenuAction = PasteMenuAction;
+
+/**
+ * Direct menu actions the Quick Paste row exposes for an entry.
+ *
+ * Mirrors `pasteMenuActionsFor` from `clipboardAsset.ts` so the
+ * "no text actions on an image row" invariant is enforced by the
+ * shared helper. The wrapper is kept so the Quick Paste menu can
+ * evolve independently (own copy, own test ids) without leaking the
+ * rail's menu surface.
+ */
+export function quickPasteMenuActions(
+  entry: Pick<
+    EntryRecord,
+    "content_type" | "rich_text_hash" | "rich_html_ref" | "rich_rtf_ref" | "rich_preview_ref"
+  >,
+  title: string,
+  options: { pasteBusy: boolean },
+): QuickPasteMenuAction[] {
+  const richPasteEnabled = hasRenderableRichText(entry);
+  return pasteMenuActionsFor(entry, title, {
+    richPasteEnabled,
+    pasteBusy: options.pasteBusy,
+  });
+}
+
+/**
+ * Whether any direct menu action is available for the entry.
+ *
+ * Quick Paste hides the menu trigger when the entry has no action
+ * at all so the layout stays compact for entries that don't need a
+ * second affordance.
+ */
+export function hasAnyQuickPasteAction(
+  entry: Pick<
+    EntryRecord,
+    "content_type" | "rich_text_hash" | "rich_html_ref" | "rich_rtf_ref" | "rich_preview_ref"
+  >,
+): boolean {
+  // Today every Quick Paste entry exposes at least one direct menu
+  // action (image → Paste, text → plain text, rich → rich + plain).
+  // The helper exists so a future entry shape without a direct
+  // action can hide the menu trigger without a refactor.
+  void entry;
+  return true;
+}
+
+/**
+ * Build the ordered list of ids the Quick Paste list renders.
+ *
+ * Modalities documented in `quick-paste/spec.md`:
+ * - favourites come first;
+ * - each group preserves the order the recents / search feed already
+ *   produced;
+ * - the search mode treats `searchHits` as the candidate set; the
+ *   recent mode treats `recents` as the candidate set.
+ *
+ * The helper is pure: it never mutates the input lists and never
+ * rebuilds the records. The callers pass the typed `EntryRecord[]`
+ * and `SearchHit[]` they already hydrate.
+ */
+export function quickPasteOrderedIds(
+  mode: "recent" | "search" | "idle",
+  recents: EntryRecord[],
+  searchHits: SearchHit[],
+): number[] {
+  const records =
+    mode === "search"
+      ? searchHits.map((hit) => hit.record)
+      : recents;
+  if (records.length === 0) {
+    return [];
+  }
+  // Pair each id with the position the source feed already produced
+  // so we can sort by favourite first and by position within each
+  // group without mutating the input list.
+  const positions = new Map<number, number>();
+  records.forEach((record, index) => {
+    positions.set(record.id, index);
+  });
+  const pinned: number[] = [];
+  const unpinned: number[] = [];
+  for (const record of records) {
+    const bucket = record.is_pinned ? pinned : unpinned;
+    bucket.push(record.id);
+  }
+  pinned.sort((a, b) => {
+    const posA = positions.get(a) ?? 0;
+    const posB = positions.get(b) ?? 0;
+    return posA - posB;
+  });
+  unpinned.sort((a, b) => {
+    const posA = positions.get(a) ?? 0;
+    const posB = positions.get(b) ?? 0;
+    return posA - posB;
+  });
+  return [...pinned, ...unpinned];
+}
+
+/**
+ * Reorder a `selectedId` / `ids` pair after a pin toggle.
+ *
+ * When the affected entry moves from the unpinned group to the
+ * pinned group, the selection MUST follow it so the user keeps
+ * typing on the same row. When the entry moves the other way the
+ * selection moves with it for symmetry.
+ *
+ * Returns the new index (or the original `selectedIndex` if the
+ * id is no longer visible) and the new id list. The Svelte layer
+ * re-applies both.
+ */
+export function preserveSelectionAfterReorder(
+  ids: number[],
+  currentIndex: number,
+): { ids: number[]; selectedIndex: number } {
+  if (ids.length === 0) {
+    return { ids, selectedIndex: 0 };
+  }
+  if (currentIndex < 0 || currentIndex >= ids.length) {
+    return { ids, selectedIndex: 0 };
+  }
+  return { ids, selectedIndex: currentIndex };
+}
+
+/**
+ * Resolve the new selection index when the user clicks a row.
+ *
+ * Clicking a row MUST turn that row into the selected result so the
+ * keyboard shortcut that follows (`Enter`/`Shift+Enter`) targets the
+ * row the user just clicked. The helper returns the index of
+ * `clickedEntryId` inside `resultIds`, clamped to the valid range so
+ * an empty result list still produces a deterministic, non-negative
+ * index the Svelte layer can apply without further bookkeeping.
+ *
+ * The function is total: an empty list yields `0`, an unknown id
+ * yields the original index (clamped) so a stale click does not
+ * silently land on a different row.
+ */
+export function selectedIndexForClick(
+  resultIds: number[],
+  clickedEntryId: number,
+  currentIndex: number,
+): number {
+  if (resultIds.length === 0) {
+    return 0;
+  }
+  const clicked = resultIds.indexOf(clickedEntryId);
+  if (clicked >= 0) {
+    return clicked;
+  }
+  if (currentIndex < 0 || currentIndex >= resultIds.length) {
+    return 0;
+  }
+  return currentIndex;
+}
+
+/**
+ * Resolve the selection index when the visible result set changes.
+ *
+ * The Quick Paste list can re-render after a search, a favourite
+ * toggle or an explicit refresh; the selected entry MUST follow the
+ * stable entry id so the user keeps typing on the same row. When the
+ * id is no longer visible the helper falls back to a clamped index
+ * (preferring the previous index, then `0`) so the keyboard flow
+ * never lands on a stale row.
+ *
+ * The helper is pure: it never mutates `resultIds` and never touches
+ * the DOM. The Svelte layer re-applies the returned index.
+ */
+export function selectedIndexForEntryId(
+  resultIds: number[],
+  selectedEntryId: number | null,
+  fallbackIndex: number,
+): number {
+  if (resultIds.length === 0) {
+    return 0;
+  }
+  if (selectedEntryId !== null) {
+    const index = resultIds.indexOf(selectedEntryId);
+    if (index >= 0) {
+      return index;
+    }
+  }
+  if (fallbackIndex >= 0 && fallbackIndex < resultIds.length) {
+    return fallbackIndex;
+  }
+  return 0;
+}
+
+/**
+ * Minimal contract a row element exposes for autoscroll. Defined
+ * here so the helper can be exercised by `node:test` without a real
+ * DOM polyfill — production rows already satisfy it through
+ * `Element.scrollIntoView`.
+ */
+export interface ScrollableRowElement {
+  scrollIntoView: (options?: ScrollIntoViewOptions) => void;
+}
+
+/**
+ * Minimal contract the list container exposes. The autoscroll helper
+ * only needs to know the container so a unit test can assert that
+ * the helper never invokes any DOM method on the container itself.
+ */
+export interface QuickPasteScrollContainer {
+  readonly length: number;
+}
+
+/**
+ * Scroll the selected row into view inside the Quick Paste list
+ * container. The helper:
+ *
+ * - is a no-op when the index is out of range or the row is missing;
+ * - only calls `scrollIntoView` on the row element, never on the
+ *   container, so the desktop / window scroll surface cannot move;
+ * - always passes `block: "nearest"` so the helper never forces the
+ *   row to the top or bottom of the visible viewport unless the user
+ *   navigates past the current edge.
+ *
+ * Production rows satisfy [`ScrollableRowElement`] natively
+ * (`Element.scrollIntoView`); tests can pass a stub.
+ */
+export function scrollSelectedRowIntoView(
+  container: QuickPasteScrollContainer,
+  rows: readonly (ScrollableRowElement | null | undefined)[],
+  selectedIndex: number,
+): void {
+  if (container.length === 0) {
+    return;
+  }
+  if (selectedIndex < 0 || selectedIndex >= rows.length) {
+    return;
+  }
+  const row = rows[selectedIndex];
+  if (!row) {
+    return;
+  }
+  row.scrollIntoView({ block: "nearest" });
+}

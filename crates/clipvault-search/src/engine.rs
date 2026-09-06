@@ -18,6 +18,22 @@ pub const SCORE_ALL_TOKENS_SUBSTRING: i32 = 2_000;
 /// fuzzy matching but no exact or substring hit is available.
 pub const SCORE_FUZZY: i32 = 1_000;
 
+/// Score used when the entire normalized phrase matches the
+/// user-defined card title only (the document content does not match
+/// at any tier). Title matches always rank below any content match so
+/// the existing ranking semantics for content stay intact; the
+/// constants exist purely so a title-only entry can still surface in
+/// the Quick Paste results list.
+pub const SCORE_TITLE_EXACT_PHRASE: i32 = 800;
+
+/// Score used when every query token appears as a substring of the
+/// title only (content does not match).
+pub const SCORE_TITLE_ALL_TOKENS_SUBSTRING: i32 = 600;
+
+/// Score used when every query token fuzzy-matches the title only
+/// (content does not match at any tier).
+pub const SCORE_TITLE_FUZZY: i32 = 400;
+
 /// Default length, in `char`s, of the snippet returned with each hit.
 pub const SNIPPET_MAX_CHARS: usize = 80;
 
@@ -43,11 +59,18 @@ pub struct SearchQuery {
 
 /// One document the engine can score. The engine borrows the strings so
 /// it does not own any data and does not need to allocate per call.
+///
+/// `title` is the user-defined card title (the "custom" label the
+/// `card-title-editing-regression` change persists on the row).
+/// `None` for rows that never received a custom title; the engine
+/// falls back to a content-only match in that case. The field is
+/// metadata only: the engine never logs, returns or persists it.
 #[derive(Debug, Clone)]
 pub struct SearchDocument<'a> {
     pub entry_id: i64,
     pub content: &'a str,
     pub updated_at: &'a str,
+    pub title: Option<&'a str>,
 }
 
 /// One hit produced by the engine. `score` is the tier base; the
@@ -144,31 +167,81 @@ struct NormalizedQuery<'a> {
 
 /// Compute the score tier for one document. Returns `None` when no
 /// tier applies (the document is dropped).
+///
+/// Content matches always outrank title matches so the existing
+/// ranking semantics for content are preserved bit-for-bit. A
+/// title-only match still surfaces the row, but at the lower
+/// [`SCORE_TITLE_*`] tier so the order stays deterministic.
 fn score_document(doc: &SearchDocument<'_>, query: &NormalizedQuery<'_>) -> Option<i32> {
     let normalized_content = normalize_query(doc.content).phrase;
-    if normalized_content.is_empty() {
+
+    // Content first — the existing tiers (3000 / 2000 / 1000) keep
+    // their absolute priority.
+    if !normalized_content.is_empty() {
+        if let Some(score) = score_field(
+            &normalized_content,
+            query,
+            SCORE_EXACT_PHRASE,
+            SCORE_ALL_TOKENS_SUBSTRING,
+            SCORE_FUZZY,
+        ) {
+            return Some(score);
+        }
+    }
+
+    // Title fallback. The title is `Option<&str>`; missing or
+    // whitespace-only titles collapse to "no match" without touching
+    // the snippet, so the existing content-based snippet keeps
+    // working unchanged.
+    let normalized_title = doc.title.map(normalize_query);
+    if let Some(title) = normalized_title.as_ref().filter(|n| !n.phrase.is_empty()) {
+        if let Some(score) = score_field(
+            &title.phrase,
+            query,
+            SCORE_TITLE_EXACT_PHRASE,
+            SCORE_TITLE_ALL_TOKENS_SUBSTRING,
+            SCORE_TITLE_FUZZY,
+        ) {
+            return Some(score);
+        }
+    }
+
+    None
+}
+
+/// Score a single normalised field (content or title) using the three
+/// supplied tier constants. The function is total: a whitespace-only
+/// field is treated as "no match" and returns `None`.
+fn score_field(
+    normalized_field: &str,
+    query: &NormalizedQuery<'_>,
+    exact_phrase: i32,
+    all_tokens_substring: i32,
+    fuzzy: i32,
+) -> Option<i32> {
+    if normalized_field.is_empty() {
         return None;
     }
 
-    if !query.phrase.is_empty() && normalized_content.contains(query.phrase) {
-        return Some(SCORE_EXACT_PHRASE);
+    if !query.phrase.is_empty() && normalized_field.contains(query.phrase) {
+        return Some(exact_phrase);
     }
 
-    let content_tokens = tokenize_for_match(&normalized_content);
+    let field_tokens = tokenize_for_match(normalized_field);
     if query.tokens.iter().all(|token| {
-        content_tokens
+        field_tokens
             .iter()
-            .any(|content_token| content_token.as_str() == token.as_str())
+            .any(|field_token| field_token.as_str() == token.as_str())
     }) {
-        return Some(SCORE_ALL_TOKENS_SUBSTRING);
+        return Some(all_tokens_substring);
     }
 
     if query.tokens.iter().all(|token| {
-        content_tokens
+        field_tokens
             .iter()
-            .any(|content_token| fuzzy_token_match(token, content_token))
+            .any(|field_token| fuzzy_token_match(token, field_token))
     }) {
-        return Some(SCORE_FUZZY);
+        return Some(fuzzy);
     }
 
     None
@@ -212,6 +285,7 @@ mod tests {
             entry_id: id,
             content,
             updated_at,
+            title: None,
         }
     }
 
@@ -377,5 +451,138 @@ mod tests {
             .expect("ok");
         assert!(result.hits.is_empty());
         assert_eq!(result.note, OK_NOTE);
+    }
+
+    fn doc_with_title(
+        id: i64,
+        content: &'static str,
+        updated_at: &'static str,
+        title: Option<&'static str>,
+    ) -> SearchDocument<'static> {
+        SearchDocument {
+            entry_id: id,
+            content,
+            updated_at,
+            title,
+        }
+    }
+
+    #[test]
+    fn title_only_match_returns_the_entry_at_the_title_tier() {
+        // The query appears in the custom title only — never in the
+        // canonical content. The entry MUST still surface so the
+        // Quick Paste title-search contract holds.
+        let engine = LocalSearchEngine;
+        let documents = vec![doc_with_title(
+            1,
+            "lorem ipsum dolor",
+            "2026-01-02T03:04:05Z",
+            Some("Config Notes"),
+        )];
+        let result = engine.search(&query("config", 10), &documents).expect("ok");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].entry_id, 1);
+        assert_eq!(result.hits[0].score, SCORE_TITLE_EXACT_PHRASE);
+    }
+
+    #[test]
+    fn content_match_outranks_title_only_match() {
+        // Two entries, one matches via content, the other only via
+        // title. The content match MUST rank first regardless of the
+        // title tier it reaches.
+        let engine = LocalSearchEngine;
+        let documents = vec![
+            doc_with_title(
+                1,
+                "lorem ipsum dolor",
+                "2026-01-02T03:04:05Z",
+                Some("Config Notes"),
+            ),
+            doc_with_title(2, "alpha config beta", "2026-01-02T03:04:05Z", None),
+        ];
+        let result = engine.search(&query("config", 10), &documents).expect("ok");
+        assert_eq!(result.hits.len(), 2);
+        assert_eq!(result.hits[0].entry_id, 2);
+        assert_eq!(result.hits[0].score, SCORE_EXACT_PHRASE);
+        assert_eq!(result.hits[1].entry_id, 1);
+        assert_eq!(result.hits[1].score, SCORE_TITLE_EXACT_PHRASE);
+    }
+
+    #[test]
+    fn title_tokens_substring_match_surfaces_at_the_title_substring_tier() {
+        // Title contains the query tokens as separate, non-adjacent
+        // words: the full phrase is NOT a substring of the title so
+        // the exact-phrase tier does not fire, but every token IS a
+        // substring of a title token, so the substring tier fires.
+        let engine = LocalSearchEngine;
+        let documents = vec![doc_with_title(
+            1,
+            "lorem ipsum",
+            "2026-01-02T03:04:05Z",
+            Some("Notes about config files"),
+        )];
+        let result = engine
+            .search(&query("config notes", 10), &documents)
+            .expect("ok");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].score, SCORE_TITLE_ALL_TOKENS_SUBSTRING);
+    }
+
+    #[test]
+    fn missing_title_is_a_clean_no_match() {
+        // A `None` title MUST behave exactly like the pre-title-search
+        // contract: the entry only matches when content matches.
+        let engine = LocalSearchEngine;
+        let documents = vec![doc_with_title(
+            1,
+            "lorem ipsum",
+            "2026-01-02T03:04:05Z",
+            None,
+        )];
+        let result = engine.search(&query("config", 10), &documents).expect("ok");
+        assert!(result.hits.is_empty());
+    }
+
+    #[test]
+    fn whitespace_only_title_is_treated_as_missing() {
+        // The same trimming the repository applies to stored titles
+        // runs implicitly through `normalize_query`; the engine MUST
+        // NOT crash on whitespace-only or empty titles and MUST
+        // behave like the entry had no title.
+        let engine = LocalSearchEngine;
+        let documents = vec![doc_with_title(
+            1,
+            "lorem ipsum",
+            "2026-01-02T03:04:05Z",
+            Some("   \t  "),
+        )];
+        let result = engine.search(&query("config", 10), &documents).expect("ok");
+        assert!(result.hits.is_empty());
+    }
+
+    #[test]
+    fn mixed_field_results_are_deterministic() {
+        // Pin the ordering when three documents match through
+        // different fields: content-exact > title-exact > content
+        // fuzzy > no match. The ranking must be stable across runs.
+        let engine = LocalSearchEngine;
+        let documents = vec![
+            doc_with_title(5, "lorem ipsum", "2026-01-02T03:04:06Z", None),
+            doc_with_title(2, "alpha config beta", "2026-01-02T03:04:05Z", None),
+            doc_with_title(
+                7,
+                "lorem ipsum",
+                "2026-01-02T03:04:05Z",
+                Some("Config Notes"),
+            ),
+        ];
+        let first = engine.search(&query("config", 10), &documents).unwrap();
+        let second = engine.search(&query("config", 10), &documents).unwrap();
+        let ids_first: Vec<i64> = first.hits.iter().map(|h| h.entry_id).collect();
+        let ids_second: Vec<i64> = second.hits.iter().map(|h| h.entry_id).collect();
+        assert_eq!(ids_first, ids_second);
+        assert_eq!(ids_first, vec![2, 7]);
+        assert_eq!(first.hits[0].score, SCORE_EXACT_PHRASE);
+        assert_eq!(first.hits[1].score, SCORE_TITLE_EXACT_PHRASE);
     }
 }

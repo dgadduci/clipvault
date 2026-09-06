@@ -5,7 +5,11 @@
 // about ordering and ordering-only side effects lives here so it can
 // be exercised by `node:test` without a DOM or a real Tauri shell.
 
-import type { ActiveApplicationResponse, PasteResponse } from "../types.ts";
+import type {
+  ActiveApplicationResponse,
+  CopyResponse,
+  PasteResponse,
+} from "../types.ts";
 import type { QuickPasteTauriBridge } from "./quickPasteBridge.ts";
 
 /**
@@ -168,4 +172,68 @@ export async function performPasteFlow(args: {
     return { kind: "failed", windowStaysHidden: false, response };
   }
   return { kind: "pasted", windowStaysHidden: true };
+}
+
+/** Outcome of a copy attempt expressed in the language the UI cares
+ *  about. Centralised so the modal can react without duplicating the
+ *  decision tree. The arms mirror [`PasteFlowOutcome`] minus the
+ *  `pasted` branch: a copy flow can never report `pasted` because
+ *  the synthetic paste was not triggered. */
+export type CopyFlowOutcome =
+  | { kind: "copied"; windowStaysHidden: true }
+  | {
+      kind: "failed";
+      windowStaysHidden: false;
+      response: CopyResponse | { error: string };
+    };
+
+/**
+ * Hide the quick-paste window, invoke the copy-only command, and
+ * hide the window if the copy succeeded.
+ *
+ * The function NEVER calls a synthetic paste controller: it routes
+ * through `clipvault_copy_entry` which only writes to the clipboard
+ * and arms the suppression token. The previously focused
+ * application regains focus the moment the window hides, ready for
+ * the user to decide when to run `Cmd/Ctrl+V`.
+ *
+ * On a `failed` / `capability_unavailable` outcome the window is
+ * re-shown and the caller can render the typed guidance the
+ * backend returned. The history row is never touched.
+ */
+export async function performCopyFlow(args: {
+  bridge: QuickPasteTauriBridge;
+  copyFn: () => Promise<CopyResponse>;
+  isCapabilityUnavailable?: (response: CopyResponse) => boolean;
+  isFailed?: (response: CopyResponse) => boolean;
+  onReShow?: () => void;
+}): Promise<CopyFlowOutcome> {
+  await args.bridge.hide();
+  let response: CopyResponse;
+  try {
+    response = await args.copyFn();
+  } catch (error) {
+    await args.bridge.show();
+    args.onReShow?.();
+    return {
+      kind: "failed",
+      windowStaysHidden: false,
+      response: {
+        error: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+  const failed = args.isFailed?.(response) ?? response.kind === "failed";
+  const unavailable =
+    args.isCapabilityUnavailable?.(response) ??
+    response.kind === "capability_unavailable";
+  if (response.kind === "copied" || response.kind === "copied_plain_fallback") {
+    return { kind: "copied", windowStaysHidden: true };
+  }
+  if (failed || unavailable) {
+    await args.bridge.show();
+    args.onReShow?.();
+    return { kind: "failed", windowStaysHidden: false, response };
+  }
+  return { kind: "copied", windowStaysHidden: true };
 }

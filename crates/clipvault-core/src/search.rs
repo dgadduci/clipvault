@@ -134,13 +134,18 @@ impl SearchService {
         };
 
         // Build SearchDocuments borrowing from the records we already
-        // hold. No additional allocations beyond the Vec itself.
+        // hold. No additional allocations beyond the Vec itself. The
+        // `title` field carries the user-defined card title so the
+        // local search can match a custom label without inspecting
+        // clipboard content. `None` rows keep the pre-title behaviour
+        // byte-for-byte.
         let documents: Vec<SearchDocument<'_>> = records
             .iter()
             .map(|record| SearchDocument {
                 entry_id: record.id,
                 content: record.content.as_str(),
                 updated_at: record.updated_at.as_str(),
+                title: record.title.as_deref(),
             })
             .collect();
 

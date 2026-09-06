@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use clipvault_core::{
-    ActiveAppDiagnostics, Capabilities, ClearOutcome, ClipboardAssetStore, DeleteOutcome,
-    IgnoredAppEntry, IgnoredAppError, LocalSettingsReader, PasteMode, PasteOutcome,
+    ActiveAppDiagnostics, Capabilities, ClearOutcome, ClipboardAssetStore, CopyOutcome,
+    DeleteOutcome, IgnoredAppEntry, IgnoredAppError, LocalSettingsReader, PasteMode, PasteOutcome,
     PickAndAddOutcome, PlatformGuidance, PlatformSettingsTarget, RetentionOutcome, RetentionPolicy,
     RetentionPreview, RichTextAssetStore, SetFavoriteResult, SetTitleOutcome, Settings,
     SettingsNavigator, SettingsOpenOutcome, SettingsServiceError, SettingsUpdate,
@@ -197,6 +197,77 @@ impl PasteResponse {
                 mode: None,
             },
             PasteOutcome::CapabilityUnavailable {
+                capability,
+                guidance,
+            } => Self {
+                kind: "capability_unavailable",
+                id: None,
+                capability: Some(capability),
+                error_kind: None,
+                message: None,
+                guidance,
+                mode: None,
+            },
+        }
+    }
+}
+
+/// Response of [`clipvault_copy_entry`].
+///
+/// Mirrors [`PasteResponse`] minus the `pasted` / `pasted_plain_fallback`
+/// variants — the copy-only flow never triggers a synthetic paste and
+/// must never pretend it did. The discriminator is the stable snake
+/// case `kind` value the frontend branches on.
+#[derive(Debug, Serialize)]
+pub struct CopyResponse {
+    /// Stable discriminator: `copied`, `copied_plain_fallback`,
+    /// `failed` or `capability_unavailable`.
+    pub kind: &'static str,
+    pub id: Option<i64>,
+    pub capability: Option<&'static str>,
+    pub error_kind: Option<&'static str>,
+    pub message: Option<String>,
+    pub guidance: Option<PlatformGuidance>,
+    /// Mode the request resolved to. `None` when the call did not
+    /// resolve into a successful write.
+    pub mode: Option<&'static str>,
+}
+
+impl CopyResponse {
+    fn from_outcome(outcome: CopyOutcome) -> Self {
+        match outcome {
+            CopyOutcome::Copied { id } => Self {
+                kind: "copied",
+                id: Some(id),
+                capability: None,
+                error_kind: None,
+                message: None,
+                guidance: None,
+                mode: None,
+            },
+            CopyOutcome::CopiedPlainFallback { id } => Self {
+                kind: "copied_plain_fallback",
+                id: Some(id),
+                capability: None,
+                error_kind: None,
+                message: None,
+                guidance: None,
+                mode: Some("plain"),
+            },
+            CopyOutcome::Failed {
+                kind,
+                message,
+                guidance,
+            } => Self {
+                kind: "failed",
+                id: None,
+                capability: None,
+                error_kind: Some(kind),
+                message: Some(message),
+                guidance,
+                mode: None,
+            },
+            CopyOutcome::CapabilityUnavailable {
                 capability,
                 guidance,
             } => Self {
@@ -454,6 +525,28 @@ pub fn clipvault_paste_entry(
         .paste()
         .paste_entry(state.context(), entry_id, mode);
     Ok(PasteResponse::from_outcome(outcome))
+}
+
+/// Copy-only keyboard command used by Quick Paste.
+///
+/// Writes the type-appropriate representation of `entry_id` to the
+/// system clipboard **without** invoking any synthetic paste
+/// controller. The user keeps the captured representation available
+/// for a later manual `Cmd/Ctrl+V`. The command never modifies the
+/// history row and never creates a new card: the suppression arm
+/// the paste service runs before the write keeps the watcher quiet.
+#[tauri::command]
+pub fn clipvault_copy_entry(
+    state: State<'_, SharedState>,
+    entry_id: i64,
+    mode: Option<String>,
+) -> Result<CopyResponse, CommandError> {
+    let mode = PasteMode::from_wire(mode.as_deref());
+    let outcome = state
+        .context()
+        .paste()
+        .copy_entry(state.context(), entry_id, mode);
+    Ok(CopyResponse::from_outcome(outcome))
 }
 
 #[tauri::command]

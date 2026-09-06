@@ -133,6 +133,62 @@ impl PasteOutcome {
     }
 }
 
+/// Outcome of [`PasteService::copy_entry`].
+///
+/// The copy-only keyboard flow never invokes a paste controller and
+/// never mutates the history row. The variants mirror [`PasteOutcome`]
+/// without the `pasted` arm so the frontend can render a typed error
+/// without conflating "clipboard was written" with "the synthetic
+/// paste was triggered". The variants are pure status; `guidance` is
+/// only populated for actionable failures and never carries clipboard
+/// content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyOutcome {
+    /// Clipboard write succeeded and the synthetic paste was **not**
+    /// triggered. The user decides when to run `Cmd/Ctrl+V`.
+    Copied { id: i64 },
+    /// Rich-text copy was requested but the session can only publish
+    /// plain text: ClipVault wrote the canonical plain text. The
+    /// frontend uses this branch to explain the downgrade without
+    /// surfacing it as a failure.
+    CopiedPlainFallback { id: i64 },
+    /// The copy could not complete (entry missing, asset unreadable,
+    /// backend failure, …). When the underlying cause is actionable,
+    /// `guidance` carries a typed remediation payload.
+    Failed {
+        kind: &'static str,
+        message: String,
+        guidance: Option<PlatformGuidance>,
+    },
+    /// The platform layer does not support the requested capability
+    /// (rich-text write, image write, plain-text write). When the
+    /// underlying cause is actionable, `guidance` carries a typed
+    /// remediation payload.
+    CapabilityUnavailable {
+        capability: &'static str,
+        guidance: Option<PlatformGuidance>,
+    },
+}
+
+impl CopyOutcome {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            CopyOutcome::Copied { .. } => "copied",
+            CopyOutcome::CopiedPlainFallback { .. } => "copied_plain_fallback",
+            CopyOutcome::Failed { .. } => "failed",
+            CopyOutcome::CapabilityUnavailable { .. } => "capability_unavailable",
+        }
+    }
+
+    pub fn guidance(&self) -> Option<&PlatformGuidance> {
+        match self {
+            CopyOutcome::Copied { .. } | CopyOutcome::CopiedPlainFallback { .. } => None,
+            CopyOutcome::Failed { guidance, .. }
+            | CopyOutcome::CapabilityUnavailable { guidance, .. } => guidance.as_ref(),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum PasteServiceError {
     #[error("entry repository error: {0}")]
@@ -297,6 +353,81 @@ impl PasteService {
     /// quick-paste always writes plain text and triggers the paste.
     pub fn paste_plain_entry(&self, context: &AppContext, entry_id: i64) -> PasteOutcome {
         self.paste_entry(context, entry_id, PasteMode::Plain)
+    }
+
+    /// Copy the entry identified by `entry_id` to the system clipboard
+    /// without invoking any synthetic paste controller.
+    ///
+    /// The copy-only keyboard flow (Enter / Shift+Enter inside Quick
+    /// Paste) must:
+    /// - load the entry without mutating anything;
+    /// - write the type-appropriate representation (plain text, rich
+    ///   text, or image) using the existing adapters;
+    /// - arm the suppression token so the next watcher tick is masked
+    ///   and no new history card is created as a side effect;
+    /// - return a metadata-only outcome describing the result.
+    ///
+    /// It MUST NOT:
+    /// - invoke any `PasteController` (no `CGEvent`, no `XTest`, no
+    ///   `Cmd/Ctrl+V` synthetic paste);
+    /// - mutate the source history row (no payload, hash, timestamp
+    ///   or organization change);
+    /// - clear, restore or replace the clipboard after writing it —
+    ///   the user keeps the captured representation available for a
+    ///   later manual paste;
+    /// - log clipboard content, hashes, snippets, bytes or paths.
+    pub fn copy_entry(&self, context: &AppContext, entry_id: i64, mode: PasteMode) -> CopyOutcome {
+        // Step 1: load the entry without mutating anything.
+        let record = match self.load_record(context, entry_id) {
+            Ok(record) => record,
+            Err(outcome) => return copy_outcome_from_paste(outcome),
+        };
+
+        // Step 2: write the matching payload to the clipboard using the
+        // exact helpers the paste service already owns. The dispatch
+        // is identical: an image row writes its bitmap, a rich row
+        // writes its rich representations in the chosen mode, every
+        // other row writes its text. The single difference is that we
+        // never invoke `self.paste.paste()` afterwards.
+        let mut used_plain_fallback = false;
+        if let Some(outcome) = self.write_payload_for_record(context, &record, mode) {
+            match outcome {
+                WriteOutcome::StopWith(outcome) => return copy_outcome_from_paste(outcome),
+                WriteOutcome::FallBackToPlain => {
+                    used_plain_fallback = true;
+                }
+            }
+        }
+
+        if used_plain_fallback {
+            if let Err(error) = self.clipboard.write_text(&record.content) {
+                // Mirror the paste service: drop the suppression token
+                // so a later legitimate copy is not masked, surface
+                // the typed clipboard failure, and return without
+                // touching the history row.
+                self.clear_suppression();
+                warn!(kind = error.kind_str(), "copy: clipboard write failed");
+                let guidance = classify_clipboard_failure(context, Capability::ClipboardWrite);
+                return CopyOutcome::Failed {
+                    kind: "clipboard",
+                    message: error.to_string(),
+                    guidance,
+                };
+            }
+        }
+
+        if used_plain_fallback {
+            CopyOutcome::CopiedPlainFallback { id: record.id }
+        } else {
+            CopyOutcome::Copied { id: record.id }
+        }
+    }
+
+    /// Convenience overload that pins the copy to plain text.
+    /// Used by `Shift+Enter` on rich entries and by `Enter` on
+    /// plain-only entries.
+    pub fn copy_plain_entry(&self, context: &AppContext, entry_id: i64) -> CopyOutcome {
+        self.copy_entry(context, entry_id, PasteMode::Plain)
     }
 
     fn load_record(
@@ -679,6 +810,41 @@ enum WriteOutcome {
     FallBackToPlain,
 }
 
+/// Map the typed [`PasteOutcome`] the shared write helpers return into
+/// the [`CopyOutcome`] the copy-only flow exposes. The `Pasted` and
+/// `PastedPlainFallback` arms are intentionally not reachable: the
+/// copy flow runs **before** the synthetic paste, so a write that
+/// succeeded on the paste path is, by definition, a successful
+/// `Copied` / `CopiedPlainFallback` for the copy path. Mapping the
+/// remaining arms keeps a single source of truth for error
+/// classification (capability, failure kind, guidance).
+fn copy_outcome_from_paste(outcome: PasteOutcome) -> CopyOutcome {
+    match outcome {
+        // Unreachable by construction: the copy path never invokes
+        // the paste trigger. Treated defensively so a future
+        // refactor that re-uses more of the write helpers cannot
+        // accidentally downgrade a copy into a paste success.
+        PasteOutcome::Pasted { id } => CopyOutcome::Copied { id },
+        PasteOutcome::PastedPlainFallback { id } => CopyOutcome::CopiedPlainFallback { id },
+        PasteOutcome::Failed {
+            kind,
+            message,
+            guidance,
+        } => CopyOutcome::Failed {
+            kind,
+            message,
+            guidance,
+        },
+        PasteOutcome::CapabilityUnavailable {
+            capability,
+            guidance,
+        } => CopyOutcome::CapabilityUnavailable {
+            capability,
+            guidance,
+        },
+    }
+}
+
 /// Classify an "image clipboard write unavailable" error.
 ///
 /// Wayland must **not** receive a permission prompt: ClipVault links no
@@ -780,6 +946,43 @@ mod tests {
             .kind(),
             "capability_unavailable"
         );
+    }
+
+    #[test]
+    fn copy_outcome_kind_strings_are_stable() {
+        // The frontend pins the discriminator strings to drive the
+        // guidance modal: a future rename MUST be visible in the
+        // cross-language contract tests.
+        assert_eq!(CopyOutcome::Copied { id: 1 }.kind(), "copied");
+        assert_eq!(
+            CopyOutcome::CopiedPlainFallback { id: 1 }.kind(),
+            "copied_plain_fallback"
+        );
+        assert_eq!(
+            CopyOutcome::Failed {
+                kind: "x",
+                message: "y".into(),
+                guidance: None,
+            }
+            .kind(),
+            "failed"
+        );
+        assert_eq!(
+            CopyOutcome::CapabilityUnavailable {
+                capability: "clipboard_write_image",
+                guidance: None,
+            }
+            .kind(),
+            "capability_unavailable"
+        );
+    }
+
+    #[test]
+    fn copy_outcome_guidance_accessor_returns_none_for_success() {
+        let outcome = CopyOutcome::Copied { id: 7 };
+        assert!(outcome.guidance().is_none());
+        let outcome = CopyOutcome::CopiedPlainFallback { id: 7 };
+        assert!(outcome.guidance().is_none());
     }
 
     #[test]

@@ -88,6 +88,31 @@ export interface PasteResponse {
   mode: string | null;
 }
 
+/**
+ * Metadata-only response of the copy-only keyboard flow
+ * (`clipvault_copy_entry`).
+ *
+ * The discriminator mirrors the backend [`CopyOutcome`]: a copy flow
+ * can never return `pasted` / `pasted_plain_fallback` — those arms
+ * are reserved for the paste flow and would conflate "clipboard was
+ * written" with "the synthetic paste was triggered". The frontend
+ * uses the `copied` / `copied_plain_fallback` arms to hide the
+ * window without ever calling the paste controller.
+ */
+export interface CopyResponse {
+  kind: "copied" | "copied_plain_fallback" | "failed" | "capability_unavailable";
+  id: number | null;
+  capability: string | null;
+  error_kind: string | null;
+  message: string | null;
+  guidance: PlatformGuidance | null;
+  /**
+   * Mode the request resolved to. `null` when the call did not
+   * resolve into a successful write.
+   */
+  mode: string | null;
+}
+
 export type PlatformIssueKind =
   | "permission_required"
   | "unsupported_session"

@@ -87,8 +87,9 @@ pub use organization::{
     OrganizationService, OrganizationServiceError, OrganizationSidebarSnapshot,
 };
 pub use paste::{
-    PasteMode, PasteOutcome, PasteService, PasteServiceError, CLIPBOARD_WRITE_IMAGE_CAPABILITY,
-    CLIPBOARD_WRITE_RICH_TEXT_CAPABILITY, SYNTHETIC_PASTE_CAPABILITY,
+    CopyOutcome, PasteMode, PasteOutcome, PasteService, PasteServiceError,
+    CLIPBOARD_WRITE_IMAGE_CAPABILITY, CLIPBOARD_WRITE_RICH_TEXT_CAPABILITY,
+    SYNTHETIC_PASTE_CAPABILITY,
 };
 pub use paste_suppression::{PasteSuppression, SuppressionFingerprint, DEFAULT_SUPPRESSION_TTL};
 pub use platform_adapters::PlatformAdapters;
