@@ -14,5 +14,6 @@ pub mod bootstrap;
 pub mod commands;
 pub mod main_window_layout;
 pub mod metadata_scheduler;
+pub mod quick_paste_window_layout;
 pub mod state;
 pub mod tray;

@@ -31,6 +31,7 @@ function fakeBridge(): QuickPasteTauriBridge & {
         identifier: "com.example.TestApp",
       };
     },
+    center: make("center"),
     show: make("show"),
     focus: make("focus"),
     emitOpened: make("emitOpened"),
@@ -100,6 +101,110 @@ test("openQuickPaste does not wait forever for an active-app probe", async () =>
   assert.equal(active, null);
   assert.deepEqual(recorded, ["show", "focus", "emitOpened"]);
   assert.equal(QUICK_PASTE_ACTIVE_APP_TIMEOUT_MS, 500);
+});
+
+test("openQuickPaste runs the center step between the probe and show", async () => {
+  // The `quick-paste-compact-ui` change adds a centring step right
+  // after the active-app probe. The controller MUST run `center`
+  // before `show` so the window lands on the current monitor before
+  // becoming visible. The test mirrors the documented order and
+  // confirms the visible tail `show → focus → emitOpened` is still
+  // preserved.
+  const recorded: string[] = [];
+  const bridge: QuickPasteTauriBridge = {
+    captureActiveApp: async () => {
+      recorded.push("captureActiveApp");
+      return {
+        available: true,
+        name: "TestApp",
+        identifier: "com.example.TestApp",
+      };
+    },
+    center: async () => {
+      recorded.push("center");
+    },
+    show: async () => {
+      recorded.push("show");
+    },
+    focus: async () => {
+      recorded.push("focus");
+    },
+    emitOpened: async () => {
+      recorded.push("emitOpened");
+    },
+    hide: async () => {
+      recorded.push("hide");
+    },
+  };
+  await openQuickPaste(bridge);
+  assert.deepEqual(recorded, [
+    "captureActiveApp",
+    "center",
+    "show",
+    "focus",
+    "emitOpened",
+  ]);
+});
+
+test("openQuickPaste skips the center step when the bridge does not provide one", async () => {
+  // A test bridge that does not implement `center` MUST still open
+  // the palette through the protected visible tail. The
+  // `compact-ui` change adds the step optionally so existing tests
+  // and ad-hoc fakes keep working without modification.
+  const recorded: string[] = [];
+  const bridge: QuickPasteTauriBridge = {
+    captureActiveApp: async () => ({
+      available: false,
+      name: null,
+      identifier: null,
+    }),
+    show: async () => {
+      recorded.push("show");
+    },
+    focus: async () => {
+      recorded.push("focus");
+    },
+    emitOpened: async () => {
+      recorded.push("emitOpened");
+    },
+    hide: async () => {
+      recorded.push("hide");
+    },
+  };
+  await openQuickPaste(bridge);
+  assert.deepEqual(recorded, ["show", "focus", "emitOpened"]);
+});
+
+test("openQuickPaste tolerates a failing center step without blocking show", async () => {
+  // Centring is best-effort: a transient failure (Tauri monitor API
+  // unavailable) MUST NOT block the user from opening the palette.
+  // The window keeps the conf-defined defaults declared in
+  // `tauri.conf.json` instead of throwing.
+  const recorded: string[] = [];
+  const bridge: QuickPasteTauriBridge = {
+    captureActiveApp: async () => ({
+      available: true,
+      name: "TestApp",
+      identifier: "com.example.TestApp",
+    }),
+    center: async () => {
+      throw new Error("monitor API unavailable");
+    },
+    show: async () => {
+      recorded.push("show");
+    },
+    focus: async () => {
+      recorded.push("focus");
+    },
+    emitOpened: async () => {
+      recorded.push("emitOpened");
+    },
+    hide: async () => {
+      recorded.push("hide");
+    },
+  };
+  await openQuickPaste(bridge);
+  assert.deepEqual(recorded, ["show", "focus", "emitOpened"]);
 });
 
 test("performPasteFlow hides the window before invoking paste", async () => {

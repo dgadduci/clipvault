@@ -19,6 +19,12 @@ import { activeApplicationCommand } from "./tauri.ts";
 import { openQuickPaste } from "./quickPasteController.ts";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import {
+  currentMonitor,
+  primaryMonitor,
+  type Monitor,
+} from "@tauri-apps/api/window";
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import type { ActiveApplicationResponse } from "../types.ts";
 
 export const QUICK_SEARCH_EVENT = "clipvault://quick-search";
@@ -80,15 +86,132 @@ export function emitQuickPasteOpened(): Promise<void> {
  */
 export interface QuickPasteTauriBridge {
   captureActiveApp: () => Promise<ActiveApplicationResponse>;
+  /**
+   * Optional centring step. The controller invokes it after the
+   * active-app probe resolves and before the window becomes visible
+   * so the palette lands on the current monitor with a safe
+   * primary-display fallback. Bridges that cannot position the
+   * window (non-Tauri callers, tests) can simply no-op; the
+   * activation order documented in
+   * `quick-paste/spec.md` only requires the window to land on
+   * `show`, not on a specific rectangle.
+   */
+  center?: () => Promise<void>;
   show: () => Promise<void>;
   focus: () => Promise<void>;
   emitOpened: () => Promise<void>;
   hide: () => Promise<void>;
 }
 
+/**
+ * Default centring step wired to the real Tauri shell. The helper
+ * resolves the current monitor's work area (with a primary-display
+ * fallback) and hands the result to the pure math helper from
+ * `quick_paste_window_layout` through Tauri's monitor API. A
+ * missing monitor or a window API failure collapses to a no-op so
+ * the activation order stays robust on every supported host.
+ */
+export async function centerQuickPasteWindow(): Promise<void> {
+  try {
+    const current = await currentMonitor().catch(() => null);
+    const primary = !current ? await primaryMonitor().catch(() => null) : null;
+    const target = await resolveCenterWorkArea(current, primary);
+    if (!target) {
+      return;
+    }
+    const layout = computeQuickPasteLayout(target);
+    const window = await getQuickPasteWindow();
+    await applyQuickPasteLayout(window, layout);
+  } catch {
+    // Centring is best-effort: a missing capability or a transient
+    // Tauri error must not block the user from opening the
+    // quick-paste palette. The window keeps the conf-defined
+    // defaults declared in `tauri.conf.json`.
+  }
+}
+
+interface QuickPasteCenterTarget {
+  workX: number;
+  workY: number;
+  workWidth: number;
+  workHeight: number;
+  scaleFactor: number;
+}
+
+interface QuickPasteCenterLayout {
+  logicalSize: { width: number; height: number };
+  logicalPosition: { x: number; y: number };
+}
+
+async function resolveCenterWorkArea(
+  current: Monitor | null,
+  primary: Monitor | null,
+): Promise<QuickPasteCenterTarget | null> {
+  if (current?.workArea) {
+    return toCenterTarget(current);
+  }
+  if (primary?.workArea) {
+    return toCenterTarget(primary);
+  }
+  return null;
+}
+
+function toCenterTarget(monitor: Monitor): QuickPasteCenterTarget {
+  return {
+    workX: monitor.workArea.position.x,
+    workY: monitor.workArea.position.y,
+    workWidth: Math.max(1, monitor.workArea.size.width),
+    workHeight: Math.max(1, monitor.workArea.size.height),
+    scaleFactor: safeScale(monitor.scaleFactor),
+  };
+}
+
+function safeScale(value: number): number {
+  return typeof value === "number" && value > 0 ? value : 1;
+}
+
+function computeQuickPasteLayout(target: QuickPasteCenterTarget): QuickPasteCenterLayout {
+  const scale = target.scaleFactor;
+  const logicalWidth = 720;
+  const logicalHeight = 520;
+  const workLogicalWidth = target.workWidth / scale;
+  const workLogicalHeight = target.workHeight / scale;
+  const workLogicalX = target.workX / scale;
+  const workLogicalY = target.workY / scale;
+  const logicalX = workLogicalX + (workLogicalWidth - logicalWidth) / 2;
+  const logicalY = workLogicalY + (workLogicalHeight - logicalHeight) / 2;
+  return {
+    logicalSize: { width: logicalWidth, height: logicalHeight },
+    logicalPosition: { x: logicalX, y: logicalY },
+  };
+}
+
+async function applyQuickPasteLayout(
+  window: WebviewWindow,
+  layout: QuickPasteCenterLayout,
+): Promise<void> {
+  try {
+    await window.setSize(new LogicalSize(layout.logicalSize.width, layout.logicalSize.height));
+  } catch {
+    // Tauri's `setSize` is best-effort on the quick-paste window:
+    // the documented contract is "fixed 720×520", and the conf
+    // already pins the value. A transient failure leaves the conf
+    // defaults in place instead of surfacing an error.
+  }
+  try {
+    await window.setPosition(
+      new LogicalPosition(layout.logicalPosition.x, layout.logicalPosition.y),
+    );
+  } catch {
+    // Same rationale as `setSize`: positioning is best-effort, the
+    // conf defaults keep the window usable.
+  }
+}
+
 /** Default bridge wired to the real Tauri shell. */
 export const defaultQuickPasteBridge: QuickPasteTauriBridge = {
   captureActiveApp: activeApplicationCommand,
+  center: centerQuickPasteWindow,
   show: showQuickPasteWindow,
   focus: focusQuickPasteWindow,
   emitOpened: emitQuickPasteOpened,

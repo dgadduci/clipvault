@@ -12,17 +12,41 @@ import type { QuickPasteTauriBridge } from "./quickPasteBridge.ts";
  * Step the controller runs in order when the global hotkey fires.
  *
  * Captured so unit tests can assert that the live code follows the
- * documented order (`captureActiveApp → show → focus → emitOpened`).
+ * documented order (`captureActiveApp → center → show → focus →
+ * emitOpened`). The `center` step is part of the optional
+ * `bridge.center` adapter the production bridge wires to
+ * `centerQuickPasteWindow`; a test bridge that does not implement
+ * `center` simply skips the step while still preserving the rest of
+ * the ordering.
  */
 export type QuickPasteStep =
   | "captureActiveApp"
+  | "center"
   | "show"
   | "focus"
   | "emitOpened";
 
-/** Order of steps executed for a fresh quick-paste activation. */
+/**
+ * Order of steps executed for a fresh quick-paste activation. The
+ * `center` step sits between the active-app probe and the visibility
+ * transition so the documented `show → focus → emitOpened` tail stays
+ * intact and the palette lands on the current monitor before it
+ * becomes visible.
+ */
 export const QUICK_PASTE_STEP_ORDER: readonly QuickPasteStep[] = [
   "captureActiveApp",
+  "center",
+  "show",
+  "focus",
+  "emitOpened",
+] as const;
+
+/**
+ * The visible activation tail the spec protects. The three steps
+ * must run in this exact order and only after `center` resolves so
+ * the window lands on its final rectangle before becoming visible.
+ */
+export const QUICK_PASTE_VISIBLE_TAIL: readonly QuickPasteStep[] = [
   "show",
   "focus",
   "emitOpened",
@@ -73,6 +97,16 @@ export async function openQuickPaste(
     // synthetic paste step will surface a guidance modal later if
     // needed.
     void error;
+  }
+  if (bridge.center) {
+    try {
+      await bridge.center();
+    } catch (error) {
+      // Centring is best-effort: a failure must not block the user
+      // from opening the palette. The window keeps the conf-defined
+      // defaults declared in `tauri.conf.json` instead of throwing.
+      void error;
+    }
   }
   await bridge.show();
   await bridge.focus();

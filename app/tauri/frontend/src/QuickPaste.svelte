@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
   import type {
     EntryRecord,
     PasteResponse,
@@ -22,6 +22,12 @@
   import { listen } from "@tauri-apps/api/event";
   import { contentTypeLabel } from "./lib/contentType";
   import {
+    contentTypeIconId,
+    contentTypeIconLabel,
+  } from "./lib/contentTypeIcons";
+  import { sourceAppAccessibleLabel } from "./lib/sourceAppFallback";
+  import { formatElapsedTime } from "./lib/elapsedTime";
+  import {
     createClipboardAssetResolver,
     entryPreviewText,
     hasRenderableImage,
@@ -31,6 +37,7 @@
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
 
   type Mode = "idle" | "recent" | "search";
+  type ThumbnailState = "loading" | "loaded" | "error";
 
   let query = "";
   let mode: Mode = "idle";
@@ -44,6 +51,14 @@
   let guidance: PlatformGuidance | null = null;
   let pasteError: string | null = null;
   let quickPasteController: { cancel: () => void } | null = null;
+
+  // Fixed dimensions of the result item. The contract documented in
+  // `quick-paste-compact-ui/spec.md` pins 72 logical pixels so every
+  // entry — text, image, loading, error, selected, hover, focus —
+  // shares the same outer rectangle. Any change to the value MUST
+  // update the matching CSS rule on `.qp-row` AND the tests under
+  // `tests/quickPasteCompact.test.ts`.
+  const ROW_HEIGHT_PX = 72;
 
   // List of entry ids actually rendered (depends on mode). We keep a
   // separate `resultIds` so keyboard navigation can clamp the
@@ -94,15 +109,15 @@
     currentQuery: string,
   ): string {
     if (error !== null) return "";
-    if (isSearching) return "Searching…";
+    if (isSearching) return "Buscando…";
     if (currentMode === "search") {
       if (searchHits.length === 0) {
-        return `No matches for “${currentQuery}”.`;
+        return `Sin coincidencias para “${currentQuery}”.`;
       }
       return "";
     }
     if (recents.length === 0) {
-      return "No clipboard history yet. Copy something and try again.";
+      return "Sin historial aún. Copia algo y vuelve a intentarlo.";
     }
     return "";
   }
@@ -184,63 +199,61 @@
     }
   }
 
-  function renderSnippet(
-    currentMode: Mode,
-    recents: EntryRecord[],
-    searchHits: SearchHit[],
-    id: number,
-  ): string {
-    const entry = findEntry(currentMode, recents, searchHits, id);
-    // An image row has no textual payload; showing the backend's empty
-    // `content` sentinel would render a blank row, so the shared helper
-    // returns a localised placeholder with the known dimensions instead.
-    if (entry && isImageEntry(entry)) {
-      return entryPreviewText(entry);
-    }
-    if (currentMode === "search") {
-      const hit = searchHits.find((h) => h.entry_id === id);
-      if (hit) return hit.snippet;
-    } else if (entry) {
-      return entryPreviewText(entry, 80);
-    }
-    return "";
-  }
-
-  /**
-   * Resolve the full record behind a rendered row id, in either mode.
-   * Quick-paste needs the record (not just the snippet) so it can
-   * recognise an image entry and request its thumbnail.
-   */
-  function findEntry(
-    currentMode: Mode,
-    recents: EntryRecord[],
-    searchHits: SearchHit[],
-    id: number,
-  ): EntryRecord | null {
-    if (currentMode === "search") {
-      return searchHits.find((hit) => hit.entry_id === id)?.record ?? null;
-    }
-    return recents.find((entry) => entry.id === id) ?? null;
-  }
-
   // ---------------------------------------------------------------
   // Image thumbnails in the quick-paste list.
   //
   // The list reuses the same validated asset bridge and blob-URL
-  // lifecycle as `HistoryCard`. Resolutions are stored per entry id so
-  // the `{#each}` block stays synchronous; every URL is revoked in
-  // `onDestroy`.
+  // lifecycle as `HistoryCard`. The contract documented in
+  // `quick-paste-compact-ui/spec.md` requires:
+  //
+  //   - the thumbnail occupies a fixed-size square that NEVER changes
+  //     shape between `loading`, `loaded`, and `error`;
+  //   - while the bridge round-trip is in flight the placeholder
+  //     shows the same dimensions as the eventual thumbnail;
+  //   - a stale response from a previous entry never overwrites the
+  //     current entry's state.
+  //
+  // The token guard mirrors `HistoryCard.thumbnailToken` so a late
+  // resolution from entry A cannot clobber entry B's `loaded` state
+  // when the user navigates quickly through the rail.
   // ---------------------------------------------------------------
 
   const assetResolver: IconResolver = createClipboardAssetResolver();
   let thumbnails: Record<number, string> = {};
+  /**
+   * Per-entry thumbnail state. Mirrors `HistoryCard`'s three-state
+   * machine so the compact UI can branch on `"loading"` without
+   * inspecting `thumbnailUrl === null` (which is also the terminal
+   * state for a textual entry). The initial value is computed per
+   * entry because a coherent image row must never flash the error
+   * fallback during the very first paint.
+   */
+  let thumbnailStates: Record<number, ThumbnailState> = {};
+  /**
+   * Per-entry token used to discard stale bridge round-trips. The
+   * shared counter bumps on every `loadThumbnail` invocation; a
+   * resolution that lands after a newer round has been scheduled
+   * for a different entry is dropped on the floor so the row
+   * never shows another entry's thumbnail.
+   */
+  let thumbnailToken = 0;
 
   async function loadThumbnail(entry: EntryRecord): Promise<void> {
     if (!hasRenderableImage(entry) || !entry.asset_ref) return;
     if (thumbnails[entry.id]) return;
+    const token = ++thumbnailToken;
+    if (thumbnailStates[entry.id] !== "loading") {
+      thumbnailStates = { ...thumbnailStates, [entry.id]: "loading" };
+    }
     const resolution = await assetResolver.resolve(entry.asset_ref);
+    if (token !== thumbnailToken) {
+      return;
+    }
     if (resolution.ok && resolution.url) {
       thumbnails = { ...thumbnails, [entry.id]: resolution.url };
+      thumbnailStates = { ...thumbnailStates, [entry.id]: "loaded" };
+    } else {
+      thumbnailStates = { ...thumbnailStates, [entry.id]: "error" };
     }
   }
 
@@ -268,6 +281,7 @@
     if (!url) return;
     const { [id]: _removed, ...rest } = thumbnails;
     thumbnails = rest;
+    thumbnailStates = { ...thumbnailStates, [id]: "error" };
   }
 
   function resolveContentType(
@@ -284,6 +298,49 @@
       if (entry) return entry.content_type;
     }
     return "text";
+  }
+
+  function findEntry(
+    currentMode: Mode,
+    recents: EntryRecord[],
+    searchHits: SearchHit[],
+    id: number,
+  ): EntryRecord | null {
+    if (currentMode === "search") {
+      return searchHits.find((hit) => hit.entry_id === id)?.record ?? null;
+    }
+    return recents.find((entry) => entry.id === id) ?? null;
+  }
+
+  function renderTitle(
+    currentMode: Mode,
+    recents: EntryRecord[],
+    searchHits: SearchHit[],
+    id: number,
+  ): string {
+    const entry = findEntry(currentMode, recents, searchHits, id);
+    if (!entry) return "";
+    const explicit = entry.title?.trim();
+    if (explicit) return explicit;
+    return contentTypeLabel(entry.content_type);
+  }
+
+  function renderPreview(
+    currentMode: Mode,
+    recents: EntryRecord[],
+    searchHits: SearchHit[],
+    id: number,
+  ): string {
+    const entry = findEntry(currentMode, recents, searchHits, id);
+    if (!entry) return "";
+    if (isImageEntry(entry)) {
+      return entryPreviewText(entry);
+    }
+    if (currentMode === "search") {
+      const hit = searchHits.find((h) => h.entry_id === id);
+      if (hit && hit.snippet) return hit.snippet;
+    }
+    return entryPreviewText(entry, 80);
   }
 
   function moveSelection(delta: number): void {
@@ -415,13 +472,45 @@
     void runQuery(value);
   }
 
-  function onQuickPasteOpened(): void {
+  /**
+   * Reference to the search input. The compact UI must autofocus the
+   * input every time the window opens so the user can start typing
+   * immediately after `Cmd/Ctrl+Shift+V`. The reference is captured
+   * with `bind:this` and the focus call happens in
+   * `onQuickPasteOpened` (after the `tick()` microtask so the input
+   * is guaranteed to be mounted and visible).
+   */
+  let searchInputEl: HTMLInputElement | null = null;
+  let unlistenOpened: (() => void) | null = null;
+
+  function focusSearchInput(): void {
+    if (!searchInputEl) return;
+    searchInputEl.focus();
+    // Place the caret at the end of the existing value so the user
+    // can keep typing without having to click into the field.
+    const valueLength = searchInputEl.value.length;
+    try {
+      searchInputEl.setSelectionRange(valueLength, valueLength);
+    } catch {
+      // `setSelectionRange` is not supported on every input type on
+      // every host; ignoring the failure is the safe no-op the
+      // spec relies on.
+    }
+  }
+
+  async function onQuickPasteOpened(): Promise<void> {
     // Reset the visible state so the user sees the recent list when
     // the hotkey fires. The bridge only emits a null payload, so we
     // intentionally do not look at the event details.
     selectedIndex = 0;
     query = "";
     void loadRecent();
+    // The autofocus contract from the compact-UI spec: focus the
+    // search field every time the window opens so the user can type
+    // immediately. We wait for the next microtask so the focus call
+    // lands on a mounted, visible input.
+    await tick();
+    focusSearchInput();
   }
 
   // The Tauri event API is only available inside the Tauri runtime;
@@ -448,11 +537,15 @@
     };
   }
 
-  let unlistenOpened: (() => void) | null = null;
-
   onMount(() => {
     void loadRecent();
-    unlistenOpened = safeListenOpened(onQuickPasteOpened);
+    unlistenOpened = safeListenOpened(() => {
+      void onQuickPasteOpened();
+    });
+    // The opened signal is the canonical "user just opened the
+    // window" cue. The initial mount also calls `onQuickPasteOpened`
+    // (via the listener) so the autofocus is the contract of the
+    // very first activation as well — no separate code path needed.
   });
 
   onDestroy(() => {
@@ -467,72 +560,224 @@
     // Revoke every thumbnail blob URL the list minted.
     assetResolver.release();
     thumbnails = {};
+    thumbnailStates = {};
   });
 </script>
 
 <svelte:window on:keydown={onWindowKeydown} />
 
 <main data-testid="quick-paste-root">
-  <header>
-    <h1>ClipVault Quick Paste</h1>
-  </header>
-
   <input
     type="search"
-    placeholder="Search the clipboard history"
+    class="qp-search"
+    placeholder="Buscar en el historial del portapapeles"
     value={query}
     on:input={onInput}
-    aria-label="Search the clipboard history"
+    aria-label="Buscar en el historial del portapapeles"
     data-testid="quick-paste-input"
+    bind:this={searchInputEl}
   />
 
-  {#if loading}
-    <p class="status" data-testid="quick-paste-loading">Loading history…</p>
-  {:else if searchError}
-    <p class="status error" role="alert" data-testid="quick-paste-error">
-      {searchError}
-    </p>
-  {:else if visibleEmpty}
-    <p class="status muted" data-testid="quick-paste-empty">
-      {emptyMessage}
-    </p>
-  {:else if pasteError}
-    <p class="status error" role="alert" data-testid="quick-paste-paste-error">
-      {pasteError}
-    </p>
-  {:else}
-    <ul class="entries" data-testid="quick-paste-results">
-      {#each resultIds as id, index (id)}
-        <li
-          class:active={index === selectedIndex}
-          data-entry-id={id}
-          data-testid="quick-paste-row"
-          data-selected={index === selectedIndex ? "true" : "false"}
-        >
-          {#if thumbnails[id]}
-            <img
-              class="row-thumbnail"
-              src={thumbnails[id]}
-              alt=""
-              aria-hidden="true"
-              data-testid="quick-paste-thumbnail"
-              on:error={() => dropThumbnail(id)}
-            />
-          {/if}
-          <code>{renderSnippet(mode, recent, hits, id)}</code>
-          <span
-            class="type-badge"
-            data-testid="quick-paste-type"
-            data-content-type={resolveContentType(mode, recent, hits, id)}
-            aria-label="Tipo: {contentTypeLabel(resolveContentType(mode, recent, hits, id))}"
+  <div class="qp-results-region" data-testid="quick-paste-results-region">
+    {#if loading}
+      <p
+        class="qp-status"
+        data-testid="quick-paste-loading"
+        role="status"
+        aria-live="polite"
+      >
+        Cargando historial…
+      </p>
+    {:else if searchError}
+      <p
+        class="qp-status qp-status-error"
+        role="alert"
+        data-testid="quick-paste-error"
+      >
+        {searchError}
+      </p>
+    {:else if visibleEmpty}
+      <p
+        class="qp-status"
+        data-testid="quick-paste-empty"
+        role="status"
+        aria-live="polite"
+      >
+        {emptyMessage}
+      </p>
+    {:else if pasteError}
+      <p
+        class="qp-status qp-status-error"
+        role="alert"
+        data-testid="quick-paste-paste-error"
+      >
+        {pasteError}
+      </p>
+    {:else}
+      <ul
+        class="qp-entries"
+        data-testid="quick-paste-results"
+        data-row-height={ROW_HEIGHT_PX}
+      >
+        {#each resultIds as id, index (id)}
+          {@const entry = findEntry(mode, recent, hits, id)}
+          {@const contentType = resolveContentType(mode, recent, hits, id)}
+          {@const title = renderTitle(mode, recent, hits, id)}
+          {@const preview = renderPreview(mode, recent, hits, id)}
+          {@const isImage = entry ? isImageEntry(entry) : false}
+          {@const thumbState = thumbnailStates[id] ?? (isImage ? "loading" : "error")}
+          {@const sourceAppLabel = entry
+            ? sourceAppAccessibleLabel(entry)
+            : "Aplicación fuente desconocida"}
+          {@const typeIconId = contentTypeIconId(contentType)}
+          {@const typeLabel = contentTypeIconLabel(contentType)}
+          <li
+            class="qp-row"
+            class:qp-row-active={index === selectedIndex}
+            style="--qp-row-height: {ROW_HEIGHT_PX}px;"
+            data-entry-id={id}
+            data-testid="quick-paste-row"
+            data-selected={index === selectedIndex ? "true" : "false"}
+            data-content-type={contentType}
+            data-thumb-state={isImage ? thumbState : "none"}
+            data-row-height={ROW_HEIGHT_PX}
+            role="option"
+            aria-selected={index === selectedIndex}
+            aria-label={title}
+            title={title}
           >
-            {contentTypeLabel(resolveContentType(mode, recent, hits, id))}
-          </span>
-          <span class="muted">#{id}</span>
-        </li>
-      {/each}
-    </ul>
-  {/if}
+            <div class="qp-row-line qp-row-line-meta">
+              <span
+                class="qp-type"
+                data-testid="quick-paste-type"
+                data-content-type={contentType}
+                aria-hidden="true"
+                title={`Tipo: ${typeLabel}`}
+              >
+                <svg
+                  aria-hidden="true"
+                  focusable="false"
+                  width="14"
+                  height="14"
+                >
+                  <use href="#{typeIconId}" />
+                </svg>
+                <span class="qp-visually-hidden">
+                  Tipo: {typeLabel}
+                </span>
+              </span>
+              <span
+                class="qp-title"
+                data-testid="quick-paste-title"
+                data-row-title={title}
+              >
+                {title}
+              </span>
+              <span
+                class="qp-source-app"
+                data-testid="quick-paste-source-app"
+                title={sourceAppLabel}
+                aria-label={sourceAppLabel}
+              >
+                <svg
+                  aria-hidden="true"
+                  focusable="false"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  data-testid="quick-paste-source-app-fallback"
+                >
+                  <rect x="4" y="4" width="16" height="16" rx="3" />
+                  <path d="M9 9h6v6H9z" />
+                </svg>
+                <span class="qp-visually-hidden">{sourceAppLabel}</span>
+              </span>
+            </div>
+            <div class="qp-row-line qp-row-line-body">
+              {#if isImage}
+                <span
+                  class="qp-thumb"
+                  data-testid="quick-paste-thumbnail"
+                  data-thumb-state={thumbState}
+                  aria-hidden="true"
+                >
+                  {#if thumbnails[id] && thumbState === "loaded"}
+                    <img
+                      class="qp-thumb-img"
+                      src={thumbnails[id]}
+                      alt=""
+                      on:error={() => dropThumbnail(id)}
+                    />
+                  {:else if thumbState === "loading"}
+                    <span
+                      class="qp-thumb-placeholder"
+                      data-testid="quick-paste-thumbnail-loading"
+                      aria-label="Cargando imagen"
+                    >
+                      <svg
+                        aria-hidden="true"
+                        focusable="false"
+                        width="16"
+                        height="16"
+                      >
+                        <use href="#{typeIconId}" />
+                      </svg>
+                    </span>
+                  {:else}
+                    <span
+                      class="qp-thumb-placeholder qp-thumb-placeholder-error"
+                      data-testid="quick-paste-thumbnail-error"
+                      aria-label="Imagen no disponible"
+                    >
+                      <svg
+                        aria-hidden="true"
+                        focusable="false"
+                        width="16"
+                        height="16"
+                      >
+                        <use href="#{typeIconId}" />
+                      </svg>
+                    </span>
+                  {/if}
+                </span>
+                <span
+                  class="qp-preview qp-preview-image"
+                  data-testid="quick-paste-preview"
+                  data-content-type="image"
+                >
+                  {preview}
+                </span>
+              {:else}
+                <span
+                  class="qp-preview"
+                  data-testid="quick-paste-preview"
+                  data-content-type={contentType}
+                >
+                  {preview}
+                </span>
+              {/if}
+              <span
+                class="qp-elapsed"
+                data-testid="quick-paste-elapsed"
+                aria-label={entry
+                  ? formatElapsedTime(entry.created_at, new Date()).accessible
+                  : ""}
+              >
+                {entry
+                  ? formatElapsedTime(entry.created_at, new Date()).visual
+                  : ""}
+              </span>
+            </div>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </div>
 </main>
 
 {#if guidance}
@@ -556,111 +801,277 @@
   }
 
   main {
-    padding: 1rem 1.25rem;
+    /* The compact UI fills the 720x520 transient window. Every
+     * padding/inset is hand-tuned so the 72px rows fit without
+     * horizontal scroll and the search input stays the visual
+     * header. */
+    box-sizing: border-box;
+    width: 100%;
+    height: 100vh;
+    padding: 0.5rem 0.75rem 0.5rem;
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
-    height: 100vh;
-    box-sizing: border-box;
+    gap: 0.4rem;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
-  header h1 {
-    margin: 0;
-    font-size: 1rem;
-    color: #94a3b8;
-    font-weight: 600;
-  }
-
-  input[type="search"] {
+  .qp-search {
+    /* The search field is the primary header of the palette. The
+     * typography follows the compact-UI spec: 15-16px, slightly
+     * larger than the row title so the user lands on the right
+     * surface as soon as the window opens. */
+    flex: 0 0 auto;
     width: 100%;
-    padding: 0.5rem 0.75rem;
+    padding: 0.45rem 0.7rem;
     background: #161b22;
     color: inherit;
     border: 1px solid #30363d;
     border-radius: 6px;
     font-family: inherit;
     font-size: 0.95rem;
+    line-height: 1.2;
     box-sizing: border-box;
   }
 
-  input[type="search"]:focus {
+  .qp-search:focus {
     outline: none;
     border-color: #2563eb;
+    box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.5);
   }
 
-  ul.entries {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    overflow-y: auto;
+  .qp-results-region {
     flex: 1 1 auto;
-  }
-
-  ul.entries li {
+    min-height: 0;
+    overflow: hidden;
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.75rem;
+    flex-direction: column;
+  }
+
+  .qp-status {
+    margin: 0;
     padding: 0.4rem 0.5rem;
-    border-radius: 4px;
-    border-top: 1px solid #1f2937;
-  }
-
-  /*
-   * A bounded thumbnail so an image entry is recognisable at a glance
-   * without changing the row height or the keyboard navigation model.
-   */
-  .row-thumbnail {
-    flex: 0 0 auto;
-    width: 2rem;
-    height: 2rem;
-    border-radius: 4px;
-    object-fit: cover;
-    background: rgba(255, 255, 255, 0.06);
-  }
-
-  ul.entries li.active {
-    background: #1d4ed8;
-    color: white;
-  }
-
-  ul.entries li.active .muted {
-    color: rgba(255, 255, 255, 0.85);
-  }
-
-  .type-badge {
-    display: inline-block;
-    padding: 0.1rem 0.45rem;
-    border-radius: 999px;
-    font-size: 0.7rem;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    background: #1f2937;
-    color: #93c5fd;
-    border: 1px solid #30363d;
-    white-space: nowrap;
-  }
-
-  ul.entries li.active .type-badge {
-    background: rgba(255, 255, 255, 0.15);
-    color: white;
-    border-color: rgba(255, 255, 255, 0.3);
-  }
-
-  .status {
+    font-size: 0.78rem;
+    line-height: 1.3;
+    color: #94a3b8;
     font-style: italic;
+    /* Pin the empty/loading/error band to a stable height that
+     * matches a single row so the window never resizes when the
+     * list state flips between results, empty and error. */
+    min-height: 72px;
+    display: flex;
+    align-items: center;
   }
 
-  .status.error {
+  .qp-status-error {
     color: #f87171;
     font-style: normal;
   }
 
-  .muted {
+  .qp-entries {
+    /* The list owns the only vertical scroll surface in the
+     * window. Every other container (search, status) is bounded,
+     * so the rail cannot grow the window or introduce horizontal
+     * scroll. */
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .qp-row {
+    /* The fixed-height row: 72px is the value pinned by the
+     * compact-UI spec. Every state (default, hover, selected,
+     * focus, loading, error) keeps the same rectangle so the
+     * neighbour rows never shift when a single entry's state
+     * changes. */
+    box-sizing: border-box;
+    height: var(--qp-row-height, 72px);
+    min-height: var(--qp-row-height, 72px);
+    max-height: var(--qp-row-height, 72px);
+    display: grid;
+    grid-template-rows: 1fr 1fr;
+    gap: 0.1rem;
+    padding: 0.35rem 0.55rem;
+    border-radius: 6px;
+    border: 1px solid #1f2937;
+    background: rgba(15, 23, 42, 0.55);
+    color: inherit;
+    overflow: hidden;
+    cursor: default;
+  }
+
+  .qp-row:hover {
+    background: rgba(37, 99, 235, 0.12);
+  }
+
+  .qp-row-active,
+  .qp-row-active:hover {
+    background: #1d4ed8;
+    color: #ffffff;
+    border-color: #2563eb;
+  }
+
+  .qp-row-line {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    min-width: 0;
+  }
+
+  .qp-row-line-meta {
+    /* The metadata line carries the type icon, the title and the
+     * source-app icon. Each column has a fixed footprint so the
+     * title truncates with an ellipsis instead of pushing the
+     * source-app icon out of the visible area. */
+    grid-template-columns: 18px 1fr 18px;
+  }
+
+  .qp-type {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 18px;
+    border-radius: 4px;
+    background: rgba(147, 197, 253, 0.12);
+    color: #93c5fd;
+  }
+
+  .qp-row-active .qp-type {
+    background: rgba(255, 255, 255, 0.18);
+    color: #ffffff;
+  }
+
+  .qp-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 0.84rem;
+    line-height: 1.2;
+    font-weight: 600;
+    color: inherit;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .qp-source-app {
+    flex: 0 0 18px;
+    width: 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    background: rgba(148, 163, 184, 0.12);
     color: #94a3b8;
   }
 
-  code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  .qp-row-active .qp-source-app {
+    background: rgba(255, 255, 255, 0.18);
+    color: #ffffff;
+  }
+
+  .qp-row-line-body {
+    /* The body line carries the preview/thumbnail and the elapsed
+     * time. The thumbnail reserves a fixed 40x40px square; the
+     * preview truncates with an ellipsis. The elapsed time stays a
+     * fixed-width column on the right so the preview never has to
+     * compete with it. */
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .qp-preview {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 0.78rem;
+    line-height: 1.25;
+    color: #cbd5f5;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .qp-row-active .qp-preview {
+    color: rgba(255, 255, 255, 0.92);
+  }
+
+  .qp-preview-image {
+    /* The image preview text sits next to the thumbnail; the
+     * ellipsis truncates long image labels the same way text
+     * entries do. */
+    color: #94a3b8;
+  }
+
+  .qp-row-active .qp-preview-image {
+    color: rgba(255, 255, 255, 0.78);
+  }
+
+  .qp-elapsed {
+    flex: 0 0 auto;
+    font-size: 0.7rem;
+    line-height: 1.2;
+    color: #94a3b8;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .qp-row-active .qp-elapsed {
+    color: rgba(255, 255, 255, 0.85);
+  }
+
+  .qp-thumb {
+    flex: 0 0 40px;
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+    min-height: 40px;
+    border-radius: 4px;
+    background: rgba(148, 163, 184, 0.12);
+    overflow: hidden;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .qp-thumb-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .qp-thumb-placeholder {
+    width: 100%;
+    height: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #94a3b8;
+  }
+
+  .qp-thumb-placeholder-error {
+    color: #f87171;
+  }
+
+  .qp-visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
   }
 </style>
