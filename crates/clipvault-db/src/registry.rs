@@ -479,6 +479,93 @@ const MIGRATION_0009_RICH_TEXT: Migration = Migration {
         ON clipboard_entries (asset_ref);",
 };
 
+/// `code-language-detection`: extend `clipboard_entries` with the
+/// optional `code_language` metadata the conservative detector persists.
+///
+/// `code_language` is a nullable text column holding one of the canonical
+/// identifiers (`javascript`, `typescript`, `python`, …) the
+/// `code-language-detection` allowlist defines. Pre-existing rows keep
+/// `code_language = NULL` and continue rendering through the documented
+/// generic `code` content type; the column is purely additive.
+///
+/// The `down` step uses the table-rebuild pattern the other
+/// additive migrations use so a rollback returns the schema to the
+/// pre-`code-language-detection` shape without losing data. Image,
+/// rich-text and text rows are preserved; the column itself is
+/// dropped alongside the index the migration adds.
+const MIGRATION_0011_CODE_LANGUAGE: Migration = Migration {
+    version: 11,
+    description: "code-language-detection: add nullable code_language column and index",
+    up_sql: "ALTER TABLE clipboard_entries ADD COLUMN code_language TEXT;
+    CREATE INDEX IF NOT EXISTS idx_clipboard_entries_code_language
+        ON clipboard_entries (code_language);",
+    down_sql: "DROP INDEX IF EXISTS idx_clipboard_entries_code_language;
+    CREATE TABLE clipboard_entries_code_language_rollback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        content_size INTEGER NOT NULL,
+        content_hash TEXT NOT NULL,
+        source_app TEXT,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        title TEXT,
+        source_app_name TEXT,
+        source_app_icon_ref TEXT,
+        asset_ref TEXT,
+        mime_type TEXT,
+        payload_width INTEGER,
+        payload_height INTEGER,
+        rich_text_hash TEXT,
+        rich_html_ref TEXT,
+        rich_rtf_ref TEXT,
+        rich_preview_ref TEXT,
+        rich_html_size INTEGER,
+        rich_rtf_size INTEGER
+    );
+    INSERT INTO clipboard_entries_code_language_rollback
+        (id, content, content_type, content_size, content_hash,
+         source_app, is_pinned, created_at, updated_at, last_seen_at,
+         title, source_app_name, source_app_icon_ref,
+         asset_ref, mime_type, payload_width, payload_height,
+         rich_text_hash, rich_html_ref, rich_rtf_ref,
+         rich_preview_ref, rich_html_size, rich_rtf_size)
+    SELECT id, content, content_type, content_size, content_hash,
+           source_app, is_pinned, created_at, updated_at, last_seen_at,
+           title, source_app_name, source_app_icon_ref,
+           asset_ref, mime_type, payload_width, payload_height,
+           rich_text_hash, rich_html_ref, rich_rtf_ref,
+           rich_preview_ref, rich_html_size, rich_rtf_size
+    FROM clipboard_entries;
+    DROP TABLE clipboard_entries;
+    ALTER TABLE clipboard_entries_code_language_rollback RENAME TO clipboard_entries;
+    CREATE UNIQUE INDEX idx_clipboard_entries_plain_hash
+        ON clipboard_entries (content_hash) WHERE rich_text_hash IS NULL;
+    CREATE UNIQUE INDEX idx_clipboard_entries_rich_hash
+        ON clipboard_entries (content_hash, rich_text_hash)
+        WHERE rich_text_hash IS NOT NULL;
+    CREATE INDEX idx_clipboard_entries_updated_at
+        ON clipboard_entries (updated_at DESC);
+    CREATE INDEX idx_clipboard_entries_source_app
+        ON clipboard_entries (source_app);
+    CREATE INDEX idx_clipboard_entries_pinned_updated
+        ON clipboard_entries (is_pinned, updated_at DESC);
+    CREATE INDEX idx_clipboard_entries_created_at
+        ON clipboard_entries (created_at);
+    CREATE INDEX idx_clipboard_entries_asset_ref
+        ON clipboard_entries (asset_ref);
+    CREATE INDEX idx_clipboard_entries_rich_text_hash
+        ON clipboard_entries (rich_text_hash);
+    CREATE INDEX idx_clipboard_entries_rich_html_ref
+        ON clipboard_entries (rich_html_ref);
+    CREATE INDEX idx_clipboard_entries_rich_rtf_ref
+        ON clipboard_entries (rich_rtf_ref);
+    CREATE INDEX idx_clipboard_entries_rich_preview_ref
+        ON clipboard_entries (rich_preview_ref);",
+};
+
 /// Returns the migrations shipped with ClipVault. Each new migration is
 /// appended to this slice to keep ordering deterministic.
 pub fn builtin_migrations() -> Vec<Migration> {
@@ -493,6 +580,7 @@ pub fn builtin_migrations() -> Vec<Migration> {
         MIGRATION_0008_CLIPBOARD_ASSETS,
         MIGRATION_0009_RICH_TEXT,
         MIGRATION_0010_ORGANIZATION,
+        MIGRATION_0011_CODE_LANGUAGE,
     ]
 }
 
@@ -517,14 +605,17 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_assets_migration_is_the_next_sequential_version() {
-        // The change contract says the asset migration is appended
-        // after the existing ones, not inserted in the middle.
+    fn code_language_migration_is_the_next_sequential_version() {
+        // The `code-language-detection` change appends its migration
+        // after the existing ones. It MUST stay the last entry of
+        // `builtin_migrations` so the registry keeps ordering
+        // deterministic and a future contributor cannot accidentally
+        // reorder history.
         let migrations = builtin_migrations();
         let last = migrations.last().expect("at least one migration");
-        assert_eq!(last.version, 10);
-        assert_eq!(last.version, MIGRATION_0010_ORGANIZATION.version);
-        assert_eq!(migrations.len(), 10);
+        assert_eq!(last.version, 11);
+        assert_eq!(last.version, MIGRATION_0011_CODE_LANGUAGE.version);
+        assert_eq!(migrations.len(), 11);
     }
 
     #[test]
@@ -589,6 +680,26 @@ mod tests {
         assert!(
             up.contains("INSERT OR IGNORE INTO ENTRY_COLLECTIONS"),
             "missing entry backfill"
+        );
+    }
+
+    #[test]
+    fn code_language_migration_is_purely_additive() {
+        // Same rule as the other additive migrations: the `up` step
+        // must only add columns / indexes; the `down` step uses the
+        // table-rebuild pattern but is excluded from this assertion
+        // because rollbacks inherently DROP and INSERT.
+        let up = MIGRATION_0011_CODE_LANGUAGE.up_sql.to_uppercase();
+        for forbidden in ["DROP TABLE", "DELETE FROM", "UPDATE ", "INSERT INTO"] {
+            assert!(
+                !up.contains(forbidden),
+                "additive migration must not contain {forbidden}"
+            );
+        }
+        assert!(up.contains("CODE_LANGUAGE"), "missing code_language column");
+        assert!(
+            up.contains("IDX_CLIPBOARD_ENTRIES_CODE_LANGUAGE"),
+            "missing code_language index"
         );
     }
 }

@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-07
+goal: Detectar, persistir y presentar localmente el lenguaje de capturas de código sin alterar el contenido original ni romper la taxonomía existente.

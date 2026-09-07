@@ -1129,6 +1129,7 @@ fn collector_keeps_an_asset_still_referenced_by_another_row() {
             rich_preview_ref: None,
             rich_html_size: None,
             rich_rtf_size: None,
+            code_language: None,
         };
         shared.content_hash = format!("{reference}-variant");
         repo.insert_or_touch(shared).expect("shared row");
@@ -1456,6 +1457,7 @@ fn shared_asset_survives_every_pass_including_failing_query() {
             rich_preview_ref: None,
             rich_html_size: None,
             rich_rtf_size: None,
+            code_language: None,
         };
         repo.insert_or_touch(shared).expect("shared row");
     }
@@ -1624,6 +1626,7 @@ fn failing_rich_text_reference_query_keeps_every_rich_asset_on_disk() {
             rich_preview_ref: outcome.preview_ref().map(str::to_owned),
             rich_html_size: Some(html.len() as i64),
             rich_rtf_size: None,
+            code_language: None,
         };
         repo.insert_or_touch(rich_row).expect("insert rich row");
     }
@@ -1825,6 +1828,7 @@ fn wayland_image_paste_reports_a_session_limit_not_a_permission() {
             rich_preview_ref: None,
             rich_html_size: None,
             rich_rtf_size: None,
+            code_language: None,
         })
         .expect("insert")
         .record()

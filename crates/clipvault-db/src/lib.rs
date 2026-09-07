@@ -23,7 +23,8 @@ pub use database::{
 pub use entry::{ContentType, EntryRecord, NewEntry, IMAGE_CONTENT_SENTINEL, IMAGE_MIME_PNG};
 pub use entry_repository::{
     AggregatedSourceApp, AggregatedSourceApps, EntryOutcome, EntryRepository, EntryRepositoryError,
-    SetFavoriteOutcome, SetSourceAppMetadataOutcome, SetTitleOutcome, TEXTUAL_CONTENT_TYPES,
+    SetCodeLanguageOutcome, SetFavoriteOutcome, SetSourceAppMetadataOutcome, SetTitleOutcome,
+    TEXTUAL_CONTENT_TYPES,
 };
 pub use error::{DbError, DbResult};
 pub use ignored_apps::{IgnoredApp, IgnoredAppRepository, IgnoredAppsError};

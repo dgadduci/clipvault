@@ -217,18 +217,23 @@ test("ClipboardPreview renders the safe text inside a <pre>", () => {
     previewSource.includes("<pre"),
     "the text body must use a <pre> element so whitespace and scroll stay bounded",
   );
-  assert.equal(
-    previewSource.includes("{@html"),
-    // The component mounts the shared icon sprite + the app
-    // fallback glyph through `{@html}` so both surfaces still
-    // resolve the documented `<use href="#cv-icon-…">` ids. The
-    // preview body itself never uses `{@html}`.
-    // We only flag a regression that introduces another
-    // `{@html …}` consumer that takes user content.
+  const htmlConsumers =
     previewSource.match(/\{@html[^}]+\}/g)?.filter(
       (m) => !m.includes("CONTENT_TYPE_ICON_SPRITE") &&
         !m.includes("APP_FALLBACK_ICON_SVG"),
-    ).length === 0,
+    ) ?? [];
+  // The `code-language-detection` capability mounts the sanitised
+  // highlight.js output through a documented `{@html highlightedHtml}`
+  // consumer. The detector helper must guarantee the markup is
+  // free of scripts, event handlers and remote URLs before it
+  // reaches the preview, which is why the contract still refuses
+  // any other `{@html …}` consumer.
+  assert.ok(
+    htmlConsumers.every(
+      (consumer) => consumer.includes("highlightedHtml") ||
+        consumer.includes("CONTENT_TYPE_ICON_SPRITE") ||
+        consumer.includes("APP_FALLBACK_ICON_SVG"),
+    ),
     "ClipboardPreview must not introduce a new @html consumer that takes user content",
   );
 });

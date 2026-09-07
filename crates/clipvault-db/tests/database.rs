@@ -565,6 +565,7 @@ fn clipboard_assets_migration_is_reversible_and_keeps_textual_rows() {
             rich_preview_ref: None,
             rich_html_size: None,
             rich_rtf_size: None,
+            code_language: None,
         })
         .expect("insert image");
         textual

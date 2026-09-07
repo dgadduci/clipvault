@@ -291,6 +291,17 @@ export interface EntryRecord {
   rich_html_size: number | null;
   /** Byte length of the original RTF representation, or `null`. */
   rich_rtf_size: number | null;
+  /**
+   * Canonical programming-language identifier the
+   * `code-language-detection` detector accepted for the capture.
+   * `null` for every row predating the change, every textual
+   * variant other than `code`, every image / rich-text row and
+   * every payload the detector could not classify with sufficient
+   * confidence. The value is the canonical, normalised identifier
+   * from the allowlist (never an alias) so the SQL index, the
+   * label helper and the preview overlay agree byte-for-byte.
+   */
+  code_language: string | null;
 }
 
 export interface SearchHit {

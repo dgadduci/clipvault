@@ -63,6 +63,10 @@
     selectPendingEntries,
     type EntryOrganizationFetchResult,
   } from "./lib/entryOrganization";
+  import { hydrateCodeLanguageForEntry } from "./lib/codeLanguageHydration";
+  import {
+    applyCodeLanguageToDesktopProjections,
+  } from "./lib/codeLanguageProjections";
   import {
     matchesSearchShortcut,
     searchShortcutAccessibleLabel,
@@ -291,6 +295,14 @@
       await refreshEntries();
       await refreshSourceAppOptions();
       await refreshUnorganizedClearableCount();
+      // Bootstrap hydration: walk the freshly-loaded entries and
+      // ask the conservative detector for a canonical language. The
+      // round-trip is anchored on its own token, runs in the
+      // background and never blocks the loading flag — a user who
+      // opens the Desktop and immediately interacts with the rail
+      // must never wait for the analysis to finish before they can
+      // paste or pin a capture.
+      void hydrateCodeLanguages();
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     } finally {
@@ -1159,11 +1171,56 @@
       await refreshSourceAppOptions();
       await refreshEntries();
       await refreshUnorganizedClearableCount();
+      await hydrateCodeLanguages();
     } catch (err) {
       console.warn(
         "history-updated refresh failed:",
         err instanceof Error ? err.message : String(err),
       );
+    }
+  }
+
+  /**
+   * Walk the most-recent rail entries and persist any pending
+   * `code_language` classification the conservative frontend detector
+   * could accept. The helper coalesces requests per entry id, skips
+   * already-classified rows and never inspects clipboard content:
+   * the bridge carries only the canonical identifier.
+   *
+   * Every persisted classification patches `entries`,
+   * `visibleEntries` and — when a search is active — the rail's
+   * slice of search hits through the pure helper
+   * `applyCodeLanguageToDesktopProjections`. The patch is an
+   * immutable copy of the affected row only, so titles, tags,
+   * collections, favourites, source-app metadata, thumbnails and
+   * image references stay intact.
+   */
+  let codeLanguageHydrationToken = 0;
+  async function hydrateCodeLanguages(): Promise<void> {
+    const token = ++codeLanguageHydrationToken;
+    for (const entry of entries) {
+      if (token !== codeLanguageHydrationToken) return;
+      try {
+        const outcome = await hydrateCodeLanguageForEntry(entry);
+        if (outcome.persisted && outcome.language !== null) {
+          const patched = applyCodeLanguageToDesktopProjections(
+            entries,
+            visibleEntries,
+            entry.id,
+            outcome.language,
+            { isFiltering },
+          );
+          if (patched.applied) {
+            entries = patched.nextEntries;
+            visibleEntries = patched.nextVisibleEntries;
+          }
+        }
+      } catch (error) {
+        console.warn(
+          "code-language hydration failed:",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
     }
   }
 

@@ -217,6 +217,15 @@ pub struct EntryRecord {
     /// Byte length of the original RTF representation. `None` when the
     /// source did not expose RTF.
     pub rich_rtf_size: Option<i64>,
+    /// Canonical programming-language identifier the
+    /// `code-language-detection` detector accepted for the capture.
+    /// `None` for every row predating the change, every textual
+    /// variant other than `code`, every image / rich-text row and
+    /// every payload the detector could not classify with sufficient
+    /// confidence. The value is the canonical, normalised identifier
+    /// from the allowlist (never an alias) so the frontend, the SQL
+    /// index and the UI label stay byte-for-byte aligned.
+    pub code_language: Option<String>,
 }
 
 impl EntryRecord {
@@ -282,6 +291,9 @@ pub struct NewEntry {
     pub rich_preview_ref: Option<String>,
     pub rich_html_size: Option<i64>,
     pub rich_rtf_size: Option<i64>,
+    /// Canonical programming-language identifier for a textual
+    /// capture the detector accepted. `None` for every other row.
+    pub code_language: Option<String>,
 }
 
 impl NewEntry {
@@ -314,7 +326,51 @@ impl NewEntry {
             rich_preview_ref: None,
             rich_html_size: None,
             rich_rtf_size: None,
+            code_language: None,
         }
+    }
+
+    /// Build a textual `code` entry with the canonical language the
+    /// detector accepted. `code_language` MUST be the canonical,
+    /// normalised identifier from the allowlist; the helper does not
+    /// validate it because the canonical-language helpers in
+    /// `clipvault-core` already enforce the rule at the bridge.
+    pub fn code(
+        content: String,
+        content_size: i64,
+        content_hash: String,
+        source_app: Option<String>,
+        code_language: Option<String>,
+        created_at: OffsetDateTime,
+        last_seen_at: OffsetDateTime,
+    ) -> Self {
+        Self::text(
+            content,
+            ContentType::Code,
+            content_size,
+            content_hash,
+            source_app,
+            created_at,
+            last_seen_at,
+        )
+        .with_code_language(code_language)
+    }
+
+    /// Attach a canonical language to an existing textual entry.
+    /// Returns `self` so callers can chain the helper without a
+    /// dedicated intermediate variable. The helper intentionally
+    /// trusts the caller; the canonical-language helpers in the
+    /// core layer own the validation.
+    pub fn with_code_language(mut self, language: Option<String>) -> Self {
+        self.code_language = language.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        self
     }
 }
 
@@ -401,6 +457,7 @@ mod tests {
             rich_preview_ref: None,
             rich_html_size: None,
             rich_rtf_size: None,
+            code_language: None,
         }
     }
 
@@ -478,6 +535,43 @@ mod tests {
         assert!(entry.mime_type.is_none());
         assert!(entry.payload_width.is_none());
         assert!(entry.payload_height.is_none());
+        assert!(entry.code_language.is_none());
+    }
+
+    #[test]
+    fn new_entry_code_helper_sets_content_type_and_code_language() {
+        let entry = NewEntry::code(
+            "print('hi')".into(),
+            11,
+            "hash".into(),
+            None,
+            Some("python".into()),
+            OffsetDateTime::UNIX_EPOCH,
+            OffsetDateTime::UNIX_EPOCH,
+        );
+        assert_eq!(entry.content_type, ContentType::Code);
+        assert_eq!(entry.code_language.as_deref(), Some("python"));
+    }
+
+    #[test]
+    fn with_code_language_trims_and_drops_empty_strings() {
+        let entry = NewEntry::text(
+            "x".into(),
+            ContentType::Code,
+            1,
+            "hash".into(),
+            None,
+            OffsetDateTime::UNIX_EPOCH,
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .with_code_language(Some("  python  ".into()));
+        assert_eq!(entry.code_language.as_deref(), Some("python"));
+
+        let empty = entry.clone().with_code_language(Some("   ".into()));
+        assert!(empty.code_language.is_none());
+
+        let cleared = entry.with_code_language(None);
+        assert!(cleared.code_language.is_none());
     }
 
     #[test]

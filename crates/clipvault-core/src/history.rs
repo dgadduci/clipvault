@@ -389,6 +389,7 @@ impl TextHistoryService {
             rich_preview_ref: outcome.preview_ref().map(str::to_string),
             rich_html_size: payload.html().map(|h| h.len() as i64),
             rich_rtf_size: payload.rtf().map(|r| r.len() as i64),
+            code_language: None,
         };
 
         self.commit(context, new_entry, source_app.as_deref())
@@ -498,6 +499,7 @@ impl TextHistoryService {
             rich_preview_ref: None,
             rich_html_size: None,
             rich_rtf_size: None,
+            code_language: None,
         };
 
         self.commit(context, new_entry, source_app.as_deref())

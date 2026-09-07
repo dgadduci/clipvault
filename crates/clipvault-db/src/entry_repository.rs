@@ -25,7 +25,8 @@ const ENTRY_COLUMNS: &str = "id, content, content_type, content_size, content_ha
      title, source_app_name, source_app_icon_ref,
      asset_ref, mime_type, payload_width, payload_height,
      rich_text_hash, rich_html_ref, rich_rtf_ref, rich_preview_ref,
-     rich_html_size, rich_rtf_size";
+     rich_html_size, rich_rtf_size,
+     code_language";
 
 #[derive(Debug, Error)]
 pub enum EntryRepositoryError {
@@ -68,6 +69,20 @@ pub struct SetFavoriteOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetTitleOutcome {
     pub updated: Option<EntryRecord>,
+}
+
+/// Result of [`EntryRepository::set_code_language`]. `updated` is
+/// `None` when the target entry does not exist; otherwise it carries
+/// the refreshed record. `noop = true` signals that the caller asked
+/// to overwrite an already-stored classification with `null` and the
+/// repository deliberately refused — the row stays unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetCodeLanguageOutcome {
+    pub updated: Option<EntryRecord>,
+    /// `true` when the repository accepted the requested change but
+    /// refused to clear an already-stored classification; the row is
+    /// untouched and `updated` still carries the previous record.
+    pub noop: bool,
 }
 
 /// Result of [`EntryRepository::set_source_app_metadata`]. `updated`
@@ -171,9 +186,10 @@ impl<'a> EntryRepository<'a> {
                      source_app, created_at, updated_at, last_seen_at,
                      asset_ref, mime_type, payload_width, payload_height,
                      rich_text_hash, rich_html_ref, rich_rtf_ref,
-                     rich_preview_ref, rich_html_size, rich_rtf_size)
+                     rich_preview_ref, rich_html_size, rich_rtf_size,
+                     code_language)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11,
-                         ?12, ?13, ?14, ?15, ?16, ?17)",
+                         ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     new.content,
                     new.content_type.as_str(),
@@ -192,6 +208,7 @@ impl<'a> EntryRepository<'a> {
                     new.rich_preview_ref,
                     new.rich_html_size,
                     new.rich_rtf_size,
+                    new.code_language,
                 ],
             )?;
             let id = tx.last_insert_rowid();
@@ -698,6 +715,81 @@ impl<'a> EntryRepository<'a> {
         Ok(SetTitleOutcome { updated: record })
     }
 
+    /// Set or restore the canonical `code_language` for a single entry.
+    /// The repository trusts the caller to have validated the language
+    /// already (the canonical-language helpers in `clipvault-core`
+    /// enforce the allowlist); it only stores the trimmed value.
+    ///
+    /// The operation is idempotent and refuses to overwrite an
+    /// already-stored classification with `None`: a later request to
+    /// clear the metadata is reported as `noop = true` instead of
+    /// mutating the row, so a stale or buggy frontend cannot poison
+    /// the persistence layer.
+    pub fn set_code_language(
+        &mut self,
+        id: i64,
+        language: Option<&str>,
+        now: OffsetDateTime,
+    ) -> Result<SetCodeLanguageOutcome, EntryRepositoryError> {
+        let tx = self.conn.transaction()?;
+        let now_str = format_timestamp(now);
+        let stored = language.and_then(normalise_code_language);
+        // Refuse to clobber an existing classification with null: a
+        // stale frontend cannot turn "python" into "unknown" by
+        // re-asking. The repository still returns `updated = Some(_)` so
+        // the caller can render the canonical record.
+        if stored.is_none() {
+            let existing: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT code_language FROM clipboard_entries WHERE id = ?1",
+                    params![id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+            return match existing {
+                None => Ok(SetCodeLanguageOutcome {
+                    updated: None,
+                    noop: false,
+                }),
+                Some(current) => {
+                    if current.is_some() {
+                        let record = fetch_by_id(&tx, id)?;
+                        tx.commit()?;
+                        Ok(SetCodeLanguageOutcome {
+                            updated: record,
+                            noop: true,
+                        })
+                    } else {
+                        // Already null: leave the row untouched and
+                        // report no change.
+                        let record = fetch_by_id(&tx, id)?;
+                        tx.commit()?;
+                        Ok(SetCodeLanguageOutcome {
+                            updated: record,
+                            noop: false,
+                        })
+                    }
+                }
+            };
+        }
+        let updated = tx.execute(
+            "UPDATE clipboard_entries
+             SET code_language = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![stored, now_str, id],
+        )?;
+        let record = if updated == 0 {
+            None
+        } else {
+            fetch_by_id(&tx, id)?
+        };
+        tx.commit()?;
+        Ok(SetCodeLanguageOutcome {
+            updated: record,
+            noop: false,
+        })
+    }
+
     /// Set the source-application presentation metadata for an
     /// existing entry. Passing `None` for either `name` or `icon_ref`
     /// leaves the previously stored value untouched (similar to
@@ -886,6 +978,21 @@ fn normalise_title(raw: &str) -> Option<String> {
     }
 }
 
+/// Trim and validate a `code_language` value before persistence. The
+/// repository keeps the validator dumb — it only enforces "non-empty
+/// trimmed input" — so the canonical-language helpers in
+/// `clipvault-core` own the allowlist and the alias resolution. The
+/// function returns `None` when the input is blank; the caller MUST
+/// have already checked the allowlist.
+fn normalise_code_language(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 fn fetch_by_id(conn: &Connection, id: i64) -> Result<Option<EntryRecord>, EntryRepositoryError> {
     let sql = format!(
         "SELECT {ENTRY_COLUMNS}
@@ -933,6 +1040,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord> {
         rich_preview_ref: row.get(20)?,
         rich_html_size: row.get(21)?,
         rich_rtf_size: row.get(22)?,
+        code_language: parse_code_language(row.get(23)?)?,
     })
 }
 
@@ -955,6 +1063,22 @@ fn parse_content_type(raw: &str) -> Option<ContentType> {
         "image" => Some(ContentType::Image),
         _ => None,
     }
+}
+
+/// Parse the raw `code_language` column. The repository only accepts
+/// canonical, normalised identifiers — empty strings collapse to
+/// `None` so a hand-edited database cannot poison the render. Unknown
+/// values surface a typed conversion error so callers can decide
+/// whether to drop the row or surface a soft failure.
+fn parse_code_language(raw: Option<String>) -> Result<Option<String>, rusqlite::Error> {
+    let Some(value) = raw else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 /// Canonical list of textual content types included by
@@ -1038,6 +1162,7 @@ mod tests {
             rich_preview_ref: None,
             rich_html_size: None,
             rich_rtf_size: None,
+            code_language: None,
         }
     }
 
@@ -1067,6 +1192,7 @@ mod tests {
             rich_preview_ref: Some(format!("rich-text/{hash}.preview.html")),
             rich_html_size: html.map(|value| value.len() as i64),
             rich_rtf_size: rtf.map(|value| value.len() as i64),
+            code_language: None,
         }
     }
 

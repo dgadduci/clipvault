@@ -514,6 +514,40 @@ export const entryUpsertTagCommand: ClipvaultCommandArg<
 export const historyCollectionIdCommand: ClipvaultCommand<number> = () =>
   invoke<number>("clipvault_history_collection_id");
 
+// ---------------------------------------------------------------------------
+// `code-language-detection` command surface.
+// ---------------------------------------------------------------------------
+
+/**
+ * Response shape of `clipvault_code_language_set`. Mirrors the
+ * backend `SetCodeLanguageResponse` discriminated union so the UI can
+ * branch on `kind` without parsing free-form messages.
+ */
+export type SetCodeLanguageResponse =
+  | { kind: "updated"; entry: EntryRecord }
+  | { kind: "noop"; entry: EntryRecord }
+  | { kind: "not_found" };
+
+/**
+ * Persist the canonical `code_language` the frontend detector accepted
+ * for `entryId`. The bridge carries only metadata — the canonical
+ * language identifier and the entry id — and never inspects the
+ * clipboard payload, hash or snippet.
+ *
+ * The command accepts `null` to mean "the detector could not classify
+ * this capture"; the backend refuses to overwrite an already-stored
+ * classification with `null` and reports the refusal as `noop` so a
+ * stale frontend cannot poison the persistence layer.
+ */
+export const codeLanguageSetCommand: ClipvaultCommandArg<
+  SetCodeLanguageResponse,
+  { entryId: number; codeLanguage: string | null }
+> = (args) =>
+  invoke<SetCodeLanguageResponse>("clipvault_code_language_set", {
+    entryId: args.entryId,
+    codeLanguage: args.codeLanguage,
+  });
+
 // Re-export the types so consumers don't need a second import.
 export type {
   ActiveAppDiagnostics,

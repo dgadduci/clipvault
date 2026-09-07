@@ -22,6 +22,7 @@ use crate::active_app_diagnostics::ActiveAppDiagnosticsState;
 use crate::clipboard::{Clipboard, FakeClipboard};
 use crate::clipboard_assets::ClipboardAssetStore;
 use crate::clock::{Clock, SystemClock};
+use crate::code_language_service::CodeLanguageService;
 use crate::history::TextHistoryService;
 use crate::ignored_apps_service::IgnoredAppsService;
 use crate::management::{HistoryManagementService, DEFAULT_RETENTION, RETENTION_SETTING_KEY};
@@ -183,6 +184,13 @@ impl AppContext {
 
     pub fn history(&self) -> &TextHistoryService {
         &self.history
+    }
+
+    /// Handle the persistence layer uses for the canonical
+    /// `code_language` metadata. The service is stateless so the
+    /// accessor returns a fresh, zero-cost handle on every call.
+    pub fn code_language(&self) -> CodeLanguageService {
+        CodeLanguageService::new()
     }
 
     pub fn management(&self) -> &HistoryManagementService {

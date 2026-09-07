@@ -38,6 +38,8 @@
     defaultCardTitle,
     validateTitle,
   } from "./lib/contentType";
+  import { canonicalLabel as canonicalCodeLanguageLabel } from "./lib/codeLanguageDetector";
+  import { shouldShowCodeLanguageBadge } from "./lib/codeLanguageProjections";
   import type { PreviewShortcutPlatform } from "./lib/clipboardPreview";
   import {
     APP_FALLBACK_ICON_SVG,
@@ -1158,6 +1160,16 @@
     >{previewText}</pre>
   {/if}
 
+  {#if shouldShowCodeLanguageBadge(entry)}
+    <p
+      class="card-code-language"
+      data-testid="history-card-code-language"
+      data-code-language={entry.code_language}
+    >
+      Código · {canonicalCodeLanguageLabel(entry.code_language)}
+    </p>
+  {/if}
+
   {#if pasteError}
     <p
       class="paste-error"
@@ -1641,6 +1653,23 @@
     -webkit-box-orient: vertical;
     white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  .card-code-language {
+    /* The compact language badge shares the documented
+     * `--cv-tag` token the tag chips use so the card metadata stays
+     * visually consistent. The badge is decorative — the canonical
+     * `data-code-language` attribute carries the language the UI
+     * helpers, the bridge and the persistence layer consume. */
+    margin: 0;
+    padding: 0.1rem 0.45rem;
+    align-self: flex-start;
+    border-radius: 4px;
+    background: rgba(94, 234, 212, 0.15);
+    color: #5eead4;
+    font-size: var(--cv-tag, 0.65rem);
+    font-weight: 500;
+    letter-spacing: 0.02em;
   }
 
   /*

@@ -12,7 +12,8 @@
     "test": "node --experimental-strip-types --no-warnings --test tests/**/*.test.ts"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.0"
+    "@tauri-apps/api": "^2.0.0",
+    "highlight.js": "^11.10.0"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^4.0.0",

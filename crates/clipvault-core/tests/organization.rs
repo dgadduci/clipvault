@@ -1384,6 +1384,7 @@ fn recent_entries_with_filter_returns_image_rows_for_collection() {
             rich_preview_ref: None,
             rich_html_size: None,
             rich_rtf_size: None,
+            code_language: None,
         };
         let outcome = repo.insert_or_touch(new).expect("insert image").record().id;
         drop(db);
@@ -1468,6 +1469,7 @@ fn recent_entries_with_filter_for_history_includes_image_rows() {
             rich_preview_ref: None,
             rich_html_size: None,
             rich_rtf_size: None,
+            code_language: None,
         };
         repo.insert_or_touch(new).expect("insert image").record().id
     };
@@ -1820,6 +1822,7 @@ fn seed_image_entry(context: &clipvault_core::AppContext, when: time::OffsetDate
         rich_preview_ref: None,
         rich_html_size: None,
         rich_rtf_size: None,
+        code_language: None,
     };
     let id = repo.insert_or_touch(new).expect("insert image").record().id;
     drop(db);

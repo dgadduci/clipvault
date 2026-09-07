@@ -383,6 +383,35 @@ export function entryFullPreviewText(
 }
 
 /**
+ * Raw, unmodified textual content of an entry.
+ *
+ * The helper is the source of truth the shared `ClipboardPreview`
+ * overlay feeds to `renderHighlightedCode` so the highlighted
+ * preview keeps the original tabs, newlines, indentation and
+ * empty lines the source application produced. Unlike
+ * `entryFullPreviewText`, the helper never collapses whitespace
+ * runs and never trims the string: a Python block with four
+ * spaces of indentation, a JavaScript snippet with literal `\t`
+ * characters or a multi-line block with empty lines must reach
+ * the highlighter unchanged so the same characters can reach the
+ * `<pre>` element the helper renders inside.
+ *
+ * The helper is metadata-only by construction: it reads the same
+ * `content` field the rest of the preview pipeline consumes and
+ * never inspects asset references, hashes, paths or absolute
+ * filenames. For an image row the helper returns the empty
+ * `content` sentinel for backwards compatibility; callers that
+ * build a code preview must branch on `isImageEntry` first so the
+ * sentinel never leaks into the highlighted output.
+ */
+export function entryRawContent(
+  entry: Pick<EntryRecord, "content" | "content_type">,
+): string {
+  if (isImageEntry(entry)) return "";
+  return entry.content ?? "";
+}
+
+/**
  * Escape a plain-text capture into a safe representation the
  * preview overlay can render inside a `<pre>` element without
  * re-introducing the active content the spec explicitly forbids.

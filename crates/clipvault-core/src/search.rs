@@ -333,6 +333,7 @@ mod tests {
             rich_preview_ref: None,
             rich_html_size: None,
             rich_rtf_size: None,
+            code_language: None,
         };
         let mut db = context.database().lock();
         let mut repo = EntryRepository::new(db.connection_mut());

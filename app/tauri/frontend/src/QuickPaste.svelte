@@ -61,6 +61,12 @@
     searchShortcutPlatform,
     type SearchShortcutPlatform,
   } from "./lib/searchShortcut";
+  import { hydrateCodeLanguageForEntry } from "./lib/codeLanguageHydration";
+  import {
+    applyCodeLanguageToRecentAndHits,
+    shouldShowCodeLanguageBadge,
+  } from "./lib/codeLanguageProjections";
+  import { canonicalLabel as canonicalCodeLanguageLabel } from "./lib/codeLanguageDetector";
   import { sourceAppIconCommand, diagnosticsCommand } from "./lib/tauri";
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
   import ClipboardPreview from "./ClipboardPreview.svelte";
@@ -244,9 +250,52 @@
       }
       loading = false;
       clampSelection();
+      void hydrateCodeLanguages();
     } catch (err) {
       searchError = err instanceof Error ? err.message : String(err);
       loading = false;
+    }
+  }
+
+  /**
+   * Walk the freshly loaded `recent` feed and persist any pending
+   * `code_language` classification the conservative detector
+   * accepts. The helper coalesces requests per entry id, skips
+   * already-classified rows and never forwards clipboard content.
+   *
+   * Every persisted classification patches `recent` and `hits`
+   * through the pure helper
+   * `applyCodeLanguageToRecentAndHits` so the row renders the
+   * canonical language badge and the preview overlay mirrors the
+   * same metadata. The patch is an immutable copy of the
+   * affected row only, so titles, tags, favourites,
+   * source-app, thumbnails and image metadata stay intact.
+   */
+  let codeLanguageHydrationToken = 0;
+  async function hydrateCodeLanguages(): Promise<void> {
+    const token = ++codeLanguageHydrationToken;
+    for (const entry of recent) {
+      if (token !== codeLanguageHydrationToken) return;
+      try {
+        const outcome = await hydrateCodeLanguageForEntry(entry);
+        if (outcome.persisted && outcome.language !== null) {
+          const patched = applyCodeLanguageToRecentAndHits(
+            recent,
+            hits,
+            entry.id,
+            outcome.language,
+          );
+          if (patched.applied) {
+            recent = patched.nextRecent;
+            hits = patched.nextHits;
+          }
+        }
+      } catch (error) {
+        console.warn(
+          "code-language hydration failed:",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
     }
   }
 
@@ -1828,6 +1877,16 @@
                   {preview}
                 </span>
               {/if}
+              {#if entry && shouldShowCodeLanguageBadge(entry)}
+                <span
+                  class="qp-code-language"
+                  data-testid="quick-paste-code-language"
+                  data-code-language={entry.code_language ?? ""}
+                  title={`Lenguaje: ${canonicalCodeLanguageLabel(entry.code_language)}`}
+                >
+                  Código · {canonicalCodeLanguageLabel(entry.code_language)}
+                </span>
+              {/if}
               <span
                 class="qp-elapsed"
                 data-testid="quick-paste-elapsed"
@@ -2374,14 +2433,17 @@
   }
 
   .qp-row-line-body {
-    /* The body line carries the preview/thumbnail, the elapsed
-     * time and the menu trigger. The thumbnail reserves a fixed
-     * 40x40px square; the preview truncates with an ellipsis. The
-     * elapsed time stays a fixed-width column so the preview
-     * never has to compete with it. The menu trigger takes a
-     * fixed 18px column so the body line never shifts when the
-     * menu opens or closes. */
-    grid-template-columns: minmax(0, 1fr) auto 18px;
+    /* The body line carries the preview/thumbnail, an optional
+     * language badge, the elapsed time and the menu trigger. The
+     * thumbnail reserves a fixed 40x40px square; the preview
+     * truncates with an ellipsis. The elapsed time stays a
+     * fixed-width column so the preview never has to compete
+     * with it. The menu trigger takes a fixed 18px column so the
+     * body line never shifts when the menu opens or closes. The
+     * language badge column collapses to its natural width and is
+     * only present when the row carries a canonical code
+     * classification. */
+    grid-template-columns: minmax(0, 1fr) auto auto 18px;
   }
 
   .qp-preview {
@@ -2423,6 +2485,35 @@
     color: #94a3b8;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+  }
+
+  .qp-code-language {
+    /* Compact language badge that mirrors the desktop rail's
+     * `card-code-language` style. The badge reuses the same
+     * `--cv-tag` token the rest of the metadata strip consumes so
+     * the row reads at the same weight the desktop card
+     * surfaces. The canonical `data-code-language` attribute is
+     * what the bridge, the highlight.js grammar and the search
+     * index consume; the visible copy is decorative. */
+    align-self: center;
+    flex: 0 0 auto;
+    padding: 0.05rem 0.4rem;
+    border-radius: 4px;
+    background: rgba(94, 234, 212, 0.18);
+    color: #5eead4;
+    font-size: var(--cv-tag, 0.65rem);
+    font-weight: 500;
+    line-height: 1.2;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 9rem;
+  }
+
+  .qp-row-active .qp-code-language {
+    background: rgba(255, 255, 255, 0.22);
+    color: #ecfeff;
   }
 
   .qp-row-active .qp-elapsed {

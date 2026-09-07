@@ -58,10 +58,19 @@
   import {
     createClipboardAssetResolver,
     entryFullPreviewText,
+    entryRawContent,
     escapeForPreview,
     hasRenderableImage,
     isImageEntry,
   } from "./lib/clipboardAsset.ts";
+  import {
+    canonicalLabel as canonicalCodeLanguageLabel,
+    renderHighlightedCode,
+  } from "./lib/codeLanguageDetector.ts";
+  import {
+    shouldRenderHighlightedPreview,
+    shouldShowCodeLanguageBadge,
+  } from "./lib/codeLanguageProjections.ts";
   import type { IconResolver } from "./lib/iconResolver.ts";
 
   export let entry: EntryRecord | null = null;
@@ -223,6 +232,24 @@
   $: safeText =
     entry == null ? "" : escapeForPreview(entryFullPreviewText(entry));
   $: fullText = entry == null ? "" : entryFullPreviewText(entry);
+  /**
+   * Raw textual content of the entry, with no whitespace collapse and
+   * no trim. The highlighted preview feeds THIS string into
+   * `renderHighlightedCode` so the same `\n`, `\r\n`, `\t` and empty
+   * lines the source application produced survive both the
+   * highlighting and the subsequent `<pre>` mount. The
+   * `entryFullPreviewText` helper above keeps collapsing whitespace
+   * for the plain-text fallback path — every regression that targets
+   * the non-highlighted branch (and every test pinned against it) is
+   * preserved byte-for-byte.
+   */
+  $: rawText = entry == null ? "" : entryRawContent(entry);
+  $: highlightedHtml = (() => {
+    if (entry == null || !shouldRenderHighlightedPreview(entry) || rawText.length === 0) {
+      return null;
+    }
+    return renderHighlightedCode(rawText, entry.code_language).html;
+  })();
   $: titleLabel =
     entry == null
       ? ""
@@ -235,6 +262,10 @@
     entry == null ? "" : sourceAppAccessibleLabel(entry);
   $: typeLabel =
     entry == null ? "" : contentTypeIconLabel(entry.content_type);
+  $: codeLanguageLabel =
+    entry == null || !shouldShowCodeLanguageBadge(entry)
+      ? ""
+      : canonicalCodeLanguageLabel(entry.code_language);
 </script>
 
 {#if entry != null}
@@ -328,6 +359,14 @@
           >
             (Captura vacía)
           </p>
+        {:else if highlightedHtml && shouldRenderHighlightedPreview(record)}
+          <pre
+            class="cv-preview-text cv-preview-code"
+            data-testid="{testIdPrefix}-code"
+            data-content-type={record.content_type}
+            data-code-language={record.code_language ?? ""}
+            data-testid-language={record.code_language ?? ""}
+          >{@html highlightedHtml}</pre>
         {:else}
           <pre
             class="cv-preview-text"
@@ -344,6 +383,16 @@
         >
           {sourceLabel}
         </span>
+        {#if codeLanguageLabel && shouldShowCodeLanguageBadge(record)}
+          <span
+            class="cv-preview-language"
+            data-testid="{testIdPrefix}-code-language"
+            data-code-language={record.code_language ?? ""}
+            title={`Lenguaje: ${codeLanguageLabel}`}
+          >
+            Código · {codeLanguageLabel}
+          </span>
+        {/if}
         <span
           class="cv-preview-elapsed"
           data-testid="{testIdPrefix}-elapsed"
@@ -458,6 +507,83 @@
     color: #f0f4f8;
     white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  .cv-preview-code {
+    /* The code preview keeps the documented monospace family but
+     * tightens the padding and slightly enlarges the font so the
+     * highlighted markup remains legible while the card preview
+     * remains compact. The highlighted markup is read-only:
+     * `highlight.js` never emits active content and the
+     * `codeLanguageDetector.ts` helper sanitises the output so a
+     * future regression cannot re-introduce scripts, event
+     * handlers or remote URLs.
+     *
+     * The whitespace contract is declared here on purpose instead
+     * of relying on the inherited `.cv-preview-text` rule: a global
+     * stylesheet or a future ancestor rule with `white-space:
+     * normal` would otherwise collapse the indentation, tabs and
+     * newlines the source application produced. `tab-size: 4`
+     * mirrors the Python / Rust / JavaScript indentation the
+     * regression suite verifies; `overflow-wrap` keeps an
+     * especially long line from breaking inside an identifier,
+     * and `overflow: auto` lets the body scroll when the snippet
+     * does not fit horizontally. */
+    padding: 0.5rem 0.6rem;
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 6px;
+    border: 1px solid rgba(147, 197, 253, 0.18);
+    font-size: var(--cv-preview, 0.74rem);
+    white-space: pre-wrap;
+    tab-size: 4;
+    -moz-tab-size: 4;
+    overflow-wrap: break-word;
+    overflow-x: auto;
+    max-width: 100%;
+  }
+
+  .cv-preview-code :global(.hljs-keyword),
+  .cv-preview-code :global(.hljs-built_in),
+  .cv-preview-code :global(.hljs-type) {
+    color: #93c5fd;
+  }
+
+  .cv-preview-code :global(.hljs-string),
+  .cv-preview-code :global(.hljs-attr) {
+    color: #f9a8d4;
+  }
+
+  .cv-preview-code :global(.hljs-number),
+  .cv-preview-code :global(.hljs-literal) {
+    color: #fcd34d;
+  }
+
+  .cv-preview-code :global(.hljs-comment) {
+    color: #94a3b8;
+    font-style: italic;
+  }
+
+  .cv-preview-code :global(.hljs-title),
+  .cv-preview-code :global(.hljs-function),
+  .cv-preview-code :global(.hljs-class),
+  .cv-preview-code :global(.hljs-name) {
+    color: #5eead4;
+  }
+
+  .cv-preview-code :global(.hljs-variable),
+  .cv-preview-code :global(.hljs-params) {
+    color: #f0f4f8;
+  }
+
+  .cv-preview-language {
+    margin-left: 0.5rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 4px;
+    background: rgba(94, 234, 212, 0.18);
+    color: #5eead4;
+    font-size: var(--cv-tag, 0.65rem);
+    font-weight: 500;
+    letter-spacing: 0.02em;
   }
 
   .cv-preview-image {

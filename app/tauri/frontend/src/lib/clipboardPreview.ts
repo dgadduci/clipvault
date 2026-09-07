@@ -48,6 +48,7 @@ export type PreviewShortcutPlatform = SearchShortcutPlatform;
  */
 export {
   entryFullPreviewText,
+  entryRawContent,
   escapeForPreview,
   isImageEntry,
   hasRenderableImage,

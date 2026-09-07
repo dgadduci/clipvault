@@ -4,12 +4,13 @@
 use std::sync::Arc;
 
 use clipvault_core::{
-    ActiveAppDiagnostics, Capabilities, ClearOutcome, ClipboardAssetStore, CopyOutcome,
-    DeleteOutcome, IgnoredAppEntry, IgnoredAppError, LocalSettingsReader, PasteMode, PasteOutcome,
-    PickAndAddOutcome, PlatformGuidance, PlatformSettingsTarget, RetentionOutcome, RetentionPolicy,
-    RetentionPreview, RichTextAssetStore, SetFavoriteResult, SetTitleOutcome, Settings,
-    SettingsNavigator, SettingsOpenOutcome, SettingsServiceError, SettingsUpdate,
-    TitleValidationError, ValidationCode, ValidationError, WatchTickOutcome,
+    ActiveAppDiagnostics, Capabilities, ClearOutcome, ClipboardAssetStore,
+    CodeLanguageServiceError, CopyOutcome, DeleteOutcome, IgnoredAppEntry, IgnoredAppError,
+    LocalSettingsReader, PasteMode, PasteOutcome, PickAndAddOutcome, PlatformGuidance,
+    PlatformSettingsTarget, RetentionOutcome, RetentionPolicy, RetentionPreview,
+    RichTextAssetStore, SetFavoriteResult, SetTitleOutcome, Settings, SettingsNavigator,
+    SettingsOpenOutcome, SettingsServiceError, SettingsUpdate, TitleValidationError,
+    ValidationCode, ValidationError, WatchTickOutcome,
 };
 use clipvault_platform::{
     read_icon_bytes, read_source_app_icon_bytes, ActiveAppError, IconReadError,
@@ -1534,6 +1535,97 @@ pub fn clipvault_history_collection_id(state: State<'_, SharedState>) -> Result<
         .map_err(organization_command_error)
 }
 
+// ---------------------------------------------------------------------------
+// `code-language-detection` capability commands.
+// ---------------------------------------------------------------------------
+
+/// Response of [`clipvault_code_language_set`]. Mirrors the
+/// [`clipvault_core::CodeLanguageServiceOutcome`] discriminated union so
+/// the frontend can branch on `kind` without inspecting the free-form
+/// `message` string. The response is metadata-only: no clipboard
+/// payload, no hash, no snippet and no asset reference.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SetCodeLanguageResponse {
+    /// The classification was written (or already matched) and the
+    /// refreshed record is returned for the rail to update.
+    Updated { entry: clipvault_db::EntryRecord },
+    /// The repository deliberately refused to overwrite a stored
+    /// classification with `null`. The record is still returned so
+    /// the frontend can render the previous state.
+    Noop { entry: clipvault_db::EntryRecord },
+    /// The target entry does not exist (anymore).
+    NotFound,
+}
+
+impl From<clipvault_core::CodeLanguageServiceOutcome> for SetCodeLanguageResponse {
+    fn from(outcome: clipvault_core::CodeLanguageServiceOutcome) -> Self {
+        match outcome {
+            clipvault_core::CodeLanguageServiceOutcome {
+                updated: Some(record),
+                noop: true,
+            } => SetCodeLanguageResponse::Noop { entry: record },
+            clipvault_core::CodeLanguageServiceOutcome {
+                updated: Some(record),
+                noop: false,
+            } => SetCodeLanguageResponse::Updated { entry: record },
+            clipvault_core::CodeLanguageServiceOutcome {
+                updated: None,
+                noop: _,
+            } => SetCodeLanguageResponse::NotFound,
+        }
+    }
+}
+
+fn code_language_command_error(error: CodeLanguageServiceError) -> CommandError {
+    let kind = error.kind_str();
+    CommandError::new(kind, error.to_string())
+}
+
+/// Persist the canonical `code_language` the frontend detector accepted
+/// for `entry_id`. The command carries only metadata: the
+/// canonical language identifier and the entry id. The bridge never
+/// inspects clipboard content, hashes, snippets or absolute paths,
+/// and the response carries only the refreshed record.
+#[tauri::command]
+pub fn clipvault_code_language_set(
+    state: State<'_, SharedState>,
+    entry_id: i64,
+    code_language: Option<String>,
+) -> Result<SetCodeLanguageResponse, CommandError> {
+    let raw_language = code_language.as_deref();
+    let mut db = state.context().database().lock();
+    let mut repo = clipvault_db::EntryRepository::new(db.connection_mut());
+    let outcome = state
+        .context()
+        .code_language()
+        .set_code_language(
+            &mut repo,
+            entry_id,
+            raw_language,
+            state.context().clock().now(),
+        )
+        .map_err(code_language_command_error)?;
+    Ok(outcome.into())
+}
+
+/// Test-friendly handle for [`clipvault_code_language_set`].
+#[allow(dead_code)]
+pub fn clipvault_code_language_set_for_test(
+    context: &clipvault_core::AppContext,
+    entry_id: i64,
+    code_language: Option<String>,
+) -> Result<SetCodeLanguageResponse, CommandError> {
+    let raw_language = code_language.as_deref();
+    let mut db = context.database().lock();
+    let mut repo = clipvault_db::EntryRepository::new(db.connection_mut());
+    let outcome = context
+        .code_language()
+        .set_code_language(&mut repo, entry_id, raw_language, context.clock().now())
+        .map_err(code_language_command_error)?;
+    Ok(outcome.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1550,5 +1642,62 @@ mod tests {
             ORGANIZATION_UPDATED_EVENT,
             "clipvault://organization-updated",
         );
+    }
+
+    /// Pin the wire-format discriminator for the code-language bridge
+    /// so a frontend rename surfaces as a unit-test failure instead of
+    /// silently dropping notifications.
+    #[test]
+    fn set_code_language_response_discriminator_is_stable() {
+        let entry = clipvault_db::EntryRecord {
+            id: 1,
+            content: "x".into(),
+            content_type: clipvault_db::ContentType::Code,
+            content_size: 1,
+            content_hash: "hash".into(),
+            source_app: None,
+            is_pinned: false,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            last_seen_at: "2026-01-01T00:00:00Z".into(),
+            title: None,
+            source_app_name: None,
+            source_app_icon_ref: None,
+            asset_ref: None,
+            mime_type: None,
+            payload_width: None,
+            payload_height: None,
+            rich_text_hash: None,
+            rich_html_ref: None,
+            rich_rtf_ref: None,
+            rich_preview_ref: None,
+            rich_html_size: None,
+            rich_rtf_size: None,
+            code_language: Some("python".into()),
+        };
+        let updated: SetCodeLanguageResponse = clipvault_core::CodeLanguageServiceOutcome {
+            updated: Some(entry.clone()),
+            noop: false,
+        }
+        .into();
+        match updated {
+            SetCodeLanguageResponse::Updated { entry: record } => {
+                assert_eq!(record.code_language.as_deref(), Some("python"));
+            }
+            other => panic!("expected Updated, got {other:?}"),
+        }
+        let noop: SetCodeLanguageResponse = clipvault_core::CodeLanguageServiceOutcome {
+            updated: Some(entry),
+            noop: true,
+        }
+        .into();
+        assert!(matches!(noop, SetCodeLanguageResponse::Noop { .. }));
+
+        let missing: SetCodeLanguageResponse = clipvault_core::CodeLanguageServiceOutcome {
+            updated: None,
+            noop: false,
+        }
+        .into();
+        assert!(matches!(missing, SetCodeLanguageResponse::NotFound));
     }
 }

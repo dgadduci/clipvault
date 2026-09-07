@@ -11,6 +11,8 @@ pub mod bootstrap;
 pub mod clipboard;
 pub mod clipboard_assets;
 pub mod clock;
+pub mod code_language;
+pub mod code_language_service;
 pub mod content_type;
 pub mod diagnostics;
 pub mod fakes;
@@ -68,6 +70,14 @@ pub use clipvault_platform::{
 };
 pub use clipvault_search::SearchQuery;
 pub use clock::{Clock, SystemClock};
+pub use code_language::{
+    canonical_label as canonical_code_language_label, is_canonical_code_language,
+    is_canonical_normalised as is_canonical_normalised_code_language, normalise_code_language,
+    CodeLanguageError, CODE_LANGUAGES, CODE_LANGUAGE_LABELS,
+};
+pub use code_language_service::{
+    CodeLanguageService, CodeLanguageServiceError, CodeLanguageServiceOutcome,
+};
 pub use content_type::detect_content_type;
 pub use diagnostics::{
     DatabasePath, Diagnostics, DiagnosticsService, HistoryCount, MigrationsApplied,
