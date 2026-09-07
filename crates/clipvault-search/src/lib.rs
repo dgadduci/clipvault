@@ -19,5 +19,7 @@ mod snippet;
 
 pub use engine::{
     LocalSearchEngine, SearchDocument, SearchEngine, SearchError, SearchHit, SearchQuery,
-    SearchResults, EMPTY_QUERY_NOTE, OK_NOTE,
+    SearchResults, EMPTY_QUERY_NOTE, FUZZY_MAX_DISTANCE, OK_NOTE, SCORE_ALL_TOKENS_SUBSTRING,
+    SCORE_EXACT_PHRASE, SCORE_FUZZY, SCORE_TITLE_ALL_TOKENS_SUBSTRING, SCORE_TITLE_EXACT_PHRASE,
+    SCORE_TITLE_FUZZY, SNIPPET_MAX_CHARS,
 };
