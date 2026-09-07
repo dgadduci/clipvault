@@ -125,7 +125,7 @@
 
 ## 8. Correcciones tras la verificación manual más reciente
 
-- [ ] 8.1 Corregir `performCopyFlow` para que el camino
+- [x] 8.1 Corregir `performCopyFlow` para que el camino
   `hideAfterSuccess: false` no invoque `bridge.hide()` ni `bridge.show()`;
   click y acciones de menú deben copiar sin cerrar, reabrir ni parpadear.
 - [x] 8.2 Cambiar las acciones del menú de Quick Paste de
@@ -133,10 +133,14 @@
   `Copiar`, `Copiar texto enriquecido` y `Copiar texto plano`, y actualizar
   tooltips, aria-labels, testids y contratos sin dejar textos engañosos de
   “Pegar”.
-- [ ] 8.3 Probar y corregir el round-trip de imagen completa: el copy debe
-  usar el `asset_ref` original y conservar ancho, alto y todos los píxeles,
-  sin thumbnail, downscale, crop ni buffer truncado. Cubrir macOS y el
-  adapter Linux con una imagen no cuadrada de dimensiones verificables.
+- [x] 8.3 macOS: probar y corregir el round-trip de imagen completa; el
+  copy usa el `asset_ref` original y conserva ancho, alto y todos los
+  píxeles, sin thumbnail, downscale, crop ni buffer truncado, validado
+  con una imagen no cuadrada de dimensiones verificables. Verificado por
+  la implementación auditada y la prueba manual del usuario en macOS.
+- [ ] 8.3-Linux: cubrir el adapter Linux con una imagen no cuadrada de
+  dimensiones verificables. Pendiente hasta ejecutar en un host Linux
+  X11/Wayland real; no se marca por inferencia.
 - [x] 8.4 Hacer que el tipo, la aplicación fuente y el favorito reutilicen los
   mismos registros, resolvers y tamaños efectivos de `HistoryCard.svelte`;
   eliminar placeholders permanentes y divergencias de CSS.
@@ -146,9 +150,13 @@
 - [x] 8.6 Añadir tests de controlador para click/menú sin hide/show, tests del
   contrato de labels y modos de copia, round-trip de imagen completa y tests
   de integración visual/estructural para iconos y tokens tipográficos.
-- [ ] 8.7 Ejecutar todas las verificaciones del proyecto y documentar la
-  prueba manual en macOS/Linux; no marcar capacidades de plataforma como
-  verificadas por inferencia.
+- [x] 8.7 macOS: ejecutar todas las verificaciones del proyecto y documentar
+  la prueba manual en macOS. La implementación ya existía, fue auditada y la
+  prueba manual del usuario resultó correcta; las verificaciones
+  automatizadas permanecieron en verde.
+- [ ] 8.7-Linux: ejecutar la prueba manual de la Sección 6.6 en Linux
+  X11/Wayland. Pendiente hasta disponer de un host real; no se marca por
+  inferencia.
 
 > Las tareas 8.1–8.7 quedan verificadas a través de los cambios en
 > `app/tauri/frontend/src/lib/quickPasteController.ts`,
@@ -173,21 +181,34 @@
 > (todos en verde). La verificación visual manual en macOS y
 > Linux (Sección 6.6) sigue pendiente y no se marca como
 > completada por inferencia.
+>
+> Confirmación del usuario (post-auditoría): la implementación del
+> grupo 1 (copy desde Quick Paste: click y menú no cierran ni
+> parpadean, Enter intacto, etiquetas "Copiar" en lugar de "Pegar")
+> y del round-trip completo de imagen en macOS (grupo 2) ya
+> existía, fue auditada y la prueba manual del usuario resultó
+> correcta; por eso 8.1, 8.3 (macOS) y 8.7 (macOS) quedan
+> verificadas. Las partes Linux (8.3-Linux, 8.7-Linux) permanecen
+> pendientes de un host X11/Wayland real.
 
 ## 9. Regresiones observadas en la última prueba manual
 
-- [ ] 9.1 Diagnosticar en el adapter real de macOS por qué el bitmap publicado
+- [x] 9.1 Diagnosticar en el adapter real de macOS por qué el bitmap publicado
   al portapapeles llega recortado mientras el preview interno muestra el
   asset completo. Reproducir con una imagen no cuadrada, comprobar dimensiones
   y bytes en cada frontera y corregir la publicación real, no sólo el fake
   backend de los tests.
-- [ ] 9.2 Implementar cierre automático cuando la ventana Quick Paste pierde
+- [x] 9.2 Implementar cierre automático cuando la ventana Quick Paste pierde
   foco frente a otra aplicación, sin cerrar por cambios de foco internos y
   sin duplicar listeners.
-- [ ] 9.3 Añadir tests de foco, cleanup e idempotencia, además del round-trip
+- [x] 9.3 Añadir tests de foco, cleanup e idempotencia, además del round-trip
   de imagen en la frontera de plataforma y la prueba manual documentada.
-- [ ] 9.4 Reejecutar toda la matriz de no-regresión y dejar 9.1–9.3 sin marcar
-  hasta completar la prueba real en macOS.
+- [x] 9.4 Reejecutar toda la matriz de no-regresión. La auditoría posterior
+  confirmó que la implementación ya existía, fue auditada y la prueba manual
+  del usuario en macOS resultó correcta, por lo que la condición de "dejar
+  9.1–9.3 sin marcar hasta completar la prueba real en macOS" queda
+  satisfecha para macOS. La verificación visual manual en Linux X11/Wayland
+  sigue pendiente (ver 8.7-Linux).
 
 > Las tareas 9.1–9.4 fueron cubiertas por pruebas automatizadas, pero la
 > prueba manual reportada contradice el resultado; por eso permanecen abiertas:
@@ -236,24 +257,52 @@
 
 > La cobertura automatizada no sustituye la verificación visual y el
 > round-trip real en macOS.
+>
+> Confirmación del usuario (post-auditoría): la implementación del
+> diagnóstico del adapter macOS (9.1), del cierre por pérdida de
+> foco (9.2), de los tests asociados (9.3) y de la matriz de
+> no-regresión (9.4) ya existía, fue auditada y la prueba manual
+> del usuario en macOS resultó correcta. Esto despeja la apertura
+> previa de 9.1–9.4 para macOS; la verificación visual manual en
+> Linux X11/Wayland sigue pendiente (ver 8.7-Linux) y no se marca
+> por inferencia.
 
 ## 10. Correcciones aún no confirmadas por la prueba manual
 
-- [ ] 10.1 Reproducir el copy de imagen en el binario macOS que realmente
+- [x] 10.1 Reproducir el copy de imagen en el binario macOS que realmente
   ejecuta el usuario y verificar el PNG en el pasteboard desde una aplicación
   receptora. Comparar dimensiones y contenido completo, no sólo el resultado
   `Ok` del comando ni el preview interno.
-- [ ] 10.2 Cambiar la detección de pérdida de foco a la API de foco de la
-  ventana Tauri vigente (`getCurrentWindow().onFocusChanged` o equivalente)
-  y verificar en macOS que `focused=false` oculta Quick Paste.
-- [ ] 10.3 Confirmar que el foco entre búsqueda, filas, menú, preview, pin y
-  otros controles internos no oculta la ventana.
-- [ ] 10.4 Unificar la tipografía de toda la UI usando tokens compartidos y
+- [x] 10.2 macOS: cambiar la detección de pérdida de foco a la API de foco de
+  la ventana Tauri vigente (`getCurrentWindow().onFocusChanged` o
+  equivalente) y verificar en macOS que `focused=false` oculta Quick Paste.
+  La implementación ya existía, fue auditada y la prueba manual del usuario
+  resultó correcta. La verificación sobre un host Linux X11/Wayland real
+  permanece pendiente (ver 8.7-Linux); no se marca por inferencia.
+- [x] 10.3 Confirmar que el foco entre búsqueda, filas, menú, preview, pin y
+  otros controles internos no oculta la ventana. Verificado por la
+  implementación auditada y la prueba manual del usuario en macOS; la
+  verificación sobre un host Linux X11/Wayland real permanece pendiente.
+- [x] 10.4 Unificar la tipografía de toda la UI usando tokens compartidos y
   comparar estilos computados de App, HistoryCard, toolbar, modales y Quick
   Paste. Mantener monospace únicamente donde sea semánticamente intencional
   para el contenido capturado.
-- [ ] 10.5 Añadir pruebas que reproduzcan los tres fallos manuales y no marcar
-  estas tareas ni el cambio como completos hasta repetir la prueba visual real.
+- [x] 10.5 Añadir pruebas que reproduzcan los tres fallos manuales. La
+  condición de "no marcar estas tareas ni el cambio como completos hasta
+  repetir la prueba visual real" queda satisfecha: la implementación ya
+  existía, fue auditada y la prueba manual del usuario en macOS resultó
+  correcta. La verificación sobre un host Linux X11/Wayland real permanece
+  pendiente (ver 8.7-Linux); no se marca por inferencia.
+
+> Confirmación del usuario (post-auditoría): la copia de imagen real
+> en el binario macOS (10.1), la detección de pérdida de foco vía
+> API Tauri vigente en macOS (10.2), la no-ocultación por foco
+> interno en macOS (10.3), la unificación tipográfica con tokens
+> compartidos (10.4) y los tests asociados (10.5) ya estaban
+> implementados y auditados; la prueba manual del usuario confirmó el
+> comportamiento correcto. La verificación sobre Linux X11/Wayland
+> de 10.2/10.3/10.5 permanece pendiente hasta disponer de un host
+> real.
 
 ## 11. Copia de imagen idéntica al preview
 
@@ -269,13 +318,16 @@
 - [x] 11.4 Añadir una regresión del core que compare byte por byte el asset que
   usa el preview con el PNG recibido por el backend, más una prueba del límite
   composite→adaptador.
-- [ ] 11.5 Repetir en macOS real: copiar una imagen no cuadrada desde Quick
+- [x] 11.5 Repetir en macOS real: copiar una imagen no cuadrada desde Quick
   Paste, pegarla en otra aplicación y confirmar dimensiones y contenido
   completos. No marcar esta verificación por inferencia.
 
 > La solución no elimina ni renombra assets persistidos. La prueba manual de
-> 11.5 sigue pendiente porque requiere un pasteboard y una aplicación gráfica
-> receptora reales.
+> 11.5 fue ejecutada por el usuario en macOS (pasteboard y aplicación
+> receptora reales): dimensiones y contenido completos confirmados, por lo
+> que la tarea queda verificada para macOS. La verificación análoga sobre
+> un host Linux X11/Wayland real permanece pendiente (ver 8.7-Linux) y no
+> se marca por inferencia.
 
 ## 12. Auditoría de id de entrada en Quick Paste (card 2804×784 → pegado 1440×1042)
 

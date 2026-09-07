@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { visualTokenCss } from "../src/lib/visualTokens.ts";
 
 const FRONTEND_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -142,16 +143,27 @@ test("OrganizationSidebar keeps the header and the new-collection icon visible a
 
 test("Desktop layout stretches both columns to the rail height", () => {
   const source = loadSource("src/App.svelte");
-  // The grid token is declared on `:root` so the rail still pins
-  // its own height. The desktop-toolbar-layout change moved the
-  // toolbar inside the right column and adopted
-  // `align-items: stretch` so the sidebar fills the row height the
-  // right column owns (toolbar + status + rail) — no second
-  // fixed-height token is needed.
+  // The visual token block is no longer inlined inside this file's
+  // `<style>` section: `App.svelte` injects the same string the
+  // Quick Paste palette uses through `<svelte:head>` so the desktop
+  // rail and the Quick Paste palette share one source of truth.
+  // The regression asserts both that the helper is the single
+  // writer and that the resulting CSS carries the rail-height
+  // declaration the rail consumes.
   assert.match(
     source,
+    /visualTokenCss\(/,
+    "the desktop must source the visual tokens through the shared helper",
+  );
+  assert.match(
+    source,
+    /svelte:head/,
+    "the desktop must inject the visual tokens through <svelte:head>",
+  );
+  assert.match(
+    visualTokenCss(),
     /--cv-card-rail-height:\s*calc\(var\(--cv-card-size/,
-    "the desktop declares the shared card-rail-height token",
+    "the shared token block must declare --cv-card-rail-height",
   );
   assert.match(
     source,

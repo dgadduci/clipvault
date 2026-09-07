@@ -1069,15 +1069,12 @@ fn build_clipboard(info: &PlatformInfo, _capabilities: Capabilities) -> Arc<dyn 
     // `public.rtf` together with `public.html` and
     // `public.utf8-plain-text` in a single logical write. The
     // previous prototype used `arboard` for every direction;
-    // `arboard` does not expose RTF, so a rich paste silently
-    // degraded to plain text. The native adapter reports
-    // `supports_image_{read,write} = false` because image
-    // transport stays on `arboard`'s `NSBitmapImageRep` pipeline;
-    // the composite adapter delegates image calls back to the
-    // `arboard` instance. On Linux X11 the same `arboard` instance
-    // is reused for both legs because no native rich adapter
-    // exists. The plain-text leg is always the `arboard` instance:
-    // it is the most battle-tested on every supported host.
+    // `arboard` does not expose RTF, and its bitmap path can discard
+    // pasteboard resolution/profile metadata. The native adapter now
+    // owns the macOS rich-text and fidelity-sensitive image paths.
+    // On Linux X11 the same `arboard` instance is reused for both
+    // legs because no native rich adapter exists. The plain-text leg
+    // remains the `arboard` instance on every host.
     #[cfg(feature = "clipboard-arboard")]
     let plain: Arc<dyn ClipboardBackend> =
         Arc::new(clipvault_platform::runtime::clipboard_arboard::ArboardClipboard::new());
