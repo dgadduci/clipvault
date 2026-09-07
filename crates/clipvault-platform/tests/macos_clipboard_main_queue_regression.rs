@@ -205,17 +205,29 @@ fn composite_read_payload_collapses_thread_limitation_to_soft_outcome() {
     }
 }
 
-/// The macOS pasteboard adapter must NOT claim image support: the
-/// composite must therefore route image reads through the plain
-/// adapter (the production `arboard` instance). Pinning the flag
-/// here guards against a refactor that accidentally turns on
-/// image support in the native adapter and forces the composite
-/// to duplicate the `NSBitmapImageRep` pipeline.
+/// The macOS pasteboard adapter claims image-write support so the
+/// composite can route image writes through the native PNG path.
+/// Image read now goes through the fidelity-preserving native
+/// `public.png` bridge when the pasteboard exposes that flavour;
+/// `arboard` only serves the fallback when the bridge reports no
+/// PNG, so the native adapter advertises both `supports_image_read`
+/// and `supports_image_png_read`. Pinning the flags here guards
+/// against a refactor that turns the native adapter into a silent
+/// full transport and bypasses the dedicated PNG fidelity path.
 #[test]
-fn macos_pasteboard_does_not_claim_image_support() {
+fn macos_pasteboard_image_capabilities_pins_read_write_asymmetry() {
     let backend = MacOsPasteboardClipboard::new();
-    assert!(!backend.supports_image_read());
-    assert!(!backend.supports_image_write());
+    assert!(backend.supports_image_read());
+    // The fidelity-preserving PNG read lives on this adapter: a
+    // refactor that drops the capability flag would silently
+    // regress to the legacy `arboard` bitmap path on macOS and
+    // destroy the original metadata.
+    assert!(backend.supports_image_png_read());
+    // Image write goes through the native PNG path so the canonical
+    // bitmap survives the round-trip — the legacy `arboard`
+    // `writeObjects(&[NSImage])` route silently stored a downsampled
+    // / cropped representation.
+    assert!(backend.supports_image_write());
 }
 
 /// Coherence: a single pasteboard read MUST yield a single
@@ -299,11 +311,16 @@ fn composite_read_payload_falls_back_through_rich_after_soft_rich_miss() {
 #[derive(Debug, Default)]
 struct CountingPlainFake {
     text_reads: std::sync::atomic::AtomicUsize,
+    image_writes: std::sync::atomic::AtomicUsize,
 }
 
 impl CountingPlainFake {
     fn text_reads(&self) -> usize {
         self.text_reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn image_writes(&self) -> usize {
+        self.image_writes.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -320,6 +337,8 @@ impl ClipboardBackend for CountingPlainFake {
         Ok(None)
     }
     fn write_image(&self, _image: &ClipboardImage) -> Result<(), ClipboardBackendError> {
+        self.image_writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
     fn supports_image_read(&self) -> bool {
@@ -432,6 +451,167 @@ fn composite_read_image_routes_to_plain_adapter() {
     assert_eq!(rich.plain_reads(), 0);
 }
 
+/// The composite MUST route `write_image` to the rich adapter when
+/// it advertises `supports_image_write` — the native macOS
+/// adapter publishes the canonical bitmap via the PNG path while
+/// the legacy `arboard` route silently stored a downsampled /
+/// cropped representation. The test pins the dispatch contract
+/// so a regression that flips the routing to the plain adapter
+/// surfaces here as a misrouted image write.
+#[test]
+fn composite_write_image_routes_to_rich_adapter_when_supported() {
+    let plain = Arc::new(CountingPlainFake::default());
+    let rich = Arc::new(ImageRecordingRichFake::default());
+    let plain_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&plain) as _;
+    let rich_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&rich) as _;
+    let composite = CompositeClipboard::new(plain_dyn, rich_dyn);
+    let image = ClipboardImage::new(vec![0x42; 4 * 3 * 4], 4, 3).expect("valid image");
+    composite
+        .write_image(&image)
+        .expect("rich adapter accepts the write");
+    assert_eq!(
+        rich.image_writes(),
+        1,
+        "the composite must route the image write to the rich adapter when it advertises supports_image_write",
+    );
+}
+
+/// Full-fidelity dispatch: the composite MUST hand the rich adapter
+/// the *exact* RGBA buffer it received, never a downscaled preview,
+/// a thumbnail, a cropped region or a truncated stride. The
+/// `quick-paste-preview-ui` change surfaced a regression where the
+/// legacy `arboard` `writeObjects(&[NSImage])` route stored only a
+/// downsampled top-left slice of the original; the native PNG path
+/// fixes the contract and the dispatch test pins it.
+#[test]
+fn composite_write_image_routes_full_non_square_buffer_to_rich_adapter() {
+    let plain = Arc::new(CountingPlainFake::default());
+    let rich = Arc::new(ImageRecordingRichFake::default());
+    let plain_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&plain) as _;
+    let rich_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&rich) as _;
+    let composite = CompositeClipboard::new(plain_dyn, rich_dyn);
+    // A 17×9 bitmap where every pixel carries a coordinate-derived
+    // signature; a downscaled, cropped or truncated buffer would
+    // fail the byte-for-byte equality check below.
+    let width = 17u32;
+    let height = 9u32;
+    let mut buffer = Vec::with_capacity((width as usize) * (height as usize) * 4);
+    for y in 0..height {
+        for x in 0..width {
+            buffer.push((x & 0xFF) as u8);
+            buffer.push((x.wrapping_add(y) & 0xFF) as u8);
+            buffer.push((y & 0xFF) as u8);
+            buffer.push(0xFF);
+        }
+    }
+    let image = ClipboardImage::new(buffer.clone(), width, height).expect("valid image");
+    composite
+        .write_image(&image)
+        .expect("rich adapter accepts the write");
+    let recorded = rich
+        .last_image()
+        .expect("the rich adapter captured the write");
+    // Full dimensions preserved.
+    assert_eq!(recorded.width(), width);
+    assert_eq!(recorded.height(), height);
+    // Full RGBA buffer length preserved.
+    assert_eq!(
+        recorded.rgba().len(),
+        buffer.len(),
+        "the composite must hand the rich adapter the exact RGBA buffer it received",
+    );
+    // Every pixel survives byte-for-byte.
+    assert_eq!(
+        recorded.rgba(),
+        buffer.as_slice(),
+        "a downscaled or cropped bitmap would perturb at least one channel",
+    );
+}
+
+/// Encoded-image dispatch: the composite MUST pass the persisted PNG
+/// bytes unchanged to the rich/native adapter. This is the boundary
+/// that the Quick Paste copy path uses instead of the decoded bitmap
+/// route.
+#[test]
+fn composite_write_image_png_routes_exact_bytes_to_rich_adapter() {
+    let plain = Arc::new(CountingPlainFake::default());
+    let rich = Arc::new(ImageRecordingRichFake::default());
+    let composite = CompositeClipboard::new(
+        Arc::clone(&plain) as Arc<dyn ClipboardBackend>,
+        Arc::clone(&rich) as Arc<dyn ClipboardBackend>,
+    );
+    let png = vec![
+        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02, 0x03,
+    ];
+
+    composite
+        .write_image_png(&png)
+        .expect("encoded image write");
+    assert_eq!(rich.last_png(), Some(png));
+    assert_eq!(plain.image_writes(), 0);
+}
+
+/// Wider variant (31×13) so the assertion catches regressions that
+/// silently special-case one aspect ratio. The same coordinate-
+/// derived pixel buffer pattern is used.
+#[test]
+fn composite_write_image_routes_full_wider_buffer_to_rich_adapter() {
+    let plain = Arc::new(CountingPlainFake::default());
+    let rich = Arc::new(ImageRecordingRichFake::default());
+    let plain_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&plain) as _;
+    let rich_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&rich) as _;
+    let composite = CompositeClipboard::new(plain_dyn, rich_dyn);
+    let width = 31u32;
+    let height = 13u32;
+    let mut buffer = Vec::with_capacity((width as usize) * (height as usize) * 4);
+    for y in 0..height {
+        for x in 0..width {
+            buffer.push((x & 0xFF) as u8);
+            buffer.push((x.wrapping_add(y) & 0xFF) as u8);
+            buffer.push((y & 0xFF) as u8);
+            buffer.push(0xFF);
+        }
+    }
+    let image = ClipboardImage::new(buffer.clone(), width, height).expect("valid image");
+    composite
+        .write_image(&image)
+        .expect("rich adapter accepts the write");
+    let recorded = rich
+        .last_image()
+        .expect("the rich adapter captured the write");
+    assert_eq!(recorded.width(), width);
+    assert_eq!(recorded.height(), height);
+    assert_eq!(recorded.rgba().len(), buffer.len());
+    assert_eq!(recorded.rgba(), buffer.as_slice());
+}
+
+/// When the rich adapter advertises `supports_image_write = false`
+/// (Linux X11, the no-op fallback, a host where the native adapter
+/// is not linked) the composite MUST fall back to the plain
+/// adapter. The test pins the fallback path so the macOS-native
+/// `supports_image_write = true` flag can never accidentally short
+/// out the Linux path.
+#[test]
+fn composite_write_image_falls_back_to_plain_when_rich_does_not_advertise_image_write() {
+    let plain = Arc::new(CountingPlainFake::default());
+    let rich = Arc::new(ScriptedRichFake::default());
+    let plain_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&plain) as _;
+    let rich_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&rich) as _;
+    let composite = CompositeClipboard::new(plain_dyn, rich_dyn);
+    let image = ClipboardImage::new(vec![0x24; 4 * 2 * 4], 4, 2).expect("valid image");
+    composite
+        .write_image(&image)
+        .expect("plain adapter accepts the write");
+    // The rich fake reports `supports_image_write = false` so the
+    // composite must consult the plain adapter instead. The fake
+    // records the write as a no-op success.
+    assert_eq!(
+        plain.image_writes(),
+        1,
+        "the composite must fall back to the plain adapter when the rich adapter does not advertise image write",
+    );
+}
+
 /// Smoke check: the rich adapter's read returns `Ok(None)` when
 /// no payload is queued; the composite must report `Ok(None)` for
 /// `read_payload`. The default priority helper collapses both
@@ -455,4 +635,90 @@ fn rich_payload(html: &str) -> ClipboardPayload {
     ClipboardPayload::RichText(
         RichTextPayload::new("plain".into(), Some(html.into()), None).expect("valid"),
     )
+}
+
+/// Rich fake that advertises `supports_image_write = true` and
+/// records every image write so the composite routing tests can
+/// assert the dispatch contract. The last image is stored verbatim
+/// (dimensions + RGBA buffer) so the round-trip tests can verify
+/// the full bitmap survives the composite hop — a downscaled or
+/// cropped bitmap would surface here as soon as `width`/`height`
+/// shrink or any byte diverges.
+#[derive(Debug, Default)]
+struct ImageRecordingRichFake {
+    image_writes: std::sync::atomic::AtomicUsize,
+    last_image: parking_lot::Mutex<Option<ClipboardImage>>,
+    last_png: parking_lot::Mutex<Option<Vec<u8>>>,
+}
+
+impl ImageRecordingRichFake {
+    fn image_writes(&self) -> usize {
+        self.image_writes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Snapshot of the most recent image write. Returns `None` when
+    /// `write_image` was never called on this fake.
+    fn last_image(&self) -> Option<ClipboardImage> {
+        // The faked image holds the canonical `ClipboardImage` we
+        // wrote verbatim; rebuilding the struct here keeps the
+        // helper test-friendly without leaking the inner buffer.
+        let guard = self.last_image.lock();
+        guard.as_ref().map(|image| {
+            ClipboardImage::new(image.rgba().to_vec(), image.width(), image.height())
+                .expect("previously valid image must remain valid")
+        })
+    }
+
+    fn last_png(&self) -> Option<Vec<u8>> {
+        self.last_png.lock().clone()
+    }
+}
+
+impl ClipboardBackend for ImageRecordingRichFake {
+    fn read_text(&self) -> Result<Option<String>, ClipboardBackendError> {
+        Ok(None)
+    }
+    fn write_text(&self, _text: &str) -> Result<(), ClipboardBackendError> {
+        Ok(())
+    }
+    fn read_rich(&self) -> Result<Option<RichTextPayload>, ClipboardBackendError> {
+        Ok(None)
+    }
+    fn write_rich(&self, _payload: &RichTextPayload) -> Result<(), ClipboardBackendError> {
+        Ok(())
+    }
+    fn read_image(&self) -> Result<Option<ClipboardImage>, ClipboardBackendError> {
+        Ok(None)
+    }
+    fn write_image(&self, image: &ClipboardImage) -> Result<(), ClipboardBackendError> {
+        self.image_writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.last_image.lock() = Some(
+            ClipboardImage::new(image.rgba().to_vec(), image.width(), image.height())
+                .expect("valid image to clone"),
+        );
+        Ok(())
+    }
+    fn write_image_png(&self, png: &[u8]) -> Result<(), ClipboardBackendError> {
+        *self.last_png.lock() = Some(png.to_vec());
+        Ok(())
+    }
+    fn supports_rich_read(&self) -> bool {
+        true
+    }
+    fn supports_rich_write(&self) -> bool {
+        true
+    }
+    fn supports_image_read(&self) -> bool {
+        false
+    }
+    fn supports_image_write(&self) -> bool {
+        true
+    }
+    fn supports_image_png_write(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "image-recording-rich-fake"
+    }
 }

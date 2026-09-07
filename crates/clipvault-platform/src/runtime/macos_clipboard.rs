@@ -43,14 +43,19 @@
 //!
 //! ## Image transport
 //!
-//! Image read / write stays on `arboard`: `NSPasteboard` carries
-//! images as `NSPasteboardTypeTIFF` or `NSPasteboardTypePNG`, but
-//! the existing `arboard` adapter already implements both
-//! directions on top of those flavours. Routing the image path
-//! through a second adapter would duplicate the `NSBitmapImageRep`
-//! → RGBA → PNG pipeline. The native adapter therefore reports
-//! `supports_image_{read,write} = false` and the bootstrap wires
-//! the `arboard` adapter alongside it for the image path.
+//! Image read and write go through this adapter's native
+//! `NSPasteboard` path. Reads prefer original `public.png` bytes and
+//! inspect paired `public.tiff` metadata on the same main-thread
+//! snapshot. Image write goes through this adapter's own PNG path so the bitmap
+//! survives the round-trip verbatim — the previous
+//! `pasteboard.writeObjects(&[NSImage])` route silently stored a
+//! downsampled / cropped version of the source bitmap when the
+//! AppKit representation cache dropped the original. The PNG path
+//! encodes the canonical RGBA buffer via `NSBitmapImageRep` and
+//! publishes the resulting `NSData` through
+//! `setData_forType(NSPasteboardTypePNG)`. The composite wires this
+//! adapter on macOS and falls back to `arboard` on Linux X11 where
+//! the same native path is not available.
 
 #![cfg(all(target_os = "macos", feature = "macos-native"))]
 
@@ -76,6 +81,98 @@ pub struct MacOsPasteboardClipboard;
 impl MacOsPasteboardClipboard {
     pub fn new() -> Self {
         Self
+    }
+}
+
+/// Emit the native image-read outcome only when the image-capture
+/// diagnostic is explicitly enabled. This is deliberately
+/// metadata-only: it reports the selected branch (`native_png`,
+/// `tiff_only_with_metadata`, `no_png_with_tiff_metadata`, `invalid_png`, or
+/// `main_queue_unavailable`) and never reports bytes, sizes, paths,
+/// identifiers or clipboard content. Keeping this signal at the
+/// adapter boundary makes an `arboard_fallback` diagnostic
+/// actionable instead of leaving the operator to infer whether the
+/// native bridge was compiled and reached at all.
+fn log_native_image_read_outcome(
+    outcome: &Result<
+        macos_clipboard_main_queue::NativePngRead,
+        macos_clipboard_main_queue::MainQueueBridgeError,
+    >,
+) {
+    let enabled =
+        std::env::var_os("CLIPVAULT_DEBUG_IMAGE_CAPTURE").is_some_and(|value| value == "1");
+    if !enabled {
+        return;
+    }
+    let kind = outcome
+        .as_ref()
+        .map(macos_clipboard_main_queue::NativePngRead::kind_str)
+        .unwrap_or("main_queue_unavailable");
+    tracing::debug!(
+        native_image_read_outcome = kind,
+        "macOS native image read outcome"
+    );
+}
+
+/// Re-attach the bridge's [`PasteboardImageMetadata`] to the
+/// validated image the bridge produced so the persistence layer
+/// can resolve the four fidelity paths the
+/// `native_png_with_tiff_metadata` outcome surfaces.
+///
+/// The helper is necessary because the bridge returns a
+/// `(image, metadata)` pair: the core eventually needs the
+/// metadata in the [`ClipboardImage`] struct rather than in a
+/// parallel tuple, so the adapter forwards the metadata via the
+/// dedicated constructor on the platform layer.
+fn attach_pasteboard_metadata(
+    image: ClipboardImage,
+    metadata: macos_clipboard_main_queue::PasteboardImageMetadata,
+) -> ClipboardImage {
+    if metadata.tiff_metadata.is_none()
+        && metadata.png_metadata == crate::clipboard_image_png::PngMetadataSummary::default()
+        && metadata.inferred_display_dpi.is_none()
+    {
+        return image;
+    }
+    let rgba = image.rgba().to_vec();
+    let width = image.width();
+    let height = image.height();
+    let original_png = image.clone().into_original_png();
+    // Drop the bridge-side clone: the original `image` carries the
+    // same RGBA buffer we just copied out, so we drop it after the
+    // clone to avoid any double-ownership corner case.
+    drop(image);
+    let platform_metadata = crate::clipboard::PasteboardImageMetadata {
+        png_chunks: metadata.png_metadata,
+        tiff: metadata.tiff_metadata,
+        inferred_display_dpi: metadata.inferred_display_dpi,
+        resolution_detected: metadata.resolution_detected,
+        profile_detected: metadata.profile_detected,
+    };
+    let rebuilt = match original_png {
+        Some(original_png) => ClipboardImage::with_pasteboard_metadata(
+            rgba.clone(),
+            width,
+            height,
+            original_png,
+            platform_metadata,
+        ),
+        None => ClipboardImage::with_pasteboard_metadata_without_original(
+            rgba.clone(),
+            width,
+            height,
+            platform_metadata,
+        ),
+    };
+    match rebuilt {
+        Ok(image_with_metadata) => image_with_metadata,
+        // The constructor never fails on a struct the bridge
+        // already validated: stride mismatch is enforced before
+        // and the `original_png` byte buffer is non-empty by the
+        // bridge invariants. The fallback rebuilds a vanilla
+        // image so the caller still gets a usable struct.
+        Err(_) => ClipboardImage::new(rgba, width, height)
+            .unwrap_or_else(|_| ClipboardImage::new(Vec::new(), 1, 1).expect("safe fallback")),
     }
 }
 
@@ -109,19 +206,114 @@ impl ClipboardBackend for MacOsPasteboardClipboard {
     }
 
     fn read_image(&self) -> Result<Option<ClipboardImage>, ClipboardBackendError> {
-        // Image read stays on `arboard`; surfacing `Backend { ... }`
-        // would mislead the pipeline because the `arboard` adapter
-        // implements this direction. The bootstrap wires both
-        // adapters — this one for rich text, `arboard` for images.
-        Err(ClipboardBackendError::backend(
-            "macos_pasteboard does not transport images; use the arboard adapter",
-        ))
+        // Image read delegates to the native PNG bridge so the
+        // pasteboard's `public.png` bytes survive verbatim — including
+        // the `pHYs` resolution chunk, the `iCCP` / `sRGB` color
+        // profile and any other safe metadata chunks the source
+        // application published. The composite routes
+        // `read_image` through this method when it advertises
+        // `supports_image_png_read`; the bridge's typed outcome lets
+        // the composite decide between a safe fallback to the
+        // `arboard` bitmap path and a hard `InvalidImage` error.
+        let outcome = macos_clipboard_main_queue::read_png_main_thread();
+        log_native_image_read_outcome(&outcome);
+        match outcome {
+            Ok(macos_clipboard_main_queue::NativePngRead::Native { image, metadata }) => {
+                Ok(Some(attach_pasteboard_metadata(image, metadata)))
+            }
+            Ok(macos_clipboard_main_queue::NativePngRead::TiffOnly { image, metadata }) => {
+                Ok(Some(attach_pasteboard_metadata(image, metadata)))
+            }
+            Ok(macos_clipboard_main_queue::NativePngRead::NoPng { .. }) => {
+                // No usable native raster representation exists:
+                // surface a soft `UnsupportedFormat` so the composite
+                // can use the legacy bitmap path. A valid TIFF-only
+                // capture never reaches this branch because the bridge
+                // decodes it into `TiffOnly` first.
+                Err(ClipboardBackendError::UnsupportedFormat)
+            }
+            Ok(macos_clipboard_main_queue::NativePngRead::InvalidPng(error)) => {
+                // `public.png` was present but failed. Surfacing the
+                // structural error here is what stops the composite
+                // from silently falling back to `arboard::get_image`
+                // and saving a degraded PNG without the original
+                // metadata chunks the user reported as missing.
+                Err(ClipboardBackendError::InvalidImage(
+                    crate::clipboard::ImageValidationError::InvalidPng {
+                        kind: error.kind_str(),
+                    },
+                ))
+            }
+            Err(_) => Err(ClipboardBackendError::Unavailable {
+                capability: Capability::ClipboardReadImage,
+            }),
+        }
     }
 
-    fn write_image(&self, _image: &ClipboardImage) -> Result<(), ClipboardBackendError> {
-        Err(ClipboardBackendError::backend(
-            "macos_pasteboard does not transport images; use the arboard adapter",
-        ))
+    fn read_image_png(&self) -> Result<Option<ClipboardImage>, ClipboardBackendError> {
+        // The fidelity-preserving read lives entirely on this adapter:
+        // the bridge reads `public.png` from `NSPasteboard` on the
+        // Cocoa main thread, validates the bytes against the PNG
+        // signature, the size cap and the dimension cap, decodes the
+        // RGBA frame for dedupe and returns the original PNG bytes
+        // alongside the bitmap. The typed outcome lets the composite
+        // distinguish three different pasteboard shapes:
+        //
+        // - `Ok(Some(image))` when `public.png` was present and the
+        //   bytes validated. The image carries `original_png` so the
+        //   core can persist the original bytes verbatim.
+        // - `Ok(None)` when the clipboard has no `public.png`
+        //   representation at all. The composite falls back to the
+        //   legacy `arboard` bitmap path.
+        // - `Err(InvalidImage)` when `public.png` was present but
+        //   the bytes failed validation. The composite MUST NOT fall
+        //   back to `arboard::get_image` here: doing so would
+        //   silently save a re-encoded PNG that lacks the metadata
+        //   chunks the user observed as missing.
+        // - `Err(Unavailable)` when the bridge cannot hop to the
+        //   main thread. The composite surfaces this soft result so
+        //   the watcher retries instead of degrading to
+        //   `arboard::get_image` in the same tick.
+        let outcome = macos_clipboard_main_queue::read_png_main_thread();
+        log_native_image_read_outcome(&outcome);
+        match outcome {
+            Ok(macos_clipboard_main_queue::NativePngRead::Native { image, metadata }) => {
+                Ok(Some(attach_pasteboard_metadata(image, metadata)))
+            }
+            Ok(macos_clipboard_main_queue::NativePngRead::TiffOnly { image, metadata }) => {
+                Ok(Some(attach_pasteboard_metadata(image, metadata)))
+            }
+            Ok(macos_clipboard_main_queue::NativePngRead::NoPng { .. }) => Ok(None),
+            Ok(macos_clipboard_main_queue::NativePngRead::InvalidPng(error)) => {
+                Err(ClipboardBackendError::InvalidImage(
+                    crate::clipboard::ImageValidationError::InvalidPng {
+                        kind: error.kind_str(),
+                    },
+                ))
+            }
+            Err(_) => Err(macos_clipboard_main_queue::unavailable_for(
+                Capability::ClipboardReadImage,
+            )),
+        }
+    }
+
+    fn write_image(&self, image: &ClipboardImage) -> Result<(), ClipboardBackendError> {
+        // Image write goes through the native PNG path so the
+        // canonical bitmap survives the round-trip. The composite
+        // routes here whenever this adapter is wired (macOS) so a
+        // regression that surfaced `Backend { ... }` from this
+        // method would break the documented image-copy contract.
+        let rgba = image.rgba().to_vec();
+        macos_clipboard_main_queue::write_image_main_thread(image.width(), image.height(), rgba)
+            .map_err(|_| {
+                macos_clipboard_main_queue::unavailable_for(Capability::ClipboardWriteImage)
+            })
+    }
+
+    fn write_image_png(&self, png: &[u8]) -> Result<(), ClipboardBackendError> {
+        macos_clipboard_main_queue::write_png_main_thread(png.to_vec()).map_err(|_| {
+            macos_clipboard_main_queue::unavailable_for(Capability::ClipboardWriteImage)
+        })
     }
 
     fn supports_rich_read(&self) -> bool {
@@ -137,11 +329,40 @@ impl ClipboardBackend for MacOsPasteboardClipboard {
     }
 
     fn supports_image_read(&self) -> bool {
-        false
+        // The native adapter exposes a fidelity-preserving
+        // `public.png` read; the composite still uses this flag to
+        // short-circuit image reads on hosts where the bridge cannot
+        // reach the main thread. The flag is `true` so the composite
+        // prefers the native read; `Ok(None)` from the bridge is the
+        // soft-miss signal that triggers the `arboard` fallback.
+        true
+    }
+
+    fn supports_image_png_read(&self) -> bool {
+        // The native adapter is the only path that can read the
+        // original PNG bytes the pasteboard exposed; the composite
+        // uses this flag to dispatch `read_image_png` instead of
+        // `read_image` whenever the bridge is reachable.
+        true
     }
 
     fn supports_image_write(&self) -> bool {
-        false
+        // The native adapter publishes the image as PNG via
+        // `setData_forType(NSPasteboardTypePNG)`. The composite uses
+        // this flag to route image writes to the macOS adapter
+        // instead of the legacy `arboard` path that produced a
+        // partial / downsampled bitmap. Per-operation failures
+        // surface through `Unavailable { capability }` instead of a
+        // false capability downgrade.
+        true
+    }
+
+    fn supports_image_png_write(&self) -> bool {
+        // The native adapter publishes the persisted PNG bytes
+        // directly through `setData:forType:`. This is the path that
+        // guarantees the preview and a later paste observe the same
+        // complete bitmap.
+        true
     }
 
     fn supports_native_plain_write(&self) -> bool {
@@ -177,17 +398,47 @@ mod tests {
         assert_sync::<MacOsPasteboardClipboard>();
     }
 
+    /// A native PNG can have no PNG chunks and no usable TIFF IFD while
+    /// still carrying the bounded display-scale fallback. That fallback
+    /// must survive the adapter boundary; otherwise the core receives the
+    /// legacy image and silently persists it at the PNG default of 72 ppi.
+    #[test]
+    fn attach_pasteboard_metadata_preserves_display_scale_fallback() {
+        let image =
+            ClipboardImage::with_original_png(vec![0, 0, 0, 255], 1, 1, vec![1]).expect("image");
+        let metadata = macos_clipboard_main_queue::PasteboardImageMetadata {
+            png_metadata: crate::clipboard_image_png::PngMetadataSummary::default(),
+            tiff_metadata: None,
+            inferred_display_dpi: Some((144, 144)),
+            resolution_detected: true,
+            profile_detected: false,
+        };
+
+        let attached = attach_pasteboard_metadata(image, metadata);
+        assert_eq!(
+            attached.pasteboard_metadata().inferred_display_dpi,
+            Some((144, 144))
+        );
+        assert!(attached.has_original_png());
+    }
+
     /// The constant surface area (types, stable name, capability
     /// flags) is pinned here so a future refactor that drops one of
     /// the legs surfaces here instead of as a silent frontend
     /// regression.
     #[test]
-    fn adapter_declares_rich_text_capabilities_and_image_unavailable() {
+    fn adapter_declares_rich_text_capabilities_and_image_write() {
         let backend = MacOsPasteboardClipboard::new();
         assert!(backend.supports_rich_read());
         assert!(backend.supports_rich_write());
-        assert!(!backend.supports_image_read());
-        assert!(!backend.supports_image_write());
+        // Image read goes through the fidelity-preserving native
+        // PNG bridge; `supports_image_png_read` advertises the
+        // capability so the composite dispatches `read_image_png`.
+        assert!(backend.supports_image_read());
+        assert!(backend.supports_image_png_read());
+        // Image write goes through the native PNG path so the
+        // canonical bitmap survives the round-trip.
+        assert!(backend.supports_image_write());
         assert_eq!(backend.name(), "macos_pasteboard");
     }
 

@@ -14,6 +14,7 @@ pub mod app_metadata;
 mod app_picker;
 mod capabilities;
 mod clipboard;
+mod clipboard_image_png;
 pub mod guidance;
 mod hotkey;
 mod info;
@@ -21,6 +22,7 @@ mod noop;
 pub mod paste;
 pub mod runtime;
 mod stub;
+mod tiff_metadata;
 mod tray;
 
 pub use active_app::{
@@ -44,8 +46,13 @@ pub use capabilities::{
 };
 pub use clipboard::{
     checked_rgba_len, ClipboardBackend, ClipboardBackendError, ClipboardBackendKind,
-    ClipboardImage, ClipboardPayload, ImageValidationError, RichTextPayload,
-    MAX_CLIPBOARD_IMAGE_DIM, MAX_CLIPBOARD_IMAGE_RGBA_BYTES, RGBA_BYTES_PER_PIXEL,
+    ClipboardImage, ClipboardPayload, ImageValidationError, PasteboardImageMetadata,
+    RichTextPayload, MAX_CLIPBOARD_IMAGE_DIM, MAX_CLIPBOARD_IMAGE_RGBA_BYTES, RGBA_BYTES_PER_PIXEL,
+};
+pub use clipboard_image_png::{
+    chunk, parse_ppu_triple, phys_to_dpi, png_metadata_summary, validate_png, ChunkType,
+    PngMetadataSummary, PngValidationError, PngValidationOutcome, ValidatedPng,
+    MAX_CLIPBOARD_PNG_BYTES, PNG_SIGNATURE,
 };
 pub use guidance::{
     backend_unavailable_guidance, linux_unknown_session_guidance,
@@ -64,6 +71,7 @@ pub use noop::{
 };
 pub use paste::{PasteBackendKind, PasteController, PasteError};
 pub use stub::{data_dir, DefaultPlatform, PlatformError};
+pub use tiff_metadata::{parse_tiff_metadata, TiffMetadata, TiffResolutionUnit};
 pub use tray::{
     TrayAction, TrayBackendKind, TrayController, TrayEntry, TrayError, TrayHandle, TrayOutcome,
 };

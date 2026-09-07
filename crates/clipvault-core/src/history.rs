@@ -19,15 +19,21 @@ use clipvault_db::{
     IMAGE_CONTENT_SENTINEL, IMAGE_MIME_PNG,
 };
 use clipvault_platform::{
-    ApplicationMetadataError, ApplicationMetadataProvider, ClipboardImage, ClipboardPayload,
-    RichTextPayload,
+    parse_ppu_triple, phys_to_dpi, ApplicationMetadataError, ApplicationMetadataProvider,
+    ClipboardImage, ClipboardPayload, PasteboardImageMetadata, RichTextPayload,
 };
 
 use crate::bootstrap::AppContext;
 use crate::clipboard::Clipboard;
-use crate::clipboard_assets::{normalize_image, ClipboardAssetStore};
+use crate::clipboard_assets::{
+    normalize_image_with_original, ClipboardAssetStore, NormalizedSource,
+};
 use crate::clock::Clock;
 use crate::content_type::detect_content_type;
+use crate::image_capture_diagnostic::{
+    log_image_capture_diagnostic, ColorProfileKind, ImageCaptureDiagnostic, ImageSource,
+    RepresentationSource,
+};
 use crate::privacy::{CaptureDecision, PrivacyGate};
 use crate::rich_text::{canonical_rich_text_hash, RichTextAssetStore};
 
@@ -411,7 +417,8 @@ impl TextHistoryService {
             };
         };
 
-        let normalized = match normalize_image(image) {
+        let pasteboard_metadata = image.pasteboard_metadata().clone();
+        let normalized = match normalize_image_with_original(image) {
             Ok(normalized) => normalized,
             Err(error) => {
                 // Metadata-only: `kind_str` never carries pixels.
@@ -434,6 +441,40 @@ impl TextHistoryService {
                 };
             }
         };
+
+        // Metadata-only diagnostic: confirms the fidelity-preserving
+        // path ran without leaking the asset bytes, the content hash
+        // or the data directory. The helper is gated on the
+        // `CLIPVAULT_DEBUG_IMAGE_CAPTURE` environment variable so the
+        // diagnostic stays inert in production.
+        let (
+            representation_source,
+            png_chunks_kind,
+            tiff_resolution_present,
+            tiff_icc_profile_present,
+            resolution_dpi_x,
+            resolution_dpi_y,
+            profile_kind,
+        ) = image_metadata_diagnostic(&pasteboard_metadata);
+        let image_source = match normalized.source() {
+            NormalizedSource::NativeVerbatim => ImageSource::NativePng,
+            NormalizedSource::NativeRebuiltWithMetadata => ImageSource::NativePngPlusMetadata,
+            NormalizedSource::TiffMetadataOnly => ImageSource::TiffMetadata,
+            NormalizedSource::LegacyEncoded => ImageSource::ArboardFallback,
+        };
+        log_image_capture_diagnostic(ImageCaptureDiagnostic::from_normalized(
+            image_source,
+            representation_source,
+            png_chunks_kind,
+            tiff_resolution_present,
+            tiff_icc_profile_present,
+            resolution_dpi_x,
+            resolution_dpi_y,
+            profile_kind,
+            normalized.has_original_png_bytes(),
+            normalized.width(),
+            normalized.height(),
+        ));
 
         let now = self.clock.now();
         let new_entry = NewEntry {
@@ -633,6 +674,86 @@ impl TextHistoryService {
             None => SetTitleOutcome::NotFound,
         })
     }
+}
+
+/// Resolve the metadata fields used by the opt-in image diagnostic.
+///
+/// This is deliberately separate from normalisation: the diagnostic
+/// must describe the metadata that arrived with the capture, while
+/// the normaliser owns the decision to persist the original PNG or to
+/// rebuild it. The helper only carries bounded enums and numeric
+/// metadata; it never returns clipboard bytes, hashes or paths.
+fn image_metadata_diagnostic(
+    metadata: &PasteboardImageMetadata,
+) -> (
+    RepresentationSource,
+    &'static str,
+    bool,
+    bool,
+    Option<u32>,
+    Option<u32>,
+    ColorProfileKind,
+) {
+    let png_dpi = metadata.png_chunks.phys.and_then(|payload| {
+        parse_ppu_triple(&payload).and_then(|(ppu_x, ppu_y, unit)| phys_to_dpi(ppu_x, ppu_y, unit))
+    });
+    let tiff_dpi = metadata.tiff.as_ref().and_then(|tiff| {
+        tiff.macos_pixels_per_meter_x()
+            .zip(tiff.macos_pixels_per_meter_y())
+            .and_then(|(ppu_x, ppu_y)| phys_to_dpi(ppu_x, ppu_y, 1))
+    });
+    let inferred_dpi = metadata.inferred_display_dpi;
+    let tiff_has_metadata = metadata
+        .tiff
+        .as_ref()
+        .is_some_and(|tiff| tiff.has_resolution() || tiff.icc_profile.is_some());
+    let png_has_metadata = metadata.png_chunks != Default::default();
+    let representation_source = if tiff_has_metadata {
+        RepresentationSource::TiffIfd
+    } else if png_has_metadata {
+        RepresentationSource::PngChunks
+    } else if inferred_dpi.is_some() {
+        RepresentationSource::DisplayScaleFallback
+    } else {
+        RepresentationSource::None
+    };
+    let (resolution_dpi_x, resolution_dpi_y) = if let Some((x, y)) = tiff_dpi {
+        (Some(x), Some(y))
+    } else if let Some((x, y)) = png_dpi {
+        (Some(x), Some(y))
+    } else if let Some((x, y)) = inferred_dpi {
+        (Some(x), Some(y))
+    } else {
+        (None, None)
+    };
+    let profile_kind = if metadata
+        .tiff
+        .as_ref()
+        .is_some_and(|tiff| tiff.icc_profile.is_some())
+    {
+        ColorProfileKind::TiffIccProfile
+    } else if metadata.png_chunks.icc_profile_chunk.is_some() {
+        ColorProfileKind::Iccp
+    } else if metadata.png_chunks.has_srgb {
+        ColorProfileKind::Srgb
+    } else {
+        ColorProfileKind::None
+    };
+    (
+        representation_source,
+        metadata.png_chunks.kind_str(),
+        metadata
+            .tiff
+            .as_ref()
+            .is_some_and(|tiff| tiff.has_resolution()),
+        metadata
+            .tiff
+            .as_ref()
+            .is_some_and(|tiff| tiff.icc_profile.is_some()),
+        resolution_dpi_x,
+        resolution_dpi_y,
+        profile_kind,
+    )
 }
 
 /// Reduce a caller-supplied source identifier to its canonical

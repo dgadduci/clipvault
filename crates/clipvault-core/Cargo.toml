@@ -43,6 +43,13 @@ parking_lot = { workspace = true }
 png = { workspace = true }
 sha2 = { workspace = true }
 tempfile = "3.10"
+# `flate2` is the canonical zlib encoder the PNG `iCCP` chunk
+# expects. The crate is already in the dependency graph transitively
+# (through `png`); surfacing it as a direct dependency lets the
+# asset store emit `iCCP`-shaped chunks without re-implementing
+# the deflate wire format. The dependency is small, mature and
+# kept narrow by enabling only the `zlib` backend.
+flate2 = { workspace = true }
 
 [dev-dependencies]
 rusqlite = { workspace = true }

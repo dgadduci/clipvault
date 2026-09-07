@@ -60,7 +60,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use clipvault_platform::{ClipboardImage, MAX_CLIPBOARD_IMAGE_DIM};
+use clipvault_platform::{checked_rgba_len, ClipboardImage, MAX_CLIPBOARD_IMAGE_DIM};
 use sha2::{Digest, Sha256};
 
 /// Sub-directory under `<data_dir>/assets` that holds persisted
@@ -114,6 +114,16 @@ pub enum AssetError {
     InvalidDimensions { width: u32, height: u32 },
     /// The bitmap could not be encoded to PNG.
     Encode { reason: String },
+    /// The original PNG bytes the clipboard surfaced failed the
+    /// core-side coherence check (signature, dimension mismatch,
+    /// decoder failure, RGBA mismatch). The capture pipeline MUST
+    /// surface this error rather than silently re-encoding the
+    /// bitmap through the legacy encoder — doing so would persist
+    /// a degraded PNG that lacks the `pHYs` / `iCCP` / `sRGB`
+    /// metadata chunks the source application published. The
+    /// inner [`OriginalPngValidationError`] is metadata-only and
+    /// `kind_str` returns the stable snake_case identifier.
+    OriginalPngValidation(OriginalPngValidationError),
 }
 
 impl AssetError {
@@ -130,6 +140,7 @@ impl AssetError {
             AssetError::NotPng => "not_png",
             AssetError::InvalidDimensions { .. } => "invalid_dimensions",
             AssetError::Encode { .. } => "encode",
+            AssetError::OriginalPngValidation(_) => "original_png_validation",
         }
     }
 }
@@ -164,6 +175,10 @@ impl fmt::Display for AssetError {
             AssetError::Encode { reason } => {
                 write!(f, "clipboard asset encoding failed: {reason}")
             }
+            AssetError::OriginalPngValidation(error) => write!(
+                f,
+                "clipboard original png failed validation: {error}"
+            ),
         }
     }
 }
@@ -301,21 +316,73 @@ impl AssetDiagnostic {
     }
 }
 
+/// Relative reference for a normalised-PNG hash.
+pub fn asset_ref_for_hash(hash: &str) -> String {
+    format!("{CLIPBOARD_ASSETS_DIR}/{hash}.{CLIPBOARD_ASSET_EXTENSION}")
+}
+
+/// How the asset was persisted. The capture pipeline converts
+/// this identifier into the corresponding [`crate::ImageSource`]
+/// diagnostic value; the renaming keeps the persistence layer
+/// free of GUI-facing types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NormalizedSource {
+    /// `original_png = None` legacy encoder: the canonical 8-bit
+    /// RGBA PNG without any safe metadata chunks.
+    #[default]
+    LegacyEncoded,
+    /// `original_png = Some(bytes)` and the bytes were kept
+    /// verbatim because the source PNG already carried the
+    /// metadata the bridge consumed.
+    NativeVerbatim,
+    /// `original_png = Some(bytes)` but the rebuild path ran:
+    /// the persistence layer encoded the PNG with the same
+    /// pixels plus the metadata injected from the sibling leg.
+    /// The output bytes are not byte-identical to the source.
+    NativeRebuiltWithMetadata,
+    /// Only the TIFF leg was available. The persistence layer
+    /// kept the asset by combining the sibling-leg metadata with
+    /// the RGBA frame the bridge recovered.
+    TiffMetadataOnly,
+}
+
 /// A bitmap normalised to a canonical PNG, ready to be persisted.
 ///
 /// `hash` is the lowercase hex SHA-256 of `png` — the same value the
 /// capture pipeline uses as `content_hash`, so dedupe and the asset
 /// name are derived from exactly the same bytes.
+///
+/// When the original PNG bytes the clipboard exposed were valid, the
+/// struct also carries a clone of those bytes in `original_png_bytes`
+/// so callers (the asset store, the diagnostic surface) can confirm
+/// the fidelity-preserving path was used without inspecting the
+/// payload. The field is metadata-only: it is never surfaced
+/// through `Debug` and never reaches a log line.
+///
+/// The `source` field records which fidelity path produced the
+/// payload. The diagnostic surface uses it to render the
+/// `image_source` identifier an operator expects, so the capture
+/// pipeline never has to inspect the byte buffer to tell whether
+/// the rebuild path ran.
 #[derive(Clone, PartialEq, Eq)]
 pub struct NormalizedImage {
     png: Vec<u8>,
     hash: String,
     width: u32,
     height: u32,
+    original_png_bytes: Option<Vec<u8>>,
+    /// Which fidelity path produced the PNG. The default is
+    /// [`NormalizedSource::LegacyEncoded`] because every helper
+    /// that did not preserve the original bytes produces an
+    /// identical value.
+    source: NormalizedSource,
 }
 
 impl NormalizedImage {
-    /// Canonical PNG bytes.
+    /// Canonical PNG bytes. For the fidelity-preserving path these
+    /// are the original bytes the clipboard exposed (with `pHYs`,
+    /// `iCCP` / `sRGB`, ...); for the legacy encoder these are the
+    /// canonical 8-bit RGBA PNG the encoder produced.
     pub fn png(&self) -> &[u8] {
         &self.png
     }
@@ -339,9 +406,36 @@ impl NormalizedImage {
         self.png.len()
     }
 
+    /// Whether the asset was persisted from the original PNG bytes
+    /// the host clipboard exposed, rather than from a re-encoded
+    /// bitmap. Metadata-only: safe to log without inspecting the
+    /// payload.
+    pub fn has_original_png_bytes(&self) -> bool {
+        self.original_png_bytes.is_some()
+    }
+
+    /// Owned original PNG bytes, when the fidelity-preserving path
+    /// was used. Returns `None` for the legacy encoder fallback.
+    pub fn into_original_png_bytes(self) -> Option<Vec<u8>> {
+        self.original_png_bytes
+    }
+
+    /// Which fidelity path produced the persisted asset.
+    pub fn source(&self) -> NormalizedSource {
+        self.source
+    }
+
     /// Relative reference this asset will be persisted under.
     pub fn asset_ref(&self) -> String {
-        asset_ref_for_hash(&self.hash)
+        crate::clipboard_assets::asset_ref_for_hash(&self.hash)
+    }
+
+    /// True when the persistence layer rebuilt a PNG that
+    /// preserved the metadata the bridge consumed. The diagnostic
+    /// surface uses this flag to render the
+    /// `native_png_plus_metadata` identifier the operator expects.
+    pub fn was_rebuilt_with_metadata(&self) -> bool {
+        self.source == NormalizedSource::NativeRebuiltWithMetadata
     }
 }
 
@@ -353,13 +447,10 @@ impl fmt::Debug for NormalizedImage {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("png_len", &self.png.len())
+            .field("has_original_png_bytes", &self.original_png_bytes.is_some())
+            .field("source", &self.source)
             .finish()
     }
-}
-
-/// Relative reference for a normalised-PNG hash.
-pub fn asset_ref_for_hash(hash: &str) -> String {
-    format!("{CLIPBOARD_ASSETS_DIR}/{hash}.{CLIPBOARD_ASSET_EXTENSION}")
 }
 
 /// Encode a validated bitmap to a canonical PNG and hash the result.
@@ -410,6 +501,630 @@ pub fn normalize_image(image: &ClipboardImage) -> Result<NormalizedImage, AssetE
         hash,
         width,
         height,
+        original_png_bytes: None,
+        source: NormalizedSource::LegacyEncoded,
+    })
+}
+
+/// Persist an image through the fidelity-preserving path when the
+/// clipboard surfaced the original PNG bytes; otherwise fall back to
+/// [`normalize_image`].
+///
+/// The original-bytes path preserves the `pHYs` resolution chunk,
+/// the `iCCP` / `sRGB` color-profile chunk, the `gAMA` / `cHRM`
+/// chunks and any other safe metadata chunks the source application
+/// published. The decoded RGBA frame the bridge produced is used as
+/// the dedupe fingerprint so the same image captured twice still
+/// collapses to a single row.
+///
+/// The validation pipeline matches the platform-layer helper:
+///
+/// 1. **Signature**: the first eight bytes must be the canonical
+///    PNG magic.
+/// 2. **Size cap**: `bytes.len() <= MAX_CLIPBOARD_ASSET_BYTES`.
+/// 3. **Dimension cap**: the IHDR dimensions must be non-zero, must
+///    stay within [`clipvault_platform::MAX_CLIPBOARD_IMAGE_DIM`],
+///    and must match the bitmap the capture produced.
+/// 4. **RGBA consistency**: the decoded RGBA frame must match the
+///    RGBA frame the capture pipeline holds.
+///
+/// The legacy `normalize_image()` path is reserved for two cases:
+///
+/// - the clipboard did not surface `original_png` (the legacy
+///   `arboard::get_image` bitmap path on Linux X11 / Wayland or on
+///   macOS hosts where the native bridge is unreachable);
+/// - the platform validation already rejected the bytes via the
+///   typed `InvalidImage` outcome, in which case the rich adapter
+///   surfaces the error and the capture pipeline never reaches
+///   this helper.
+///
+/// When `original_png` is `Some(bytes)` but
+/// [`validate_original_png`] rejects them (signature, dimension
+/// mismatch, decoder failure, RGBA mismatch), the helper MUST NOT
+/// silently re-encode the bitmap through the legacy encoder:
+/// doing so would persist a degraded PNG that lacks the metadata
+/// chunks the user reported as missing. The helper surfaces the
+/// typed [`OriginalPngValidationError`] wrapped in
+/// [`AssetError::OriginalPngValidation`] so the capture pipeline
+/// can surface the typed failure without re-encoding the bitmap.
+pub fn normalize_image_with_original(
+    image: &ClipboardImage,
+) -> Result<NormalizedImage, AssetError> {
+    let width = image.width();
+    let height = image.height();
+    let original_bytes = image.original_png();
+    let pasteboard_metadata = image.pasteboard_metadata();
+    if let Some(bytes) = original_bytes {
+        match validate_original_png(bytes, image.rgba(), width, height) {
+            Ok(()) => {
+                // The original PNG decoded cleanly. Decide which
+                // fidelity path to surface:
+                //
+                // - **`NativePng`**: the PNG bytes already carry
+                //   resolution + profile chunks. Persist verbatim.
+                // - **`NativePngPlusMetadata`**: the PNG bytes are
+                //   pixel-valid but the pasteboard reports
+                //   resolution / profile metadata on a sibling
+                //   leg. Rebuild the PNG with `pHYs` / `iCCP`
+                //   injected from the TIFF leg. The output bytes
+                //   differ from the source — this branch is the
+                //   only one that cannot preserve the original
+                //   byte stream byte-for-byte.
+                // - **`NativePngNoMetadata`**: neither the PNG nor
+                //   the TIFF leg expose resolution / profile. The
+                //   original PNG is still pixel-valid; persist it
+                //   verbatim with no metadata to lose.
+                if let Some(rebuilt) = rebuild_for_pasteboard_metadata(
+                    bytes,
+                    width,
+                    height,
+                    image.rgba(),
+                    pasteboard_metadata,
+                )? {
+                    let png = rebuilt;
+                    if png.len() > MAX_CLIPBOARD_ASSET_BYTES {
+                        return Err(AssetError::TooLarge { size: png.len() });
+                    }
+                    let hash = sha256_hex(&png);
+                    return Ok(NormalizedImage {
+                        png,
+                        hash,
+                        width,
+                        height,
+                        original_png_bytes: Some(bytes.to_vec()),
+                        source: NormalizedSource::NativeRebuiltWithMetadata,
+                    });
+                }
+                // No sibling-leg metadata to inject: persist the
+                // original PNG bytes verbatim.
+                if bytes.len() > MAX_CLIPBOARD_ASSET_BYTES {
+                    return Err(AssetError::TooLarge { size: bytes.len() });
+                }
+                let png = bytes.to_vec();
+                let hash = sha256_hex(&png);
+                return Ok(NormalizedImage {
+                    png,
+                    hash,
+                    width,
+                    height,
+                    original_png_bytes: Some(bytes.to_vec()),
+                    source: NormalizedSource::NativeVerbatim,
+                });
+            }
+            Err(error) => {
+                // The platform bridge guarantees that an image with
+                // `original_png: Some(bytes)` has already cleared the
+                // signature / dimension / decoder validation, so the
+                // failures the core helper can still produce are
+                // dimension mismatches and RGBA mismatches between
+                // the decoded frame and the bitmap the capture
+                // pipeline holds. Either way: do not silently fall
+                // back to the legacy encoder. The capture pipeline
+                // surfaces the typed failure instead.
+                return Err(AssetError::OriginalPngValidation(error));
+            }
+        }
+    }
+
+    // A macOS screenshot copied through the screenshot UI can expose
+    // only `public.tiff`. In that case there is no original PNG to
+    // validate or persist, but the bridge still gives us the complete
+    // RGBA frame and the TIFF resolution/profile metadata. Start from
+    // the deterministic canonical PNG, then inject that metadata so
+    // the TIFF-only path retains the 144 ppi contract instead of
+    // silently falling back to a metadata-free 72 ppi PNG.
+    let normalized = normalize_image(image)?;
+    if let Some(rebuilt) = rebuild_for_pasteboard_metadata(
+        normalized.png(),
+        width,
+        height,
+        image.rgba(),
+        pasteboard_metadata,
+    )? {
+        if rebuilt.len() > MAX_CLIPBOARD_ASSET_BYTES {
+            return Err(AssetError::TooLarge {
+                size: rebuilt.len(),
+            });
+        }
+        let hash = sha256_hex(&rebuilt);
+        return Ok(NormalizedImage {
+            png: rebuilt,
+            hash,
+            width,
+            height,
+            original_png_bytes: None,
+            source: NormalizedSource::TiffMetadataOnly,
+        });
+    }
+    Ok(normalized)
+}
+
+/// Decide whether the persistence layer can rebuild a higher-fidelity
+/// PNG out of an existing pixel-valid source and the metadata the
+/// bridge surfaced.
+///
+/// Returns `Ok(Some(bytes))` when the helper produced a new payload.
+/// Returns `Ok(None)` when the original PNG already carries the same
+/// metadata the sibling leg reports, or when no sibling-leg metadata
+/// applies; in either case the persistence layer should fall back to
+/// the verbatim path.
+///
+/// Returns `Err(AssetError::OriginalPngValidation(_))` when the
+/// sibling metadata disagrees with the pixels at the structural
+/// level: a malformed `pHYs` payload, an `iCCP` profile name longer
+/// than the PNG spec allows, or an `iCCP` profile that the deflate
+/// encoder refused to compress. The error is typed so the caller can
+/// surface the failure without falling back to the legacy 8-bit RGBA
+/// encoder.
+fn dpi_to_pixels_per_meter(dpi: u32) -> Option<u32> {
+    // 100 / 2.54 = 5000 / 127 exactly. Match the platform bridge's
+    // bounded integer conversion so the inferred fallback produces
+    // the same pHYs payload as an explicit macOS TIFF value.
+    let numerator = (dpi as u64).checked_mul(5000)?;
+    let ppm = numerator.checked_add(63)? / 127;
+    u32::try_from(ppm).ok()
+}
+
+fn rebuild_for_pasteboard_metadata(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    pasteboard_metadata: &clipvault_platform::PasteboardImageMetadata,
+) -> Result<Option<Vec<u8>>, AssetError> {
+    let png_summary = &pasteboard_metadata.png_chunks;
+
+    // Prefer the TIFF rational converted directly to pixels per metre.
+    // Going through rounded integer DPI first can move a non-integer
+    // source resolution by a measurable amount and, more importantly,
+    // makes the persisted `pHYs` value depend on a lossy intermediate
+    // representation.  The PNG metadata contract is pixels/metre,
+    // so keep that unit all the way to the chunk writer.
+    let tiff_pixels_per_meter = pasteboard_metadata.tiff.as_ref().and_then(|tiff| {
+        // `public.tiff` is an Apple pasteboard representation.
+        // ImageIO can publish X/Y resolution without tag 296;
+        // its UI still reports those values as ppi.  Use the
+        // explicitly macOS-compatible conversion here, while
+        // keeping the strict TIFF helpers available for generic
+        // callers.
+        tiff.macos_pixels_per_meter_x()
+            .zip(tiff.macos_pixels_per_meter_y())
+    });
+    let inferred_display_pixels_per_meter =
+        pasteboard_metadata
+            .inferred_display_dpi
+            .and_then(|(dpi_x, dpi_y)| {
+                Some((
+                    dpi_to_pixels_per_meter(dpi_x)?,
+                    dpi_to_pixels_per_meter(dpi_y)?,
+                ))
+            });
+    let tiff_icc_profile_bytes = pasteboard_metadata
+        .tiff
+        .as_ref()
+        .and_then(|tiff| tiff.icc_profile.clone());
+
+    // Resolution candidates: the TIFF leg is authoritative whenever
+    // it is available. macOS may publish a stale/default 72 ppi
+    // `pHYs` chunk in `public.png` while the sibling TIFF describes
+    // the actual 144 ppi representation shown by Preview. Choosing
+    // the PNG value first would preserve that wrong default forever.
+    let phys_payload = tiff_pixels_per_meter
+        .map(|(ppu_x, ppu_y)| {
+            let mut payload = [0u8; 9];
+            payload[0..4].copy_from_slice(&ppu_x.to_be_bytes());
+            payload[4..8].copy_from_slice(&ppu_y.to_be_bytes());
+            payload[8] = 1;
+            payload
+        })
+        .or_else(|| {
+            inferred_display_pixels_per_meter.map(|(ppu_x, ppu_y)| {
+                let mut payload = [0u8; 9];
+                payload[0..4].copy_from_slice(&ppu_x.to_be_bytes());
+                payload[4..8].copy_from_slice(&ppu_y.to_be_bytes());
+                payload[8] = 1;
+                payload
+            })
+        })
+        .or(png_summary.phys);
+
+    // Profile candidates: existing PNG `iCCP` bytes (already
+    // deflate-compressed), a fresh `iCCP` chunk wrapping the TIFF
+    // ICCProfile IFD bytes, or `sRGB` rendering intent. The PNG
+    // spec requires iCCP name 1..=79 chars and a non-zero profile
+    // payload; we reject anything outside the bounds as a typed
+    // validation failure so the capture pipeline can surface it.
+    let icc_chunk: Option<IccChunk> = if let Some(existing) = &png_summary.icc_profile_chunk {
+        // An existing iCCP chunk payload travels through the
+        // rebuild path unchanged. The scanner already validated
+        // that it lives before IDAT so the bytes are part of the
+        // metadata layer the PNG decoder already accepted.
+        if existing.is_empty() {
+            return Err(AssetError::OriginalPngValidation(
+                OriginalPngValidationError::NotPng,
+            ));
+        }
+        // Distinguish the canonical "Display P3" name and use it
+        // verbatim; otherwise fall back to "icc".
+        let (name, body) = split_iccp_chunk(existing).ok_or(AssetError::OriginalPngValidation(
+            OriginalPngValidationError::DecodeFailed,
+        ))?;
+        Some(IccChunk {
+            profile_name: name,
+            compression_method: body.0,
+            compressed_profile: body.1,
+        })
+    } else if let Some(profile_bytes) = &tiff_icc_profile_bytes {
+        if profile_bytes.is_empty() {
+            return Err(AssetError::OriginalPngValidation(
+                OriginalPngValidationError::NotPng,
+            ));
+        }
+        let compressed = deflate_icc_profile(profile_bytes)?;
+        Some(IccChunk {
+            profile_name: "icc".to_string(),
+            compression_method: 0,
+            compressed_profile: compressed,
+        })
+    } else {
+        None
+    };
+    let srgb_intent: Option<u8> = if png_summary.icc_profile_chunk.is_some() {
+        None
+    } else if png_summary.has_srgb {
+        // Match `png::SrgbRenderingIntent::Perceptual` (= 0). The
+        // spec lets the rendering intent be any of four values; we
+        // pin Perceptual because that is the legacy encoder's
+        // default and the field is opaque for sRGB PNGs.
+        Some(0)
+    } else {
+        None
+    };
+
+    let resolution_needs_rebuild = phys_payload != png_summary.phys;
+    let profile_needs_rebuild =
+        tiff_icc_profile_bytes.is_some() && png_summary.icc_profile_chunk.is_none();
+    if !resolution_needs_rebuild && !profile_needs_rebuild {
+        // The source PNG already carries every metadata field the
+        // current pasteboard snapshot can improve. Keep it verbatim.
+        // This also avoids turning a metadata-free source into a
+        // freshly encoded 72 ppi PNG merely because the rebuild
+        // helper was called.
+        return Ok(None);
+    }
+
+    // The rebuild produces a fresh PNG with the same pixels and
+    // the injected metadata. This is the
+    // `NativePngPlusMetadata` path the user reported: the source
+    // pixels travel through; only the chunk layout changes.
+    let png = rebuild_png_with_metadata(width, height, rgba, phys_payload, icc_chunk, srgb_intent)?;
+    if png == bytes.to_vec() {
+        // Defensive: the rebuild should never be byte-identical
+        // unless the source was already perfect. Avoid the round
+        // trip just in case.
+        return Ok(None);
+    }
+    Ok(Some(png))
+}
+
+/// Split an iCCP chunk payload into `(profile_name, (compression,
+/// compressed_profile))`. The helper exists so the rebuild path
+/// can forward an existing `iCCP` chunk's deflate-compressed
+/// profile without re-deflating it.
+fn split_iccp_chunk(payload: &[u8]) -> Option<(String, (u8, Vec<u8>))> {
+    let nul = payload.iter().position(|&b| b == 0)?;
+    if nul == 0 || nul > 79 {
+        return None;
+    }
+    let name = std::str::from_utf8(&payload[..nul]).ok()?.to_string();
+    let compression = *payload.get(nul + 1)?;
+    let profile = payload.get(nul + 2..)?;
+    Some((name, (compression, profile.to_vec())))
+}
+
+/// Validate a candidate PNG payload against the bitmap the capture
+/// pipeline holds.
+///
+/// Returns `Ok(())` when:
+///
+/// - the payload starts with the canonical PNG signature;
+/// - the payload size stays within [`MAX_CLIPBOARD_ASSET_BYTES`];
+/// - the IHDR dimensions are non-zero, stay within
+///   [`clipvault_platform::MAX_CLIPBOARD_IMAGE_DIM`] and match
+///   `expected_width` / `expected_height`;
+/// - the decoded RGBA frame matches `expected_rgba` byte for byte.
+///
+/// On any failure the helper returns a typed
+/// [`OriginalPngValidationError`] whose `kind_str` is metadata-only.
+/// The helper never logs the payload and never echoes it through a
+/// free-form message.
+pub fn validate_original_png(
+    bytes: &[u8],
+    expected_rgba: &[u8],
+    expected_width: u32,
+    expected_height: u32,
+) -> Result<(), OriginalPngValidationError> {
+    if !looks_like_png(bytes) {
+        return Err(OriginalPngValidationError::NotPng);
+    }
+    if bytes.len() > MAX_CLIPBOARD_ASSET_BYTES {
+        return Err(OriginalPngValidationError::TooLarge { size: bytes.len() });
+    }
+    let decoder = png::Decoder::new(io::Cursor::new(bytes));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|_| OriginalPngValidationError::DecodeFailed)?;
+    let info = reader.info();
+    let (decoded_width, decoded_height) = (info.width, info.height);
+    if decoded_width != expected_width || decoded_height != expected_height {
+        return Err(OriginalPngValidationError::DimensionMismatch {
+            declared: (expected_width, expected_height),
+            decoded: (decoded_width, decoded_height),
+        });
+    }
+    let palette: Option<Vec<u8>> = info.palette.as_deref().map(|slice| slice.to_vec());
+    let trns: Option<Vec<u8>> = info.trns.as_deref().map(|slice| slice.to_vec());
+    let mut buffer = vec![0; reader.output_buffer_size()];
+    let frame = reader
+        .next_frame(&mut buffer)
+        .map_err(|_| OriginalPngValidationError::DecodeFailed)?;
+    buffer.truncate(frame.buffer_size());
+    let decoded = expand_png_frame_to_rgba8(
+        frame.color_type,
+        frame.bit_depth,
+        &buffer,
+        palette.as_deref(),
+        trns.as_deref(),
+    )
+    .map_err(|_| OriginalPngValidationError::DecodeFailed)?;
+    if decoded.as_slice() != expected_rgba {
+        return Err(OriginalPngValidationError::RgbaMismatch);
+    }
+    Ok(())
+}
+
+/// Why a candidate PNG payload did not pass
+/// [`validate_original_png`].
+///
+/// The variants are metadata-only: no payload bytes, no path, no
+/// hash. The free-form `Display` impl never embeds the offending
+/// bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OriginalPngValidationError {
+    /// The payload is shorter than the PNG signature or the first
+    /// eight bytes do not match the canonical magic.
+    NotPng,
+    /// The payload exceeds [`MAX_CLIPBOARD_ASSET_BYTES`].
+    TooLarge { size: usize },
+    /// The decoded dimensions do not match the bitmap the capture
+    /// pipeline holds. The tuple pairs the declared `(width,
+    /// height)` with the decoded `(width, height)` so the diagnostic
+    /// can pinpoint the divergence without echoing the payload.
+    DimensionMismatch {
+        declared: (u32, u32),
+        decoded: (u32, u32),
+    },
+    /// The PNG decoder refused the payload: a truncated body, an
+    /// illegal chunk, an unknown critical chunk, an unsupported
+    /// `(ColorType, BitDepth)` combination, etc. The `png::Decoder`
+    /// produces a free-form message; the diagnostic keeps the message
+    /// off its surface so it never reaches a log line.
+    DecodeFailed,
+    /// The decoded RGBA frame does not match the bitmap the capture
+    /// pipeline holds. The mismatch is the canonical signal that the
+    /// bridge derived the bitmap from a different source than the
+    /// pasteboard's PNG.
+    RgbaMismatch,
+}
+
+impl OriginalPngValidationError {
+    /// Stable snake_case identifier so callers can collapse a failure
+    /// to a soft miss without parsing free-form text.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            OriginalPngValidationError::NotPng => "not_png",
+            OriginalPngValidationError::TooLarge { .. } => "too_large",
+            OriginalPngValidationError::DimensionMismatch { .. } => "dimension_mismatch",
+            OriginalPngValidationError::DecodeFailed => "decode_failed",
+            OriginalPngValidationError::RgbaMismatch => "rgba_mismatch",
+        }
+    }
+}
+
+impl fmt::Display for OriginalPngValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OriginalPngValidationError::NotPng => f.write_str("original png is not a png"),
+            OriginalPngValidationError::TooLarge { size } => {
+                write!(f, "original png exceeds the size cap ({size} bytes)")
+            }
+            OriginalPngValidationError::DimensionMismatch { declared, decoded } => write!(
+                f,
+                "original png dimensions {}x{} differ from the captured {}x{}",
+                decoded.0, decoded.1, declared.0, declared.1,
+            ),
+            OriginalPngValidationError::DecodeFailed => {
+                f.write_str("original png decoder refused the payload")
+            }
+            OriginalPngValidationError::RgbaMismatch => {
+                f.write_str("original png decoded to an unexpected rgba frame")
+            }
+        }
+    }
+}
+
+impl std::error::Error for OriginalPngValidationError {}
+
+/// Mandatory ICC profile chunks the rebuilder can attach to a
+/// freshly encoded PNG. The values are pre-compressed (deflate)
+/// inside the chunk payload; the persistence layer treats the
+/// chunk as opaque bytes.
+///
+/// The bridge constructs an [`IccChunk`] from a TIFF
+/// `ICCProfile` IFD entry or from a PNG `iCCP` chunk the original
+/// PNG carried. Either way the helper produces a single
+/// `iCCP`-shaped chunk the persistence layer can splice into the
+/// freshly encoded PNG without inspecting the bytes.
+///
+/// `compression_method` is `0` ("deflate") in every Profile the
+/// spec allows; the field is exposed for the rare case where a
+/// host publishes a future, non-deflate encoder.
+#[derive(Debug, Clone)]
+pub struct IccChunk {
+    pub profile_name: String,
+    pub compression_method: u8,
+    pub compressed_profile: Vec<u8>,
+}
+
+/// Rebuild a PNG asset from the source RGBA frame plus the metadata
+/// the bridge recovered.
+///
+/// The function is the persistence layer's last-mile response to
+/// the documented failure mode the user reported: a 1104×396 px
+/// screenshot from a Retina-class display carries the
+/// resolution and the colour profile on the **TIFF leg** of the
+/// pasteboard, not on the PNG leg. The PNG leg the macOS bridge
+/// reads can be a pixel-identical bitmap that lacks `pHYs`,
+/// `iCCP` / `sRGB` and any other ancillary chunk, so the asset
+/// stored verbatim would report the canonical 72 ppi and no
+/// profile. This helper rebuilds a new PNG that:
+///
+/// - keeps every pixel the source PNG delivered (the RGBA bytes
+///   the bridge validated are the input here);
+/// - inserts a `pHYs` chunk with the pixels-per-metre resolution
+///   the bridge resolved;
+/// - inserts an `iCCP` chunk for the ICC profile when the bridge
+///   found one on the TIFF leg, or an `sRGB` chunk when the
+///   bridge found an `sRGB` PNG marker;
+/// - leaves the dimensions, the colour interpretation and the
+///   alpha channel untouched.
+///
+/// When the source PNG already carried the same metadata the
+/// bridge uses [`rebuild_png_for_native_png`] with an empty
+/// metadata argument set, which produces a fresh 8-bit RGBA PNG
+/// exactly like the legacy encoder. This is the deliberate
+/// bridge behaviour: the asset store only calls this helper
+/// when the source PNG's metadata disagrees with the
+/// pasteboard-reported metadata, so the scenario "fidelity was
+/// already preserved verbatim" never goes through the rebuild
+/// path.
+///
+/// The helper returns [`AssetError::Encode`] for any encoder
+/// failure. The ICC profile and the pHYs payloads are kept
+/// metadata-only at the call site: the helper never logs the
+/// payload bytes or echoes them through a free-form `Display`
+/// formatter.
+pub fn rebuild_png_with_metadata(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    phys_payload: Option<[u8; 9]>,
+    icc_chunk: Option<IccChunk>,
+    srgb_intent: Option<u8>,
+) -> Result<Vec<u8>, AssetError> {
+    let expected = checked_rgba_len(width, height)
+        .map_err(|_| AssetError::InvalidDimensions { width, height })?;
+    if rgba.len() != expected {
+        return Err(AssetError::InvalidDimensions { width, height });
+    }
+
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|error| AssetError::Encode {
+            reason: error.to_string(),
+        })?;
+
+        if let Some(payload) = phys_payload {
+            writer
+                .write_chunk(png::chunk::ChunkType(*b"pHYs"), &payload)
+                .map_err(|error| AssetError::Encode {
+                    reason: error.to_string(),
+                })?;
+        }
+        if let Some(icc) = &icc_chunk {
+            let mut payload: Vec<u8> =
+                Vec::with_capacity(icc.profile_name.len() + 1 + 1 + icc.compressed_profile.len());
+            payload.extend_from_slice(icc.profile_name.as_bytes());
+            payload.push(0);
+            payload.push(icc.compression_method);
+            payload.extend_from_slice(&icc.compressed_profile);
+            writer
+                .write_chunk(png::chunk::ChunkType(*b"iCCP"), &payload)
+                .map_err(|error| AssetError::Encode {
+                    reason: error.to_string(),
+                })?;
+        }
+        if let Some(intent) = srgb_intent {
+            writer
+                .write_chunk(png::chunk::ChunkType(*b"sRGB"), &[intent])
+                .map_err(|error| AssetError::Encode {
+                    reason: error.to_string(),
+                })?;
+        }
+
+        writer
+            .write_image_data(rgba)
+            .map_err(|error| AssetError::Encode {
+                reason: error.to_string(),
+            })?;
+        writer.finish().map_err(|error| AssetError::Encode {
+            reason: error.to_string(),
+        })?;
+    }
+
+    if out.len() > MAX_CLIPBOARD_ASSET_BYTES {
+        return Err(AssetError::TooLarge { size: out.len() });
+    }
+
+    Ok(out)
+}
+
+/// Compress an ICC profile payload with the canonical deflate
+/// method `iCCP` uses. The helper exists because the bridge may
+/// surface a raw ICC payload (`ICCProfile` IFD tag in TIFF,
+/// [`crate::clipboard_image_png::PngMetadataSummary::icc_profile_chunk`]
+/// in PNG) that the persistence layer still has to wrap into an
+/// `iCCP`-shaped chunk.
+///
+/// The output is `zlib`-wrapped deflate so the PNG encoder can
+/// write the chunk without inspecting the byte stream. The fn
+/// traps any I/O error from the deflate encoder and surfaces it
+/// as [`AssetError::Encode`] — the upstream contract does not
+/// admit an `io::Error` because every PNG encoder failure must
+/// already collapse to that variant.
+pub fn deflate_icc_profile(profile: &[u8]) -> Result<Vec<u8>, AssetError> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    use std::io::Write as _;
+    encoder
+        .write_all(profile)
+        .map_err(|error| AssetError::Encode {
+            reason: error.to_string(),
+        })?;
+    encoder.finish().map_err(|error| AssetError::Encode {
+        reason: error.to_string(),
     })
 }
 
@@ -994,15 +1709,17 @@ impl ClipboardAssetStore {
                 }
                 // Path-level validation only ever surfaces the
                 // variants above. The remaining cases
-                // (size / PNG / dimensions / encode) require an
-                // actual file read and cannot be produced by
-                // `resolve`, so a future addition that introduces a
-                // new variant here would surface as a compiler error
-                // — exactly what we want.
+                // (size / PNG / dimensions / encode / original
+                // validation) require an actual file read or a
+                // capture-time validation step and cannot be
+                // produced by `resolve`, so a future addition that
+                // introduces a new variant here would surface as a
+                // compiler error — exactly what we want.
                 AssetError::TooLarge { .. }
                 | AssetError::NotPng
                 | AssetError::InvalidDimensions { .. }
-                | AssetError::Encode { .. } => {
+                | AssetError::Encode { .. }
+                | AssetError::OriginalPngValidation(_) => {
                     return AssetDiagnostic {
                         kind: AssetDiagnosticKind::InvalidReference,
                     };
@@ -1665,7 +2382,7 @@ mod tests {
 
     #[test]
     fn error_kind_strings_are_stable() {
-        let cases: [(AssetError, &str); 11] = [
+        let cases: [(AssetError, &str); 12] = [
             (AssetError::Empty, "empty"),
             (AssetError::Absolute, "absolute"),
             (AssetError::Traversal, "traversal"),
@@ -1683,6 +2400,10 @@ mod tests {
                 "invalid_dimensions",
             ),
             (AssetError::Encode { reason: "x".into() }, "encode"),
+            (
+                AssetError::OriginalPngValidation(OriginalPngValidationError::NotPng),
+                "original_png_validation",
+            ),
         ];
         for (error, expected) in cases {
             assert_eq!(error.kind_str(), expected);

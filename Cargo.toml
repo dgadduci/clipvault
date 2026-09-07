@@ -38,6 +38,7 @@ png = "0.17"
 # reference implementation and has no transitive surface beyond
 # `digest`.
 sha2 = "0.10"
+flate2 = "1"
 global-hotkey = "0.6"
 x11rb = "0.13"
 objc2 = "0.6"
@@ -48,7 +49,7 @@ objc2 = "0.6"
 # `NSCompositingOperation` and the colour-space name constants the
 # bitmap allocator requires. `objc2-core-graphics` features cover the
 # `CGContext`/`CGImage` calls used to redraw the scaled bitmap.
-objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSApplication", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSGraphicsContext", "NSGraphics"] }
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSApplication", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSGraphicsContext", "NSGraphics", "NSScreen"] }
 objc2-core-graphics = { version = "0.3", features = ["CGContext", "CGImage"] }
 objc2-foundation = { version = "0.3", features = ["NSString"] }
 dispatch2 = "0.3"

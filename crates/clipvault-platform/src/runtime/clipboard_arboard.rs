@@ -266,6 +266,16 @@ impl ClipboardBackend for ArboardClipboard {
         true
     }
 
+    // `arboard` decodes the pasteboard bitmap through
+    // `NSBitmapImageRep`/`x11` representations; the original PNG
+    // bytes (with `pHYs`, `iCCP`/`sRGB`, ...) are not surfaced, so the
+    // adapter never reports original-PNG fidelity. The composite
+    // therefore falls back to the legacy `read_image` path on
+    // platforms where `arboard` is the only adapter (Linux X11).
+    fn supports_image_png_read(&self) -> bool {
+        false
+    }
+
     fn name(&self) -> &'static str {
         "arboard"
     }
@@ -285,6 +295,12 @@ mod tests {
         let image = to_clipboard_image(data).expect("valid bitmap");
         assert_eq!((image.width(), image.height()), (2, 2));
         assert_eq!(image.byte_len(), 16);
+        // arboard never transports the original PNG bytes: the
+        // legacy capture path therefore produces an image with
+        // `original_png = None` and the core falls back to the
+        // normalised RGBA encoder.
+        assert!(!image.has_original_png());
+        assert!(image.original_png().is_none());
     }
 
     #[test]
@@ -351,6 +367,10 @@ mod tests {
         let backend = ArboardClipboard::new();
         assert!(backend.supports_image_read());
         assert!(backend.supports_image_write());
+        // arboard does not surface the original PNG bytes the
+        // pasteboard exposed: the fidelity-preserving path is the
+        // native macOS adapter's responsibility.
+        assert!(!backend.supports_image_png_read());
         assert_eq!(backend.name(), "arboard");
     }
 

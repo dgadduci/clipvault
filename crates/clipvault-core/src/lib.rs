@@ -17,6 +17,7 @@ pub mod fakes;
 pub mod history;
 pub mod ignored_apps;
 pub mod ignored_apps_service;
+pub mod image_capture_diagnostic;
 pub mod management;
 pub mod organization;
 pub mod paste;
@@ -39,27 +40,31 @@ pub use active_app_diagnostics::{
 pub use bootstrap::{AppBootstrap, AppContext, BootstrapError, BootstrapOptions};
 pub use clipboard::{Clipboard, ClipboardError, FakeClipboard};
 pub use clipboard_assets::{
-    asset_ref_for_hash, decode_png, normalize_image, sha256_hex, AssetDiagnostic,
-    AssetDiagnosticKind, AssetError, ClipboardAssetStore, NormalizedImage, StoreOutcome,
+    asset_ref_for_hash, decode_png, deflate_icc_profile, normalize_image,
+    normalize_image_with_original, rebuild_png_with_metadata, sha256_hex, validate_original_png,
+    AssetDiagnostic, AssetDiagnosticKind, AssetError, ClipboardAssetStore, IccChunk,
+    NormalizedImage, NormalizedSource, OriginalPngValidationError, StoreOutcome,
     CLIPBOARD_ASSETS_DIR, CLIPBOARD_ASSET_EXTENSION, MAX_CLIPBOARD_ASSET_BYTES,
 };
 pub use clipvault_db::SourceAppFilter;
 pub use clipvault_db::{Collection, CollectionKind, Tag};
 pub use clipvault_platform::{
     checked_rgba_len, default_linux_binding, default_macos_binding, detect_capabilities,
-    macos_accessibility_guidance, probe_image_clipboard, probe_rich_text_clipboard,
-    ActiveAppBackendKind, ActiveAppError, ActiveApplication, ActiveApplicationProbe,
-    ApplicationMetadata, ApplicationMetadataError, ApplicationMetadataProvider, Capabilities,
-    Capability, ClipboardBackend, ClipboardBackendError, ClipboardBackendKind, ClipboardImage,
-    ClipboardPayload, DefaultPlatform, DisplayServer, HotkeyBackendKind, HotkeyBinding,
-    HotkeyError, HotkeyKey, HotkeyManager, HotkeyModifiers, HotkeyOutcome, ImageClipboardSupport,
-    ImageValidationError, NoopActiveApplicationProbe, NoopApplicationMetadataProvider,
-    NoopClipboardBackend, NoopHotkeyManager, NoopPasteController, NoopSettingsNavigator,
-    NoopTrayController, NoopTrayHandle, OsFamily, PasteBackendKind, PasteController, PasteError,
-    PlatformError, PlatformGuidance, PlatformInfo, PlatformIssueKind, PlatformSettingsTarget,
-    RichTextClipboardSupport, RichTextPayload, SettingsNavigator, SettingsOpenOutcome, TrayAction,
-    TrayBackendKind, TrayController, TrayEntry, TrayError, TrayHandle, TrayOutcome,
-    APPLICATION_ICONS_DIR, MAX_CLIPBOARD_IMAGE_DIM, MAX_CLIPBOARD_IMAGE_RGBA_BYTES,
+    macos_accessibility_guidance, parse_tiff_metadata, png_metadata_summary, probe_image_clipboard,
+    probe_rich_text_clipboard, ActiveAppBackendKind, ActiveAppError, ActiveApplication,
+    ActiveApplicationProbe, ApplicationMetadata, ApplicationMetadataError,
+    ApplicationMetadataProvider, Capabilities, Capability, ClipboardBackend, ClipboardBackendError,
+    ClipboardBackendKind, ClipboardImage, ClipboardPayload, DefaultPlatform, DisplayServer,
+    HotkeyBackendKind, HotkeyBinding, HotkeyError, HotkeyKey, HotkeyManager, HotkeyModifiers,
+    HotkeyOutcome, ImageClipboardSupport, ImageValidationError, NoopActiveApplicationProbe,
+    NoopApplicationMetadataProvider, NoopClipboardBackend, NoopHotkeyManager, NoopPasteController,
+    NoopSettingsNavigator, NoopTrayController, NoopTrayHandle, OsFamily, PasteBackendKind,
+    PasteController, PasteError, PasteboardImageMetadata, PlatformError, PlatformGuidance,
+    PlatformInfo, PlatformIssueKind, PlatformSettingsTarget, PngMetadataSummary,
+    RichTextClipboardSupport, RichTextPayload, SettingsNavigator, SettingsOpenOutcome,
+    TiffMetadata, TiffResolutionUnit, TrayAction, TrayBackendKind, TrayController, TrayEntry,
+    TrayError, TrayHandle, TrayOutcome, APPLICATION_ICONS_DIR, MAX_CLIPBOARD_IMAGE_DIM,
+    MAX_CLIPBOARD_IMAGE_RGBA_BYTES,
 };
 pub use clipvault_search::SearchQuery;
 pub use clock::{Clock, SystemClock};
@@ -78,6 +83,10 @@ pub use history::{
 };
 pub use ignored_apps::{normalize_identifier, IgnoredAppEntry, IgnoredAppError, PickAndAddOutcome};
 pub use ignored_apps_service::{IgnoredAppsService, IgnoredAppsServiceError};
+pub use image_capture_diagnostic::{
+    log_image_capture_diagnostic, log_image_paste_diagnostic, ColorProfileKind,
+    ImageCaptureDiagnostic, ImageSource, RepresentationSource,
+};
 pub use management::{
     AssetCollectionOutcome, ClearOutcome, DeleteOutcome, HistoryManagementService,
     LocalSettingsReader, ManagementServiceError, RetentionOutcome, RetentionPolicy,

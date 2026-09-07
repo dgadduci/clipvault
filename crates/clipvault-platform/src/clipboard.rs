@@ -52,7 +52,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::Capability;
+use crate::tiff_metadata::TiffMetadata;
+use crate::{Capability, PngMetadataSummary};
 
 /// Upper bound on either pixel dimension of a captured image.
 ///
@@ -96,6 +97,17 @@ pub enum ImageValidationError {
     /// The supplied buffer length does not match `width * height * 4`.
     #[error("clipboard image buffer is {actual} bytes, expected {expected}")]
     StrideMismatch { expected: usize, actual: usize },
+    /// The pasteboard published a `public.png` representation but the
+    /// bytes failed the platform-layer validator (signature,
+    /// dimension / size cap, decoder failure). The composite MUST
+    /// surface this error and MUST NOT fall back to the legacy
+    /// `arboard::get_image` bitmap path: doing so would silently save
+    /// a re-encoded PNG that lacks the `pHYs` / `iCCP` / `sRGB`
+    /// metadata chunks the source application published. The
+    /// `kind` field carries the snake_case reason the validator
+    /// reported (never the payload, never the byte length).
+    #[error("clipboard public.png payload is invalid: {kind}")]
+    InvalidPng { kind: &'static str },
 }
 
 impl ImageValidationError {
@@ -108,6 +120,7 @@ impl ImageValidationError {
             ImageValidationError::SizeOverflow => "size_overflow",
             ImageValidationError::TooLarge { .. } => "too_large",
             ImageValidationError::StrideMismatch { .. } => "stride_mismatch",
+            ImageValidationError::InvalidPng { kind } => kind,
         }
     }
 }
@@ -147,33 +160,116 @@ pub fn checked_rgba_len(width: u32, height: u32) -> Result<usize, ImageValidatio
     Ok(bytes)
 }
 
+/// Optional metadata the bridge exposes alongside a
+/// [`ClipboardImage`]: the chunk summary the scanner produced for
+/// the source PNG and the four IFD tags the TIFF parser cares
+/// about. The struct is metadata-only except for the
+/// `tiff_metadata.icc_profile` payload — that one byte buffer is
+/// intentionally opaque because the persistence layer feeds it
+/// into a PNG `iCCP` chunk without inspecting its content.
+///
+/// The bridge carrying this metadata lives in
+/// [`crate::runtime::macos_clipboard_main_queue`]; every other
+/// adapter leaves both fields `None` / empty so the persistence
+/// layer can safely fall back to the legacy `arboard::get_image`
+/// path on Linux X11 without surfacing the empty metadata as an
+/// error.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct PasteboardImageMetadata {
+    /// The chunk summary the PNG byte stream reported.
+    pub png_chunks: PngMetadataSummary,
+    /// The metadata the TIFF leg of the same pasteboard snapshot
+    /// published. `None` when the pasteboard did not declare
+    /// `public.tiff`.
+    pub tiff: Option<TiffMetadata>,
+    /// Resolution inferred from the macOS display scale when the
+    /// pasteboard exposed a native PNG but neither image leg exposed
+    /// usable resolution metadata. This is deliberately separate
+    /// from `tiff`: it is a host fallback, not a claim about bytes
+    /// present in the TIFF representation.
+    pub inferred_display_dpi: Option<(u32, u32)>,
+    /// True when the bridge was able to detect resolution
+    /// metadata on at least one of the two representations.
+    pub resolution_detected: bool,
+    /// True when the bridge was able to detect a colour profile.
+    pub profile_detected: bool,
+}
+
+impl PasteboardImageMetadata {
+    /// Stable snake_case identifier the diagnostic surface and the
+    /// `CLIPVAULT_DEBUG_IMAGE_*` environment contract consume.
+    pub fn kind_str(&self) -> &'static str {
+        if self.resolution_detected && self.profile_detected {
+            "native_full_metadata"
+        } else if self.resolution_detected {
+            "native_resolution_only"
+        } else if self.profile_detected {
+            "native_profile_only"
+        } else {
+            "native_no_metadata"
+        }
+    }
+
+    pub fn has_png(&self) -> bool {
+        self.png_chunks != PngMetadataSummary::default()
+    }
+}
+
+impl fmt::Debug for PasteboardImageMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PasteboardImageMetadata")
+            .field("png_chunks_kind", &self.png_chunks.kind_str())
+            .field("tiff_resolution_present", &self.tiff.is_some())
+            .field("resolution_detected", &self.resolution_detected)
+            .field("profile_detected", &self.profile_detected)
+            .finish()
+    }
+}
+
 /// A validated, platform-neutral raster bitmap read from (or destined
 /// for) the operating-system clipboard.
 ///
 /// # Invariants
 ///
 /// A value of this type can only be built through
-/// [`ClipboardImage::new`], which guarantees:
+/// [`ClipboardImage::new`] or [`ClipboardImage::with_original_png`],
+/// which guarantee:
 ///
 /// - `width > 0` and `height > 0`;
 /// - `width <= MAX_CLIPBOARD_IMAGE_DIM` and likewise for `height`;
 /// - `rgba.len() == width * height * 4`, computed with checked
 ///   arithmetic;
-/// - `rgba.len() <= MAX_CLIPBOARD_IMAGE_RGBA_BYTES`.
+/// - `rgba.len() <= MAX_CLIPBOARD_IMAGE_RGBA_BYTES`;
+/// - when `original_png` is `Some(bytes)`, the bytes form a
+///   decodable PNG whose IHDR dimensions match `width` and `height`
+///   and whose RGBA frame matches `rgba`. The validation is the core's
+///   `validate_original_png` responsibility; the constructor only
+///   enforces the structural invariants so a malformed payload is
+///   rejected as early as possible.
 ///
 /// The pixel order is straight (non-premultiplied) RGBA, top-left
 /// origin, no row padding — the same layout every supported backend
 /// exposes.
 ///
 /// The [`fmt::Debug`] implementation is hand-written on purpose: it
-/// prints the dimensions and the buffer length but **never** the
-/// pixels, so an accidental `{:?}` in a log line cannot leak the
-/// captured image.
+/// prints the dimensions, the buffer length and a boolean indicating
+/// whether the original PNG bytes are present, but **never** the
+/// pixels, the original PNG payload or its byte length. An accidental
+/// `{:?}` in a log line therefore cannot leak the captured image.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ClipboardImage {
     rgba: Vec<u8>,
     width: u32,
     height: u32,
+    original_png: Option<Vec<u8>>,
+    /// Metadata the host pasteboard exposed alongside the PNG
+    /// leg. Optional: only the macOS bridge populates this field,
+    /// every other adapter leaves it as the default
+    /// [`PasteboardImageMetadata`]. The struct participates in the
+    /// equality contract only by surface-level marker (presence of
+    /// `original_png`) so legacy tests keep passing without the
+    /// equality semantics bringing in ICC bytes.
+    pasteboard_metadata: PasteboardImageMetadata,
 }
 
 impl ClipboardImage {
@@ -190,7 +286,90 @@ impl ClipboardImage {
             rgba,
             width,
             height,
+            original_png: None,
+            pasteboard_metadata: PasteboardImageMetadata::default(),
         })
+    }
+
+    /// Build a validated image that also carries the original PNG
+    /// bytes the clipboard exposed (typically `public.png` on macOS).
+    ///
+    /// `original_png` is the verbatim byte stream ClipVault will
+    /// persist when the core's [`crate::clipboard_assets::normalize_image_with_original`]
+    /// accepts it; the persistence layer keeps `pHYs`, `iCCP`/`sRGB`,
+    /// `gAMA`, `cHRM` and any other safe metadata chunks intact.
+    ///
+    /// The constructor enforces the structural invariants only:
+    /// - `original_png` must be non-empty;
+    /// - the supplied RGBA buffer must match the declared dimensions.
+    ///
+    /// Semantic validation (PNG signature, decoder success, dimension
+    /// coherence, RGBA consistency) lives in the core so the platform
+    /// layer never owns the spec interpretation. The constructor
+    /// returns an empty `original_png` rejection as
+    /// [`ImageValidationError::ZeroDimension`] because there is no
+    /// pixel data behind an empty PNG; the persistent zero-length
+    /// case is a programming error.
+    pub fn with_original_png(
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        original_png: Vec<u8>,
+    ) -> Result<Self, ImageValidationError> {
+        if original_png.is_empty() {
+            return Err(ImageValidationError::ZeroDimension);
+        }
+        let image = Self::new(rgba, width, height)?;
+        Ok(Self {
+            original_png: Some(original_png),
+            pasteboard_metadata: PasteboardImageMetadata::default(),
+            ..image
+        })
+    }
+
+    /// Build a validated image that carries the original PNG bytes
+    /// **and** the metadata the pasteboard exposed alongside them.
+    ///
+    /// The bridge uses this constructor for the
+    /// `NativePng` outcome: the constructor stashes the
+    /// [`PasteboardImageMetadata`] so the persistence layer can
+    /// later decide between the verbatim path, the
+    /// `NativePngPlusMetadata` chunk-injection path and the
+    /// `TiffMetadata` TIFF-only path. The struct participates in
+    /// `PartialEq` only through `original_png`, so tests that
+    /// pin the bytes do not need to recompute the metadata
+    /// fingerprint every time.
+    pub fn with_pasteboard_metadata(
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        original_png: Vec<u8>,
+        pasteboard_metadata: PasteboardImageMetadata,
+    ) -> Result<Self, ImageValidationError> {
+        let mut image = Self::with_original_png(rgba, width, height, original_png)?;
+        image.pasteboard_metadata = pasteboard_metadata;
+        Ok(image)
+    }
+
+    /// Build a validated image carrying pasteboard metadata when the
+    /// native clipboard exposed a raster representation other than
+    /// PNG (currently the macOS `public.tiff` leg).
+    ///
+    /// The TIFF-only capture path still needs to transport the
+    /// resolution/profile metadata into the core, but it has no
+    /// original PNG byte stream to attach. Keeping this constructor
+    /// separate from [`Self::with_pasteboard_metadata`] makes that
+    /// distinction explicit and prevents an empty byte vector from
+    /// being mistaken for a valid original PNG.
+    pub fn with_pasteboard_metadata_without_original(
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        pasteboard_metadata: PasteboardImageMetadata,
+    ) -> Result<Self, ImageValidationError> {
+        let mut image = Self::new(rgba, width, height)?;
+        image.pasteboard_metadata = pasteboard_metadata;
+        Ok(image)
     }
 
     pub fn width(&self) -> u32 {
@@ -216,15 +395,49 @@ impl ClipboardImage {
     pub fn byte_len(&self) -> usize {
         self.rgba.len()
     }
+
+    /// Original PNG bytes the clipboard exposed, when the capture
+    /// pipeline surfaced them. `Some` only when the platform adapter
+    /// read `public.png` (or equivalent) and the bytes validated; the
+    /// `None` case is the legacy `arboard` path or a fallback.
+    pub fn original_png(&self) -> Option<&[u8]> {
+        self.original_png.as_deref()
+    }
+
+    /// Owned original PNG bytes, consuming the image.
+    pub fn into_original_png(self) -> Option<Vec<u8>> {
+        self.original_png
+    }
+
+    /// Whether the image carries original PNG bytes. Metadata-only:
+    /// safe to log without inspecting the payload.
+    pub fn has_original_png(&self) -> bool {
+        self.original_png.is_some()
+    }
+
+    /// Read-only view of the pasteboard metadata the bridge
+    /// attached to this image. Defaults to an empty metadata
+    /// block when the producing adapter did not populate one.
+    pub fn pasteboard_metadata(&self) -> &PasteboardImageMetadata {
+        &self.pasteboard_metadata
+    }
 }
 
 impl fmt::Debug for ClipboardImage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Metadata only: never print the pixel buffer.
+        // Metadata only: never print the pixel buffer, the original
+        // PNG payload or its byte length. A boolean presence flag is
+        // enough for diagnostics; the actual bytes never reach a log
+        // line.
         f.debug_struct("ClipboardImage")
             .field("width", &self.width)
             .field("height", &self.height)
             .field("rgba_len", &self.rgba.len())
+            .field("has_original_png", &self.original_png.is_some())
+            .field(
+                "pasteboard_metadata_kind",
+                &self.pasteboard_metadata.kind_str(),
+            )
             .finish()
     }
 }
@@ -554,11 +767,48 @@ pub trait ClipboardBackend: Send + Sync {
         })
     }
 
+    /// Returns the current clipboard contents through the native
+    /// fidelity-preserving image path. When the host exposes
+    /// `public.png`, the result carries those original PNG bytes;
+    /// when macOS exposes only `public.tiff`, the result carries the
+    /// complete decoded RGBA frame plus its pasteboard metadata.
+    ///
+    /// The default implementation returns
+    /// [`ClipboardBackendError::UnsupportedFormat`] (soft) so a backend
+    /// that does not know how to transport original PNG bytes keeps
+    /// compiling and reports the missing capability honestly instead
+    /// of pretending to support it.
+    ///
+    /// Backends that implement the PNG leg MUST populate
+    /// [`ClipboardImage::original_png`] so the core can persist the
+    /// PNG verbatim. A TIFF-only native leg may leave that field
+    /// empty, but MUST preserve its metadata through
+    /// [`ClipboardImage::pasteboard_metadata`] so the core can
+    /// rebuild the persisted PNG without degrading it to `arboard`.
+    fn read_image_png(&self) -> Result<Option<ClipboardImage>, ClipboardBackendError> {
+        Err(ClipboardBackendError::UnsupportedFormat)
+    }
+
     /// Writes `image` to the clipboard so a subsequent paste action
     /// receives it. The default reports
     /// [`Capability::ClipboardWriteImage`] as unavailable.
     fn write_image(&self, image: &ClipboardImage) -> Result<(), ClipboardBackendError> {
         let _ = image;
+        Err(ClipboardBackendError::Unavailable {
+            capability: Capability::ClipboardWriteImage,
+        })
+    }
+
+    /// Writes the canonical PNG bytes of an image to the clipboard.
+    ///
+    /// This optional fast path exists for platforms whose native
+    /// clipboard can publish an encoded image without decoding and
+    /// re-encoding it. The core uses it for persisted image copies so
+    /// the bytes shown by the preview and the bytes handed to the
+    /// receiving application are identical. A backend that does not
+    /// implement the path keeps the historical `write_image` route.
+    fn write_image_png(&self, png: &[u8]) -> Result<(), ClipboardBackendError> {
+        let _ = png;
         Err(ClipboardBackendError::Unavailable {
             capability: Capability::ClipboardWriteImage,
         })
@@ -586,6 +836,23 @@ pub trait ClipboardBackend: Send + Sync {
 
     /// Whether this backend can write images at all.
     fn supports_image_write(&self) -> bool {
+        false
+    }
+
+    /// Whether this backend can publish a PNG without changing its
+    /// encoded bytes. This is deliberately separate from
+    /// [`Self::supports_image_write`], because a backend may support
+    /// image writes only through its decoded bitmap API.
+    fn supports_image_png_write(&self) -> bool {
+        false
+    }
+
+    /// Whether this backend can read the original PNG bytes the host
+    /// clipboard exposed (typically `public.png` on macOS). This is
+    /// deliberately separate from
+    /// [`Self::supports_image_read`], because a backend may support
+    /// bitmap reads without a fidelity-preserving PNG read path.
+    fn supports_image_png_read(&self) -> bool {
         false
     }
 
@@ -815,6 +1082,60 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_image_with_original_png_keeps_invariants() {
+        let rgba = vec![0xAB; 4];
+        let png = b"\x89PNG\r\n\x1a\nfake-png".to_vec();
+        let image =
+            ClipboardImage::with_original_png(rgba.clone(), 1, 1, png.clone()).expect("valid");
+        assert_eq!(image.width(), 1);
+        assert_eq!(image.height(), 1);
+        assert_eq!(image.byte_len(), 4);
+        assert_eq!(image.rgba(), rgba.as_slice());
+        assert!(image.has_original_png());
+        assert_eq!(image.original_png(), Some(png.as_slice()));
+        // `into_original_png` consumes the image and returns the
+        // owned PNG bytes; the rgba is dropped together with the
+        // rest of the struct.
+        let recovered = image.into_original_png();
+        assert_eq!(recovered.as_deref(), Some(png.as_slice()));
+    }
+
+    #[test]
+    fn clipboard_image_with_original_png_rejects_empty_bytes() {
+        let err = ClipboardImage::with_original_png(vec![0; 4], 1, 1, Vec::new())
+            .expect_err("must reject");
+        assert_eq!(err, ImageValidationError::ZeroDimension);
+    }
+
+    #[test]
+    fn clipboard_image_with_original_png_rejects_stride_mismatch() {
+        // The constructor must reject a mismatched RGBA buffer even
+        // when the original PNG bytes look plausible. This keeps the
+        // structural invariants symmetric with `ClipboardImage::new`.
+        let err = ClipboardImage::with_original_png(vec![0; 3], 2, 2, b"PNG".to_vec())
+            .expect_err("must reject");
+        assert_eq!(
+            err,
+            ImageValidationError::StrideMismatch {
+                expected: 16,
+                actual: 3
+            }
+        );
+    }
+
+    #[test]
+    fn clipboard_image_default_has_no_original_png() {
+        // The legacy `new` constructor is the path arboard uses:
+        // it must produce an image with `original_png = None` so the
+        // core can detect the legacy fallback and persist through
+        // `normalize_image`.
+        let image = ClipboardImage::new(vec![0x10; 4], 1, 1).expect("image");
+        assert!(!image.has_original_png());
+        assert!(image.original_png().is_none());
+        assert!(image.into_original_png().is_none());
+    }
+
+    #[test]
     fn debug_output_never_contains_payload_bytes() {
         // Regression guard for the privacy contract: an accidental
         // `{:?}` in a log line must not print pixels or text.
@@ -837,6 +1158,30 @@ mod tests {
         assert!(!rendered.contains("secret"));
         assert!(!rendered.contains("<b>"));
         assert!(rendered.contains("plain_len"));
+    }
+
+    #[test]
+    fn debug_output_never_leaks_original_png_bytes() {
+        // The `Debug` impl for an image that carries the original
+        // PNG bytes MUST NOT print the payload, the byte length or
+        // any substring of the PNG. The only diagnostic that may
+        // reach a log line is the presence flag and the standard
+        // dimensions / rgba length.
+        let secret_png = b"\x89PNG\r\n\x1a\nsecret-payload-content".to_vec();
+        let image =
+            ClipboardImage::with_original_png(vec![0xAB; 4], 1, 1, secret_png.clone()).expect("ok");
+        let rendered = format!("{image:?}");
+        assert!(rendered.contains("has_original_png"));
+        assert!(rendered.contains("width"));
+        assert!(rendered.contains("rgba_len"));
+        assert!(
+            !rendered.contains("secret"),
+            "the original PNG bytes must never appear in Debug output"
+        );
+        assert!(
+            !rendered.contains("89 50 4E 47") && !rendered.contains("89504e47"),
+            "PNG signature markers must not appear"
+        );
     }
 
     #[test]

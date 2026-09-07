@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-07
+goal: Preservar los bytes PNG originales del portapapeles en macOS durante la captura, conservando dimensiones, resolución (pHYs), perfil de color ICC/Display P3 y demás metadata segura del PNG, sin re-encodear el bitmap vía AppKit/arboard.

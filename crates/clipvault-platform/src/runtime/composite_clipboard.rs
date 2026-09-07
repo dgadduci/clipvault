@@ -3,20 +3,35 @@
 //!
 //! ## Why this exists
 //!
-//! `arboard` is the image / plain-text adapter for macOS and Linux
-//! X11: it exposes `get_image` / `set_image` and the basic
-//! `get_text` / `set_text` pair. It does **not** expose RTF, so the
-//! previous prototype could not satisfy a rich paste that needed to
-//! publish `public.rtf` together with `public.html`. The native
-//! macOS adapter talks to `NSPasteboard` directly and can publish
-//! the full set of flavours in a single logical write, but it
-//! does not transport raster images (the `NSBitmapImageRep` →
-//! RGBA → PNG pipeline is implemented inside `arboard`).
+//! `arboard` is the plain-text adapter for macOS and Linux X11: it
+//! exposes `get_text` / `set_text` and the basic
+//! `get_image` / `set_image` pair. It does **not** expose RTF, so
+//! the previous prototype could not satisfy a rich paste that
+//! needed to publish `public.rtf` together with `public.html`.
+//! The native macOS adapter talks to `NSPasteboard` directly and
+//! can publish the full set of flavours in a single logical
+//! write. macOS also uses the native adapter for image writes so
+//! the bitmap survives the round-trip verbatim — the previous
+//! `arboard`-based `pasteboard.writeObjects(&[NSImage])` route
+//! silently stored a downsampled / cropped version of the source
+//! bitmap when the AppKit representation cache dropped the
+//! original. On Linux X11 the rich adapter is the same `arboard`
+//! instance, the image path stays on `arboard`, and the contract
+//! matches the legacy behaviour byte-for-byte.
 //!
 //! The composite backend dispatches:
 //!
 //! - `read_text` / `write_text` → the plain backend (`arboard`).
-//! - `read_image` / `write_image` → the image backend (`arboard`).
+//! - `read_image` → the rich backend when it advertises
+//!   `supports_image_png_read` (the native macOS `public.png`
+//!   fidelity-preserving path); falls back to the plain backend
+//!   (`arboard`) when the rich read returns `Ok(None)` or a soft
+//!   miss.
+//! - `write_image` → the rich backend when it advertises
+//!   `supports_image_write` (the native macOS PNG path); falls back
+//!   to the plain backend otherwise (`arboard` on Linux X11).
+//! - `write_image_png` → the rich backend when it advertises the
+//!   encoded-PNG path; this keeps the persisted PNG bytes unchanged.
 //! - `read_rich` / `write_rich` → the rich backend (the native
 //!   `NSPasteboard` adapter on macOS, `arboard` on Linux X11).
 //!
@@ -147,19 +162,97 @@ impl ClipboardBackend for CompositeClipboard {
     }
 
     fn read_image(&self) -> Result<Option<ClipboardImage>, ClipboardBackendError> {
-        // Images always travel through the plain adapter. The
-        // native `NSPasteboard` adapter is rich-text-only because
-        // the `NSBitmapImageRep` → RGBA → PNG pipeline belongs to
-        // `arboard`; routing the image path through a second
-        // adapter would duplicate that pipeline. On macOS this
-        // means the composite dispatches the image read through
-        // the same `arboard` instance the rich adapter borrows for
-        // its plain-text leg.
+        // Prefer the fidelity-preserving read through the rich
+        // adapter when it advertises `supports_image_png_read()`:
+        // on macOS the native `NSPasteboard` adapter exposes the
+        // original PNG bytes the pasteboard published (with `pHYs`,
+        // `iCCP` / `sRGB`, ...), whereas the legacy `arboard`
+        // bitmap path can return a downsampled / cropped
+        // representation when AppKit's representation cache drops
+        // the original.
+        //
+        // The rich adapter's outcome is the single source of truth
+        // for whether the clipboard had a `public.png`
+        // representation:
+        //
+        // - `Ok(Some(image))`: native PNG, use it verbatim.
+        // - `Ok(None)`: no `public.png` flavour at all. The
+        //   composite MAY fall back to the plain adapter so the
+        //   capture still succeeds on hosts / producers that only
+        //   expose a bitmap.
+        // - `Err(InvalidImage(_))`: `public.png` was present but
+        //   the bytes failed validation. The composite MUST NOT
+        //   fall back to the plain adapter; doing so would silently
+        //   save a re-encoded PNG without the original metadata
+        //   chunks the user reported as missing. The error is
+        //   surfaced to the caller so the capture pipeline can
+        //   decide between a hard failure and a retryable miss.
+        // - `Err(UnsupportedFormat)`: the rich adapter does not
+        //   know how to transport original PNG bytes (a non-macOS
+        //   host). Fall back to the plain adapter.
+        // - `Err(Unavailable)`: the bridge cannot reach the main
+        //   thread. Surface the soft error and let the watcher retry;
+        //   falling back to arboard here would silently discard the
+        //   PNG's resolution/profile metadata, which is precisely the
+        //   fidelity regression this native path prevents.
+        if self.rich.supports_image_png_read() {
+            match self.rich.read_image_png() {
+                Ok(Some(image)) => return Ok(Some(image)),
+                Ok(None) => {}
+                Err(ClipboardBackendError::UnsupportedFormat) => {}
+                Err(error @ ClipboardBackendError::Unavailable { .. }) => return Err(error),
+                Err(ClipboardBackendError::InvalidImage(_)) => {
+                    // Surface the typed error so the capture
+                    // pipeline does not silently save a degraded
+                    // PNG. The rich adapter already typed the
+                    // failure as `InvalidPng { kind }`; the
+                    // pipeline can branch on the snake_case kind
+                    // through `error.kind_str()`.
+                    return Err(ClipboardBackendError::InvalidImage(
+                        crate::clipboard::ImageValidationError::InvalidPng {
+                            kind: "invalid_png",
+                        },
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+        }
         self.plain.read_image()
     }
 
     fn write_image(&self, image: &ClipboardImage) -> Result<(), ClipboardBackendError> {
+        // Image write goes through the rich backend when it
+        // advertises native PNG support. On macOS the
+        // `MacOsPasteboardClipboard` adapter exposes a direct
+        // `setData_forType(NSPasteboardTypePNG)` path that preserves
+        // the canonical bitmap, while the legacy `arboard` path
+        // delegates to `pasteboard.writeObjects(&[NSImage])` which
+        // can store a downsampled / cropped representation. On every
+        // other host (Linux X11, the no-op fallback) the rich and
+        // plain adapters are the same `arboard` instance so this
+        // branch is a no-op and the plain path is the documented
+        // degradation route.
+        if self.rich.supports_image_write() {
+            match self.rich.write_image(image) {
+                Ok(()) => return Ok(()),
+                // A soft miss (no main queue) collapses to the plain
+                // adapter so the paste still completes.
+                Err(ClipboardBackendError::Unavailable { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
         self.plain.write_image(image)
+    }
+
+    fn write_image_png(&self, png: &[u8]) -> Result<(), ClipboardBackendError> {
+        // The native macOS adapter owns the encoded-PNG path. Do not
+        // fall back to `write_image` here: that would decode and
+        // re-encode the bitmap again, reintroducing the crop/stride
+        // regression this method exists to prevent.
+        if self.rich.supports_image_png_write() {
+            return self.rich.write_image_png(png);
+        }
+        self.plain.write_image_png(png)
     }
 
     fn read_payload(&self) -> Result<Option<ClipboardPayload>, ClipboardBackendError> {
@@ -203,6 +296,32 @@ impl ClipboardBackend for CompositeClipboard {
                         Err(error) if error.is_soft() => {}
                         Err(error) => return Err(error),
                     }
+                    // No usable plain text on the rich adapter's
+                    // own leg: try the fidelity-preserving PNG read
+                    // before falling through to the plain adapter.
+                    if self.rich.supports_image_png_read() {
+                        match self.rich.read_image_png() {
+                            Ok(Some(image)) => {
+                                return Ok(Some(ClipboardPayload::Image(image)));
+                            }
+                            Ok(None) => {}
+                            Err(ClipboardBackendError::UnsupportedFormat) => {}
+                            Err(error @ ClipboardBackendError::Unavailable { .. }) => {
+                                return Err(error)
+                            }
+                            Err(ClipboardBackendError::InvalidImage(_)) => {
+                                // Surface the typed error so the
+                                // capture pipeline does not
+                                // silently save a degraded PNG.
+                                return Err(ClipboardBackendError::InvalidImage(
+                                    crate::clipboard::ImageValidationError::InvalidPng {
+                                        kind: "invalid_png",
+                                    },
+                                ));
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
                 }
                 Err(error) if error.is_soft() => {
                     // The rich adapter could not produce a rich
@@ -217,6 +336,34 @@ impl ClipboardBackend for CompositeClipboard {
                         Ok(_) => {}
                         Err(inner) if inner.is_soft() => {}
                         Err(inner) => return Err(inner),
+                    }
+                    // Same fallback shape as the rich-miss path
+                    // above: prefer the fidelity-preserving PNG read
+                    // before the plain adapter so a macOS host that
+                    // exposes only `public.png` still captures the
+                    // image.
+                    if self.rich.supports_image_png_read() {
+                        match self.rich.read_image_png() {
+                            Ok(Some(image)) => {
+                                return Ok(Some(ClipboardPayload::Image(image)));
+                            }
+                            Ok(None) => {}
+                            Err(ClipboardBackendError::UnsupportedFormat) => {}
+                            Err(error @ ClipboardBackendError::Unavailable { .. }) => {
+                                return Err(error)
+                            }
+                            Err(ClipboardBackendError::InvalidImage(_)) => {
+                                // Surface the typed error so the
+                                // capture pipeline does not
+                                // silently save a degraded PNG.
+                                return Err(ClipboardBackendError::InvalidImage(
+                                    crate::clipboard::ImageValidationError::InvalidPng {
+                                        kind: "invalid_png",
+                                    },
+                                ));
+                            }
+                            Err(error) => return Err(error),
+                        }
                     }
                 }
                 Err(error) => return Err(error),
@@ -265,6 +412,14 @@ impl ClipboardBackend for CompositeClipboard {
 
     fn supports_image_write(&self) -> bool {
         self.plain.supports_image_write()
+    }
+
+    fn supports_image_png_read(&self) -> bool {
+        self.rich.supports_image_png_read()
+    }
+
+    fn supports_image_png_write(&self) -> bool {
+        self.rich.supports_image_png_write() || self.plain.supports_image_png_write()
     }
 
     fn supports_native_plain_write(&self) -> bool {
@@ -337,6 +492,8 @@ mod tests {
         next_rich: Mutex<Option<Result<Option<RichTextPayload>, ClipboardBackendError>>>,
         next_plain: Mutex<Option<Result<Option<String>, ClipboardBackendError>>>,
         plain_reads: Mutex<u32>,
+        next_image_png: Mutex<Option<Result<Option<ClipboardImage>, ClipboardBackendError>>>,
+        png_reads: Mutex<u32>,
     }
 
     impl ClipboardBackend for RichFake {
@@ -368,6 +525,13 @@ mod tests {
                 capability: crate::Capability::ClipboardWriteRichText,
             })
         }
+        fn read_image_png(&self) -> Result<Option<ClipboardImage>, ClipboardBackendError> {
+            *self.png_reads.lock() += 1;
+            self.next_image_png
+                .lock()
+                .take()
+                .unwrap_or(Err(ClipboardBackendError::UnsupportedFormat))
+        }
         fn supports_rich_read(&self) -> bool {
             true
         }
@@ -376,6 +540,9 @@ mod tests {
         }
         fn supports_image_read(&self) -> bool {
             false
+        }
+        fn supports_image_png_read(&self) -> bool {
+            true
         }
         fn supports_image_write(&self) -> bool {
             false
@@ -563,5 +730,220 @@ mod tests {
         // the composite reports `Ignored`.
         let outcome = composite.read_payload().expect("soft");
         assert!(outcome.is_none());
+    }
+
+    /// `read_image` MUST prefer the fidelity-preserving PNG read
+    /// through the rich adapter when it advertises
+    /// `supports_image_png_read()` and returns a bitmap. The plain
+    /// adapter is the legacy fallback only.
+    #[test]
+    fn read_image_prefers_native_png_when_available() {
+        let plain = Arc::new(PlainFake::default());
+        let rich = Arc::new(RichFake::default());
+        let png_bytes = b"\x89PNG\r\n\x1a\npayload".to_vec();
+        let image = ClipboardImage::with_original_png(vec![0xAB; 4], 1, 1, png_bytes.clone())
+            .expect("valid image");
+        *rich.next_image_png.lock() = Some(Ok(Some(image.clone())));
+        let plain_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&plain) as _;
+        let rich_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&rich) as _;
+        let composite = CompositeClipboard::new(plain_dyn, rich_dyn);
+
+        let observed = composite.read_image().expect("read").expect("image");
+        assert_eq!(observed.width(), 1);
+        assert_eq!(observed.height(), 1);
+        assert!(observed.has_original_png());
+        assert_eq!(observed.original_png(), Some(png_bytes.as_slice()));
+        // The composite must NOT have consulted the plain adapter
+        // when the rich adapter already answered.
+        assert_eq!(*rich.png_reads.lock(), 1);
+    }
+
+    /// When the rich adapter reports `Ok(None)` for the PNG read
+    /// (the clipboard has no `public.png` representation, or the
+    /// bridge returned `None` for some other reason), the composite
+    /// MUST fall back to the plain adapter so the capture still
+    /// succeeds.
+    #[test]
+    fn read_image_falls_back_to_plain_when_native_returns_none() {
+        let plain = Arc::new(PlainFake::default());
+        let rich = Arc::new(RichFake::default());
+        *rich.next_image_png.lock() = Some(Ok(None));
+        let plain_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&plain) as _;
+        let rich_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&rich) as _;
+        let composite = CompositeClipboard::new(plain_dyn, rich_dyn);
+
+        let observed = composite.read_image().expect("read");
+        assert!(observed.is_none(), "plain adapter also returns None");
+        assert_eq!(*rich.png_reads.lock(), 1);
+    }
+
+    /// When the rich adapter returns the typed `UnsupportedFormat`
+    /// outcome (the default `read_image_png` for a backend that
+    /// cannot transport original PNG bytes), the composite MUST
+    /// fall back to the plain adapter rather than propagating the
+    /// soft error.
+    #[test]
+    fn read_image_falls_back_to_plain_when_native_returns_unsupported() {
+        let plain = Arc::new(PlainFake::default());
+        let rich = Arc::new(RichFake::default());
+        *rich.next_image_png.lock() = Some(Err(ClipboardBackendError::UnsupportedFormat));
+        let plain_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&plain) as _;
+        let rich_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&rich) as _;
+        let composite = CompositeClipboard::new(plain_dyn, rich_dyn);
+
+        let observed = composite.read_image().expect("read");
+        assert!(observed.is_none());
+    }
+
+    /// A native macOS bridge timeout MUST remain a soft unavailable
+    /// result, not become an arboard image. Falling back here would
+    /// persist a new PNG without the source pasteboard metadata and
+    /// make a 144 ppi capture look like a successful 72 ppi capture.
+    #[test]
+    fn read_image_does_not_fall_back_when_native_bridge_is_unavailable() {
+        let plain = Arc::new(PlainFake::default());
+        let rich = Arc::new(RichFake::default());
+        *rich.next_image_png.lock() = Some(Err(ClipboardBackendError::Unavailable {
+            capability: crate::Capability::ClipboardReadImage,
+        }));
+        let plain_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&plain) as _;
+        let rich_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&rich) as _;
+        let composite = CompositeClipboard::new(plain_dyn, rich_dyn);
+
+        let outcome = composite
+            .read_image()
+            .expect_err("native bridge unavailability must not degrade to arboard");
+        assert!(matches!(
+            outcome,
+            ClipboardBackendError::Unavailable {
+                capability: crate::Capability::ClipboardReadImage
+            }
+        ));
+    }
+
+    /// `read_payload` (the priority helper) MUST surface an image
+    /// produced by the rich PNG read when the rich leg is empty and
+    /// the plain-text fallback is empty too. This is the path
+    /// Quick Paste follows on macOS when the user copies an image
+    /// that publishes a `public.png` representation.
+    #[test]
+    fn read_payload_surfaces_native_png_image_when_no_text_present() {
+        let plain = Arc::new(PlainFake::default());
+        let rich = Arc::new(RichFake::default());
+        let png_bytes = b"\x89PNG\r\n\x1a\npayload".to_vec();
+        let image = ClipboardImage::with_original_png(vec![0xCD; 4], 1, 1, png_bytes.clone())
+            .expect("valid image");
+        // Rich read returns None (no rich flavour), rich plain
+        // returns None (no plain text), but rich PNG read returns
+        // Some(image). The composite must keep polling on the text
+        // legs and then surface the PNG image.
+        *rich.next_image_png.lock() = Some(Ok(Some(image.clone())));
+        *rich.next_plain.lock() = Some(Ok(None));
+        let plain_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&plain) as _;
+        let rich_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&rich) as _;
+        let composite = CompositeClipboard::new(plain_dyn, rich_dyn);
+
+        let payload = composite
+            .read_payload()
+            .expect("read")
+            .expect("payload present");
+        assert_eq!(payload.kind(), "image");
+        let observed = payload.as_image().expect("image");
+        assert_eq!(observed.original_png(), Some(png_bytes.as_slice()));
+    }
+
+    /// When the rich adapter reports a typed `InvalidImage` error
+    /// (the `public.png` flavour was present but the bytes failed
+    /// validation), the composite MUST surface the error to the
+    /// caller. Falling back to the plain `arboard::get_image` path
+    /// here would silently save a re-encoded PNG without the
+    /// original metadata chunks the user reported as missing.
+    #[test]
+    fn read_image_does_not_fall_back_when_native_png_is_invalid() {
+        let plain = Arc::new(PlainFake::default());
+        let rich = Arc::new(RichFake::default());
+        *rich.next_image_png.lock() = Some(Err(ClipboardBackendError::InvalidImage(
+            crate::clipboard::ImageValidationError::InvalidPng { kind: "too_large" },
+        )));
+        let plain_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&plain) as _;
+        let rich_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&rich) as _;
+        let composite = CompositeClipboard::new(plain_dyn, rich_dyn);
+
+        let outcome = composite
+            .read_image()
+            .expect_err("must surface InvalidImage");
+        match outcome {
+            ClipboardBackendError::InvalidImage(error) => {
+                assert_eq!(error.kind_str(), "invalid_png");
+            }
+            other => panic!("expected InvalidImage, got {other:?}"),
+        }
+        // The plain adapter MUST NOT have been consulted: falling
+        // back to `arboard::get_image` would silently degrade the
+        // capture.
+        assert_eq!(*rich.png_reads.lock(), 1);
+    }
+
+    /// `read_payload` (the priority helper) MUST also surface the
+    /// typed `InvalidImage` error when the rich PNG read fails. The
+    /// path Quick Paste exercises on macOS — capturing an image
+    /// when no rich / plain text is on the clipboard — must not
+    /// silently fall back to the plain bitmap adapter either.
+    #[test]
+    fn read_payload_does_not_fall_back_when_native_png_is_invalid() {
+        let plain = Arc::new(PlainFake::default());
+        let rich = Arc::new(RichFake::default());
+        // Rich read returns None (no rich flavour); rich plain
+        // returns None (no plain text); rich PNG read returns the
+        // typed InvalidImage error. The composite must surface the
+        // InvalidImage error rather than falling back to the plain
+        // adapter.
+        *rich.next_rich.lock() = Some(Ok(None));
+        *rich.next_plain.lock() = Some(Ok(None));
+        *rich.next_image_png.lock() = Some(Err(ClipboardBackendError::InvalidImage(
+            crate::clipboard::ImageValidationError::InvalidPng {
+                kind: "decode_failed",
+            },
+        )));
+        let plain_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&plain) as _;
+        let rich_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&rich) as _;
+        let composite = CompositeClipboard::new(plain_dyn, rich_dyn);
+
+        let outcome = composite
+            .read_payload()
+            .expect_err("must surface InvalidImage");
+        match outcome {
+            ClipboardBackendError::InvalidImage(error) => {
+                assert_eq!(error.kind_str(), "invalid_png");
+            }
+            other => panic!("expected InvalidImage, got {other:?}"),
+        }
+    }
+
+    /// The priority helper has the same no-degradation contract as the
+    /// direct image method: a native bridge timeout must be retried by
+    /// the watcher, never converted into a legacy arboard bitmap.
+    #[test]
+    fn read_payload_does_not_fall_back_when_native_bridge_is_unavailable() {
+        let plain = Arc::new(PlainFake::default());
+        let rich = Arc::new(RichFake::default());
+        *rich.next_rich.lock() = Some(Ok(None));
+        *rich.next_plain.lock() = Some(Ok(None));
+        *rich.next_image_png.lock() = Some(Err(ClipboardBackendError::Unavailable {
+            capability: crate::Capability::ClipboardReadImage,
+        }));
+        let plain_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&plain) as _;
+        let rich_dyn: Arc<dyn ClipboardBackend> = Arc::clone(&rich) as _;
+        let composite = CompositeClipboard::new(plain_dyn, rich_dyn);
+
+        let outcome = composite
+            .read_payload()
+            .expect_err("native bridge unavailability must not degrade to arboard");
+        assert!(matches!(
+            outcome,
+            ClipboardBackendError::Unavailable {
+                capability: crate::Capability::ClipboardReadImage
+            }
+        ));
     }
 }

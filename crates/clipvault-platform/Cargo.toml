@@ -31,6 +31,13 @@ tracing = { workspace = true }
 dirs = { workspace = true }
 serde = { workspace = true }
 parking_lot = { workspace = true }
+# Pure-Rust PNG decoder used by the macOS `public.png` capture
+# bridge to validate the bytes the pasteboard exposes. The crate is
+# already in the workspace graph through `clipvault-core`'s asset
+# store; surfacing it here adds no new third-party code to the build
+# and lets the platform layer own the PNG fidelity contract without
+# pulling in `clipvault-core`.
+png = { workspace = true }
 
 arboard = { workspace = true, optional = true }
 global-hotkey = { workspace = true, optional = true }
