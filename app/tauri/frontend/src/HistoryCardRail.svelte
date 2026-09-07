@@ -62,6 +62,14 @@
     entry: EntryRecord,
     collectionId: number,
   ) => Promise<void> = async () => {};
+  /**
+   * Optional forwarder the rail re-emits when a card dispatches
+   * `preview-request`. The Desktop coordinates a single preview
+   * overlay from `App.svelte`; the rail only forwards the request
+   * so the card never has to know whether it is mounted in a
+   * preview-enabled rail or not.
+   */
+  export let onRequestPreview: (entry: EntryRecord) => void = () => {};
 
   /** Active card id (the only card whose menu is currently open). */
   let openCardId: number | null = null;
@@ -69,6 +77,21 @@
   function handleMenuToggle(event: CustomEvent<{ id: number; open: boolean }>) {
     const { id, open } = event.detail;
     openCardId = open ? id : null;
+  }
+
+  function handlePreviewRequest(
+    event: CustomEvent<{ id: number }>,
+  ): void {
+    const entryId = event.detail.id;
+    const entry = entries.find((candidate) => candidate.id === entryId);
+    if (!entry) {
+      // The entry is no longer in the visible scope (it may have
+      // been deleted, filtered out, or moved to a different
+      // collection); the rail silently drops the request so the
+      // preview never opens against a stale id.
+      return;
+    }
+    onRequestPreview(entry);
   }
 
   function closeAllMenus(): void {
@@ -175,6 +198,7 @@
         {onRequestDelete}
         {onAfterMutation}
         on:menu-toggle={(e) => handleMenuToggle(e)}
+        on:preview-request={(e) => handlePreviewRequest(e)}
       />
     {/each}
   </div>

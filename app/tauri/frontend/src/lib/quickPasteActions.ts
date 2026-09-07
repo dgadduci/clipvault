@@ -20,8 +20,6 @@ import type { EntryRecord, SearchHit } from "../types.ts";
 import {
   hasRenderableRichText,
   isImageEntry,
-  pasteMenuActionsFor,
-  type PasteMenuAction,
 } from "./clipboardAsset.ts";
 
 /**
@@ -153,24 +151,118 @@ export function quickPasteConfirmAction(
 }
 
 /**
- * Single direct menu action rendered for an entry.
+ * Single copy-only menu action rendered for an entry.
  *
  * The shape is intentionally self-describing: the caller renders each
  * item from its own fields (label, testid, aria-label, tooltip,
  * disabled, mode). The backend mode is the same value the menu
- * forwards to `pasteEntryCommand` so the existing direct paste flow
- * stays a thin wrapper around the legacy paste service.
+ * forwards to `copyEntryCommand` so the existing copy-only flow
+ * stays a thin wrapper around `clipvault_copy_entry` and never
+ * invokes a synthetic paste controller.
+ *
+ * `kind` discriminates the four documented actions:
+ * - `"copy"` — the canonical copy action (image rows forward
+ *   `mode: null`; plain text forwards `mode: "plain"`).
+ * - `"copy-rich"` — rich-text copy; only enabled when the entry
+ *   exposes a sanitised rich preview.
+ * - `"copy-plain"` — plain-text copy; always enabled for a textual
+ *   entry.
+ * - `"preview"` — opens the in-window preview overlay. The action
+ *   never writes to the clipboard and never mutates history.
  */
-export type QuickPasteMenuAction = PasteMenuAction;
+export type QuickPasteMenuAction =
+  | {
+      kind: "copy";
+      label: string;
+      testId: string;
+      mode: "plain" | null;
+      ariaLabel: string;
+      tooltip: string;
+      disabled: boolean;
+    }
+  | {
+      kind: "copy-rich";
+      label: string;
+      testId: string;
+      mode: "rich";
+      ariaLabel: string;
+      tooltip: string;
+      disabled: boolean;
+    }
+  | {
+      kind: "copy-plain";
+      label: string;
+      testId: string;
+      mode: "plain";
+      ariaLabel: string;
+      tooltip: string;
+      disabled: boolean;
+    }
+  | {
+      kind: "preview";
+      label: string;
+      testId: string;
+      ariaLabel: string;
+      tooltip: string;
+      disabled: boolean;
+    };
 
 /**
- * Direct menu actions the Quick Paste row exposes for an entry.
+ * Visible label the Quick Paste menu renders for the canonical
+ * copy action. The string is shared with the `Copiar` action the
+ * image menu exposes so the two surfaces read identically and never
+ * suggest a synthetic paste.
+ */
+export const QUICK_PASTE_COPY_LABEL = "Copiar";
+
+/**
+ * Visible label the Quick Paste menu renders for the rich-text
+ * copy. The wording mirrors the spec the
+ * `quick-paste-preview-ui/spec.md` change pins so the user never
+ * has to relearn the action.
+ */
+export const QUICK_PASTE_COPY_RICH_LABEL = "Copiar texto enriquecido";
+
+/**
+ * Visible label the Quick Paste menu renders for the plain-text
+ * copy. Mirrors the spec wording so the menu and the keyboard
+ * shortcut share the same vocabulary.
+ */
+export const QUICK_PASTE_COPY_PLAIN_LABEL = "Copiar texto plano";
+
+/**
+ * Visible label the Quick Paste menu renders for the preview
+ * action. The label is shared with the keyboard hint the design
+ * documents so the user sees the same wording everywhere.
+ */
+export const QUICK_PASTE_PREVIEW_LABEL = "Previsualizar";
+
+/**
+ * Copy-only menu actions the Quick Paste row exposes for an entry.
  *
- * Mirrors `pasteMenuActionsFor` from `clipboardAsset.ts` so the
- * "no text actions on an image row" invariant is enforced by the
- * shared helper. The wrapper is kept so the Quick Paste menu can
- * evolve independently (own copy, own test ids) without leaking the
- * rail's menu surface.
+ * The Quick Paste matrix documented in
+ * `openspec/changes/quick-paste-preview-ui/specs/quick-paste/spec.md`
+ * is intentionally tighter than the desktop rail's:
+ *
+ * - plain (or any non-rich) entry → `Copiar` + `Previsualizar`;
+ * - rich entry → `Copiar texto enriquecido` + `Copiar texto plano` +
+ *   `Previsualizar`;
+ * - image entry → `Copiar` + `Previsualizar`.
+ *
+ * The non-rich branch intentionally hides the rich-text copy: the
+ * row already exposes the rich-disabled affordance on the rail, and
+ * the Quick Paste palette is documented to be a compact tool the
+ * user can drive with one keystroke per intent. The menu NEVER
+ * surfaces a `Pegar` wording and NEVER routes through
+ * `pasteEntryCommand`; the copy path is the same `clipvault_copy_entry`
+ * flow `Enter` / `Shift+Enter` / row click consult, only with
+ * `hideAfterSuccess: false` so the window stays visible after the
+ * success branch and the user can run `Cmd/Ctrl+V` against the
+ * just-copied representation.
+ *
+ * `Previsualizar` is always appended; it never writes to the
+ * clipboard and is always enabled unless a copy / pin round-trip is
+ * already in flight for the same row.
  */
 export function quickPasteMenuActions(
   entry: Pick<
@@ -178,17 +270,63 @@ export function quickPasteMenuActions(
     "content_type" | "rich_text_hash" | "rich_html_ref" | "rich_rtf_ref" | "rich_preview_ref"
   >,
   title: string,
-  options: { pasteBusy: boolean },
+  options: { copyBusy: boolean },
 ): QuickPasteMenuAction[] {
-  const richPasteEnabled = hasRenderableRichText(entry);
-  return pasteMenuActionsFor(entry, title, {
-    richPasteEnabled,
-    pasteBusy: options.pasteBusy,
+  const actions: QuickPasteMenuAction[] = [];
+  const hasRich = hasRenderableRichText(entry);
+  if (isImageEntry(entry)) {
+    actions.push({
+      kind: "copy",
+      label: QUICK_PASTE_COPY_LABEL,
+      testId: "quick-paste-menu-copy",
+      mode: null,
+      ariaLabel: `Copiar ${title}`,
+      tooltip: "Copiar la imagen capturada.",
+      disabled: options.copyBusy,
+    });
+  } else if (hasRich) {
+    actions.push({
+      kind: "copy-rich",
+      label: QUICK_PASTE_COPY_RICH_LABEL,
+      testId: "quick-paste-menu-copy-rich",
+      mode: "rich",
+      ariaLabel: `${QUICK_PASTE_COPY_RICH_LABEL} de ${title}`,
+      tooltip: "Copiar la entrada conservando el formato.",
+      disabled: options.copyBusy,
+    });
+    actions.push({
+      kind: "copy-plain",
+      label: QUICK_PASTE_COPY_PLAIN_LABEL,
+      testId: "quick-paste-menu-copy-plain",
+      mode: "plain",
+      ariaLabel: `${QUICK_PASTE_COPY_PLAIN_LABEL} de ${title}`,
+      tooltip: "Copiar únicamente el texto plano.",
+      disabled: options.copyBusy,
+    });
+  } else {
+    actions.push({
+      kind: "copy",
+      label: QUICK_PASTE_COPY_LABEL,
+      testId: "quick-paste-menu-copy",
+      mode: "plain",
+      ariaLabel: `Copiar ${title}`,
+      tooltip: "Copiar la entrada como texto plano.",
+      disabled: options.copyBusy,
+    });
+  }
+  actions.push({
+    kind: "preview",
+    label: QUICK_PASTE_PREVIEW_LABEL,
+    testId: "quick-paste-menu-preview",
+    ariaLabel: `${QUICK_PASTE_PREVIEW_LABEL} ${title}`,
+    tooltip: "Mostrar la captura sin pegarla.",
+    disabled: options.copyBusy,
   });
+  return actions;
 }
 
 /**
- * Whether any direct menu action is available for the entry.
+ * Whether any copy-only menu action is available for the entry.
  *
  * Quick Paste hides the menu trigger when the entry has no action
  * at all so the layout stays compact for entries that don't need a
@@ -200,10 +338,10 @@ export function hasAnyQuickPasteAction(
     "content_type" | "rich_text_hash" | "rich_html_ref" | "rich_rtf_ref" | "rich_preview_ref"
   >,
 ): boolean {
-  // Today every Quick Paste entry exposes at least one direct menu
-  // action (image → Paste, text → plain text, rich → rich + plain).
-  // The helper exists so a future entry shape without a direct
-  // action can hide the menu trigger without a refactor.
+  // Today every Quick Paste entry exposes at least one copy-only
+  // menu action (image → Copiar, text → plain text, rich → rich +
+  // plain). The helper exists so a future entry shape without a
+  // copy action can hide the menu trigger without a refactor.
   void entry;
   return true;
 }

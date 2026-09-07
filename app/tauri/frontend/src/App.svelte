@@ -1,3 +1,7 @@
+<svelte:head>
+  {@html `<style data-clipvault-visual-tokens>:root{${VISUAL_TOKEN_ROOT_CSS}}</style>`}
+</svelte:head>
+
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import type {
@@ -67,6 +71,7 @@
   } from "./lib/searchShortcut";
   import { combineMemberships, hasActiveDragSession } from "./lib/dragAndDrop";
   import { installPointerDragController } from "./lib/pointerDragAndDrop";
+  import { visualTokenCss } from "./lib/visualTokens";
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
   import HistoryCardRail from "./HistoryCardRail.svelte";
   import OrganizationSidebar from "./OrganizationSidebar.svelte";
@@ -76,6 +81,21 @@
   import PrivacyModal from "./PrivacyModal.svelte";
   import RetentionModal from "./RetentionModal.svelte";
   import QuickPasteShortcutModal from "./QuickPasteShortcutModal.svelte";
+  import ClipboardPreview from "./ClipboardPreview.svelte";
+
+  /**
+   * Single source of truth for the visual tokens, computed at module
+   * load. The string is rendered through `<svelte:head>` below so the
+   * `:root { … }` block `App.svelte` and `QuickPaste.svelte` both
+   * inject is the exact same one — the desktop rail and the Quick
+   * Paste palette cannot drift apart without the regression suite
+   * catching it. `lib/visualTokens.ts` is the only place the values
+   * live; every other component reads them through `var(--cv-*, …)`.
+   *
+   * The const is consumed by the head injection below.
+   */
+  const VISUAL_TOKEN_ROOT_CSS = visualTokenCss();
+  void VISUAL_TOKEN_ROOT_CSS;
 
   type ModalId =
     | null
@@ -119,6 +139,30 @@
     | null = null;
   let openModal: ModalId = null;
   let modalReturnFocus: HTMLElement | null = null;
+  /**
+   * Single source of truth for the Desktop preview overlay the
+   * `desktop-card-preview` change introduces. The component holds
+   * the entry whose preview is open so the rail, the menu and the
+   * keyboard shortcut can all dispatch through one switch and the
+   * user can only ever see one preview at a time.
+   *
+   * `previewTrigger` records the card element that requested the
+   * preview so the overlay can return focus when it closes. A
+   * refresh / search / collection change that drops the trigger
+   * from the DOM leaves the overlay in a "no trigger" state and
+   * the close path simply detaches focus so screen readers do not
+   * announce a stale node.
+   */
+  let previewEntry: EntryRecord | null = null;
+  let previewTrigger: HTMLElement | null = null;
+  /**
+   * Token that bumps every time the visible scope changes
+   * (collection switch, search query, refresh, delete). The
+   * reactive block below compares the token against the preview's
+   * entry id; when the scope no longer contains the entry the
+   * preview closes silently without showing a stale entry.
+   */
+  let previewScopeToken = 0;
 
   let organization: OrganizationSnapshot | null = null;
   let selectedCollectionId: number | null = null;
@@ -185,6 +229,52 @@
   $: searchShortcutLabelText = searchShortcutLabel(shortcutPlatform);
   $: searchShortcutAccessibleText =
     searchShortcutAccessibleLabel(shortcutPlatform);
+
+  /**
+   * Open the shared preview overlay for the supplied entry. The
+   * helper is the single switch the menu `Previsualizar` action and
+   * the per-card `Cmd/Ctrl+Enter` keyboard shortcut route through;
+   * it MUST live on the parent (`App.svelte`) so only one Desktop
+   * preview can be open at a time and the entry the overlay shows
+   * is the one currently visible in the rail.
+   *
+   * `trigger` is the card element the user activated; the overlay
+   * returns focus to it on close.
+   */
+  function requestPreview(
+    entry: EntryRecord,
+    trigger: HTMLElement | null = null,
+  ): void {
+    if (!entry) return;
+    previewEntry = entry;
+    previewTrigger = trigger;
+  }
+
+  function closePreview(): void {
+    previewEntry = null;
+    previewTrigger = null;
+  }
+
+  /**
+   * Whenever the visible scope (rail entries, search results,
+   * collection filter, deleted / pinned mutations) changes we bump
+   * the scope token and drop the preview if the entry it was
+   * showing is no longer in scope. This keeps the overlay honest
+   * without having to wire a per-card visibility watcher.
+   */
+  function bumpPreviewScope(): void {
+    previewScopeToken += 1;
+    if (previewEntry === null) return;
+    const stillVisible =
+      visibleEntries.some((candidate) => candidate.id === previewEntry!.id) ||
+      entries.some((candidate) => candidate.id === previewEntry!.id);
+    if (!stillVisible) {
+      previewEntry = null;
+      previewTrigger = null;
+    }
+  }
+
+  $: visibleEntries, entries, bumpPreviewScope();
 
   async function refresh(): Promise<void> {
     loading = true;
@@ -1258,11 +1348,19 @@
             handleAssignCollections(entry, collectionIds)}
           onRemoveFromCollection={(entry, collectionId) =>
             handleRemoveFromCollection(entry, collectionId)}
+          onRequestPreview={(entry) => requestPreview(entry, document.activeElement instanceof HTMLElement ? document.activeElement : null)}
         />
       </div>
     </div>
   {/if}
 </main>
+
+<ClipboardPreview
+  entry={previewEntry}
+  trigger={previewTrigger}
+  testIdPrefix="history-card-preview"
+  onClose={closePreview}
+/>
 
 {#if pendingConfirmation}
   {@const confirmation = pendingConfirmation}
@@ -1395,38 +1493,15 @@
 {/if}
 
 <style>
-  :global(:root) {
-    --cv-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-    --cv-body: 0.9rem;
-    --cv-muted: 0.78rem;
-    --cv-title: 1.5rem;
-    --cv-title-lg: 1.75rem;
-    --cv-title-md: 1rem;
-    --cv-title-sm: 0.95rem;
-    --cv-control: 0.85rem;
-    --cv-tag: 0.65rem;
-    --cv-preview: 0.72rem;
-    --cv-radius-sm: 6px;
-    --cv-radius-md: 10px;
-    --cv-radius-lg: 12px;
-    --cv-bg-surface: #0e1116;
-    --cv-bg-elevated: #161b22;
-    --cv-bg-hover: rgba(255, 255, 255, 0.06);
-    --cv-border: #30363d;
-    --cv-border-strong: #475569;
-    --cv-fg: #f0f4f8;
-    --cv-fg-muted: #94a3b8;
-    --cv-fg-error: #f87171;
-    --cv-fg-ok: #4ade80;
-    --cv-accent: #2563eb;
-    --cv-accent-hover: #1d4ed8;
-    --cv-danger: #b91c1c;
-    --cv-danger-hover: #991b1b;
-    --cv-modal-overlay: rgba(8, 11, 16, 0.78);
-    --cv-focus-ring: rgba(37, 99, 235, 0.45);
-    --cv-card-size: 240px;
-    --cv-card-rail-height: calc(var(--cv-card-size, 240px) + 2.75rem);
-  }
+  /*
+   * The visual tokens (`--cv-font-family`, `--cv-body`, …) are
+   * injected through `<svelte:head>` at the top of this component
+   * using `visualTokenCss()` from `lib/visualTokens.ts`. Keeping the
+   * block out of this stylesheet means there is a single source of
+   * truth — every component reads the values through
+   * `var(--cv-*, fallback)` and the regression suite can pin the
+   * exact CSS string the helper emits.
+   */
 
   :global(html, body) {
     margin: 0;

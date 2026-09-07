@@ -216,64 +216,159 @@ test("quickPasteConfirmAction: shift+click on an image row is a no-op", () => {
   assert.deepEqual(action, { kind: "none" });
 });
 
-test("quickPasteMenuActions: image entry yields exactly one Paste action", () => {
+test("quickPasteMenuActions: image entry yields exactly one Copiar action plus Previsualizar", () => {
   const entry = imageEntry();
   const actions = quickPasteMenuActions(entry, "Captured image", {
-    pasteBusy: false,
+    copyBusy: false,
   });
-  assert.equal(actions.length, 1);
-  assert.equal(actions[0].kind, "image-paste");
+  assert.equal(actions.length, 2);
+  assert.equal(actions[0].kind, "copy");
   assert.equal(actions[0].mode, null);
-  // An image entry MUST NOT expose text paste actions.
+  assert.equal(actions[1].kind, "preview");
+  // An image entry MUST NOT expose text copy actions.
   assert.equal(
-    actions.some((action) => action.kind === "text-rich-paste"),
+    actions.some((action) => action.kind === "copy-rich"),
     false,
-    "image entries must not surface a rich-text paste action",
+    "image entries must not surface a rich-text copy action",
   );
   assert.equal(
-    actions.some((action) => action.kind === "text-plain-paste"),
+    actions.some((action) => action.kind === "copy-plain"),
     false,
-    "image entries must not surface a plain-text paste action",
+    "image entries must not surface a plain-text copy action",
   );
 });
 
-test("quickPasteMenuActions: rich entry yields rich + plain actions, rich enabled", () => {
+test("quickPasteMenuActions: rich entry yields rich + plain actions plus Previsualizar", () => {
   const actions = quickPasteMenuActions(richEntry(), "Captured rich", {
-    pasteBusy: false,
+    copyBusy: false,
   });
-  assert.equal(actions.length, 2);
-  assert.equal(actions[0].kind, "text-rich-paste");
+  assert.equal(actions.length, 3);
+  assert.equal(actions[0].kind, "copy-rich");
   assert.equal(actions[0].disabled, false);
   assert.equal(actions[0].mode, "rich");
-  assert.equal(actions[1].kind, "text-plain-paste");
+  assert.equal(actions[1].kind, "copy-plain");
   assert.equal(actions[1].disabled, false);
+  assert.equal(actions[2].kind, "preview");
 });
 
-test("quickPasteMenuActions: plain entry yields rich disabled + plain enabled", () => {
+test("quickPasteMenuActions: plain entry yields one Copiar action plus Previsualizar", () => {
   const actions = quickPasteMenuActions(textEntry(), "Captured plain", {
-    pasteBusy: false,
+    copyBusy: false,
   });
   assert.equal(actions.length, 2);
-  assert.equal(actions[0].kind, "text-rich-paste");
+  assert.equal(actions[0].kind, "copy");
+  assert.equal(actions[0].mode, "plain");
+  assert.equal(actions[0].disabled, false);
+  assert.equal(actions[1].kind, "preview");
+  // The compact Quick Paste palette MUST NOT expose the disabled
+  // rich-text variant for a non-rich entry: the design collapses the
+  // rail's two-action shape into a single `Copiar` action so the row
+  // stays the one-keystroke surface the spec documents.
   assert.equal(
-    actions[0].disabled,
-    true,
-    "plain text rows must surface the rich action as disabled",
+    actions.some((action) => action.kind === "copy-rich"),
+    false,
+    "non-rich entries must not surface a rich-text copy action",
   );
-  assert.equal(actions[1].kind, "text-plain-paste");
-  assert.equal(actions[1].disabled, false);
 });
 
-test("quickPasteMenuActions: pasteBusy disables every action", () => {
+test("quickPasteMenuActions: copyBusy disables every action", () => {
   const actions = quickPasteMenuActions(richEntry(), "Captured rich", {
-    pasteBusy: true,
+    copyBusy: true,
   });
   for (const action of actions) {
     assert.equal(
       action.disabled,
       true,
-      `pasteBusy must disable every menu action; ${action.kind} stayed enabled`,
+      `copyBusy must disable every menu action; ${action.kind} stayed enabled`,
     );
+  }
+});
+
+test("quickPasteMenuActions: Previsualizar action is always enabled for every entry shape", () => {
+  for (const entry of [textEntry(), richEntry(), imageEntry()]) {
+    const actions = quickPasteMenuActions(entry, "Title", { copyBusy: false });
+    const preview = actions.find((action) => action.kind === "preview");
+    assert.ok(preview, `entry shape ${entry.content_type} must expose Previsualizar`);
+    assert.equal(preview?.disabled, false);
+  }
+});
+
+test("quickPasteMenuActions: image copy action carries mode null and Copiar label", () => {
+  const actions = quickPasteMenuActions(imageEntry(), "Captured image", {
+    copyBusy: false,
+  });
+  const copyAction = actions.find((action) => action.kind === "copy");
+  assert.ok(copyAction);
+  assert.equal(copyAction?.label, "Copiar");
+  assert.equal(
+    copyAction && "mode" in copyAction ? copyAction.mode : "unexpected",
+    null,
+  );
+  assert.equal(copyAction?.testId, "quick-paste-menu-copy");
+});
+
+test("quickPasteMenuActions: rich copy action carries mode rich and Copiar texto enriquecido label", () => {
+  const actions = quickPasteMenuActions(richEntry(), "Captured rich", {
+    copyBusy: false,
+  });
+  const richAction = actions.find((action) => action.kind === "copy-rich");
+  assert.ok(richAction);
+  assert.equal(
+    richAction && "mode" in richAction ? richAction.mode : "unexpected",
+    "rich",
+  );
+  assert.equal(richAction?.label, "Copiar texto enriquecido");
+  assert.equal(richAction?.testId, "quick-paste-menu-copy-rich");
+});
+
+test("quickPasteMenuActions: plain copy action carries mode plain", () => {
+  const actions = quickPasteMenuActions(textEntry(), "Captured plain", {
+    copyBusy: false,
+  });
+  const copyAction = actions.find((action) => action.kind === "copy");
+  assert.ok(copyAction);
+  assert.equal(copyAction?.label, "Copiar");
+  assert.equal(
+    copyAction && "mode" in copyAction ? copyAction.mode : "unexpected",
+    "plain",
+  );
+  assert.equal(copyAction?.testId, "quick-paste-menu-copy");
+});
+
+test("quickPasteMenuActions: plain copy-rich variant exposes Copiar texto enriquecido label", () => {
+  const actions = quickPasteMenuActions(richEntry(), "Captured rich", {
+    copyBusy: false,
+  });
+  const plainAction = actions.find((action) => action.kind === "copy-plain");
+  assert.ok(plainAction);
+  assert.equal(plainAction?.label, "Copiar texto plano");
+  assert.equal(plainAction?.testId, "quick-paste-menu-copy-plain");
+});
+
+test("quickPasteMenuActions: never surfaces a Pegar wording", () => {
+  // The menu MUST NEVER advertise a "Pegar" wording or route through
+  // a pasteEntryCommand call. The copy-only surface is the documented
+  // contract; a regression that re-introduces the legacy wording is
+  // caught here before it ships.
+  for (const entry of [textEntry(), richEntry(), imageEntry()]) {
+    const actions = quickPasteMenuActions(entry, "Title", { copyBusy: false });
+    for (const action of actions) {
+      assert.equal(
+        action.label.includes("Pegar"),
+        false,
+        `action ${action.kind} must not advertise Pegar wording, got "${action.label}"`,
+      );
+    }
+  }
+});
+
+test("quickPasteMenuActions: preview action has no mode and a stable test id", () => {
+  for (const entry of [textEntry(), richEntry(), imageEntry()]) {
+    const actions = quickPasteMenuActions(entry, "Title", { copyBusy: false });
+    const preview = actions.find((action) => action.kind === "preview");
+    assert.ok(preview, `entry shape ${entry.content_type} must expose Previsualizar`);
+    assert.equal(preview?.testId, "quick-paste-menu-preview");
+    assert.equal("mode" in (preview ?? {}), false);
   }
 });
 

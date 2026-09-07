@@ -178,9 +178,17 @@ export async function performPasteFlow(args: {
  *  about. Centralised so the modal can react without duplicating the
  *  decision tree. The arms mirror [`PasteFlowOutcome`] minus the
  *  `pasted` branch: a copy flow can never report `pasted` because
- *  the synthetic paste was not triggered. */
+ *  the synthetic paste was not triggered.
+ *
+ *  `windowStaysHidden` is the union of the keyboard contract (`true`
+ *  after a successful copy, so the palette hides and the user
+ *  decides when to run `Cmd/Ctrl+V`) and the click contract the
+ *  `quick-paste-preview-ui` spec introduces (`false` so the user
+ *  can dispatch the paste from the previously focused
+ *  application). The flag is therefore `boolean` on the `copied`
+ *  arm and `false` (always re-show) on the `failed` arm. */
 export type CopyFlowOutcome =
-  | { kind: "copied"; windowStaysHidden: true }
+  | { kind: "copied"; windowStaysHidden: boolean }
   | {
       kind: "failed";
       windowStaysHidden: false;
@@ -188,8 +196,9 @@ export type CopyFlowOutcome =
     };
 
 /**
- * Hide the quick-paste window, invoke the copy-only command, and
- * hide the window if the copy succeeded.
+ * Invoke the copy-only command while keeping Quick Paste visible
+ * (`hideAfterSuccess: false`) or hiding the window after a successful
+ * write (`hideAfterSuccess: true`).
  *
  * The function NEVER calls a synthetic paste controller: it routes
  * through `clipvault_copy_entry` which only writes to the clipboard
@@ -197,9 +206,27 @@ export type CopyFlowOutcome =
  * application regains focus the moment the window hides, ready for
  * the user to decide when to run `Cmd/Ctrl+V`.
  *
- * On a `failed` / `capability_unavailable` outcome the window is
- * re-shown and the caller can render the typed guidance the
- * backend returned. The history row is never touched.
+ * Two explicit branches replace the previous collapse onto the
+ * keyboard path so the click and the menu can opt into the
+ * "window stays visible" contract without flickering through a
+ * hide/show round-trip:
+ *
+ * - `hideAfterSuccess: true` (default — keyboard path): the
+ *   function hides the window before invoking the copy command and
+ *   keeps it hidden on success; on `failed` /
+ *   `capability_unavailable` the window is re-shown so the user
+ *   can read the typed guidance.
+ * - `hideAfterSuccess: false` (click and menu path): the function
+ *   NEVER calls `bridge.hide()` and NEVER calls `bridge.show()`. The
+ *   copy happens while Quick Paste stays visible; the success
+ *   outcome returns `windowStaysHidden: false`. The error branches
+ *   also leave the surface visible (nothing was hidden, so there
+ *   is nothing to restore) and the caller can render the typed
+ *   guidance without flipping the window state.
+ *
+ * On every outcome the history row is never touched — the copy
+ * path arms the suppression token so the next watcher tick does
+ * not create a new card as a side effect.
  */
 export async function performCopyFlow(args: {
   bridge: QuickPasteTauriBridge;
@@ -207,7 +234,43 @@ export async function performCopyFlow(args: {
   isCapabilityUnavailable?: (response: CopyResponse) => boolean;
   isFailed?: (response: CopyResponse) => boolean;
   onReShow?: () => void;
+  hideAfterSuccess?: boolean;
 }): Promise<CopyFlowOutcome> {
+  const hideAfterSuccess = args.hideAfterSuccess ?? true;
+  if (!hideAfterSuccess) {
+    // Click / menu path. Copy while the window stays visible:
+    // there is no `hide` to pair with a re-`show`, so the surface
+    // never reflows and the user keeps their selection and scroll
+    // position. The error branches return the typed outcome and
+    // leave the surface untouched; the caller renders the
+    // guidance without ever touching the bridge.
+    let response: CopyResponse;
+    try {
+      response = await args.copyFn();
+    } catch (error) {
+      return {
+        kind: "failed",
+        windowStaysHidden: false,
+        response: {
+          error: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+    const failed = args.isFailed?.(response) ?? response.kind === "failed";
+    const unavailable =
+      args.isCapabilityUnavailable?.(response) ??
+      response.kind === "capability_unavailable";
+    if (failed || unavailable) {
+      return { kind: "failed", windowStaysHidden: false, response };
+    }
+    return { kind: "copied", windowStaysHidden: false };
+  }
+
+  // Keyboard path: hide before invoking the copy command so the
+  // previously focused host application can receive the manual
+  // paste, and keep the surface hidden on success. The error
+  // branches re-show the window through the documented guidance
+  // contract.
   await args.bridge.hide();
   let response: CopyResponse;
   try {

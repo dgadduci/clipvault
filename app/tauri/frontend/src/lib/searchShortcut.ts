@@ -46,6 +46,43 @@ export function searchShortcutAccessibleLabel(
     : "Buscar (Control F)";
 }
 
+/** Letter the platform shortcut triggers (matches the matcher
+ *  `matchesSearchShortcut`). Exposed for tests so the visible hint
+ *  and the matcher cannot drift apart. */
+export const SEARCH_SHORTCUT_LETTER = "f";
+
+/**
+ * `Quick Paste` reuses the same `Cmd/Ctrl` modifier table as the
+ * desktop search but routes the trigger to a different key so the
+ * `K` focus surface does not collide with the `F` global search
+ * shortcut the main window installs. The helpers stay next to
+ * `searchShortcutLabel` so a future change to the modifier table
+ * surfaces in both surfaces at the same time.
+ */
+
+/** Letter the Quick Paste search shortcut triggers. */
+export const QUICK_PASTE_SEARCH_LETTER = "k";
+
+/** Visible label the Quick Paste search hint renders next to the
+ *  input. Mirrors the desktop rail (`⌘F` on macOS, `Ctrl F` on
+ *  other platforms) but uses the `K` key the Quick Paste window
+ *  installs so the user never sees the two surfaces advertise
+ *  different shortcuts. */
+export function quickPasteSearchShortcutLabel(
+  platform: SearchShortcutPlatform,
+): string {
+  return platform === "macos" ? "⌘K" : "Ctrl K";
+}
+
+/** Long-form accessible label matching the visible hint. */
+export function quickPasteSearchShortcutAccessibleLabel(
+  platform: SearchShortcutPlatform,
+): string {
+  return platform === "macos"
+    ? "Buscar pegado rápido (Comando K)"
+    : "Buscar pegado rápido (Control K)";
+}
+
 /**
  * Whether a keyboard event matches the platform-specific search
  * shortcut. The check uses the `key` field (defaults to "F" or "f")

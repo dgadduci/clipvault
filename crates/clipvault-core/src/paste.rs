@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use clipvault_db::{EntryRecord, EntryRepository, EntryRepositoryError};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use clipvault_platform::{
     backend_unavailable_guidance, linux_unknown_session_guidance,
@@ -30,6 +30,10 @@ use clipvault_platform::{
 
 use crate::bootstrap::AppContext;
 use crate::clipboard_assets::{decode_png, ClipboardAssetStore};
+use crate::image_capture_diagnostic::{
+    log_image_paste_diagnostic, ColorProfileKind, ImageCaptureDiagnostic, ImageSource,
+    RepresentationSource,
+};
 use crate::paste_suppression::{image_fingerprint, PasteSuppression, SuppressionFingerprint};
 use crate::platform::ClipboardBackend;
 use crate::rich_text::RichTextAssetStore;
@@ -215,6 +219,64 @@ pub struct PasteService {
     /// without wiring a registry; the production bootstrap always
     /// attaches one through [`Self::with_paste_suppression`].
     paste_suppression: Option<PasteSuppression>,
+}
+
+/// Emit a metadata-only diagnostic snapshot for an image-copy call.
+/// The helper is intentionally narrow: the only fields it logs are
+/// the integer `entry_id`, the integer `payload_width` and
+/// `payload_height`, and the **relative** `asset_ref` (e.g.
+/// `clipboard/<sha>.png`). It never logs the bytes, the content
+/// hash, the source-app identifier, snippets, the data directory
+/// or any absolute path.
+///
+/// The helper is gated on the `CLIPVAULT_DEBUG_IMAGE_COPY`
+/// environment variable so the diagnostic stays inert in production
+/// and only fires when an operator explicitly opts in. Setting the
+/// variable to anything other than the literal `1` keeps the
+/// diagnostic silent so a stray `true` / `on` cannot leak into
+/// logs.
+fn log_image_copy_metadata(record: &EntryRecord) {
+    let enabled = match std::env::var_os("CLIPVAULT_DEBUG_IMAGE_COPY") {
+        Some(value) => value == "1",
+        None => false,
+    };
+    if !enabled {
+        return;
+    }
+    // The four fields the diagnostic is allowed to emit. We do NOT
+    // include the bytes, the content hash, the data directory or
+    // the source-app identifier — the asset_ref already pins the
+    // exact file the backend resolved.
+    debug!(
+        entry_id = record.id,
+        payload_width = record.payload_width.unwrap_or(0),
+        payload_height = record.payload_height.unwrap_or(0),
+        asset_ref = record.asset_ref.as_deref().unwrap_or(""),
+        "image copy metadata",
+    );
+}
+
+/// Detect whether a persisted PNG carries one of the canonical
+/// ancillary chunks the legacy encoder never emits. The check is a
+/// metadata-only byte scan: it never inspects pixel values and never
+/// copies the payload into a string. The presence of `pHYs`,
+/// `iCCP` or `sRGB` is the documented signal that the asset came
+/// from the fidelity-preserving `public.png` path; the absence of
+/// those chunks means the asset is the legacy 8-bit RGBA PNG the
+/// canonical encoder produced.
+fn bytes_windows_with(bytes: &[u8]) -> bool {
+    // The PNG format is well-defined: every chunk is a 4-byte
+    // length, a 4-byte chunk type, the data and a 4-byte CRC. The
+    // legacy encoder writes only `IHDR`, `IDAT` and `IEND`; the
+    // `png` crate never adds a `pHYs` chunk by default. Scanning for
+    // a chunk type identifier is therefore enough to distinguish the
+    // two paths without touching the chunk data.
+    bytes.windows(4).any(|window| {
+        matches!(
+            window,
+            b"pHYs" | b"iCCP" | b"sRGB" | b"gAMA" | b"cHRM" | b"tEXt" | b"iTXt" | b"zTXt"
+        )
+    })
 }
 
 impl PasteService {
@@ -558,6 +620,7 @@ impl PasteService {
                 });
             }
         };
+        log_image_copy_metadata(record);
         let image = match decode_png(&bytes) {
             Ok(image) => image,
             Err(error) => {
@@ -570,11 +633,67 @@ impl PasteService {
             }
         };
 
+        // Metadata-only paste diagnostic. The helper scans the
+        // persisted bytes for the canonical `pHYs` chunk type the
+        // legacy encoder never emits; the presence of that chunk
+        // (or any `iCCP` / `sRGB` chunk) is the documented signal
+        // that the asset came from the fidelity-preserving
+        // `public.png` path rather than the legacy
+        // `arboard::get_image` bitmap path. The scan is metadata-only
+        // (no payload exposure) and is gated on
+        // `CLIPVAULT_DEBUG_IMAGE_PASTE` so production logs stay
+        // silent.
+        let original_png_preserved = bytes_windows_with(&bytes);
+        log_image_paste_diagnostic(ImageCaptureDiagnostic::from_normalized(
+            if original_png_preserved {
+                ImageSource::NativePng
+            } else {
+                ImageSource::ArboardFallback
+            },
+            RepresentationSource::PngChunks,
+            "none",
+            false,
+            false,
+            None,
+            None,
+            ColorProfileKind::None,
+            original_png_preserved,
+            image.width(),
+            image.height(),
+        ));
+
         // Arm the suppression token with the watcher's image
         // fingerprint so the next observation of the same bitmap is
         // masked. The token lives in the registry for the default
         // TTL only.
         self.arm_image_suppression(&image);
+
+        // Prefer the encoded PNG path when the platform advertises
+        // it. This is the copy path used by Quick Paste: the preview
+        // reads these exact bytes, so publishing them directly avoids
+        // a second AppKit bitmap conversion that could crop, resize or
+        // alter the row stride of the image. Decoding above remains
+        // intentional because it validates the asset and supplies the
+        // canonical fingerprint for paste suppression.
+        if self.clipboard.supports_image_png_write() {
+            if let Err(error) = self.clipboard.write_image_png(&bytes) {
+                self.clear_suppression();
+                warn!(kind = error.kind_str(), "paste: encoded image write failed");
+                if let ClipboardBackendError::Unavailable { .. } = error {
+                    return Some(PasteOutcome::CapabilityUnavailable {
+                        capability: CLIPBOARD_WRITE_IMAGE_CAPABILITY,
+                        guidance: classify_image_capability(context),
+                    });
+                }
+                return Some(PasteOutcome::Failed {
+                    kind: "clipboard_image",
+                    message: error.to_string(),
+                    guidance: classify_clipboard_failure(context, Capability::ClipboardWriteImage),
+                });
+            }
+            return None;
+        }
+
         if let Err(error) = self.clipboard.write_image(&image) {
             self.clear_suppression();
             warn!(kind = error.kind_str(), "paste: image write failed");

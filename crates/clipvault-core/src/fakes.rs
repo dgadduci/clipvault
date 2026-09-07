@@ -49,6 +49,9 @@ pub struct FakeClipboardBackend {
     image_write_error: Mutex<Option<ClipboardBackendError>>,
     supports_image_read: Mutex<bool>,
     supports_image_write: Mutex<bool>,
+    image_png_writes: Mutex<Vec<Vec<u8>>>,
+    image_png_write_error: Mutex<Option<ClipboardBackendError>>,
+    supports_image_png_write: Mutex<bool>,
     rich_reads: Mutex<Vec<Result<Option<RichTextPayload>, ClipboardBackendError>>>,
     rich_writes: Mutex<Vec<RichTextPayload>>,
     rich_write_error: Mutex<Option<ClipboardBackendError>>,
@@ -102,6 +105,12 @@ impl FakeClipboardBackend {
         *self.supports_image_write.lock() = write;
     }
 
+    /// Model a backend that can publish the original encoded PNG
+    /// bytes without decoding and re-encoding the image.
+    pub fn set_image_png_support(&self, write: bool) {
+        *self.supports_image_png_write.lock() = write;
+    }
+
     /// Model a session that supports only some rich-text directions.
     pub fn set_rich_support(&self, read: bool, write: bool) {
         *self.supports_rich_read.lock() = read;
@@ -134,6 +143,11 @@ impl FakeClipboardBackend {
     /// Snapshot of every bitmap received by `write_image`.
     pub fn written_images(&self) -> Vec<ClipboardImage> {
         self.image_writes.lock().clone()
+    }
+
+    /// Snapshot of every encoded PNG received by the fake backend.
+    pub fn written_image_pngs(&self) -> Vec<Vec<u8>> {
+        self.image_png_writes.lock().clone()
     }
 
     /// Snapshot of every rich-text payload received by `write_rich`.
@@ -199,6 +213,19 @@ impl ClipboardBackend for FakeClipboardBackend {
         Ok(())
     }
 
+    fn write_image_png(&self, png: &[u8]) -> Result<(), ClipboardBackendError> {
+        if !*self.supports_image_png_write.lock() {
+            return Err(ClipboardBackendError::Unavailable {
+                capability: clipvault_platform::Capability::ClipboardWriteImage,
+            });
+        }
+        if let Some(error) = self.image_png_write_error.lock().take() {
+            return Err(error);
+        }
+        self.image_png_writes.lock().push(png.to_vec());
+        Ok(())
+    }
+
     fn supports_rich_read(&self) -> bool {
         *self.supports_rich_read.lock()
     }
@@ -213,6 +240,10 @@ impl ClipboardBackend for FakeClipboardBackend {
 
     fn supports_image_write(&self) -> bool {
         *self.supports_image_write.lock()
+    }
+
+    fn supports_image_png_write(&self) -> bool {
+        *self.supports_image_png_write.lock()
     }
 
     fn name(&self) -> &'static str {

@@ -38,6 +38,7 @@
     defaultCardTitle,
     validateTitle,
   } from "./lib/contentType";
+  import type { PreviewShortcutPlatform } from "./lib/clipboardPreview";
   import {
     APP_FALLBACK_ICON_SVG,
     CONTENT_TYPE_ICON_SPRITE,
@@ -112,6 +113,7 @@
 
   const dispatch = createEventDispatcher<{
     "menu-toggle": { id: number; open: boolean };
+    "preview-request": { id: number };
   }>();
 
   /** Local override of the persisted title so edits feel instant. */
@@ -464,6 +466,19 @@
     dispatch("menu-toggle", { id: entry.id, open: false });
   }
 
+  /**
+   * Forward a preview request to the parent (`App.svelte` /
+   * `HistoryCardRail.svelte`) so the Desktop opens exactly one
+   * shared overlay. The helper closes the card menu first so the
+   * user sees the menu dismiss exactly once; the event is the
+   * single switch so pin / paste / delete / drag-and-drop /
+   * title editing cannot reach the preview branch.
+   */
+  function requestPreview(): void {
+    closeMenuAfterAction();
+    dispatch("preview-request", { id: entry.id });
+  }
+
   async function runPaste(mode: "plain" | "rich" | null): Promise<void> {
     if (pasteBusy) return;
     pasteBusy = true;
@@ -772,6 +787,59 @@
     }
   }
 
+  /**
+   * Keyboard affordance for the focused card. The matcher accepts
+   * the platform-aware preview shortcut (`Cmd+Enter` on macOS,
+   * `Ctrl+Enter` elsewhere) and forwards a `preview-request` to
+   * the parent so the rail opens the shared overlay. Inputs,
+   * textareas, the title editor, the menu and other interactive
+   * controls must intercept the event before it reaches the card
+   * (the `drag-and-drop` handler and the menu / pin buttons do).
+   *
+   * The matcher is imported lazily through `onMount` so the
+   * card remains testable in a non-Tauri context. The function
+   * stays a no-op when the platform is unresolved; the parent
+   * owns the dispatcher.
+   */
+  let previewMatcher:
+    | ((event: KeyboardEvent, platform: PreviewShortcutPlatform) => boolean)
+    | null = null;
+  let previewPlatform: PreviewShortcutPlatform = "other";
+
+  onMount(() => {
+    void import("./lib/searchShortcut.ts")
+      .then(({ searchShortcutPlatform: derivePlatform }) => {
+        previewPlatform = derivePlatform(null);
+      })
+      .catch(() => {
+        previewPlatform = "other";
+      });
+    void import("./lib/clipboardPreview.ts").then(({ matchesPreviewShortcut }) => {
+      previewMatcher = matchesPreviewShortcut;
+    });
+  });
+
+  function isInteractiveTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false;
+    const tag = target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+    if (target.isContentEditable) return true;
+    if (tag === "BUTTON") return true;
+    if (target.closest("[role='menu']")) return true;
+    if (target.closest("[role='menuitem']")) return true;
+    if (target.closest(".menu")) return true;
+    if (target.closest(".title-input")) return true;
+    return false;
+  }
+
+  function onCardKeydown(event: KeyboardEvent): void {
+    if (!previewMatcher) return;
+    if (!previewMatcher(event, previewPlatform)) return;
+    if (isInteractiveTarget(event.target)) return;
+    event.preventDefault();
+    requestPreview();
+  }
+
   // Dragging is delegated to the singleton pointer controller installed by
   // App.svelte. Keeping the card itself non-draggable prevents the unreliable
   // HTML5 WebKit lifecycle from competing with pointer hit-testing.
@@ -788,10 +856,13 @@
 
 <article
   class="card"
+  class:menu-open={menuOpen}
   data-testid="history-card"
   data-entry-id={entry.id}
   aria-label={displayTitle}
   draggable="false"
+  tabindex={menuOpen || editingTitle ? -1 : 0}
+  on:keydown={(event) => onCardKeydown(event)}
 >
   <header class="card-header">
     <span class="type" data-testid="history-card-type">
@@ -1267,25 +1338,34 @@
         >
           Editar título
         </button>
-        <button
-          type="button"
-          role="menuitem"
-          class="menu-item"
-          data-testid="history-card-restore-title"
-          on:click={() => void restoreDefaultTitle()}
-          disabled={titleBusy || (entry.title ?? "") === ""}
-        >
-          Restaurar título
-        </button>
-        <button
-          type="button"
-          role="menuitem"
-          class="menu-item"
-          data-testid="history-card-add-tags"
-          on:click={openTagSelector}
-        >
-          {assignedTags.length > 0 ? "Editar tags" : "Agregar tag"}
-        </button>
+<button
+        type="button"
+        role="menuitem"
+        class="menu-item"
+        data-testid="history-card-restore-title"
+        on:click={() => void restoreDefaultTitle()}
+        disabled={titleBusy || (entry.title ?? "") === ""}
+      >
+        Restaurar título
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        class="menu-item preview-action"
+        data-testid="history-card-preview"
+        on:click={requestPreview}
+      >
+        Previsualizar
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        class="menu-item"
+        data-testid="history-card-add-tags"
+        on:click={openTagSelector}
+      >
+        {assignedTags.length > 0 ? "Editar tags" : "Agregar tag"}
+      </button>
         <button
           type="button"
           role="menuitem"
@@ -1417,7 +1497,7 @@
 
   .title {
     margin: 0;
-    font-size: 0.85rem;
+    font-size: var(--cv-control, 0.85rem);
     line-height: 1.2;
     font-weight: 600;
     text-align: center;
@@ -1444,7 +1524,7 @@
     flex: 1 1 auto;
     min-width: 0;
     font: inherit;
-    font-size: 0.85rem;
+    font-size: var(--cv-control, 0.85rem);
     background: #0e1116;
     color: #f0f4f8;
     border: 1px solid #2563eb;
@@ -1480,7 +1560,7 @@
     flex: 1 1 100%;
     margin-top: 0.25rem;
     color: #f87171;
-    font-size: 0.7rem;
+    font-size: var(--cv-meta, 0.7rem);
     font-weight: 500;
   }
 
@@ -1527,7 +1607,7 @@
     background: rgba(148, 163, 184, 0.08);
     border: 1px solid rgba(148, 163, 184, 0.15);
     color: #cbd5f5;
-    font-size: 0.7rem;
+    font-size: var(--cv-meta, 0.7rem);
     font-variant-numeric: tabular-nums;
   }
   .metadata-age,
@@ -1548,7 +1628,7 @@
   .preview {
     margin: 0;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.72rem;
+    font-size: var(--cv-preview, 0.72rem);
     line-height: 1.35;
     color: #cbd5f5;
     background: rgba(0, 0, 0, 0.18);
@@ -1591,13 +1671,13 @@
     background: rgba(248, 113, 113, 0.15);
     border: 1px solid rgba(248, 113, 113, 0.45);
     color: #fecaca;
-    font-size: 0.7rem;
+    font-size: var(--cv-meta, 0.7rem);
     line-height: 1.25;
     z-index: 5;
   }
 
   .paste-error strong {
-    font-size: 0.75rem;
+    font-size: var(--cv-body, 0.9rem);
     font-weight: 600;
     color: #fee2e2;
   }
@@ -1609,7 +1689,7 @@
     background: transparent;
     color: inherit;
     border: 0;
-    font-size: 0.9rem;
+    font-size: var(--cv-body, 0.9rem);
     line-height: 1;
     cursor: pointer;
     padding: 0.1rem 0.3rem;
@@ -1644,7 +1724,7 @@
   }
 
   .thumbnail-fallback-text {
-    font-size: 0.7rem;
+    font-size: var(--cv-meta, 0.7rem);
     line-height: 1.2;
   }
 
@@ -1675,7 +1755,7 @@
   }
 
   .thumbnail-loading-text {
-    font-size: 0.7rem;
+    font-size: var(--cv-meta, 0.7rem);
     line-height: 1.2;
     font-variant-numeric: tabular-nums;
   }
@@ -1696,7 +1776,7 @@
     border-radius: 6px;
     cursor: pointer;
     padding: 0.25rem 0.55rem;
-    font-size: 0.85rem;
+    font-size: var(--cv-control, 0.85rem);
     line-height: 1;
     /*
      * The pin button hosts a 18x18 SVG so the chincheta stays
@@ -1772,7 +1852,7 @@
     padding: 0.4rem 0.6rem;
     border-radius: 6px;
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: var(--cv-control, 0.85rem);
   }
 
   .menu-item:hover:not(:disabled) {
@@ -1825,7 +1905,7 @@
     border: 1px solid #30363d;
     border-radius: 999px;
     padding: 0.05rem 0.45rem;
-    font-size: 0.65rem;
+    font-size: var(--cv-tag, 0.65rem);
     line-height: 1.1;
     max-width: 7rem;
     overflow: hidden;
@@ -1843,7 +1923,7 @@
     background: rgba(248, 113, 113, 0.15);
     border: 1px solid rgba(248, 113, 113, 0.45);
     color: #fee2e2;
-    font-size: 0.7rem;
+    font-size: var(--cv-meta, 0.7rem);
   }
 
   /*
@@ -1858,7 +1938,7 @@
     margin: 0;
     padding: 0.2rem 0.45rem;
     border-radius: 6px;
-    font-size: 0.7rem;
+    font-size: var(--cv-meta, 0.7rem);
     line-height: 1.2;
     border: 1px dashed #30363d;
   }

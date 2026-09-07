@@ -144,8 +144,11 @@ fn store_plain_entry(h: &Harness, plain: &str) -> i64 {
 }
 
 fn store_image_entry(h: &Harness, fill: u8) -> i64 {
-    let len = 4 * 4 * 4;
-    let image = ClipboardImage::new(vec![fill; len], 4, 4).expect("valid image");
+    let image = ClipboardImage::new(vec![fill; 4 * 4 * 4], 4, 4).expect("valid image");
+    store_image_payload(h, image)
+}
+
+fn store_image_payload(h: &Harness, image: ClipboardImage) -> i64 {
     let outcome = h.context.history().record_clipboard_payload(
         &h.context,
         ClipboardPayload::Image(image),
@@ -334,6 +337,45 @@ fn copy_entry_writes_image_without_invoking_paste_controller() {
         h.paste.invocations(),
         before_paste_calls,
         "image copy MUST NOT invoke PasteController::paste"
+    );
+}
+
+#[test]
+fn copy_entry_writes_the_exact_persisted_png_to_an_encoded_backend() {
+    let h = harness(false, false, true);
+    h.clipboard.set_image_png_support(true);
+
+    // Use a non-square image with coordinate-derived pixels so the
+    // test protects against both cropping and accidental
+    // re-encoding. The encoded bytes handed to the backend must be
+    // the same bytes that the preview bridge reads from the asset.
+    let width = 17_u32;
+    let height = 9_u32;
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.extend_from_slice(&[x as u8, y as u8, x.wrapping_add(y) as u8, 0xFF]);
+        }
+    }
+    let id = store_image_payload(
+        &h,
+        ClipboardImage::new(pixels, width, height).expect("valid image"),
+    );
+    let row = record(&h, id);
+    let asset_ref = row.asset_ref.expect("image asset reference");
+    let persisted_png =
+        std::fs::read(h._dir.path().join("data/assets").join(asset_ref)).expect("persisted PNG");
+
+    let outcome = h.paste_service.copy_entry(&h.context, id, PasteMode::Plain);
+    assert!(matches!(outcome, CopyOutcome::Copied { .. }));
+    assert_eq!(
+        h.clipboard.written_image_pngs(),
+        vec![persisted_png],
+        "copy must hand the encoded backend the exact bytes used by preview"
+    );
+    assert!(
+        h.clipboard.written_images().is_empty(),
+        "encoded image support must not fall back to a decoded/re-encoded bitmap"
     );
 }
 
@@ -704,4 +746,471 @@ fn copy_entry_does_not_touch_history_when_load_fails() {
     assert_eq!(before.content_hash, after.content_hash);
     assert_eq!(before.updated_at, after.updated_at);
     assert_eq!(before.is_pinned, after.is_pinned);
+}
+
+// ---------------------------------------------------------------------
+// 7. Image round-trip with non-square geometry.
+//
+// The `quick-paste-preview-ui` change mandates that the image `Copiar`
+// path write the canonical asset (`asset_ref`) end-to-end. A regression
+// that surfaces a thumbnail, a downscaled preview or a truncated
+// buffer would be invisible to the existing 4×4 image test (it only
+// checked that the clipboard received `Ok(())`), so the regression
+// suite now drives two non-square images with coordinate-derived
+// pixels and asserts the full RGBA buffer survives the copy.
+// ---------------------------------------------------------------------
+
+/// Build a non-square RGBA buffer where every pixel is unique, so
+/// the assertion can detect a partial / cropped / downscaled copy
+/// by comparing the bytes verbatim against the original. The pixel
+/// at `(x, y)` is encoded as four bytes `(r, g, b, a)` where each
+/// channel carries a function of the coordinates; the resulting
+/// buffer is the longest sequence of distinct bytes we can produce
+/// without relying on the RNG.
+fn distinct_pixels(width: u32, height: u32) -> Vec<u8> {
+    let mut buffer = Vec::with_capacity((width as usize) * (height as usize) * 4);
+    for y in 0..height {
+        for x in 0..width {
+            buffer.push((x & 0xFF) as u8);
+            buffer.push((x.wrapping_add(y) & 0xFF) as u8);
+            buffer.push((y & 0xFF) as u8);
+            buffer.push(0xFF);
+        }
+    }
+    buffer
+}
+
+/// Store a non-square image entry whose pixels are uniquely derived
+/// from their coordinates. The helper returns the new entry id and
+/// the exact buffer the asset was stored from so the round-trip
+/// assertion can compare byte-for-byte.
+fn store_distinct_image_entry(h: &Harness, width: u32, height: u32) -> (i64, Vec<u8>) {
+    let buffer = distinct_pixels(width, height);
+    let image = ClipboardImage::new(buffer.clone(), width, height).expect("valid image");
+    let outcome = h.context.history().record_clipboard_payload(
+        &h.context,
+        ClipboardPayload::Image(image),
+        Some("com.apple.Preview"),
+    );
+    let id = match outcome {
+        clipvault_core::HistoryOutcome::Stored { id } => id,
+        other => panic!("expected Stored, got {other:?}"),
+    };
+    (id, buffer)
+}
+
+/// Round-trip the full asset: the copy must hand the backend the
+/// exact RGBA bytes `clipboard_assets` persisted, not a thumbnail,
+/// a downscaled preview, a cropped region or a partial buffer.
+#[test]
+fn copy_entry_round_trips_full_non_square_image_pixels() {
+    let h = harness(false, false, true);
+    let (width, height) = (17_u32, 9_u32);
+    let (id, source) = store_distinct_image_entry(&h, width, height);
+    let expected_len = (width as usize) * (height as usize) * 4;
+    assert_eq!(source.len(), expected_len);
+
+    let outcome = h.paste_service.copy_entry(&h.context, id, PasteMode::Plain);
+    assert!(matches!(outcome, CopyOutcome::Copied { .. }));
+
+    // The clipboard MUST have observed the round-trip exactly once.
+    let images = h.clipboard.written_images();
+    assert_eq!(images.len(), 1, "image copy must publish the bitmap");
+    let published = &images[0];
+    // Full dimensions preserved — a downscaled or cropped copy
+    // would surface here as soon as `width` or `height` shrank.
+    assert_eq!(published.width(), width);
+    assert_eq!(published.height(), height);
+    // Full RGBA buffer length preserved — a truncated write would
+    // shrink `rgba().len()` below `width * height * 4`.
+    assert_eq!(
+        published.rgba().len(),
+        expected_len,
+        "image copy must publish the complete RGBA buffer, not a thumbnail or partial stride",
+    );
+    // Every pixel survives byte-for-byte — a thumbnail / downscale /
+    // downsample would perturb at least one channel.
+    assert_eq!(
+        published.rgba(),
+        source.as_slice(),
+        "image copy must publish the exact asset bytes; a partial or downscaled bitmap would diverge here",
+    );
+    // Synthetic paste trigger must never run for an image copy.
+    assert_eq!(
+        h.paste.invocations(),
+        0,
+        "image copy MUST NOT invoke PasteController::paste",
+    );
+}
+
+/// Same guarantee for a wider rectangle (31×13) — proves the
+/// adapter carries the full asset on every supported aspect ratio,
+/// not just one. The pixel buffer keeps the coordinate-derived
+/// pattern so a single-bit drift would fail the equality check.
+#[test]
+fn copy_entry_round_trips_wider_non_square_image_pixels() {
+    let h = harness(false, false, true);
+    let (width, height) = (31_u32, 13_u32);
+    let (id, source) = store_distinct_image_entry(&h, width, height);
+
+    let outcome = h.paste_service.copy_entry(&h.context, id, PasteMode::Plain);
+    assert!(matches!(outcome, CopyOutcome::Copied { .. }));
+
+    let images = h.clipboard.written_images();
+    assert_eq!(images.len(), 1);
+    let published = &images[0];
+    assert_eq!(published.width(), width);
+    assert_eq!(published.height(), height);
+    assert_eq!(published.rgba().len(), source.len());
+    assert_eq!(
+        published.rgba(),
+        source.as_slice(),
+        "wider image must round-trip through the asset, not the thumbnail",
+    );
+    assert_eq!(h.paste.invocations(), 0);
+}
+
+// ---------------------------------------------------------------------
+// 9. Two distinct non-square images (2804×784, 1440×1042) routed by
+//    `entry_id`. Reproduces the user-reported scenario: a Quick Paste
+//    card showing image A must surface A's bytes after a copy; the
+//    same call against B's id must surface B's bytes and nothing
+//    else. The suite pins `entry_id`, `payload_width`,
+//    `payload_height` and `asset_ref` as the metadata that flows
+//    across every boundary so a swap between two stored images is
+//    immediately visible in CI. The PNG bytes are deliberately
+//    generated from a coordinate-derived pattern so a regression
+//    that swapped A and B would diverge at the very first pixel.
+// ---------------------------------------------------------------------
+
+/// Stored image dimensions mirror the user-reported scenario. The
+/// pair is asymmetric on purpose: the wider, shorter rectangle (A)
+/// and the narrower, taller rectangle (B) cannot share the same
+/// `payload_width`/`payload_height` even with identical buffers.
+const IMAGE_A_WIDTH: u32 = 2804;
+const IMAGE_A_HEIGHT: u32 = 784;
+const IMAGE_B_WIDTH: u32 = 1440;
+const IMAGE_B_HEIGHT: u32 = 1042;
+
+/// Persist two distinct image entries with deterministic pixel
+/// buffers and return the row metadata so the assertions can pin the
+/// `entry_id`, `asset_ref`, `payload_width` and `payload_height` of
+/// each row.
+fn store_two_distinct_image_entries(h: &Harness) -> (i64, i64, Vec<u8>, Vec<u8>) {
+    let buffer_a = distinct_pixels(IMAGE_A_WIDTH, IMAGE_A_HEIGHT);
+    let buffer_b = distinct_pixels(IMAGE_B_WIDTH, IMAGE_B_HEIGHT);
+    let image_a = ClipboardImage::new(buffer_a.clone(), IMAGE_A_WIDTH, IMAGE_A_HEIGHT)
+        .expect("valid image A");
+    let image_b = ClipboardImage::new(buffer_b.clone(), IMAGE_B_WIDTH, IMAGE_B_HEIGHT)
+        .expect("valid image B");
+    let id_a = store_image_payload(h, image_a);
+    let id_b = store_image_payload(h, image_b);
+    assert_ne!(id_a, id_b, "the two stores must mint distinct ids");
+    (id_a, id_b, buffer_a, buffer_b)
+}
+
+/// Pin the metadata-only contract for the stored rows so the rest
+/// of the suite can rely on a known `(id, asset_ref, width, height)`
+/// quadruple for each image. This is the metadata the diagnostic
+/// logger mirrors for humans without ever carrying bytes.
+#[test]
+fn two_image_entries_keep_distinct_metadata_after_storage() {
+    let h = harness(false, false, true);
+    let (id_a, id_b, _, _) = store_two_distinct_image_entries(&h);
+
+    let row_a = record(&h, id_a);
+    let row_b = record(&h, id_b);
+
+    let asset_a = row_a.asset_ref.clone().expect("image A asset_ref");
+    let asset_b = row_b.asset_ref.clone().expect("image B asset_ref");
+    assert_ne!(
+        asset_a, asset_b,
+        "two distinct images must keep distinct asset_ref values"
+    );
+    assert!(
+        asset_a.starts_with("clipboard/") && asset_b.starts_with("clipboard/"),
+        "asset_refs must stay under the clipboard/ namespace",
+    );
+    assert_eq!(row_a.payload_width, Some(IMAGE_A_WIDTH));
+    assert_eq!(row_a.payload_height, Some(IMAGE_A_HEIGHT));
+    assert_eq!(row_b.payload_width, Some(IMAGE_B_WIDTH));
+    assert_eq!(row_b.payload_height, Some(IMAGE_B_HEIGHT));
+}
+
+/// Copy A by `entry_id` and verify the backend receives only A's
+/// bytes. The clip-payload dimension and the RGBA buffer must match
+/// the source 2804×784 image, not the 1440×1042 one. A swap or a
+/// cross-routing regression would diverge at the very first pixel.
+#[test]
+fn copy_entry_for_id_a_publishes_only_image_a_bytes() {
+    let h = harness(false, false, true);
+    h.clipboard.set_image_png_support(true);
+    let (id_a, id_b, buffer_a, buffer_b) = store_two_distinct_image_entries(&h);
+
+    let outcome_a = h
+        .paste_service
+        .copy_entry(&h.context, id_a, PasteMode::Plain);
+    match outcome_a {
+        CopyOutcome::Copied { id: reported } => assert_eq!(reported, id_a),
+        other => panic!("copy of id A returned {other:?}"),
+    }
+
+    let pngs = h.clipboard.written_image_pngs();
+    assert_eq!(
+        pngs.len(),
+        1,
+        "copy of id A must publish exactly one PNG leg; got {} writes",
+        pngs.len()
+    );
+    let persisted_a = std::fs::read(
+        h._dir
+            .path()
+            .join("data/assets")
+            .join(record(&h, id_a).asset_ref.expect("asset_a")),
+    )
+    .expect("persisted A bytes");
+    assert_eq!(
+        pngs[0], persisted_a,
+        "copy must hand the backend the exact bytes stored for id A; a swap would diverge here"
+    );
+
+    // Cross-check against the B bytes so a regression that routed to
+    // B instead of A surfaces as a mismatch.
+    assert_ne!(
+        pngs[0],
+        std::fs::read(
+            h._dir
+                .path()
+                .join("data/assets")
+                .join(record(&h, id_b).asset_ref.expect("asset_b")),
+        )
+        .expect("persisted B bytes"),
+        "id A must not surface id B's persisted bytes",
+    );
+    assert_ne!(
+        pngs[0], buffer_a,
+        "sanity: the asset bytes are the encoded PNG, not the raw RGBA buffer",
+    );
+    assert_ne!(
+        buffer_a, buffer_b,
+        "sanity: the two test buffers must be dimensionally distinct so the cross-routing check is meaningful",
+    );
+    assert_eq!(h.paste.invocations(), 0);
+}
+
+/// Copy B by `entry_id` and verify the backend receives only B's
+/// bytes. Symmetric to the A test so a regression that always wrote
+/// A (e.g. a stale id captured at module init) is impossible to
+/// ship.
+#[test]
+fn copy_entry_for_id_b_publishes_only_image_b_bytes() {
+    let h = harness(false, false, true);
+    h.clipboard.set_image_png_support(true);
+    let (id_a, id_b, _buffer_a, _buffer_b) = store_two_distinct_image_entries(&h);
+
+    let outcome_b = h
+        .paste_service
+        .copy_entry(&h.context, id_b, PasteMode::Plain);
+    match outcome_b {
+        CopyOutcome::Copied { id: reported } => assert_eq!(reported, id_b),
+        other => panic!("copy of id B returned {other:?}"),
+    }
+
+    let pngs = h.clipboard.written_image_pngs();
+    assert_eq!(
+        pngs.len(),
+        1,
+        "copy of id B must publish exactly one PNG leg; got {} writes",
+        pngs.len()
+    );
+    let persisted_b = std::fs::read(
+        h._dir
+            .path()
+            .join("data/assets")
+            .join(record(&h, id_b).asset_ref.expect("asset_b")),
+    )
+    .expect("persisted B bytes");
+    assert_eq!(
+        pngs[0], persisted_b,
+        "copy must hand the backend the exact bytes stored for id B"
+    );
+    assert_ne!(
+        pngs[0],
+        std::fs::read(
+            h._dir
+                .path()
+                .join("data/assets")
+                .join(record(&h, id_a).asset_ref.expect("asset_a")),
+        )
+        .expect("persisted A bytes"),
+        "id B must not surface id A's persisted bytes",
+    );
+    assert_eq!(h.paste.invocations(), 0);
+}
+
+/// Call the copy entry-points for both ids in sequence (mimicking
+/// the user clicking on A then on B). The backend must observe the
+/// two writes in order and must NEVER serve B's bytes when A was
+/// requested, and vice versa.
+#[test]
+fn copy_entry_for_two_image_ids_routes_each_id_to_its_own_bytes() {
+    let h = harness(false, false, true);
+    h.clipboard.set_image_png_support(true);
+    let (id_a, id_b, _, _) = store_two_distinct_image_entries(&h);
+
+    let _ = h
+        .paste_service
+        .copy_entry(&h.context, id_a, PasteMode::Plain);
+    let _ = h
+        .paste_service
+        .copy_entry(&h.context, id_b, PasteMode::Plain);
+
+    let pngs = h.clipboard.written_image_pngs();
+    assert_eq!(
+        pngs.len(),
+        2,
+        "two copy calls must produce exactly two writes",
+    );
+    let persisted_a = std::fs::read(
+        h._dir
+            .path()
+            .join("data/assets")
+            .join(record(&h, id_a).asset_ref.expect("asset_a")),
+    )
+    .expect("persisted A bytes");
+    let persisted_b = std::fs::read(
+        h._dir
+            .path()
+            .join("data/assets")
+            .join(record(&h, id_b).asset_ref.expect("asset_b")),
+    )
+    .expect("persisted B bytes");
+    assert_eq!(
+        pngs[0], persisted_a,
+        "first write must come from id A's asset bytes"
+    );
+    assert_eq!(
+        pngs[1], persisted_b,
+        "second write must come from id B's asset bytes"
+    );
+    // Sanity: the two writes are byte-different because the two
+    // assets are dimensionally distinct.
+    assert_ne!(pngs[0], pngs[1], "A and B must not collide on the wire");
+    assert_eq!(h.paste.invocations(), 0);
+}
+
+/// Pin the metadata-only diagnostic snapshot. The test reads the
+/// row the same way the diagnostic logger does and asserts that the
+/// fields it is allowed to log (`entry_id`, `payload_width`,
+/// `payload_height`, `asset_ref`) are coherent with the persisted
+/// asset. The PNG bytes themselves are NEVER logged; the assertion
+/// uses the asset_ref as a path key only to read the file the asset
+/// store already wrote, never to inspect the contents.
+#[test]
+fn two_image_entries_diagnostic_snapshot_matches_persisted_asset() {
+    let h = harness(false, false, true);
+    let (id_a, id_b, _, _) = store_two_distinct_image_entries(&h);
+
+    for (id, expected_w, expected_h) in [
+        (id_a, IMAGE_A_WIDTH, IMAGE_A_HEIGHT),
+        (id_b, IMAGE_B_WIDTH, IMAGE_B_HEIGHT),
+    ] {
+        let row = record(&h, id);
+        let asset_ref = row.asset_ref.clone().expect("asset_ref");
+        // The four fields the diagnostic logger is allowed to emit:
+        assert_eq!(row.id, id, "entry_id must round-trip through SQLite");
+        assert_eq!(
+            row.payload_width,
+            Some(expected_w),
+            "payload_width must match the source bitmap"
+        );
+        assert_eq!(
+            row.payload_height,
+            Some(expected_h),
+            "payload_height must match the source bitmap"
+        );
+        // The asset_ref points at a real file on disk that the
+        // diagnostic logger can reference without reading its
+        // contents.
+        let path = h._dir.path().join("data/assets").join(&asset_ref);
+        assert!(
+            path.exists(),
+            "diagnostic asset_ref must resolve to a real file: {asset_ref}"
+        );
+        let metadata = std::fs::metadata(&path).expect("metadata");
+        assert!(metadata.len() > 0, "asset file must not be empty");
+    }
+}
+
+/// Pin the metadata-only diagnostic contract. The diagnostic logger
+/// is gated on `CLIPVAULT_DEBUG_IMAGE_COPY=1` and MUST emit only the
+/// `(entry_id, payload_width, payload_height, asset_ref)` quadruple.
+/// Bytes, hashes, snippets, absolute paths and the data directory
+/// are explicitly forbidden.
+///
+/// The runtime capture (`tracing_subscriber::fmt::MakeWriter` plus
+/// `with_default`) is fragile under parallel test execution — the
+/// process-wide subscriber state races with the rest of the suite —
+/// so the runtime assertion is deferred to manual verification.
+/// The contract is pinned here through a static source check that
+/// catches every forbidden leak vector at code-review time.
+#[test]
+fn image_copy_diagnostic_helper_source_contract_is_metadata_only() {
+    let source = include_str!("../src/paste.rs");
+    let helper_start = source
+        .find("fn log_image_copy_metadata(record: &EntryRecord)")
+        .expect("log_image_copy_metadata helper must exist in paste.rs");
+    let helper_end = source
+        .find("impl PasteService")
+        .expect("PasteService impl must exist after the helper");
+    let body = &source[helper_start..helper_end];
+    // The four fields the diagnostic is allowed to emit.
+    assert!(
+        body.contains("entry_id"),
+        "diagnostic helper must log entry_id"
+    );
+    assert!(
+        body.contains("payload_width"),
+        "diagnostic helper must log payload_width"
+    );
+    assert!(
+        body.contains("payload_height"),
+        "diagnostic helper must log payload_height"
+    );
+    assert!(
+        body.contains("asset_ref"),
+        "diagnostic helper must log asset_ref"
+    );
+    // The gating condition keeps production logs noise-free.
+    assert!(
+        body.contains("CLIPVAULT_DEBUG_IMAGE_COPY"),
+        "diagnostic helper must gate on CLIPVAULT_DEBUG_IMAGE_COPY"
+    );
+    // The forbidden leak vectors must NEVER appear in the helper
+    // body. Each substring below corresponds to a documented
+    // leak source we promised to keep out of logs. We restrict the
+    // match to the actual code (the field-list block between the
+    // `debug!(` macro and the message string) so the comments
+    // describing the contract do not poison the assertion.
+    let debug_call_start = body
+        .find("debug!(")
+        .expect("debug! macro must exist inside the helper");
+    let debug_call_end = body
+        .find("\"image copy metadata\"")
+        .expect("helper message string must exist");
+    let debug_call = &body[debug_call_start..debug_call_end];
+    for forbidden in [
+        ".png",
+        "rgba",
+        "content_hash",
+        "content_size",
+        "snippet",
+        "data_dir",
+        "absolute",
+    ] {
+        assert!(
+            !debug_call.contains(forbidden),
+            "diagnostic helper must never log {forbidden:?}; debug! body:\n{debug_call}"
+        );
+    }
 }

@@ -221,9 +221,10 @@ test("overflow-menu trigger uses click|stopPropagation so it does not select the
 });
 
 test("menu items use click|stopPropagation so they do not select the row", () => {
-  // The `...` menu renders one menuitem per direct paste action.
-  // Every menu item MUST stop propagation so a click on the menu
-  // item never bubbles back to the row and never runs twice.
+  // The `...` menu renders one menuitem per direct paste action
+  // plus the read-only `Previsualizar` entry. Every menu item MUST
+  // stop propagation so a click on the menu item never bubbles
+  // back to the row and never runs twice.
   const menuStart = quickPasteSource.indexOf('data-testid="quick-paste-menu"');
   assert.notEqual(menuStart, -1, "the menu <ul> must exist in QuickPaste.svelte");
   const menuEnd = quickPasteSource.indexOf("</ul>", menuStart);
@@ -233,8 +234,12 @@ test("menu items use click|stopPropagation so they do not select the row", () =>
     "every menu item must stop click propagation",
   );
   assert.ok(
-    menuBlock.includes("runMenuAction(id, action.mode)"),
-    "every menu item must delegate to runMenuAction",
+    menuBlock.includes("runMenuAction("),
+    "direct paste menu items must delegate to runMenuAction",
+  );
+  assert.ok(
+    menuBlock.includes("openPreviewFor("),
+    "the Previsualizar menu item must delegate to openPreviewFor",
   );
   // The menu items MUST keep the legacy direct paste lifecycle
   // (they MUST NOT collapse into the keyboard copy-only flow).

@@ -357,3 +357,49 @@ export function entryPreviewText(
     ? `${trimmed.slice(0, maxLength - 3)}…`
     : trimmed;
 }
+
+/**
+ * Full canonical text of an entry, never truncated.
+ *
+ * The Quick Paste preview overlay is documented to render the
+ * complete capture, not the truncated row preview — sharing the
+ * `maxLength` helper would silently regress the overlay to the
+ * same fragment the row renders. The helper collapses
+ * whitespace runs exactly the way `entryPreviewText` does so the
+ * preview does not visually break when the underlying payload has
+ * long runs of newlines or tabs, but it never truncates the
+ * resulting string.
+ *
+ * For an image row the helper returns the empty `content` sentinel
+ * for backwards compatibility; callers rendering an image preview
+ * should branch on `isImageEntry` instead of inspecting the text.
+ */
+export function entryFullPreviewText(
+  entry: Pick<EntryRecord, "content" | "content_type" | "asset_ref">,
+): string {
+  if (isImageEntry(entry)) return "";
+  const collapsed = (entry.content ?? "").replace(/\s+/g, " ").trim();
+  return collapsed;
+}
+
+/**
+ * Escape a plain-text capture into a safe representation the
+ * preview overlay can render inside a `<pre>` element without
+ * re-introducing the active content the spec explicitly forbids.
+ *
+ * The overlay MUST NEVER execute scripts, fire event handlers or
+ * navigate through HTML anchors; escaping every character —
+ * including `&`, `<`, `>` and the quote marks — closes the entire
+ * HTML / script injection surface and keeps the preview safe even
+ * for hostile captures. The exact mapped characters and their
+ * replacements are stable so existing tests can assert the
+ * mapping byte-for-byte.
+ */
+export function escapeForPreview(input: string): string {
+  return input
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}

@@ -14,6 +14,7 @@ export interface VisualTokens {
   fontFamily: string;
   fontSizeBody: string;
   fontSizeMuted: string;
+  fontSizeMeta: string;
   fontSizeTitle: string;
   fontSizeTitleLg: string;
   fontSizeTitleSm: string;
@@ -38,6 +39,12 @@ export interface VisualTokens {
   modalOverlay: string;
   focusRing: string;
   /**
+   * Fixed visible size of a single history card. The card, the rail
+   * and the sidebar all read this token so the desktop stays the same
+   * scale when the visual system is updated.
+   */
+  cardSize: string;
+  /**
    * Stable visible height of the card rail. The collection sidebar
    * reads this token so the panel and the rail stay visually aligned
    * without either of them redefining the constant.
@@ -50,6 +57,11 @@ export const VISUAL_TOKENS: VisualTokens = {
     '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
   fontSizeBody: "0.9rem",
   fontSizeMuted: "0.78rem",
+  // Metadata strip / inline status rows. Sits between `--cv-muted`
+  // (paragraph text) and `--cv-tag` (chips) so the same scale
+  // applies to history-card metadata, paste-error bodies, title
+  // errors and the Quick Paste preview footer.
+  fontSizeMeta: "0.7rem",
   fontSizeTitle: "1.5rem",
   fontSizeTitleLg: "1.75rem",
   fontSizeTitleSm: "0.95rem",
@@ -73,6 +85,10 @@ export const VISUAL_TOKENS: VisualTokens = {
   dangerHover: "#991b1b",
   modalOverlay: "rgba(8, 11, 16, 0.78)",
   focusRing: "rgba(37, 99, 235, 0.45)",
+  // The single visible size of a history card. The card, the rail
+  // and the sidebar all read this token so the desktop stays on the
+  // same scale when the visual system is updated.
+  cardSize: "240px",
   // The rail exposes the height of a single visible card row plus the
   // padding and the size of its controls. The value is intentionally
   // close to the documented card size (240px) so the sidebar matches
@@ -92,6 +108,7 @@ export function visualTokenCss(): string {
     `--cv-font-family: ${t.fontFamily};`,
     `--cv-body: ${t.fontSizeBody};`,
     `--cv-muted: ${t.fontSizeMuted};`,
+    `--cv-meta: ${t.fontSizeMeta};`,
     `--cv-title: ${t.fontSizeTitle};`,
     `--cv-title-lg: ${t.fontSizeTitleLg};`,
     `--cv-title-md: 1rem;`,
@@ -104,6 +121,7 @@ export function visualTokenCss(): string {
     `--cv-radius-lg: ${t.radiusLg};`,
     `--cv-bg-surface: ${t.surfaceBg};`,
     `--cv-bg-elevated: ${t.elevatedBg};`,
+    `--cv-bg-hover: rgba(255, 255, 255, 0.06);`,
     `--cv-border: ${t.borderColor};`,
     `--cv-border-strong: ${t.borderStrong};`,
     `--cv-fg: ${t.fg};`,
@@ -116,6 +134,7 @@ export function visualTokenCss(): string {
     `--cv-danger-hover: ${t.dangerHover};`,
     `--cv-modal-overlay: ${t.modalOverlay};`,
     `--cv-focus-ring: ${t.focusRing};`,
+    `--cv-card-size: ${t.cardSize};`,
     `--cv-card-rail-height: ${t.cardRailHeight};`,
   ].join(" ");
 }

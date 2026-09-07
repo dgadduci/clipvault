@@ -3,14 +3,13 @@
   import type {
     CopyResponse,
     EntryRecord,
-    PasteResponse,
     PlatformGuidance,
     SearchHit,
     SearchResponse,
   } from "./types";
+  import { visualTokenCss } from "./lib/visualTokens";
   import {
     copyEntryCommand,
-    pasteEntryCommand,
     recentEntriesCommand,
     searchEntriesCommand,
     setFavoriteCommand,
@@ -21,7 +20,7 @@
     QUICK_PASTE_WINDOW_LABEL,
     hideQuickPasteWindow,
   } from "./lib/quickPasteBridge";
-  import { performCopyFlow, performPasteFlow } from "./lib/quickPasteController";
+  import { performCopyFlow } from "./lib/quickPasteController";
   import {
     capabilitiesOf,
     preserveSelectionAfterReorder,
@@ -36,6 +35,8 @@
   import { listen } from "@tauri-apps/api/event";
   import { contentTypeLabel } from "./lib/contentType";
   import {
+    APP_FALLBACK_ICON_SVG,
+    CONTENT_TYPE_ICON_SPRITE,
     contentTypeIconId,
     contentTypeIconLabel,
   } from "./lib/contentTypeIcons";
@@ -47,8 +48,40 @@
     hasRenderableImage,
     isImageEntry,
   } from "./lib/clipboardAsset";
-  import type { IconResolver } from "./lib/iconResolver";
+  import {
+    matchesPreviewShortcut,
+  } from "./lib/clipboardPreview";
+  import {
+    createIconResolver,
+    type IconResolver,
+  } from "./lib/iconResolver";
+  import {
+    quickPasteSearchShortcutAccessibleLabel,
+    quickPasteSearchShortcutLabel,
+    searchShortcutPlatform,
+    type SearchShortcutPlatform,
+  } from "./lib/searchShortcut";
+  import { sourceAppIconCommand, diagnosticsCommand } from "./lib/tauri";
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
+  import ClipboardPreview from "./ClipboardPreview.svelte";
+
+  /**
+   * Single source of truth for the visual tokens. The string is the
+   * exact CSS custom-property block `lib/visualTokens.ts` emits and
+   * the `<svelte:head>` block below injects at the document root.
+   * Quick Paste runs inside its own Tauri webview so the `:root`
+   * block `App.svelte` injects on the desktop window is NOT visible
+   * here — the Quick Paste stylesheet MUST mount the same block to
+   * keep the documented `var(--cv-*, fallback)` references in
+   * lock-step with the desktop rail. Without this re-declaration the
+   * palette would render with the literal fallback colours and the
+   * typography would drift to the browser default family.
+   */
+  const VISUAL_TOKEN_ROOT_CSS = visualTokenCss();
+  // Mark the constant as used at the TypeScript level so svelte-check
+  // does not flag it — the actual consumer is the `<svelte:head>`
+  // block below.
+  void VISUAL_TOKEN_ROOT_CSS;
 
   type Mode = "idle" | "recent" | "search";
   type ThumbnailState = "loading" | "loaded" | "error";
@@ -90,6 +123,32 @@
    */
   let openMenuEntryId: number | null = null;
   /**
+   * `position: fixed` rectangle the menu popover renders at. The
+   * menu is portalised out of the row so the documented
+   * `overflow: hidden` on the row / list / main cannot clip it;
+   * `recomputeMenuPosition` writes the style string every time the
+   * user opens the menu or scrolls the list so the popover always
+   * stays anchored to the triggering `...` button and inside the
+   * documented `720 × 520` viewport.
+   */
+  let menuPositionStyle = "";
+  /**
+   * Per-row menu trigger element references keyed by entry id. The
+   * rows mount a hidden `qp-menu-anchor` button only while the menu
+   * is open; the menu popover reads the button's bounding rect to
+   * compute its `position: fixed` rectangle. The map mirrors the
+   * existing `rowRefs` pattern so the helper can resolve the
+   * anchor by id without a `querySelector` round-trip.
+   */
+  const menuAnchorEls: Record<number, HTMLElement> = {};
+  /**
+   * Reference to the open menu popover element. The popover lives
+   * outside the row (portalised into the list container) so the
+   * outside-click listener can inspect it directly without
+   * walking the DOM. `null` when no menu is open.
+   */
+  let menuEl: HTMLUListElement | null = null;
+  /**
    * Entry ids currently driving a paste or pin round-trip. The set
    * is the only switch the menu / keyboard helpers consult so two
    * concurrent activations on the same row are coalesced and a
@@ -98,6 +157,21 @@
    */
   let pasteInFlight: Set<number> = new Set();
   let pinInFlight: Set<number> = new Set();
+  /**
+   * Stable id of the entry whose `Previsualizar` overlay is currently
+   * open. Only one preview can be open at a time; the overlay is a
+   * strictly read-only surface inside the same fixed window — it
+   * never copies, pastes, mutates history or alters the previously
+   * active application target. `null` means no preview is open.
+   */
+  let previewEntryId: number | null = null;
+  /**
+   * Platform the Quick Paste window was opened on. Resolved once
+   * from the backend diagnostics so the visible `Cmd/Ctrl+K` hint
+   * and the keyboard matcher stay in lockstep without a second
+   * global listener.
+   */
+  let shortcutPlatform: SearchShortcutPlatform = "other";
 
   // Fixed dimensions of the result item. The contract documented in
   // `quick-paste-compact-ui/spec.md` pins 72 logical pixels so every
@@ -342,6 +416,113 @@
     thumbnailStates = { ...thumbnailStates, [id]: "error" };
   }
 
+  // ---------------------------------------------------------------
+  // Source-application icons in the quick-paste list.
+  //
+  // The list reuses the same validated icon bridge and blob-URL
+  // lifecycle as `HistoryCard.source-app-icon` (see
+  // `openspec/changes/archive/2026-09-04-history-card-layout/`).
+  // The contract documented in
+  // `openspec/changes/quick-paste-preview-ui/specs/quick-paste/spec.md`
+  // requires:
+  //
+  //   - the icon area has a stable square footprint across
+  //     `loading`, `loaded`, and `error` so the row never reflows;
+  //   - the `loaded` state renders the real persisted icon;
+  //   - the `loading` state renders a distinguishable placeholder
+  //     (NOT an empty square);
+  //   - the `error` / `metadata absent` state renders a generic
+  //     application glyph and never displays the raw bundle
+  //     identifier as visible content;
+  //   - stale icon responses from a previous entry cannot clobber
+  //     the current entry's state.
+  // ---------------------------------------------------------------
+
+  const tauriSourceAppIconLoader: import("./lib/iconResolver").IconLoader = {
+    async loadIconBytes(ref: string): Promise<number[] | Uint8Array | null> {
+      try {
+        return await sourceAppIconCommand({ ref });
+      } catch {
+        return null;
+      }
+    },
+  };
+
+  const appIconResolver: IconResolver = createIconResolver(
+    tauriSourceAppIconLoader,
+  );
+  let appIconUrls: Record<number, string> = {};
+  /**
+   * Per-entry source-app icon state. Mirrors the `thumbnailStates`
+   * invariant: `loading` is the canonical state for any row whose
+   * metadata carries a coherent `source_app_icon_ref` while the
+   * bridge round-trip is still pending; `loaded` swaps in the
+   * resolved blob URL; `error` collapses loader rejections and
+   * metadata-absent rows onto the same accessible fallback.
+   *
+   * The branch above intentionally never asks the renderer to inspect
+   * `appIconUrls === null` (which is also the terminal state for an
+   * entry without a persisted icon), so the row never flashes a
+   * missing icon.
+   */
+  type AppIconState = "loading" | "loaded" | "error";
+  let appIconStates: Record<number, AppIconState> = {};
+  /**
+   * Per-entry token used to discard stale icon round-trips. Mirrors
+   * the `thumbnailToken` invariant above: a response that lands
+   * after a newer round has been scheduled for a different entry is
+   * dropped so the row never shows another entry's icon.
+   */
+  let appIconToken = 0;
+  const appIconTokens = new Map<number, number>();
+
+  async function loadAppIcon(entry: EntryRecord): Promise<void> {
+    const ref = entry.source_app_icon_ref;
+    if (!ref) return;
+    if (appIconUrls[entry.id]) return;
+    if (appIconStates[entry.id] !== "loading") {
+      appIconStates = { ...appIconStates, [entry.id]: "loading" };
+    }
+    const token = ++appIconToken;
+    appIconTokens.set(entry.id, token);
+    const resolution = await appIconResolver.resolve(ref);
+    if (appIconTokens.get(entry.id) !== token) {
+      return;
+    }
+    if (resolution.ok && resolution.url) {
+      appIconUrls = { ...appIconUrls, [entry.id]: resolution.url };
+      appIconStates = { ...appIconStates, [entry.id]: "loaded" };
+    } else {
+      appIconStates = { ...appIconStates, [entry.id]: "error" };
+    }
+  }
+
+  function syncAppIcons(
+    currentMode: Mode,
+    recents: EntryRecord[],
+    searchHits: SearchHit[],
+  ): void {
+    const entries =
+      currentMode === "search" ? searchHits.map((hit) => hit.record) : recents;
+    for (const entry of entries) {
+      void loadAppIcon(entry);
+    }
+  }
+
+  $: syncAppIcons(mode, recent, hits);
+
+  function dropAppIcon(id: number, ref?: string | null): void {
+    appIconTokens.delete(id);
+    if (ref) {
+      appIconResolver.releaseFor(ref);
+    }
+    if (appIconUrls[id]) {
+      const { [id]: _removed, ...rest } = appIconUrls;
+      appIconUrls = rest;
+    }
+    appIconStates = { ...appIconStates, [id]: "error" };
+  }
+
   function resolveContentType(
     currentMode: Mode,
     recents: EntryRecord[],
@@ -484,9 +665,18 @@
    * entry id to the typed copy action, so the keyboard shortcut and
    * the mouse click cannot drift apart: they both flow through
    * `runCopyForEntry` (which keeps the `pasteInFlight` in-flight
-   * guard and hides Quick Paste on success). A no-op result from
-   * the capability helper (image-only Shift+Enter, no selection) is
-   * silently dropped so the caller does not have to branch.
+   * guard). A no-op result from the capability helper (image-only
+   * Shift+Enter, no selection) is silently dropped so the caller
+   * does not have to branch.
+   *
+   * `hideAfterSuccess` defaults to `true` so the keyboard contract
+   * keeps the historical behaviour (Enter / Shift+Enter hide the
+   * palette after a successful write). The row-click contract
+   * documented in the `quick-paste-preview-ui` change passes
+   * `hideAfterSuccess: false` so a click leaves the palette open
+   * and the user can dispatch `Cmd/Ctrl+V` against the just-copied
+   * representation. The helper is the single switch so the two
+   * surfaces cannot drift apart.
    *
    * The `shiftKey` flag lets the caller pick the plain-text
    * representation (Shift+Enter / Shift+Click) without duplicating
@@ -495,7 +685,7 @@
    */
   async function confirmEntry(
     entryId: number,
-    options: { shiftKey?: boolean } = {},
+    options: { shiftKey?: boolean; hideAfterSuccess?: boolean } = {},
   ): Promise<void> {
     const entry = findEntry(mode, recent, hits, entryId);
     if (!entry) return;
@@ -507,7 +697,7 @@
     if (!action || action.kind === "none") {
       return;
     }
-    await runCopyForEntry(entryId, action.mode);
+    await runCopyForEntry(entryId, action.mode, { hideAfterSuccess: options.hideAfterSuccess ?? true });
   }
 
   async function handleEnter(event?: KeyboardEvent): Promise<void> {
@@ -518,7 +708,7 @@
     }
     const entryId = resultIds[selectedIndex];
     if (entryId == null) return;
-    await confirmEntry(entryId, { shiftKey: event?.shiftKey ?? false });
+    await confirmEntry(entryId, { shiftKey: event?.shiftKey ?? false, hideAfterSuccess: true });
   }
 
   /**
@@ -529,28 +719,37 @@
    * is highlighted must not silently leave the keyboard focus on
    * row 1) so the next keyboard shortcut lands on the same row.
    *
-   * The handler is intentionally fire-and-forget: the in-flight
-   * guard inside `runCopyForEntry` coalesces the second copy that
-   * would otherwise be issued by the same click, and any failure
-   * surfaces through the same `pasteError` band Enter uses.
+   * The `quick-paste-preview-ui` change supersedes the previous
+   * click contract: the click keeps Quick Paste visible after a
+   * successful copy so the user can dispatch `Cmd/Ctrl+V` from the
+   * previously focused application without re-opening the palette.
+   * The `pasteInFlight` guard inside `runCopyForEntry` coalesces
+   * the second copy that would otherwise be issued by the same
+   * click, and any failure surfaces through the same `pasteError`
+   * band Enter uses.
    *
-   * Pin and menu controls inside the row use `on:click|stopPropagation`
-   * so this handler never runs for their activations.
+   * Pin and menu controls inside the row use
+   * `on:click|stopPropagation` so this handler never runs for their
+   * activations.
    */
   function handleRowClick(entryId: number, event?: MouseEvent): void {
     selectEntryOnClick(entryId);
-    void confirmEntry(entryId, { shiftKey: event?.shiftKey ?? false });
+    void confirmEntry(entryId, { shiftKey: event?.shiftKey ?? false, hideAfterSuccess: false });
   }
 
   /**
    * Drive the copy-only flow for a single entry id. The helper is
-   * reused by Enter / Shift+Enter / `...` → "Copiar" (when the menu
-   * grows it) so the controller and the typed outcome stay in one
-   * place. The function hides Quick Paste after a successful write
-   * and surfaces the typed guidance on failure without mutating the
-   * history row.
+   * reused by Enter / Shift+Enter / row-click so the controller and
+   * the typed outcome stay in one place. The function hides Quick
+   * Paste after a successful write (or re-shows it when the caller
+   * passes `hideAfterSuccess: false`) and surfaces the typed
+   * guidance on failure without mutating the history row.
    */
-  async function runCopyForEntry(entryId: number, mode: CopyMode): Promise<void> {
+  async function runCopyForEntry(
+    entryId: number,
+    mode: CopyMode,
+    options: { hideAfterSuccess?: boolean } = {},
+  ): Promise<void> {
     if (pasteInFlight.has(entryId)) {
       return;
     }
@@ -574,9 +773,16 @@
           hide: hideQuickPasteWindow,
         },
         copyFn: () => copyEntryCommand({ id: entryId, mode }),
+        hideAfterSuccess: options.hideAfterSuccess ?? true,
       });
       if (outcome.kind === "copied") {
-        // Window stays hidden by contract; nothing to do here.
+        // The keyboard contract hides the window on success
+        // (`windowStaysHidden === true`); the click contract keeps
+        // the window visible (`windowStaysHidden === false`) so the
+        // user can dispatch `Cmd/Ctrl+V` from the previously
+        // focused application. The controller itself owns the
+        // show/hide lifecycle, so the row only has to check the
+        // outcome shape — no second branch on `options`.
         return;
       }
       // Failure path: window has been re-shown by the controller.
@@ -608,17 +814,26 @@
   }
 
   /**
-   * Drive the direct paste flow for a single entry id. The menu
-   * actions keep the legacy paste lifecycle: they hide Quick Paste
-   * first so the previously focused application can receive the
-   * synthetic paste, and they surface the typed guidance on
-   * failure. The flow is intentionally NOT used by Enter or
-   * Shift+Enter — those go through `runCopyForEntry` so the
-   * clipboard is written without a synthetic paste.
+   * Drive the copy-only flow for a single menu entry id. The menu
+   * action reuses the same `performCopyFlow` controller the
+   * keyboard / row-click paths consult, only with
+   * `hideAfterSuccess: false` so the Quick Paste window stays visible
+   * after a successful copy and the user can dispatch `Cmd/Ctrl+V`
+   * from the previously focused application. The menu actions MUST
+   * NOT invoke `pasteEntryCommand` or trigger a synthetic paste
+   * controller — that contract is the whole point of the
+   * `quick-paste-preview-ui` change.
+   *
+   * The popover closes before the copy round-trip starts so the
+   * user sees the menu dismiss immediately even if the backend takes
+   * a few milliseconds to write the representation. The
+   * `pasteInFlight` guard coalesces concurrent activations on the
+   * same row (a double click on the menu trigger or on the menu
+   * item itself becomes a no-op while the round-trip is in flight).
    */
-  async function runMenuPasteForEntry(
+  async function runMenuCopyForEntry(
     entryId: number,
-    mode: "plain" | "rich" | null,
+    mode: CopyMode,
   ): Promise<void> {
     if (pasteInFlight.has(entryId)) {
       return;
@@ -631,48 +846,12 @@
     pinError = null;
     openMenuEntryId = null;
     try {
-      const outcome = await performPasteFlow({
-        bridge: {
-          captureActiveApp: async () => ({
-            available: false,
-            name: null,
-            identifier: null,
-          }),
-          show: async () => undefined,
-          focus: async () => undefined,
-          emitOpened: async () => undefined,
-          hide: hideQuickPasteWindow,
-        },
-        pasteFn: () => pasteEntryCommand({ id: entryId, mode }),
-      });
-      if (outcome.kind === "pasted") {
-        return;
-      }
-      guidance = readGuidance(outcome.response);
-      pasteError =
-        "error" in outcome.response
-          ? outcome.response.error
-          : readMessage(outcome.response);
-    } catch (error) {
-      pasteError = error instanceof Error ? error.message : String(error);
+      await runCopyForEntry(entryId, mode, { hideAfterSuccess: false });
     } finally {
       const reduced = new Set(pasteInFlight);
       reduced.delete(entryId);
       pasteInFlight = reduced;
     }
-  }
-
-  function readGuidance(
-    response: PasteResponse | { error: string },
-  ): PlatformGuidance | null {
-    if ("guidance" in response && response.guidance) {
-      return response.guidance;
-    }
-    return null;
-  }
-
-  function readMessage(response: PasteResponse): string {
-    return response.message ?? `Paste ${response.kind}`;
   }
 
   async function handleEscape(): Promise<void> {
@@ -767,25 +946,212 @@
 
   function closeMenu(): void {
     openMenuEntryId = null;
+    menuPositionStyle = "";
   }
 
   function toggleMenuFor(entryId: number): void {
-    openMenuEntryId = openMenuEntryId === entryId ? null : entryId;
+    if (openMenuEntryId === entryId) {
+      openMenuEntryId = null;
+      menuPositionStyle = "";
+      return;
+    }
+    openMenuEntryId = entryId;
+    // Compute the menu's viewport position the same tick the row
+    // renders. `tick()` is awaited from the click handler so the
+    // anchor element is always mounted before the helper reads
+    // its bounding box. The menu itself lives outside the row
+    // (portalised into the list container) so the row's
+    // `overflow: hidden` cannot clip the popover.
+    queueMicrotask(() => {
+      recomputeMenuPosition();
+    });
   }
 
   /**
-   * The Quick Paste menu exposes the legacy direct paste actions
-   * for every entry. The helper closes the menu and dispatches the
-   * paste through `runMenuPasteForEntry` so the legacy paste
-   * lifecycle (hide-before-paste, active-target, guidance, close)
-   * stays intact and the keyboard copy-only flow is unaffected.
+   * Re-anchor the open menu popover to the trigger element of the
+   * currently selected entry. The helper measures the trigger
+   * with `getBoundingClientRect` and computes a `position: fixed`
+   * rectangle that:
+   *
+   * - stays within the `720 × 520` Quick Paste viewport so it
+   *   never escapes the fixed window even when the trigger is the
+   *   last visible row;
+   * - anchors to the bottom-left of the trigger (`top` set to the
+   *   trigger's bottom edge, `right` aligned to its left edge)
+   *   so the popover reads as a continuation of the row, but
+   *   flips to the top of the trigger when there is no room
+   *   below;
+   * - collapses to the documented 12rem width and bumps back to
+   *   the bottom edge when the computed `top` would render the
+   *   popover above the list region.
+   *
+   * The trigger element is rendered inline through a hidden
+   * `qp-menu-anchor` button the row mounts when the menu opens;
+   * the helper tolerates a missing trigger (e.g. during a list
+   * recompute before the next render) by collapsing the menu
+   * back to `top: 0; left: 0` so the visible surface never hangs
+   * off-screen.
    */
-  function runMenuAction(entryId: number, mode: "plain" | "rich" | null): void {
-    void runMenuPasteForEntry(entryId, mode);
+  function recomputeMenuPosition(): void {
+    if (openMenuEntryId === null) {
+      menuPositionStyle = "";
+      return;
+    }
+    const anchor = menuAnchorEls[openMenuEntryId];
+    if (!anchor || typeof anchor.getBoundingClientRect !== "function") {
+      menuPositionStyle = "";
+      return;
+    }
+    const rect = anchor.getBoundingClientRect();
+    // The popover reserves a fixed 12rem (~192px) column; the
+    // pre-computed width mirrors the CSS rule so a future change
+    // to `.qp-menu` cannot drift past the helper.
+    const POPOVER_WIDTH = 192;
+    const VIEWPORT_WIDTH = 720;
+    const VIEWPORT_HEIGHT = 520;
+    // Left edge aligned to the trigger's right minus its declared
+    // width; clamped so the popover never escapes the window.
+    const desiredLeft = Math.max(
+      8,
+      rect.right - POPOVER_WIDTH,
+    );
+    const left = Math.min(desiredLeft, VIEWPORT_WIDTH - POPOVER_WIDTH - 8);
+    // The popover drops below the trigger when there is at least
+    // ~160px of room; otherwise it flips above so the last row
+    // always anchors the actions into the viewport.
+    const POPOVER_MIN_HEIGHT = 160;
+    const belowTop = rect.bottom + 4;
+    const aboveTop = rect.top - 4;
+    const flipsAbove =
+      belowTop + POPOVER_MIN_HEIGHT > VIEWPORT_HEIGHT &&
+      aboveTop - POPOVER_MIN_HEIGHT >= 8;
+    const top = flipsAbove ? Math.max(8, aboveTop - POPOVER_MIN_HEIGHT) : belowTop;
+    menuPositionStyle = `top: ${top}px; left: ${left}px;`;
+  }
+
+  /**
+   * Menu keyboard affordances. The helper only owns the in-menu
+   * navigation (`Escape` to close); the `...` trigger itself is a
+   * `button` so the platform activation (`Enter`/`Space`) opens
+   * the menu through the same `click` handler as a mouse. The
+   * `Cmd/Ctrl+K` shortcut the window installs never reaches the
+   * menu because it lives on the `<svelte:window>` listener and
+   * only fires when the focus is on the list / body.
+   */
+  function onMenuKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMenu();
+    }
+  }
+
+  /**
+   * Open-window `pointerdown` handler that closes the menu when a
+   * pointer lands outside the menu surface. The listener lives on
+   * `<svelte:window>` so it survives the row remounts the list
+   * runs while the user is searching; the attached guard makes
+   * sure the menu only closes when the pointer is actually
+   * outside the menu (a click inside it bubbles to the menu item
+   * handlers and to the row's own `on:click|stopPropagation`
+   * controls).
+   */
+  function onWindowPointerDown(event: PointerEvent): void {
+    if (openMenuEntryId === null) return;
+    const target = event.target;
+    if (target instanceof Node && menuEl && menuEl.contains(target)) {
+      return;
+    }
+    if (target instanceof Node && menuAnchorEls[openMenuEntryId]) {
+      const anchor = menuAnchorEls[openMenuEntryId];
+      if (anchor && target instanceof Node && anchor.contains(target)) {
+        return;
+      }
+    }
+    closeMenu();
+  }
+
+  /**
+   * The Quick Paste menu exposes the copy-only actions for every
+   * entry. The helper dispatches the copy through
+   * `runMenuCopyForEntry` so the menu shares the same
+   * `performCopyFlow` controller Enter / Shift+Enter / row click
+   * use, only with `hideAfterSuccess: false`. The window stays
+   * visible while the representation reaches the clipboard and the
+   * previously focused application can paste it with `Cmd/Ctrl+V`.
+   */
+  function runMenuAction(entryId: number, mode: CopyMode): void {
+    void runMenuCopyForEntry(entryId, mode);
+  }
+
+  /**
+   * Open the preview overlay for the supplied entry id. The helper is
+   * the single switch the menu `Previsualizar` action and the
+   * `Cmd/Ctrl+Enter` keyboard shortcut consult so the two surfaces
+   * cannot drift apart. The overlay is strictly read-only — the
+   * helper never writes to the clipboard, never invokes the paste
+   * command and never mutates the entry.
+   */
+  function openPreviewFor(entryId: number): void {
+    const entry = findEntry(mode, recent, hits, entryId);
+    if (!entry) return;
+    previewEntryId = entryId;
+    openMenuEntryId = null;
+  }
+
+  function closePreview(): void {
+    previewEntryId = null;
+  }
+
+  function previewEntry(): EntryRecord | null {
+    if (previewEntryId === null) return null;
+    return findEntry(mode, recent, hits, previewEntryId);
   }
 
   function onWindowKeydown(event: KeyboardEvent): void {
     if (guidance) return;
+    // The preview overlay is the only modal layered on top of Quick
+    // Paste. `Escape` MUST close the preview first so the user can
+    // dismiss it without losing the window; a second `Escape` falls
+    // through to the legacy Quick Paste handler below.
+    if (previewEntryId !== null && event.key === "Escape") {
+      event.preventDefault();
+      closePreview();
+      return;
+    }
+    // `Cmd/Ctrl+K` focuses the existing search input and selects the
+    // current query so the user can overwrite it without losing the
+    // platform-correct shortcut. The shortcut is scoped to the
+    // active Quick Paste window — no second global listener is
+    // installed.
+    if (matchesQuickPasteSearchShortcut(event, shortcutPlatform)) {
+      event.preventDefault();
+      focusSearchInput(true);
+      return;
+    }
+    // `Cmd/Ctrl+Enter` opens the preview overlay for the selected
+    // entry. The shortcut is read-only and never writes to the
+    // clipboard; the search input remains a typing surface, so the
+    // activation only fires when the focus is on the list, the body
+    // or the search field itself. The `desktop-card-preview` change
+    // promotes the matcher to a shared helper consumed by Quick
+    // Paste and the Desktop rail so the two surfaces cannot drift.
+    if (matchesQuickPastePreviewShortcut(event, shortcutPlatform)) {
+      const target = event.target as HTMLElement | null;
+      if (
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+      if (selectedIndex >= 0 && selectedIndex < resultIds.length) {
+        event.preventDefault();
+        const id = resultIds[selectedIndex];
+        if (id !== undefined) {
+          openPreviewFor(id);
+        }
+      }
+      return;
+    }
     if (event.key === "ArrowDown") {
       event.preventDefault();
       moveSelection(1);
@@ -819,6 +1185,40 @@
     }
   }
 
+  /**
+   * Whether the keyboard event matches the platform-specific search
+   * shortcut the Quick Paste window installs. Mirrors the
+   * `searchShortcut.ts` helper so the listener stays a thin matcher
+   * without duplicating the modifier table.
+   */
+  function matchesQuickPasteSearchShortcut(
+    event: KeyboardEvent,
+    platform: SearchShortcutPlatform,
+  ): boolean {
+    if (event.altKey || event.shiftKey) return false;
+    const key = (event.key ?? "").toLowerCase();
+    if (key !== "k") return false;
+    return platform === "macos"
+      ? Boolean(event.metaKey) && !event.ctrlKey
+      : Boolean(event.ctrlKey) && !event.metaKey;
+  }
+
+  /**
+   * Whether the keyboard event matches the preview shortcut
+   * (`Cmd+Enter` on macOS, `Ctrl+Enter` elsewhere). The helper
+   * delegates to `matchesPreviewShortcut` from `lib/clipboardPreview.ts`
+   * so the Quick Paste window and the Desktop rail consume one
+   * shared matcher; the wrapper exists so the legacy
+   * `quick-paste-preview-ui` regression suite keeps reading the
+   * inline `function matchesQuickPastePreviewShortcut` declaration.
+   */
+  function matchesQuickPastePreviewShortcut(
+    event: KeyboardEvent,
+    platform: SearchShortcutPlatform,
+  ): boolean {
+    return matchesPreviewShortcut(event, platform);
+  }
+
   function onInput(event: Event): void {
     const value = (event.currentTarget as HTMLInputElement).value;
     void runQuery(value);
@@ -834,6 +1234,14 @@
    */
   let searchInputEl: HTMLInputElement | null = null;
   let unlistenOpened: (() => void) | null = null;
+  /**
+   * Handle returned by `installWindowFocusClose` so the unmount path
+   * can detach the single window-focus listener. The listener is
+   * registered exactly once on `onMount`; remounts reuse the same
+   * idempotent flag so two `<svelte:window>` listeners can never
+   * stack and race the hide-on-blur branch.
+   */
+  let unlistenFocusClose: (() => void) | null = null;
   /**
    * Reference to the result list container. The autoscroll helper
    * uses the element only as a "list exists" sentinel; the actual
@@ -879,9 +1287,22 @@
     }
   }
 
-  function focusSearchInput(): void {
+  function focusSearchInput(selectAll = false): void {
     if (!searchInputEl) return;
     searchInputEl.focus();
+    if (selectAll) {
+      // The `Cmd/Ctrl+K` shortcut expects the existing query to be
+      // selected so the user can overwrite it immediately. Fall back
+      // to caret-at-end when `setSelectionRange` is unavailable so
+      // the field stays usable on every supported host.
+      const length = searchInputEl.value.length;
+      try {
+        searchInputEl.setSelectionRange(0, length);
+        return;
+      } catch {
+        // ignore and fall through to the caret-at-end behaviour.
+      }
+    }
     // Place the caret at the end of the existing value so the user
     // can keep typing without having to click into the field.
     const valueLength = searchInputEl.value.length;
@@ -933,10 +1354,165 @@
     };
   }
 
+  /**
+   * Subscribe to the Quick Paste window's OS-level focus changes
+   * through `getCurrentWindow().onFocusChanged`. The Tauri runtime
+   * fires the callback with `payload: boolean` whenever the window
+   * gains or loses OS-level focus — gaining focus (`focused = true`)
+   * is a no-op for Quick Paste and losing focus (`focused = false`)
+   * must hide the palette. This API is the canonical Tauri 2 way to
+   * observe window focus and replaces the previous
+   * raw blur event handler that produced an unreliable
+   * hide in the binary build.
+   *
+   * Why `onFocusChanged` and not the raw blur event:
+   *
+   * - `getCurrentWindow()` resolves the *current* webview's window
+   *   automatically; the helper does not need a `target` qualifier
+   *   because it is rooted in the webview that imports it. The
+   *   previous implementation passed `{ target: QUICK_PASTE_WINDOW_LABEL }`
+   *   to `listen` and the listener did not fire on the binary build.
+   * - The callback exposes a single typed `focused: boolean` payload
+   *   so the helper can branch on `focused === false` deterministically;
+   *   the previous raw event had no payload and forced every consumer
+   *   to treat every emit as a hide.
+   * - The helper installs exactly one listener per mount and returns
+   *   the unlisten handle so `onDestroy` always tears it down. A
+   *   remount returns the existing handle, making the registration
+   *   idempotent — the `unlistenFocusClose` slot the parent component
+   *   owns can never stack.
+   * - The helper guards the Tauri runtime with the same
+   *   `window.__TAURI_INTERNALS__` check `safeListenOpened` uses so a
+   *   non-Tauri test runtime never crashes; the helper then no-ops.
+   *
+   * Internal interactions (search input focus, row focus, menu
+   * open/close, preview open/close, pin toggle) DO NOT trip the
+   * listener — those events are DOM-level focus mutations that the
+   * OS-level window never observes.
+   */
+  function safeListenWindowFocus(handler: (focused: boolean) => void): () => void {
+    if (!window.__TAURI_INTERNALS__) return () => undefined;
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) => getCurrentWindow())
+      .then((windowHandle) =>
+        windowHandle.onFocusChanged(({ payload: focused }) => {
+          if (disposed) {
+            // Defensive: a focus event that lands after the unmount
+            // path detached the listener must never reach the hide
+            // branch (otherwise `hideQuickPasteWindow` could fire
+            // against a stale window reference and re-open the
+            // palette as a side effect of the focus event itself).
+            return;
+          }
+          try {
+            handler(focused);
+          } catch (error) {
+            console.error("quick-paste focus handler threw", error);
+          }
+        }),
+      )
+      .then((stop) => {
+        if (disposed) {
+          // The unmount path ran while we were awaiting the focus
+          // subscription; detach immediately so the listener never
+          // reaches the handler.
+          try {
+            stop();
+          } catch {
+            // Best-effort: the runtime may have already torn down the
+            // subscription.
+          }
+          return;
+        }
+        unlisten = stop;
+      })
+      .catch((error) => {
+        console.error("failed to listen for quick-paste window focus", error);
+      });
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        try {
+          unlisten();
+        } catch {
+          // Best-effort: the runtime may have already torn down the
+          // subscription.
+        }
+        unlisten = null;
+      }
+    };
+  }
+
+  /**
+   * Visible label the search surface renders next to the field so
+   * the user can see the platform-correct shortcut without reading
+   * the docs. The Quick Paste window matches `Cmd/Ctrl+K` (the same
+   * modifier table as the desktop rail's `Cmd/Ctrl+F`) so the badge
+   * derives from `quickPasteSearchShortcutLabel` instead of the
+   * `F`-key helper the main window uses.
+   */
+  $: shortcutLabelText = quickPasteSearchShortcutLabel(shortcutPlatform);
+  $: shortcutAccessibleLabel = quickPasteSearchShortcutAccessibleLabel(
+    shortcutPlatform,
+  );
+
+  /**
+   * Load the platform the Quick Paste window was opened on. The
+   * helper is best-effort: the listener only listens when the
+   * window is active, so a missing capability collapses to
+   * `"other"` (Linux / unknown) instead of surfacing an error to
+   * the user. The label and the matcher both read the same value,
+   * which is the only state the shortcut layer cares about.
+   */
+  async function loadShortcutPlatform(): Promise<void> {
+    try {
+      const diagnostics = await diagnosticsCommand();
+      shortcutPlatform = searchShortcutPlatform(diagnostics.platform_os);
+    } catch {
+      shortcutPlatform = "other";
+    }
+  }
+
   onMount(() => {
+    void loadShortcutPlatform();
     void loadRecent();
     unlistenOpened = safeListenOpened(() => {
       void onQuickPasteOpened();
+    });
+    // Window focus listener: when the OS-level window loses focus
+    // to another application, hide the Quick Paste window. The
+    // listener is installed through
+    // `getCurrentWindow().onFocusChanged` (Tauri 2's documented
+    // focus API) and only fires on OS-level focus handoffs, so an
+    // internal interaction (search input, menu, preview, pin)
+    // never reaches the hide branch. The listener is idempotent —
+    // remounts return the existing unlisten handle so two focus
+    // listeners can never stack.
+    //
+    // The handler also guards against the focus event that fires
+    // *because* we just hid the window: `hide()` calls into the
+    // Tauri shell, which can briefly clear focus, fire the focus
+    // event again, and re-enter the handler. The `isHiding` flag
+    // collapses that round-trip into a single hide so we never
+    // schedule a second hide while the first is in flight.
+    let isHiding = false;
+    unlistenFocusClose = safeListenWindowFocus((focused) => {
+      if (focused) return;
+      if (isHiding) return;
+      isHiding = true;
+      void hideQuickPasteWindow()
+        .catch(() => {
+          // Best-effort: hiding is idempotent. Failure is non-fatal.
+        })
+        .finally(() => {
+          // Release the guard on the next microtask so a future
+          // external focus event can hide the palette again.
+          queueMicrotask(() => {
+            isHiding = false;
+          });
+        });
     });
     // The opened signal is the canonical "user just opened the
     // window" cue. The initial mount also calls `onQuickPasteOpened`
@@ -953,26 +1529,52 @@
       unlistenOpened();
       unlistenOpened = null;
     }
-    // Revoke every thumbnail blob URL the list minted.
+    if (unlistenFocusClose) {
+      unlistenFocusClose();
+      unlistenFocusClose = null;
+    }
+    // Revoke every thumbnail and source-app icon blob URL the list
+    // minted so a long-lived window does not leak memory.
     assetResolver.release();
+    appIconResolver.release();
     thumbnails = {};
     thumbnailStates = {};
+    appIconUrls = {};
+    appIconStates = {};
+    previewEntryId = null;
   });
 </script>
 
-<svelte:window on:keydown={onWindowKeydown} />
+<svelte:head>
+  {@html `<style data-clipvault-visual-tokens>:root{${VISUAL_TOKEN_ROOT_CSS}}</style>`}
+</svelte:head>
+
+<svelte:window on:keydown={onWindowKeydown} on:pointerdown={onWindowPointerDown} />
 
 <main data-testid="quick-paste-root">
-  <input
-    type="search"
-    class="qp-search"
-    placeholder="Buscar en el historial del portapapeles"
-    value={query}
-    on:input={onInput}
-    aria-label="Buscar en el historial del portapapeles"
-    data-testid="quick-paste-input"
-    bind:this={searchInputEl}
-  />
+  <div class="qp-search-row">
+    <div class="qp-search-shell" data-testid="quick-paste-search-shell">
+      <input
+        type="search"
+        class="qp-search"
+        placeholder="Buscar en el historial del portapapeles"
+        value={query}
+        on:input={onInput}
+        aria-label="Buscar en el historial del portapapeles"
+        data-testid="quick-paste-input"
+        bind:this={searchInputEl}
+      />
+      <span
+        class="qp-search-hint"
+        data-testid="quick-paste-search-hint"
+        data-shortcut-platform={shortcutPlatform}
+        aria-label={shortcutAccessibleLabel}
+        title={shortcutAccessibleLabel}
+      >
+        {shortcutLabelText}
+      </span>
+    </div>
+  </div>
 
   <div class="qp-results-region" data-testid="quick-paste-results-region">
     {#if loading}
@@ -1029,11 +1631,6 @@
           {@const typeIconId = contentTypeIconId(contentType)}
           {@const typeLabel = contentTypeIconLabel(contentType)}
           {@const isPinned = entry ? entry.is_pinned : false}
-          {@const menuActions = entry
-            ? quickPasteMenuActions(entry, title, {
-                pasteBusy: pasteInFlight.has(id) || pinInFlight.has(id),
-              })
-            : []}
           {@const menuOpen = openMenuEntryId === id}
           <li
             class="qp-row"
@@ -1064,8 +1661,8 @@
                 <svg
                   aria-hidden="true"
                   focusable="false"
-                  width="14"
-                  height="14"
+                  width="20"
+                  height="20"
                 >
                   <use href="#{typeIconId}" />
                 </svg>
@@ -1096,8 +1693,8 @@
                 <svg
                   aria-hidden="true"
                   focusable="false"
-                  width="14"
-                  height="14"
+                  width="18"
+                  height="18"
                   viewBox="0 0 24 24"
                   fill={isPinned ? "currentColor" : "none"}
                   stroke="currentColor"
@@ -1118,25 +1715,53 @@
               <span
                 class="qp-source-app"
                 data-testid="quick-paste-source-app"
+                data-app-icon-state={entry && entry.source_app_icon_ref
+                  ? (appIconStates[id] ?? "loading")
+                  : "absent"}
                 title={sourceAppLabel}
                 aria-label={sourceAppLabel}
               >
-                <svg
-                  aria-hidden="true"
-                  focusable="false"
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.6"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  data-testid="quick-paste-source-app-fallback"
-                >
-                  <rect x="4" y="4" width="16" height="16" rx="3" />
-                  <path d="M9 9h6v6H9z" />
-                </svg>
+                {#if appIconUrls[id] && (appIconStates[id] ?? "loading") === "loaded"}
+                  <img
+                    class="qp-source-app-img"
+                    src={appIconUrls[id]}
+                    alt=""
+                    aria-hidden="true"
+                    data-testid="quick-paste-source-app-icon"
+                    on:error={() =>
+                      dropAppIcon(id, entry?.source_app_icon_ref ?? null)}
+                  />
+                {:else if entry && entry.source_app_icon_ref && (appIconStates[id] ?? "loading") === "loading"}
+                  <span
+                    class="qp-source-app-placeholder"
+                    data-testid="quick-paste-source-app-loading"
+                    aria-label="Cargando icono"
+                  >
+                    <svg
+                      aria-hidden="true"
+                      focusable="false"
+                      width="18"
+                      height="18"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.6"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <rect x="4" y="4" width="16" height="16" rx="3" />
+                      <path d="M9 9h6v6H9z" />
+                    </svg>
+                  </span>
+                {:else}
+                  <span
+                    class="qp-source-app-fallback"
+                    data-testid="quick-paste-source-app-fallback"
+                    aria-hidden="true"
+                  >
+                    {@html APP_FALLBACK_ICON_SVG}
+                  </span>
+                {/if}
                 <span class="qp-visually-hidden">{sourceAppLabel}</span>
               </span>
             </div>
@@ -1242,35 +1867,65 @@
               {/if}
             </div>
             {#if menuOpen && entry}
-              <ul
-                class="qp-menu"
-                role="menu"
-                data-testid="quick-paste-menu"
+              <button
+                type="button"
+                class="qp-menu-anchor"
+                data-testid="quick-paste-menu-anchor"
                 data-entry-id={id}
-              >
-                {#each menuActions as action (action.testId)}
-                  <li role="none">
-                    <button
-                      type="button"
-                      role="menuitem"
-                      class="qp-menu-item"
-                      data-testid={action.testId}
-                      data-action-kind={action.kind}
-                      disabled={action.disabled}
-                      aria-label={action.ariaLabel}
-                      title={action.tooltip}
-                      on:click|stopPropagation={() =>
-                        runMenuAction(id, action.mode)}
-                    >
-                      {action.label}
-                    </button>
-                  </li>
-                {/each}
-              </ul>
+                bind:this={menuAnchorEls[id]}
+                aria-hidden="true"
+                tabindex="-1"
+                on:click|stopPropagation={() => undefined}
+              ></button>
             {/if}
           </li>
         {/each}
       </ul>
+      {#if openMenuEntryId !== null}
+        {@const anchorEntry = findEntry(mode, recent, hits, openMenuEntryId)}
+        {#if anchorEntry}
+          {@const anchorActions = quickPasteMenuActions(
+            anchorEntry,
+            renderTitle(mode, recent, hits, openMenuEntryId),
+            {
+              copyBusy:
+                pasteInFlight.has(openMenuEntryId) ||
+                pinInFlight.has(openMenuEntryId),
+            },
+          )}
+          <ul
+            class="qp-menu"
+            role="menu"
+            data-testid="quick-paste-menu"
+            data-entry-id={openMenuEntryId}
+            style={menuPositionStyle}
+            bind:this={menuEl}
+            on:keydown={onMenuKeydown}
+          >
+            {#each anchorActions as action (action.testId)}
+              <li role="none">
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="qp-menu-item"
+                  class:qp-menu-item-preview={action.kind === "preview"}
+                  data-testid={action.testId}
+                  data-action-kind={action.kind}
+                  disabled={action.disabled}
+                  aria-label={action.ariaLabel}
+                  title={action.tooltip}
+                  on:click|stopPropagation={() =>
+                    action.kind === "preview"
+                      ? openPreviewFor(openMenuEntryId!)
+                      : runMenuAction(openMenuEntryId!, action.mode)}
+                >
+                  {action.label}
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      {/if}
     {/if}
     {#if pinError}
       <p
@@ -1284,6 +1939,29 @@
   </div>
 </main>
 
+{#if previewEntryId !== null}
+  {@const previewRecord = previewEntry()}
+  {#if previewRecord}
+    <ClipboardPreview
+      entry={previewRecord}
+      testIdPrefix="quick-paste-preview"
+      accessibleLabel={`Previsualización de ${renderTitle(mode, recent, hits, previewEntryId)}`}
+      onClose={closePreview}
+    />
+  {/if}
+{/if}
+
+<!--
+  Mount the content-type icon sprite once at the document root so
+  every `<use href="#cv-icon-…">` Quick Paste renders resolves to a
+  shape. The same sprite is mounted by `HistoryCard.svelte` so the
+  Quick Paste palette and the desktop rail share the exact same
+  glyph registry without a parallel implementation. The block is
+  rendered after the visible tree to keep the rendered output
+  deterministic.
+-->
+{@html CONTENT_TYPE_ICON_SPRITE}
+
 {#if guidance}
   <PlatformGuidanceModal
     {guidance}
@@ -1295,46 +1973,107 @@
 {/if}
 
 <style>
+  /*
+   * Quick Paste runs inside its own Tauri webview (`quick-paste.html`)
+   * so the `:root { --cv-* }` block `App.svelte` injects on the main
+   * desktop window is NOT visible here. The component above mounts
+   * the same string `lib/visualTokens.ts` emits through
+   * `<svelte:head>` so every `var(--cv-*, fallback)` reference in
+   * this stylesheet resolves to the same value the desktop rail
+   * consumes. Two parallel `--cv-*` blocks would be a regression —
+   * the regression suite pins the shared helper as the only writer.
+   */
+
   :global(html, body) {
     margin: 0;
     padding: 0;
-    background: #0e1116;
-    color: #f0f4f8;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
-      sans-serif;
+    background: var(--cv-bg-surface, #0e1116);
+    color: var(--cv-fg, #f0f4f8);
+    /* Reuse the documented `--cv-font-family` token (defined in
+     * `visualTokens.ts`) so the Quick Paste palette matches the
+     * desktop rail's typography token-for-token. A defensive
+     * fallback is kept so the webview stays readable even when
+     * the parent shell forgot to mount the token block. */
+    font-family: var(--cv-font-family, -apple-system, BlinkMacSystemFont,
+      "Segoe UI", system-ui, sans-serif);
+    font-size: var(--cv-body, 0.9rem);
   }
 
   main {
     /* The compact UI fills the 720x520 transient window. Every
      * padding/inset is hand-tuned so the 72px rows fit without
      * horizontal scroll and the search input stays the visual
-     * header. */
+     * header. The rounded shell border lives on the visible body so
+     * the geometry stays anchored to the documented `720 × 520`
+     * rectangle while the corners read consistently with the rest
+     * of the cards. The font tokens mirror the visual system so the
+     * card surface reads identically to the desktop rail. The
+     * `var(--cv-*, fallback)` lookups read the tokens the
+     * `<svelte:head>` block above emits; the literal fallback
+     * keeps the palette readable even when the global block has
+     * not been emitted. */
     box-sizing: border-box;
     width: 100%;
     height: 100vh;
-    padding: 0.5rem 0.75rem 0.5rem;
+    padding: 0.75rem 0.85rem 0.85rem;
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: 0.5rem;
     overflow: hidden;
     user-select: none;
     -webkit-user-select: none;
+    background: var(--cv-bg-surface, #0e1116);
+    border-radius: 16px;
+    border: 1px solid var(--cv-border-strong, #1f2937);
+    font-family: var(--cv-font-family, inherit);
+    color: var(--cv-fg, #f0f4f8);
+  }
+
+  .qp-search-row {
+    /* The search row groups the field with the platform-aware
+     * shortcut hint. The grid reserves a flexible column for the
+     * shell so the inner badge never has to compete with the field
+     * for horizontal space. The hint collapses to `Ctrl K` on
+     * Linux and `⌘K` on macOS via `quickPasteSearchShortcutLabel`. */
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.45rem;
+    align-items: center;
+    flex: 0 0 auto;
+  }
+
+  .qp-search-shell {
+    /* Relative wrapper anchoring the platform shortcut badge the
+     * same way `DesktopToolbar.svelte` does: the input fills the
+     * wrapper, the badge sits absolutely inside it with
+     * `pointer-events: none` so clicks and the `Cmd/Ctrl+K`
+     * shortcut both land on the input. The right padding on the
+     * input keeps the typed query from rendering under the badge. */
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   .qp-search {
     /* The search field is the primary header of the palette. The
      * typography follows the compact-UI spec: 15-16px, slightly
      * larger than the row title so the user lands on the right
-     * surface as soon as the window opens. */
-    flex: 0 0 auto;
+     * surface as soon as the window opens. The right padding
+     * reserves the column the `.qp-search-hint` badge lives in. */
     width: 100%;
-    padding: 0.45rem 0.7rem;
+    padding: 0.45rem 4rem 0.45rem 0.7rem;
     background: #161b22;
     color: inherit;
     border: 1px solid #30363d;
-    border-radius: 6px;
+    border-radius: 8px;
     font-family: inherit;
-    font-size: 0.95rem;
+    /* The search field keeps the documented `--cv-body` scale so the
+     * Quick Paste header reads at the same weight the desktop
+     * toolbar uses. A future theme change updates the toolbar
+     * (`--cv-body`) and the field in lock-step. */
+    font-size: var(--cv-body, 0.9rem);
     line-height: 1.2;
     box-sizing: border-box;
   }
@@ -1343,6 +2082,36 @@
     outline: none;
     border-color: #2563eb;
     box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.5);
+  }
+
+  .qp-search-hint {
+    /* The platform-aware shortcut hint. Anchored to the right
+     * side of the shell so the field can grow without
+     * colliding with the badge. The badge never intercepts a
+     * click — `pointer-events: none` keeps the underlying input
+     * always-reachable so the `Cmd/Ctrl+K` shortcut and the
+     * search helper both hit the input directly. The font size
+     * uses the documented `--cv-preview` token so the badge
+     * reads at the same weight the captured-content previews do. */
+    position: absolute;
+    right: 0.5rem;
+    top: 50%;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 22px;
+    padding: 0 0.5rem;
+    border-radius: 6px;
+    background: rgba(148, 163, 184, 0.14);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    color: #cbd5f5;
+    font-size: var(--cv-preview, 0.72rem);
+    font-weight: 600;
+    line-height: 1;
+    pointer-events: none;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
   .qp-results-region {
@@ -1356,7 +2125,10 @@
   .qp-status {
     margin: 0;
     padding: 0.4rem 0.5rem;
-    font-size: 0.78rem;
+    /* Reuse the documented `--cv-muted` token so the empty /
+     * loading / error band reads at the same weight the desktop
+     * toast / status text consumes. */
+    font-size: var(--cv-muted, 0.78rem);
     line-height: 1.3;
     color: #94a3b8;
     font-style: italic;
@@ -1432,20 +2204,30 @@
 
   .qp-row-line-meta {
     /* The metadata line carries the type icon, the title, the pin
-     * button and the source-app icon. Each column has a fixed
-     * footprint so the title truncates with an ellipsis instead of
-     * pushing the source-app icon out of the visible area. */
-    grid-template-columns: 18px 1fr 18px 18px;
+     * button and the source-app icon. Each column reuses the
+     * documented card footprints (`1.5rem` for the type, `1.65rem`
+     * for the pin / source-app icons) so the Quick Paste row and
+     * the desktop rail render the same effective icon size. The
+     * title takes the remaining width and truncates with an
+     * ellipsis instead of pushing the source-app icon out of the
+     * visible area. */
+    grid-template-columns: 1.5rem 1fr 1.65rem 1.65rem;
   }
 
   .qp-type {
+    /* The content-type icon area reuses the documented
+     * `HistoryCard.svelte` footprint: a 1.5rem square container
+     * with a 20×20 SVG inside. The shared size is the
+     * non-negotiable contract the `quick-paste-preview-ui` spec
+     * pins so the Quick Paste list and the desktop rail render
+     * the same effective icon. */
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 18px;
-    height: 18px;
-    flex: 0 0 18px;
-    border-radius: 4px;
+    width: 1.5rem;
+    height: 1.5rem;
+    flex: 0 0 1.5rem;
+    border-radius: 6px;
     background: rgba(147, 197, 253, 0.12);
     color: #93c5fd;
   }
@@ -1458,7 +2240,11 @@
   .qp-title {
     flex: 1 1 auto;
     min-width: 0;
-    font-size: 0.84rem;
+    /* The row title reuses `--cv-control` (the documented token
+     * `HistoryCard.svelte` consumes for its own title) so the
+     * compact row reads at the same weight the desktop card
+     * titles do. */
+    font-size: var(--cv-control, 0.85rem);
     line-height: 1.2;
     font-weight: 600;
     color: inherit;
@@ -1468,15 +2254,65 @@
   }
 
   .qp-source-app {
-    flex: 0 0 18px;
-    width: 18px;
-    height: 18px;
+    /* The source-application icon area reuses the documented
+     * `HistoryCard.svelte` footprint: a 1.65rem square container,
+     * the same `border-radius` and the same `border` colour so the
+     * Quick Paste list and the desktop rail render the same
+     * effective icon size. The shared resolver, the stable
+     * `loading` / `loaded` / `error` states and the `object-fit:
+     * contain` content contract mirror HistoryCard verbatim. */
+    flex: 0 0 1.65rem;
+    width: 1.65rem;
+    height: 1.65rem;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     border-radius: 4px;
-    background: rgba(148, 163, 184, 0.12);
+    background: rgba(255, 255, 255, 0.06);
     color: #94a3b8;
+    overflow: hidden;
+  }
+
+  .qp-source-app-img {
+    /* The resolved source-app icon. `object-fit: contain` keeps
+     * the icon inside the 18px square without distorting a square
+     * icon or cropping a tall icon — same contract the desktop
+     * rail enforces for `HistoryCard`. */
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+  }
+
+  .qp-source-app-placeholder {
+    /* A distinguishable placeholder while the icon bridge is in
+     * flight. NOT an empty square — the icon area must keep the
+     * same footprint across `loading`, `loaded` and `error` so the
+     * row never reflows while the user types. */
+    width: 100%;
+    height: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(148, 163, 184, 0.55);
+  }
+
+  .qp-source-app-fallback {
+    /* Generic application glyph the row renders when the metadata
+     * bridge cannot deliver bytes. The row never surfaces the raw
+     * bundle identifier; the accessible label carries that detail
+     * for screen readers only. */
+    width: 100%;
+    height: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #94a3b8;
+  }
+
+  .qp-source-app-fallback :global(svg) {
+    width: 100%;
+    height: 100%;
   }
 
   .qp-row-active .qp-source-app {
@@ -1486,14 +2322,16 @@
 
   .qp-pin {
     /* The pin button lives in the metadata line, between the title
-     * and the source-app icon. The 18px footprint matches the
-     * neighbouring icons so the title truncates instead of
-     * pushing the column out of the visible area. The button is
-     * a `button` element so keyboard activation and screen-reader
-     * announcements follow the documented accessible contract. */
-    flex: 0 0 18px;
-    width: 18px;
-    height: 18px;
+     * and the source-app icon. The 1.65rem footprint matches the
+     * `HistoryCard.svelte` pin button (`.card-actions :global(.pin)`)
+     * and the source-app icon column so the title truncates
+     * instead of pushing any of the controls out of the visible
+     * area. The button is a `button` element so keyboard
+     * activation and screen-reader announcements follow the
+     * documented accessible contract. */
+    flex: 0 0 1.65rem;
+    width: 1.65rem;
+    height: 1.65rem;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1549,7 +2387,10 @@
   .qp-preview {
     flex: 1 1 auto;
     min-width: 0;
-    font-size: 0.78rem;
+    /* The row preview uses the documented `--cv-muted` token so the
+     * compact row reads at the same weight the desktop metadata
+     * strips consume. */
+    font-size: var(--cv-muted, 0.78rem);
     line-height: 1.25;
     color: #cbd5f5;
     overflow: hidden;
@@ -1574,7 +2415,10 @@
 
   .qp-elapsed {
     flex: 0 0 auto;
-    font-size: 0.7rem;
+    /* The elapsed time uses the documented `--cv-tag` token so the
+     * metadata strip reads at the same weight the desktop tag
+     * chips consume. */
+    font-size: var(--cv-tag, 0.65rem);
     line-height: 1.2;
     color: #94a3b8;
     font-variant-numeric: tabular-nums;
@@ -1626,22 +2470,43 @@
   }
 
   .qp-menu {
-    /* The menu is positioned absolutely inside the row so the
-     * fixed-height contract stays intact: a single-open menu does
-     * not push other rows down. */
-    position: absolute;
-    right: 0.55rem;
-    top: 100%;
-    z-index: 2;
+    /* Portalised popover. The menu lives OUTSIDE the row so the
+     * fixed-height contract stays intact and the row's
+     * `overflow: hidden` cannot clip the popover. The exact
+     * rectangle is computed in JS (`menuPositionStyle`) and
+     * anchored to the trigger button (`.qp-menu-anchor`) with a
+     * collision-aware fallback that flips the popover above the
+     * trigger when the bottom of the list would clip it. */
+    position: fixed;
+    z-index: 50;
     margin: 0;
     padding: 0.25rem;
     list-style: none;
-    min-width: 12rem;
+    width: 12rem;
     background: #1f2937;
     color: #f0f4f8;
     border: 1px solid #30363d;
     border-radius: 6px;
     box-shadow: 0 8px 18px rgba(0, 0, 0, 0.45);
+    max-height: calc(100vh - 1rem);
+    overflow-y: auto;
+  }
+
+  /* The hidden anchor the menu's position is computed against.
+   * Lives inline in the row only while the menu is open; its
+   * `bind:this` reference becomes the trigger element the helper
+   * reads through `getBoundingClientRect`. */
+  .qp-menu-anchor {
+    position: absolute;
+    right: 0.4rem;
+    bottom: 0.4rem;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 0;
+    margin: 0;
+    background: transparent;
+    cursor: default;
   }
 
   .qp-row {
@@ -1708,6 +2573,14 @@
 
   .qp-thumb-placeholder-error {
     color: #f87171;
+  }
+
+  .qp-menu-item-preview {
+    /* The `Previsualizar` menu entry stays visually distinct from
+     * the direct paste actions so the user can tell the read-only
+     * affordance apart from the actions that mutate the clipboard. */
+    color: #cbd5f5;
+    font-style: italic;
   }
 
   .qp-visually-hidden {
