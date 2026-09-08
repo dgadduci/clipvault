@@ -490,6 +490,39 @@ export interface SourceApplicationOption {
   fallback: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// `tag-filter` capability.
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire-level filter the desktop combobox sends on every recents/search
+ * request. The discriminator mirrors the source-app filter shape so
+ * the two comboboxes can be composed in one place:
+ *
+ * - `all`: no restriction; the recents/search query applies the rest
+ *   of the filter set as usual.
+ * - `tag`: pin the candidate set to a single tag id. The id is the
+ *   stable `Tag.id` value the rest of the desktop consumes; the
+ *   frontend treats it as opaque and never displays it directly.
+ *
+ * The combobox keeps `Todas` as the first option so the default view
+ * reproduces the pre-tag-filter rail byte-for-byte.
+ */
+export type TagFilter =
+  | { kind: "all" }
+  | { kind: "tag"; tagId: number };
+
+/**
+ * Single metadata-only entry the tag combobox renders. The frontend
+ * reads `display_name` for the visible label; `id` is the stable
+ * internal identifier the filter forwards to the recents/search
+ * request.
+ */
+export interface TagFilterOption {
+  id: number;
+  display_name: string;
+}
+
 /**
  * Metadata describing the scope a `SourceApplicationsSnapshot` was
  * computed against. Returned alongside the options so the frontend can

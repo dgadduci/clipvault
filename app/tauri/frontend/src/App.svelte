@@ -18,6 +18,8 @@
     SourceApplicationOption,
     SourceApplicationsSnapshot,
     Tag,
+    TagFilter,
+    TagFilterOption,
   } from "./types";
   import {
     activeApplicationCommand,
@@ -194,6 +196,54 @@
    */
   let sourceAppOptions: SourceApplicationOption[] = [];
   let sourceAppOptionsLoading = false;
+  /**
+   * Tag filter the toolbar combobox renders between the
+   * source-application combobox and the configuration menu. The
+   * desktop owns the canonical state so the same selection can be
+   * composed with the source-app filter, the active collection and
+   * the search query inside `loadEntries` / `performSearch`.
+   *
+   * The default `{ kind: "all" }` reproduces the pre-tag-filter
+   * rail byte-for-byte so the new facet is purely additive.
+   */
+  let tagFilter: TagFilter = { kind: "all" };
+  /**
+   * Tag combobox options. The desktop derives them from the active
+   * scope (`Historial` or the active collection) using the
+   * `entryOrganization` cache the parent already hydrates for the
+   * per-card chips. The set is recomputed reactively on every
+   * cache change so a freshly created tag the user just assigned
+   * immediately becomes a selectable option without a second
+   * round-trip.
+   */
+  $: tagFilterOptions = ((): TagFilterOption[] => {
+    const lookup = new Map<number, TagFilterOption>();
+    for (const [entryId, value] of entryOrganization) {
+      if (entryOrganizationHydration.get(entryId) !== "loaded") continue;
+      for (const tag of value.tags) {
+        if (!lookup.has(tag.id)) {
+          lookup.set(tag.id, { id: tag.id, display_name: tag.display_name });
+        }
+      }
+    }
+    return Array.from(lookup.values()).sort((a, b) =>
+      a.display_name.toLowerCase().localeCompare(b.display_name.toLowerCase()),
+    );
+  })();
+  /**
+   * Compute the tag ids the recents/search request must forward
+   * to the backend. The helper is read at the call site of every
+   * backend round-trip so the new tag selection is the source of
+   * truth for the same event — Svelte flushes reactive `$:`
+   * blocks on the next microtask, which would otherwise make the
+   * request capture the *previous* `tagFilter` value when the
+   * toolbar fires the change callback. Reading the live `let`
+   * variable synchronously keeps the visible combobox selection
+   * and the rail / search response in lock-step.
+   */
+  function currentTagFilterIds(): number[] {
+    return tagFilter.kind === "tag" ? [tagFilter.tagId] : [];
+  }
   /**
    * Local selection state mirrored from the HistoryCardRail. The
    * rail owns the canonical id (so two cards racing a `mousedown`
@@ -409,7 +459,7 @@
     return recentEntriesFilteredCommand({
       limit: RAIL_LIMIT,
       collectionId: activeCollectionIsHistory ? null : selectedCollectionId,
-      tagIds: [],
+      tagIds: currentTagFilterIds(),
       sourceApp: sourceAppFilter,
     });
   }
@@ -630,6 +680,32 @@
     await refreshEntries();
   }
 
+  /**
+   * Handler the toolbar's tag combobox dispatches. The toolbar is
+   * fully presentational: it owns no state of its own and forwards
+   * every selection through this callback so the parent can
+   * compose the new constraint with the rest of the recents/search
+   * facets and immediately re-run the active query.
+   *
+   * The handler is intentionally short-circuit when the new
+   * selection equals the current one so a downstream `refreshEntries`
+   * does not needlessly rebuild the rail on a no-op interaction
+   * (the parent re-renders on every `recentEntriesFilteredCommand`
+   * round-trip).
+   */
+  async function handleTagFilterChange(next: TagFilter): Promise<void> {
+    const sameKind = next.kind === tagFilter.kind;
+    const sameTag =
+      next.kind === "tag" &&
+      tagFilter.kind === "tag" &&
+      next.tagId === tagFilter.tagId;
+    if (sameKind && (next.kind === "all" || sameTag)) {
+      return;
+    }
+    tagFilter = next;
+    await refreshEntries();
+  }
+
   async function refreshUnorganizedClearableCount(): Promise<void> {
     if (unorganizedClearableCountLoading) {
       return;
@@ -739,6 +815,16 @@
     // (the design document pins this contract).
     if (sourceAppFilter.kind !== "all") {
       sourceAppFilter = { kind: "all" };
+    }
+    // The tag filter follows the same scope contract: a selection
+    // that has no meaning in the new scope (no entry in the new
+    // collection carries the tag the user picked) must collapse
+    // back to `Todas` so the user is not silently shown a
+    // permanently empty rail. The reactive `tagFilterOptions`
+    // derivation below reads the new scope and surfaces the
+    // matching set as soon as the entries are refreshed.
+    if (tagFilter.kind === "tag") {
+      tagFilter = { kind: "all" };
     }
     // The local selection is rail state; reset it so a card that
     // was visible in the previous scope cannot silently remain
@@ -1186,7 +1272,7 @@
             selectedCollectionId !== null && !activeCollectionIsHistory
               ? selectedCollectionId
               : null,
-          tagIds: [],
+          tagIds: currentTagFilterIds(),
           sourceApp: sourceAppFilter,
         });
         return response;
@@ -1498,6 +1584,8 @@
           showClearHistory={activeCollectionIsHistory}
           sourceAppFilter={sourceAppFilter}
           sourceAppOptions={sourceAppOptions}
+          tagFilter={tagFilter}
+          tagFilterOptions={tagFilterOptions}
           onSearchInput={handleSearchInput}
           onOpenDevelopment={onOpenDevelopment}
           onOpenPrivacy={onOpenPrivacy}
@@ -1505,6 +1593,7 @@
           onOpenShortcut={onOpenShortcut}
           onRequestClearHistory={onRequestClearHistory}
           onSourceAppFilterChange={(next) => handleSourceAppFilterChange(next)}
+          onTagFilterChange={(next) => handleTagFilterChange(next)}
         />
         <p
           class="search-status muted"

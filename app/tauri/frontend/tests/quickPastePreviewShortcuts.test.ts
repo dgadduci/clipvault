@@ -158,8 +158,17 @@ test("the Escape handler layers the preview over the Quick Paste window", () => 
   const block = extractWindowKeydownBlock();
   // The preview MUST close first so the user can dismiss it
   // without losing the window; a second Escape falls through to
-  // the legacy handler.
-  const previewEscapeIndex = block.indexOf("previewEntryId !== null");
+  // the legacy handler. The `quick-paste-desktop-polish` change
+  // introduces an explicit `surface === "preview"` state machine
+  // so the keyboard handler branches on a stable, testable flag
+  // instead of inlining `previewEntryId !== null` against the
+  // overlay id. Both spellings are accepted to keep the contract
+  // testable across the migration.
+  const previewEscapeIndex = Math.min(
+    ...["previewEntryId !== null", 'surface === "preview"']
+      .map((needle) => block.indexOf(needle))
+      .filter((value) => value >= 0),
+  );
   const legacyEscapeIndex = block.indexOf("handleEscape(");
   assert.notEqual(previewEscapeIndex, -1, "preview Escape branch must exist");
   assert.notEqual(legacyEscapeIndex, -1, "legacy Escape handler must exist");

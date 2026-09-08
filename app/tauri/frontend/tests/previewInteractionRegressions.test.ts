@@ -1351,6 +1351,12 @@ test("QuickPaste preview hint never breaks the row layout", () => {
   // keep their fixed columns; the title still truncates with an
   // ellipsis instead of growing the row. The hint must remain
   // non-interactive (`pointer-events: none`).
+  //
+  // The `quick-paste-desktop-polish` change inserts a sibling
+  // `auto` column for the tag chips between the title and the
+  // hint. The hint column is therefore the second `auto` slot
+  // in the grid template; the assertion accepts both spellings
+  // so the row layout stays testable across the migration.
   const quickPasteSource = readFileSync(
     resolvePath(process.cwd(), "src", "QuickPaste.svelte"),
     "utf8",
@@ -1359,11 +1365,16 @@ test("QuickPaste preview hint never breaks the row layout", () => {
     /\.qp-row-line-meta\s*\{([^}]*)\}/,
   );
   assert.ok(metaRuleMatch, "the .qp-row-line-meta CSS rule must exist");
+  const metaColumns = metaRuleMatch![1];
+  const hasHintColumn = /grid-template-columns:\s*1\.5rem\s+minmax\(0,\s*1fr\)\s+auto\s+1\.65rem\s+1\.65rem/.test(
+    metaColumns,
+  );
+  const hasTagsAndHintColumns = /grid-template-columns:\s*1\.5rem\s+minmax\(0,\s*1fr\)\s+auto\s+auto\s+1\.65rem\s+1\.65rem/.test(
+    metaColumns,
+  );
   assert.ok(
-    /grid-template-columns:\s*1\.5rem\s+minmax\(0,\s*1fr\)\s+auto\s+1\.65rem\s+1\.65rem/.test(
-      metaRuleMatch![1],
-    ),
-    "the meta line grid must allocate an auto column for the hint",
+    hasHintColumn || hasTagsAndHintColumns,
+    "the meta line grid must allocate an auto column for the hint (with the optional tags column the polish change inserts)",
   );
   const hintRuleMatch = quickPasteSource.match(
     /\.qp-preview-hint\s*\{([^}]*)\}/,

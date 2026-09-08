@@ -65,36 +65,45 @@ responses.
 
 ### Requirement: Render a safe rich card preview
 
-The main history card SHALL render the sanitized rich preview when available,
-within the existing fixed square card and bounded preview area. The renderer
-MUST remove executable behavior, remote resources and unsupported embedded
-objects, and MUST fall back to plain text if the preview is missing or invalid.
+The shared rich-text preview SHALL render the existing sanitized rich
+representation without collapsing meaningful whitespace. It MUST preserve
+line breaks, tabs, consecutive blank lines and indentation from the captured
+plain/rich representation while retaining the supported formatting and the
+existing fixed preview bounds. If the rich preview is unavailable, the plain
+fallback SHALL preserve the same whitespace characters.
 
-#### Scenario: Formatted preview is shown
+#### Scenario: Rich preview preserves line breaks
 
-- **WHEN** a rich entry has a valid sanitized preview reference
-- **THEN** the card shows its text with supported font, color, weight,
-  italic, underline, strike, paragraph, list, alignment and line-break
-  formatting without changing the card dimensions
+- **WHEN** a rich capture contains multiple paragraphs, explicit line breaks
+  or consecutive blank lines
+- **THEN** the preview displays the same line structure and does not collapse
+  the lines into one paragraph
 
-#### Scenario: Preview overflows the card
+#### Scenario: Rich preview preserves tabs and indentation
 
-- **WHEN** formatted content is longer or larger than the card preview area
-- **THEN** the preview is clipped or truncated, remains scroll-free according
-  to the card contract and leaves the stored content unchanged
+- **WHEN** a rich capture contains tab characters or leading indentation
+- **THEN** the preview preserves their visual separation with a stable tab
+  width and does not replace the content with a collapsed single space
 
-#### Scenario: Unsafe markup is present
+#### Scenario: Rich formatting remains safe
 
-- **WHEN** the source HTML contains scripts, event attributes, dangerous URLs,
-  remote resources or embedded objects
-- **THEN** those constructs are absent from the rendered preview and no code
-  executes
+- **WHEN** the preview contains permitted font, color, weight, italic,
+  underline, list or paragraph formatting
+- **THEN** that formatting remains visible while scripts, event handlers,
+  dangerous URLs, remote resources and unsupported active objects remain
+  blocked
 
-#### Scenario: Rich preview cannot load
+#### Scenario: Plain fallback preserves whitespace
 
-- **WHEN** the reference is missing, invalid, stale or fails to decode
-- **THEN** the card renders the existing accessible plain-text fallback and
-  does not expose the internal reference
+- **WHEN** a rich preview reference is missing, invalid or still loading
+- **THEN** the safe plain-text fallback preserves line breaks, tabs and blank
+  lines and does not use the truncated card summary
+
+#### Scenario: Shared preview keeps one implementation
+
+- **WHEN** the same rich entry is previewed from Desktop and Quick Paste
+- **THEN** both surfaces use the shared preview component/helper and produce
+  the same whitespace and sanitization behavior
 
 ### Requirement: Paste a rich entry in an explicit mode
 

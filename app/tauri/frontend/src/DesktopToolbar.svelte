@@ -23,9 +23,12 @@
    */
   import { onDestroy, tick } from "svelte";
   import SourceAppFilter from "./SourceAppFilter.svelte";
+  import TagFilter from "./TagFilter.svelte";
   import type { SourceApplicationOption } from "./types.ts";
 
   type SourceAppFilterValue = import("./types.ts").SourceAppFilter;
+  type TagFilterValue = import("./types.ts").TagFilter;
+  type TagFilterOptionValue = import("./types.ts").TagFilterOption;
 
   export let searchQuery: string = "";
   export let searching: boolean = false;
@@ -73,6 +76,20 @@
    * to the combobox.
    */
   export let sourceAppOptions: SourceApplicationOption[] = [];
+  /**
+   * Tag filter the toolbar renders between the source-application
+   * combobox and the configuration menu. The parent owns the
+   * canonical state so the same filter can be composed with the
+   * collection, query and source-app facets inside `App.svelte`.
+   */
+  export let tagFilter: TagFilterValue = { kind: "all" };
+  /**
+   * Tag combobox options. The parent derives them from the active
+   * scope (`Historial` or the active collection) so the combobox
+   * never surfaces tags the user cannot target; the toolbar only
+   * forwards the list to the combobox.
+   */
+  export let tagFilterOptions: TagFilterOptionValue[] = [];
   export let onSearchInput: (value: string) => void = () => {};
   export let onOpenDevelopment: (event: MouseEvent) => void = () => {};
   export let onOpenPrivacy: (event: MouseEvent) => void = () => {};
@@ -80,6 +97,7 @@
   export let onOpenShortcut: (event: MouseEvent) => void = () => {};
   export let onRequestClearHistory: (event: MouseEvent) => void = () => {};
   export let onSourceAppFilterChange: (next: SourceAppFilterValue) => void = () => {};
+  export let onTagFilterChange: (next: TagFilterValue) => void = () => {};
 
   /**
    * Ellipsis-menu state. The toolbar owns a single menu instance;
@@ -226,6 +244,11 @@
       selected={sourceAppFilter}
       options={sourceAppOptions}
       onChange={onSourceAppFilterChange}
+    />
+    <TagFilter
+      selected={tagFilter}
+      options={tagFilterOptions}
+      onChange={onTagFilterChange}
     />
     <div class="actions" role="toolbar" aria-label="Configuración y limpieza">
       <div class="menu-wrapper" data-testid="overflow-menu-wrapper">

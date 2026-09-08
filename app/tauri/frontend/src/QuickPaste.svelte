@@ -45,6 +45,7 @@
   import { formatElapsedTime } from "./lib/elapsedTime";
   import {
     createClipboardAssetResolver,
+    entryFullPreviewText,
     entryPreviewText,
     hasRenderableImage,
     isImageEntry,
@@ -71,6 +72,22 @@
   } from "./lib/codeLanguageProjections";
   import { canonicalLabel as canonicalCodeLanguageLabel } from "./lib/codeLanguageDetector";
   import { sourceAppIconCommand, diagnosticsCommand } from "./lib/tauri";
+  import {
+    entryTagsCommand,
+    organizationSnapshotCommand,
+  } from "./lib/tauri";
+  import {
+    applyQuickPasteTagsResult,
+    bumpQuickPasteTagsToken,
+    currentQuickPasteTagsToken,
+    markQuickPasteTagsError,
+    markQuickPasteTagsPending,
+    resetQuickPasteTagsToken,
+    truncateQuickPasteTags,
+    type QuickPasteTagsCache,
+    type QuickPasteTagsHydration,
+  } from "./lib/quickPasteTags";
+  import type { Tag } from "./types";
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
   import ClipboardPreview from "./ClipboardPreview.svelte";
 
@@ -175,6 +192,30 @@
    */
   let previewEntryId: number | null = null;
   /**
+   * Explicit surface state machine. `list` is the canonical
+   * capture-list surface; `preview` is the read-only `ClipboardPreview`
+   * overlay. The Escape contract from `quick-paste/spec.md` keys
+   * off this flag so the keyboard handler cannot accidentally
+   * hide the window when the user is dismissing the preview.
+   *
+   * The flag is derived from `previewEntryId !== null` to keep a
+   * single source of truth, but is exposed as a separate reactive
+   * value so the keyboard handler branches on a stable boolean
+   * the unit tests can assert without DOM access.
+   */
+  $: surface = previewEntryId !== null ? "preview" : "list";
+  /**
+   * One-shot guard the preview-close path sets so a single
+   * `Escape` keystroke cannot both close the preview AND hide the
+   * Quick Paste window. The `<ClipboardPreview>` overlay stops
+   * propagation of its own `keydown` event as the primary fix;
+   * this flag is the defence in depth that survives a future
+   * regression that forgets the `stopPropagation()` call. The
+   * flag is consumed by `onWindowKeydown` and reset on the next
+   * animation frame so it never leaks past a single keystroke.
+   */
+  let suppressNextWindowEscape = false;
+  /**
    * Platform the Quick Paste window was opened on. Resolved once
    * from the backend diagnostics so the visible `Cmd/Ctrl+K` hint
    * and the keyboard matcher stay in lockstep without a second
@@ -182,13 +223,119 @@
    */
   let shortcutPlatform: SearchShortcutPlatform = "other";
 
-  // Fixed dimensions of the result item. The contract documented in
-  // `quick-paste-compact-ui/spec.md` pins 72 logical pixels so every
-  // entry — text, image, loading, error, selected, hover, focus —
-  // shares the same outer rectangle. Any change to the value MUST
-  // update the matching CSS rule on `.qp-row` AND the tests under
+  // Fixed dimensions of the result item. The row geometry the
+  // `quick-paste-desktop-polish` change pins:
+  //
+  // ```text
+  // item
+  // ├── title-row              ← type, title, tags, pin, source-app
+  // ├── capture-content        ← preview (exactly two lines)
+  // └── footer/meta            ← code-language, elapsed, menu
+  // ```
+  //
+  // The footer/meta is optional per the spec ("si corresponde") but
+  // the Quick Paste palette renders the elapsed time and the menu
+  // trigger, so the row reserves a third track. Every entry — text,
+  // image, loading, error, selected, hover, focus — shares the same
+  // outer rectangle. Any change to the value MUST update the
+  // matching CSS rule on `.qp-row` AND the tests under
+  // `tests/quickPasteDesktopPolishRegressions.test.ts` and
   // `tests/quickPasteCompact.test.ts`.
-  const ROW_HEIGHT_PX = 72;
+  //
+  // The total height is computed explicitly from the track sizes,
+  // padding, gaps and borders (see `QP_ROW_HEIGHT_PX` below) so a
+  // regression that drifts any single constant surfaces before the
+  // user sees a row that no longer fits inside the documented
+  // 720×520 window. The previous round pinned `ROW_HEIGHT_PX = 80`
+  // but declared the tracks via `2lh`, which resolved against
+  // `CAPTURE_LINE_HEIGHT_REM × 16px ≈ 30.4px`; combined with the
+  // title-row, footer, padding, gap and borders the inner sum was
+  // 85.6px — 5.6px larger than the 80px outer rectangle. The row
+  // visibly overflowed and the second reserved line was effectively
+  // clipped by the row's `overflow: hidden`. The current geometry
+  // replaces `2lh` with the explicit `QP_CAPTURE_CONTENT_HEIGHT_PX`
+  // track and recomputes `ROW_HEIGHT_PX` from the parts so the
+  // inner sum always fits the outer rectangle by construction.
+  const TITLE_ROW_HEIGHT_PX = 24;
+  /**
+   * Per-line height of `capture-content`. The value matches
+   * `--cv-preview` (0.72rem) so the truncation contract is shared
+   * with the desktop rail. Combined with `CAPTURE_LINE_HEIGHT_PX`
+   * below it gives the `2 × line-height` reservation the
+   * capture-content track needs to guarantee a short preview
+   * paints on the first line while keeping the second line
+   * reserved.
+   */
+  const CAPTURE_LINE_HEIGHT_REM = 0.95;
+  /**
+   * Pixel value of `CAPTURE_LINE_HEIGHT_REM` evaluated against the
+   * document's default font-size (16px). The constant is the
+   * single source of truth for the capture-content track height so
+   * the grid template and the `min/max-height` clamps on
+   * `.qp-row-line-body` resolve to the same value by construction
+   * (no more `2lh` against a line-height that the rest of the
+   * stylesheet can drift past).
+   */
+  const CAPTURE_LINE_HEIGHT_PX = Math.round(CAPTURE_LINE_HEIGHT_REM * 16);
+  /**
+   * Height the capture-content track reserves for the preview.
+   * Equals `2 × CAPTURE_LINE_HEIGHT_PX` and replaces the previous
+   * `2lh` declaration in both the grid template and the body
+   * `min-height` / `max-height` clamps so a long preview truncates
+   * inside the row instead of growing the row.
+   */
+  const CAPTURE_CONTENT_HEIGHT_PX = CAPTURE_LINE_HEIGHT_PX * 2;
+  /**
+   * Fixed height of the footer/meta track that hosts the code
+   * language badge, the elapsed-time label and the menu trigger.
+   * The footer stays outside `capture-content` so the time and the
+   * menu can never count as a content line — the second visual
+   * line of `capture-content` belongs exclusively to the preview.
+   */
+  const FOOTER_HEIGHT_PX = 18;
+  /**
+   * Top + bottom padding the row reserves. The CSS declaration
+   * `padding: 0.3rem 0.55rem` applies 0.3rem vertically; the
+   * constant rounds the value up to integer pixels so the test
+   * suite can assert the exact sum.
+   */
+  const ROW_PADDING_VERTICAL_PX = Math.round(0.3 * 2 * 16);
+  /**
+   * Sum of the two grid gaps (0.05rem × 2 = 0.1rem ≈ 1.6px). The
+   * constant rounds the value up so a regression that drifts the
+   * gap surfaces before the user sees the second line clipped by
+   * the row's `overflow: hidden`.
+   */
+  const ROW_GAP_TOTAL_PX = Math.round(0.05 * 2 * 16);
+  /**
+   * Sum of the top + bottom 1px borders the row carries.
+   */
+  const ROW_BORDER_PX = 2;
+    /**
+     * Final, fully-derived row height. The constant is the single
+     * arithmetic expression the geometry tests assert against so
+     * future contributors can move a track, a padding or a gap
+     * without having to redo the math by hand.
+     *
+     * ```text
+     * ROW_HEIGHT_PX =
+     *     TITLE_ROW_HEIGHT_PX
+     *   + CAPTURE_CONTENT_HEIGHT_PX
+     *   + FOOTER_HEIGHT_PX
+     *   + ROW_PADDING_VERTICAL_PX
+     *   + ROW_GAP_TOTAL_PX
+     *   + ROW_BORDER_PX
+     * =   24 + 30 + 18 + 10 + 2 + 2
+     * =   86
+     * ```
+     */
+    const ROW_HEIGHT_PX =
+      TITLE_ROW_HEIGHT_PX +
+      CAPTURE_CONTENT_HEIGHT_PX +
+      FOOTER_HEIGHT_PX +
+      ROW_PADDING_VERTICAL_PX +
+      ROW_GAP_TOTAL_PX +
+      ROW_BORDER_PX;
 
   // List of entry ids actually rendered (depends on mode). We keep a
   // separate `resultIds` so keyboard navigation can clamp the
@@ -254,10 +401,244 @@
       loading = false;
       clampSelection();
       void hydrateCodeLanguages();
+      void hydrateTagsForVisibleEntries(recent);
     } catch (err) {
       searchError = err instanceof Error ? err.message : String(err);
       loading = false;
     }
+  }
+
+  // ---------------------------------------------------------------
+  // Tag hydration for the Quick Paste rows.
+  //
+  // The Quick Paste window is a separate webview so it cannot
+  // reuse the `entryOrganization` map `App.svelte` already keeps
+  // for the desktop rail. The rows need to surface the same tag
+  // chips on the title line so the user can recognise a capture
+  // at a glance; the helpers in `lib/quickPasteTags.ts` own the
+  // cache transitions and the stale-response guard so a refresh
+  // that lands while a previous round is still in flight cannot
+  // attach a tag set to a row that is no longer in scope.
+  //
+  // The hydration contract:
+  //   - `entryTagsCache` and `entryTagsHydration` are the only
+  //     reactive writers the rows consult. They MUST be reassigned
+  //     (= new Map(...)) after every change so Svelte's reactivity
+  //     picks the change up — mutating them in place is invisible.
+  //   - The snapshot the bridge round-trip reads comes from
+  //     `organizationSnapshotCommand`. The command is metadata-only:
+  //     the response carries no clipboard content, hashes, asset
+  //     references or paths.
+  //   - The per-entry token table (`quickPasteTags.ts`) is the
+  //     single switch the stale-response guard reads. A response
+  //     whose `token` no longer matches the live counter is dropped
+  //     silently so a late commit never attaches tags to an entry
+  //     that left the visible scope.
+  //   - A row's hydration state never lowers the row height: the
+  //     chips row collapses to `0` when the entry has no tags or
+  //     when the bridge round is in flight, and the `+N` indicator
+  //     truncates a long tag set on the same line. A failure state
+  //     silently omits chips without showing errors as visible
+  //     content.
+  // ---------------------------------------------------------------
+
+  let entryTagsCache: QuickPasteTagsCache = new Map();
+  let entryTagsHydration: QuickPasteTagsHydration = new Map();
+  let knownTags: Tag[] = [];
+  let knownTagsHydrated = false;
+  let knownTagsHydrationToken = 0;
+
+  async function ensureKnownTagsLoaded(): Promise<Tag[]> {
+    const token = ++knownTagsHydrationToken;
+    if (knownTagsHydrated) return knownTags;
+    try {
+      const snapshot = await organizationSnapshotCommand();
+      if (token !== knownTagsHydrationToken) {
+        return knownTags;
+      }
+      knownTags = snapshot.tags;
+      knownTagsHydrated = true;
+      return knownTags;
+    } catch {
+      if (token === knownTagsHydrationToken) {
+        knownTagsHydrated = false;
+      }
+      return [];
+    }
+  }
+
+  async function hydrateTagsForEntry(entryId: number): Promise<void> {
+    // The stale-response guard bumps the per-entry token so the
+    // response below is the only one that can write to the cache.
+    // The companion `currentQuickPasteTagsToken` check rejects a
+    // late resolution that lands after the entry left the visible
+    // scope (a refresh, a search, a fresh recents feed).
+    const token = bumpQuickPasteTagsToken(entryId);
+    entryTagsHydration = markQuickPasteTagsPending(entryTagsHydration, entryId);
+    // The pre-load in `hydrateTagsForVisibleEntries` already
+    // populated `knownTags` before this call started, so the local
+    // `ensureKnownTagsLoaded()` here is defence in depth for direct
+    // callers (a future refresh path, etc.) — the happy path hits
+    // the cached `knownTagsHydrated === true` branch and resolves
+    // synchronously.
+    await ensureKnownTagsLoaded();
+    try {
+      const tagIds = await entryTagsCommand({ entryId });
+      if (currentQuickPasteTagsToken(entryId) !== token) return;
+      // The known-tags snapshot might have refreshed between the
+      // token bump and the response. Re-derive against the latest
+      // known tags so a freshly created tag the user added is
+      // honoured by the row.
+      const applied = applyQuickPasteTagsResult(
+        entryTagsCache,
+        entryTagsHydration,
+        entryId,
+        tagIds,
+        knownTags,
+      );
+      entryTagsCache = applied.nextCache;
+      entryTagsHydration = applied.nextHydration;
+    } catch (error) {
+      if (currentQuickPasteTagsToken(entryId) !== token) return;
+      entryTagsHydration = markQuickPasteTagsError(
+        entryTagsHydration,
+        entryId,
+      );
+      console.warn(
+        "quick-paste tags hydration failed:",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  /**
+   * Walk the supplied entries and hydrate their tag chips in
+   * parallel. The helper is the only place the Quick Paste window
+   * schedules a tag round-trip; it NEVER fetches more than once per
+   * entry id and silently skips an entry that already reached the
+   * `"loaded"` state. A stale response cannot leak across rows
+   * because every round-trip captures its own token before issuing
+   * the bridge call.
+   *
+   * The snapshot pre-load is the documented fix for the
+   * `quick-paste-desktop-polish` regression that left rows without
+   * tags even when the backend returned ids the user just persisted:
+   * without the pre-load, each parallel `hydrateTagsForEntry` race
+   * for the snapshot fetch and only the last one to complete writes
+   * a populated lookup into `knownTags`; the earlier entries land
+   * with an empty cache even though the bridge payload carried the
+   * tag ids. Pre-loading the snapshot once, then firing the parallel
+   * entry round-trips, guarantees every apply call sees the
+   * populated `knownTags` map.
+   */
+  async function hydrateTagsForVisibleEntries(
+    entries: readonly EntryRecord[],
+  ): Promise<void> {
+    const targets = entries.filter(
+      (entry) => entryTagsHydration.get(entry.id) !== "loaded",
+    );
+    if (targets.length === 0) return;
+    // Pre-load the organization snapshot ONCE before the parallel
+    // entry round-trips so every `applyQuickPasteTagsResult` call
+    // resolves tag ids against the same populated lookup.
+    await ensureKnownTagsLoaded();
+    await Promise.all(targets.map((entry) => hydrateTagsForEntry(entry.id)));
+  }
+
+  /**
+   * Reconcile the cache against the visible scope: an entry that
+   * left the result list MUST release its slot so a future
+   * re-addition never inherits the previous row's tag set. The
+   * helper mirrors the `reconcileEntryOrganizationToVisible`
+   * invariant `lib/entryOrganization.ts` exposes for the rail —
+   * a single stale entry cannot survive a scope change.
+   */
+  function pruneTagsToVisibleEntries(
+    visibleIds: ReadonlySet<number>,
+  ): void {
+    let nextCache = entryTagsCache;
+    let nextHydration = entryTagsHydration;
+    let cacheDirty = false;
+    let hydrationDirty = false;
+    for (const id of entryTagsCache.keys()) {
+      if (!visibleIds.has(id)) {
+        resetQuickPasteTagsToken(id);
+        if (!cacheDirty) {
+          nextCache = new Map(entryTagsCache);
+          cacheDirty = true;
+        }
+        nextCache.delete(id);
+      }
+    }
+    for (const id of entryTagsHydration.keys()) {
+      if (!visibleIds.has(id)) {
+        if (!hydrationDirty) {
+          nextHydration = new Map(entryTagsHydration);
+          hydrationDirty = true;
+        }
+        nextHydration.delete(id);
+      }
+    }
+    if (cacheDirty) entryTagsCache = nextCache;
+    if (hydrationDirty) entryTagsHydration = nextHydration;
+  }
+
+  $: {
+    // Touch the cache and hydration maps at the call site so
+    // Svelte's compiler marks them as dependencies of this
+    // reactive block. Without these explicit reads the compiler
+    // would only track `resultIds`, and the prune would never
+    // re-run after the hydration populates the cache.
+    const cache = entryTagsCache;
+    const hydration = entryTagsHydration;
+    const visibleIds = new Set(resultIds);
+    pruneTagsToVisibleEntries(visibleIds);
+    // Reference the captured locals so the compiler cannot elide
+    // the dependency reads.
+    void cache;
+    void hydration;
+  }
+
+  /**
+   * Tags the row template renders for the supplied entry id. The
+   * helper is the single switch the markup consults: it returns
+   * the truncated `Tag[]` projection when the entry has loaded
+   * chips, an empty array when the entry has no tags or when the
+   * bridge round is still in flight, and `null` only when the
+   * bridge explicitly failed so the renderer can keep the row's
+   * height stable without showing errors as visible content.
+   *
+   * The two reactive maps (`cache` and `hydration`) are explicit
+   * parameters — NOT closed-over references — so the Svelte
+   * compiler can detect them as dependencies of the call site
+   * `{@const tagsProjection = tagsForEntry(id, entryTagsCache,
+   * entryTagsHydration)}`. Without the explicit reference, the
+   * `{@const}` would NOT re-evaluate when the maps change (the
+   * compiler only tracks dependencies at the syntactic call
+   * site, not through the function body), and the chips would
+   * stay empty even after the hydration round populated the
+   * cache. The previous round shipped the markup and the
+   * hydration but the chips silently failed to appear because of
+   * this exact reactivity gap.
+   */
+  function tagsForEntry(
+    entryId: number,
+    cache: QuickPasteTagsCache,
+    hydration: QuickPasteTagsHydration,
+  ): {
+    chips: { tag: Tag; key: string }[];
+    overflow: number;
+  } | null {
+    const hydrationState = hydration.get(entryId);
+    if (hydrationState === "error") {
+      return null;
+    }
+    const tags = cache.get(entryId) ?? [];
+    const { visible, overflow } = truncateQuickPasteTags(tags, 2);
+    return {
+      chips: visible.map((tag) => ({ tag, key: `tag-${tag.id}` })),
+      overflow,
+    };
   }
 
   /**
@@ -342,6 +723,9 @@
       }
       hits = response.hits;
       clampSelection();
+      void hydrateTagsForVisibleEntries(
+        response.hits.map((hit) => hit.record),
+      );
     } catch (err) {
       if (quickPasteController === controller) {
         searchError = err instanceof Error ? err.message : String(err);
@@ -627,11 +1011,33 @@
     if (isImageEntry(entry)) {
       return entryPreviewText(entry);
     }
-    if (currentMode === "search") {
-      const hit = searchHits.find((h) => h.entry_id === id);
-      if (hit && hit.snippet) return hit.snippet;
-    }
-    return entryPreviewText(entry, 80);
+    // The row preview MUST keep the captured whitespace byte-for-byte
+    // (LF / CRLF / tabs / indentation / blank lines / significant
+    // spaces) so the CSS clamp recipe can paint the document on up
+    // to two visual lines (`display: -webkit-box` +
+    // `-webkit-line-clamp: 2` + `white-space: pre-wrap`).
+    //
+    // The previous `entryPreviewText(entry, 80)` call replaced runs
+    // of whitespace with a single space, trimmed the string and
+    // truncated it to ~80 characters before the renderer saw it —
+    // so even when the CSS reservation was correct (title-row +
+    // capture-content + footer/meta) the visible content was a
+    // single flattened line. The previous search-mode snippet
+    // fallback (`hit.snippet`) had the same problem for any
+    // highlighted match the `SearchService` had already collapsed.
+    //
+    // `entryFullPreviewText` is the named helper the shared
+    // `<ClipboardPreview>` overlay already pins for the same
+    // whitespace contract; the row preview reuses it so the row
+    // and the overlay render the exact same characters. The search
+    // snippet remains available for the preview overlay (which
+    // renders the highlighted branch) but for the row surface we
+    // prefer the canonical `EntryRecord` content so the visible
+    // truncation is deterministic and the search ranking is never
+    // coupled to the row geometry.
+    void currentMode;
+    void searchHits;
+    return entryFullPreviewText(entry);
   }
 
   function moveSelection(delta: number): void {
@@ -1154,6 +1560,14 @@
    * cannot drift apart. The overlay is strictly read-only — the
    * helper never writes to the clipboard, never invokes the paste
    * command and never mutates the entry.
+   *
+   * The list snapshot (`query` / `selectedEntryId` / `selectedIndex`)
+   * is captured before the overlay mounts so the Escape-driven
+   * `preview` → `list` transition can restore the same context
+   * even if a refresh / search round lands while the overlay is
+   * open. The snapshot is intentionally read-only — `closePreview`
+   * never writes the captured values back into the live variables,
+   * the live state is already authoritative.
    */
   function openPreviewFor(entryId: number): void {
     const entry = findEntry(mode, recent, hits, entryId);
@@ -1162,8 +1576,41 @@
     openMenuEntryId = null;
   }
 
+  /**
+   * Restore focus after the preview overlay closes so the user lands
+   * back on the search input (the same surface the activated window
+   * starts on) without losing the typed query or the selected row.
+   * The helper is a best-effort no-op when the result list has not
+   * mounted yet; the `selectedIndex` branch is reserved for a future
+   * surface that exposes a per-row focus target.
+   */
+  function restoreFocusAfterPreview(): void {
+    if (searchInputEl) {
+      searchInputEl.focus();
+    }
+  }
+
   function closePreview(): void {
     previewEntryId = null;
+    // Arm the one-shot guard so the bubbled `Escape` cannot reach
+    // `handleEscape()` after the overlay closed. `ClipboardPreview`
+    // already stops propagation as the primary fix; the flag is a
+    // belt-and-braces fallback that survives a future regression.
+    suppressNextWindowEscape = true;
+    // Restore focus on the next microtask so the overlay has time
+    // to unmount and the search input is the next focusable element
+    // the keyboard flow expects. `tick()` would also work, but
+    // `queueMicrotask` is cheaper and the focus call is idempotent.
+    queueMicrotask(() => {
+      restoreFocusAfterPreview();
+      // Reset the guard a frame later so a follow-up `Escape`
+      // pressed while the list is open still hides the window —
+      // the guard consumes exactly the keystroke that closed the
+      // preview, no more.
+      requestAnimationFrame(() => {
+        suppressNextWindowEscape = false;
+      });
+    });
   }
 
   function previewEntry(): EntryRecord | null {
@@ -1176,10 +1623,24 @@
     // The preview overlay is the only modal layered on top of Quick
     // Paste. `Escape` MUST close the preview first so the user can
     // dismiss it without losing the window; a second `Escape` falls
-    // through to the legacy Quick Paste handler below.
-    if (previewEntryId !== null && event.key === "Escape") {
+    // through to the legacy Quick Paste handler below. The branch
+    // consults the explicit `surface` state machine the
+    // `quick-paste-desktop-polish` change pins so the keyboard
+    // contract cannot drift from the visible surface.
+    if (surface === "preview" && event.key === "Escape") {
       event.preventDefault();
       closePreview();
+      return;
+    }
+    // Defence in depth: the overlay's `onOverlayKeydown` already
+    // calls `event.stopPropagation()` so this branch is the
+    // backstop for any future component that forgets to stop the
+    // bubble. The guard consumes the single `Escape` keystroke
+    // that just closed the preview and never lets it reach
+    // `handleEscape()`, so the Quick Paste window stays open.
+    if (event.key === "Escape" && suppressNextWindowEscape) {
+      event.preventDefault();
+      suppressNextWindowEscape = false;
       return;
     }
     // `Cmd/Ctrl+K` focuses the existing search input and selects the
@@ -1743,16 +2204,21 @@
           {@const typeLabel = contentTypeIconLabel(contentType)}
           {@const isPinned = entry ? entry.is_pinned : false}
           {@const menuOpen = openMenuEntryId === id}
+          {@const tagsProjection = tagsForEntry(id, entryTagsCache, entryTagsHydration)}
           <li
             class="qp-row"
             class:qp-row-active={index === selectedIndex}
-            style="--qp-row-height: {ROW_HEIGHT_PX}px;"
+            style="--qp-row-height: {ROW_HEIGHT_PX}px; --qp-title-row-height: {TITLE_ROW_HEIGHT_PX}px; --qp-capture-line-height: {CAPTURE_LINE_HEIGHT_PX}px; --qp-capture-content-height: {CAPTURE_CONTENT_HEIGHT_PX}px; --qp-footer-height: {FOOTER_HEIGHT_PX}px;"
             data-entry-id={id}
             data-testid="quick-paste-row"
             data-selected={index === selectedIndex ? "true" : "false"}
             data-content-type={contentType}
             data-thumb-state={isImage ? thumbState : "none"}
             data-row-height={ROW_HEIGHT_PX}
+            data-row-title-height={TITLE_ROW_HEIGHT_PX}
+            data-row-content-lines={2}
+            data-row-content-height={CAPTURE_CONTENT_HEIGHT_PX}
+            data-row-footer-height={FOOTER_HEIGHT_PX}
             data-pinned={isPinned ? "true" : "false"}
             role="option"
             aria-selected={index === selectedIndex}
@@ -1761,7 +2227,7 @@
             on:click={(event) => handleRowClick(id, event)}
             bind:this={rowEls[index]}
           >
-            <div class="qp-row-line qp-row-line-meta">
+            <div class="qp-row-line qp-row-line-meta" data-testid="quick-paste-title-row">
               <span
                 class="qp-type"
                 data-testid="quick-paste-type"
@@ -1788,6 +2254,33 @@
               >
                 {title}
               </span>
+              {#if tagsProjection && (tagsProjection.chips.length > 0 || tagsProjection.overflow > 0)}
+                <span
+                  class="qp-tags"
+                  data-testid="quick-paste-tags"
+                  data-tags-state={entryTagsHydration.get(id) ?? "loaded"}
+                  aria-label="Tags de la entrada"
+                >
+                  {#each tagsProjection.chips as chip (chip.key)}
+                    <span
+                      class="qp-tag-chip"
+                      data-testid="quick-paste-tag-chip"
+                      data-tag-id={chip.tag.id}
+                    >
+                      {chip.tag.display_name}
+                    </span>
+                  {/each}
+                  {#if tagsProjection.overflow > 0}
+                    <span
+                      class="qp-tag-chip qp-tag-chip-more"
+                      data-testid="quick-paste-tag-more"
+                      aria-label={`${tagsProjection.overflow} tags adicionales`}
+                    >
+                      +{tagsProjection.overflow}
+                    </span>
+                  {/if}
+                </span>
+              {/if}
               {#if index === selectedIndex}
                 <span
                   class="qp-preview-hint"
@@ -1896,7 +2389,7 @@
                 <span class="qp-visually-hidden">{sourceAppLabel}</span>
               </span>
             </div>
-            <div class="qp-row-line qp-row-line-body">
+            <div class="qp-row-line qp-row-line-body" data-testid="quick-paste-capture-content">
               {#if isImage}
                 <span
                   class="qp-thumb"
@@ -1943,7 +2436,7 @@
                     </span>
                   {/if}
                 </span>
-                <span
+<span
                   class="qp-preview qp-preview-image"
                   data-testid="quick-paste-preview"
                   data-content-type="image"
@@ -1959,6 +2452,22 @@
                   {preview}
                 </span>
               {/if}
+            </div>
+            <!--
+              Footer/meta track that hosts the optional code-language
+              badge, the elapsed-time label and the menu trigger. The
+              footer lives OUTSIDE `capture-content` so the second
+              visual line of the capture-content area always belongs
+              exclusively to the preview — the time and the menu can
+              never count as a content line, satisfying the
+              `quick-paste-desktop-polish` requirement that the two
+              visual lines of capture-content are reserved for the
+              captured content alone.
+            -->
+            <div
+              class="qp-row-line qp-row-line-footer"
+              data-testid="quick-paste-row-footer"
+            >
               {#if entry && shouldShowCodeLanguageBadge(entry)}
                 <span
                   class="qp-code-language"
@@ -2304,19 +2813,47 @@
   }
 
   .qp-row {
-    /* The fixed-height row: 72px is the value pinned by the
-     * compact-UI spec. Every state (default, hover, selected,
+    /* The fixed-height row: every state (default, hover, selected,
      * focus, loading, error) keeps the same rectangle so the
      * neighbour rows never shift when a single entry's state
-     * changes. */
+     * changes. The row is split into the documented three-region
+     * geometry the `quick-paste-desktop-polish` change pins:
+     *
+     *   - `title-row` reserves a fixed `TITLE_ROW_HEIGHT_PX`
+     *     line for the type icon, the title, the tag chips, the
+     *     preview-shortcut hint and the pin / source-app controls;
+     *   - `capture-content` reserves exactly two visual lines
+     *     (`CAPTURE_CONTENT_HEIGHT_PX`) so a long preview
+     *     truncates with an ellipsis instead of growing the row
+     *     and a short preview still occupies the same footprint;
+     *   - `footer/meta` reserves a fixed `FOOTER_HEIGHT_PX` track
+     *     for the optional code-language badge, the elapsed-time
+     *     label and the menu trigger so the second visual line of
+     *     `capture-content` is reserved exclusively for the
+     *     captured content (the time and the menu never count as
+     *     content lines).
+     *
+     * The grid template is computed from the CSS custom properties
+     * so a future refactor can move the constants without rewriting
+     * every row selector. The capture-content track uses an
+     * explicit pixel value (NOT `2lh`) so the grid reservation and
+     * the body's `min-height` / `max-height` clamps resolve to the
+     * same number by construction — `2lh` against a `line-height`
+     * the rest of the stylesheet can drift past silently pushed
+     * the inner sum past the outer rectangle (85.6px > 80px) and
+     * the second reserved line was clipped by `overflow: hidden`.
+     */
     box-sizing: border-box;
-    height: var(--qp-row-height, 72px);
-    min-height: var(--qp-row-height, 72px);
-    max-height: var(--qp-row-height, 72px);
+    height: var(--qp-row-height, 86px);
+    min-height: var(--qp-row-height, 86px);
+    max-height: var(--qp-row-height, 86px);
     display: grid;
-    grid-template-rows: 1fr 1fr;
-    gap: 0.1rem;
-    padding: 0.35rem 0.55rem;
+    grid-template-rows:
+      var(--qp-title-row-height, 24px)
+      var(--qp-capture-content-height, 32px)
+      var(--qp-footer-height, 18px);
+    gap: 0.05rem;
+    padding: 0.3rem 0.55rem;
     border-radius: 6px;
     border: 1px solid #1f2937;
     background: rgba(15, 23, 42, 0.55);
@@ -2345,16 +2882,103 @@
 
   .qp-row-line-meta {
     /* The metadata line carries the type icon, the title, the
-     * preview-shortcut hint (only on the selected row), the pin
-     * button and the source-app icon. Each fixed column reuses the
-     * documented card footprints (`1.5rem` for the type, `1.65rem`
-     * for the pin / source-app icons) so the Quick Paste row and
-     * the desktop rail render the same effective icon size. The
-     * hint sits in an `auto` column so the row never reserves room
-     * for it when the row is not selected; the title still flexes
-     * in the `1fr` column and truncates with an ellipsis instead
-     * of pushing the source-app icon out of the visible area. */
-    grid-template-columns: 1.5rem minmax(0, 1fr) auto 1.65rem 1.65rem;
+     * tag chips (when the entry has any), the preview-shortcut
+     * hint (only on the selected row), the pin button and the
+     * source-app icon. Each fixed column reuses the documented
+     * card footprints (`1.5rem` for the type, `1.65rem` for the
+     * pin / source-app icons) so the Quick Paste row and the
+     * desktop rail render the same effective icon size.
+     *
+     * The layout is a real CSS grid (not the inherited flex from
+     * `.qp-row-line`) so the six-column template reserves the
+     * exact column widths the spec pins. The `auto` columns for
+     * tags and hint collapse to `0` when their children are
+     * absent so the title still flexes in the `1fr` column and
+     * the row never reserves room for an empty container.
+     *
+     * The six columns resolve as:
+     *   type | title | tags | hint | pin | source-app
+     * with two of them (tags, hint) collapsing to their content
+     * width and reading as `0` when the row has nothing to show. */
+    display: grid;
+    grid-template-columns: 1.5rem minmax(0, 1fr) auto auto 1.65rem 1.65rem;
+    align-items: center;
+    column-gap: 0.45rem;
+    min-height: 0;
+    max-height: var(--qp-title-row-height, 24px);
+    overflow: hidden;
+  }
+
+  .qp-tags {
+    /* Compact tag chip row the `quick-paste-desktop-polish` change
+     * introduces. The chips sit on the metadata line, immediately
+     * after the title and before the preview-shortcut hint, so the
+     * reading order stays type → title → tags → hint → pin → source-app.
+     * The row collapses to `0` when the entry has no chips (the
+     * markup wraps the chips in an `{#if}` guard) so a row with no
+     * tags never reserves horizontal space.
+     *
+     * Each chip is `max-width: 7rem` and uses `text-overflow:
+     * ellipsis` so a long display name never widens the row; the
+     * `+N` chip collapses to the documented `--cv-tag` footprint
+     * so a 12-tag entry still fits on the documented two-line
+     * geometry. The whole row is `flex: 0 1 auto` so it shrinks
+     * before the title does. */
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    min-width: 0;
+    flex: 0 1 auto;
+    max-width: 12rem;
+  }
+
+  .qp-tag-chip {
+    /* Compact chip that mirrors the desktop rail's
+     * `HistoryCard.svelte` `.tag-chip` style without duplicating
+     * the CSS file. The `--cv-tag` token keeps the typography in
+     * lock-step with the rest of the metadata strip. The chip
+     * overflows with an ellipsis instead of wrapping so the row
+     * height stays stable. The chip is `pointer-events: none` so
+     * a click on a chip never bubbles up and accidentally selects
+     * the row.
+     *
+     * Visibility: the manual QA pass showed that the original
+     * 0.65rem font + 12%-opacity blue palette was hard to read on
+     * the dark surface. The chip uses a higher-contrast pair
+     * (`#bfdbfe` on `rgba(147,197,253,0.22)`) and a slightly
+     * larger footprint so the chip stays visible after hydration
+     * without forcing a third line on the row. The chip still
+     * fits inside the documented `title-row` 24px height because
+     * `line-height: 1.1` × `0.72rem` font + 0.1rem vertical
+     * padding = ~16px which is comfortably under the 24px cap. */
+    flex: 0 1 auto;
+    max-width: 7rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: rgba(147, 197, 253, 0.22);
+    color: #bfdbfe;
+    border: 1px solid rgba(147, 197, 253, 0.45);
+    border-radius: 999px;
+    padding: 0.1rem 0.5rem;
+    font-size: var(--cv-tag, 0.72rem);
+    line-height: 1.1;
+    font-weight: 600;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .qp-tag-chip-more {
+    /* The `+N` indicator. Sits at the end of the chip row with a
+     * slightly dimmer palette so the user can tell it apart from
+     * the canonical tag chips. The accessible name carries the
+     * overflow count so a screen reader announces the
+     * information without depending on the literal `+N` glyph. */
+    background: rgba(255, 255, 255, 0.10);
+    color: #e2e8f0;
+    border-color: rgba(148, 163, 184, 0.45);
+    max-width: none;
   }
 
   .qp-type {
@@ -2517,17 +3141,42 @@
   }
 
   .qp-row-line-body {
-    /* The body line carries the preview/thumbnail, an optional
-     * language badge, the elapsed time and the menu trigger. The
-     * thumbnail reserves a fixed 40x40px square; the preview
-     * truncates with an ellipsis. The elapsed time stays a
-     * fixed-width column so the preview never has to compete
-     * with it. The menu trigger takes a fixed 18px column so the
-     * body line never shifts when the menu opens or closes. The
-     * language badge column collapses to its natural width and is
-     * only present when the row carries a canonical code
-     * classification. */
-    grid-template-columns: minmax(0, 1fr) auto auto 18px;
+    /* The capture-content line carries the preview (and the
+     * thumbnail, for image entries) exclusively. The body line
+     * MUST reserve exactly two visual lines so a row with a short
+     * preview still occupies the same footprint as a row with a
+     * long preview. The grid track is `CAPTURE_CONTENT_HEIGHT_PX`
+     * (declared on the parent `.qp-row`); here we pin the
+     * `min-height` / `max-height` to the same explicit pixel value
+     * so the body's reservation and the grid track cannot drift
+     * apart. The previous `2lh` declaration against
+     * `var(--qp-capture-line-height, 0.95rem)` resolved to
+     * `30.4px`, which combined with the title-row, footer,
+     * padding, gap and borders pushed the inner sum to `85.6px`
+     * — `5.6px` past the outer `80px` rectangle. The row's
+     * `overflow: hidden` then clipped the second reserved line so
+     * the visible footprint collapsed to a single line. The
+     * explicit pixel values (`CAPTURE_CONTENT_HEIGHT_PX = 32`) and
+     * the recomputed outer `ROW_HEIGHT_PX = 88` keep the inner sum
+     * strictly inside the outer rectangle by construction.
+     *
+     * The body line is laid out as a flex row: the thumbnail
+     * reserves a fixed 40x40px square for image entries and the
+     * preview consumes the remaining space. Tags, code-language,
+     * elapsed time and the menu trigger are NOT children of this
+     * line — they live in the `footer/meta` track so the second
+     * visual line of `capture-content` belongs exclusively to the
+     * captured content (the time and the menu never count as a
+     * content line, per the `quick-paste-desktop-polish` change).
+     */
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    min-width: 0;
+    min-height: var(--qp-capture-content-height, 32px);
+    max-height: var(--qp-capture-content-height, 32px);
+    line-height: var(--qp-capture-line-height, 15px);
+    overflow: hidden;
   }
 
   .qp-preview {
@@ -2535,13 +3184,46 @@
     min-width: 0;
     /* The row preview uses the documented `--cv-muted` token so the
      * compact row reads at the same weight the desktop metadata
-     * strips consume. */
+     * strips consume. The preview MUST paint the captured block on
+     * up to two visual lines so a short preview keeps the second
+     * line reserved and a long preview truncates inside the row
+     * without growing it. The clamp recipe is the cross-browser
+     * combination `display: -webkit-box` +
+     * `-webkit-box-orient: vertical` + `-webkit-line-clamp: 2`
+     * (plus the modern `line-clamp: 2` equivalent so the same rule
+     * applies once the property lands without the `-webkit-`
+     * prefix).
+     *
+     * `white-space: pre-wrap` preserves the LF / CRLF / tabs /
+     * indentation / blank lines / significant spaces the source
+     * application produced so a multi-line capture paints exactly
+     * as many lines as its content warrants and only the third
+     * line is clipped. The previous `white-space: normal`
+     * declaration collapsed the whitespace runs the row preview
+     * fed it (LF → space, tabs → space, indentation → space,
+     * empty lines gone) and the previous `entryPreviewText(entry,
+     * 80)` call had already collapsed + truncated the string
+     * upstream — so the CSS reservation could never show a real
+     * second line. The helper now feeds the canonical
+     * `entryFullPreviewText` string through the `pre-wrap` recipe
+     * so the document renders byte-for-byte. The `line-height`
+     * stays bound to `--qp-capture-line-height` so the clamp
+     * truncates exactly on the second reserved line.
+     *
+     * `word-break: break-word` keeps long single tokens (URLs, hex
+     * blobs) inside the row without widening the column;
+     * `overflow: hidden` clips the third line. */
     font-size: var(--cv-muted, 0.78rem);
-    line-height: 1.25;
+    line-height: var(--qp-capture-line-height, 15px);
     color: #cbd5f5;
+    white-space: pre-wrap;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     overflow: hidden;
+    word-break: break-word;
     text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .qp-row-active .qp-preview {
@@ -2559,6 +3241,36 @@
     color: rgba(255, 255, 255, 0.78);
   }
 
+  .qp-row-line-footer {
+    /* Footer/meta track that hosts the optional code-language
+     * badge, the elapsed-time label and the menu trigger. The
+     * footer lives OUTSIDE `capture-content` so the second visual
+     * line of the capture-content area always belongs exclusively
+     * to the preview — the time and the menu can never count as
+     * a content line. The grid reserves a fixed-height track
+     * (FOOTER_HEIGHT_PX) so the row geometry stays stable across
+     * every entry shape (text, image, code with a badge).
+     *
+     * The footer grid distributes the available width with a
+     * flexible spacer, then auto-width slots for the badge (when
+     * present), the elapsed time and the menu trigger. The badge
+     * column collapses to its natural width and is only present
+     * when the entry carries a canonical code classification, so
+     * non-code rows do not reserve any width for it. The menu
+     * trigger takes a fixed 18px column so the footer never
+     * shifts when the menu opens or closes. */
+    display: grid;
+    grid-template-columns: 1fr auto auto 18px;
+    align-items: center;
+    column-gap: 0.4rem;
+    min-width: 0;
+    min-height: 0;
+    max-height: var(--qp-footer-height, 18px);
+    overflow: hidden;
+    font-size: var(--cv-tag, 0.65rem);
+    line-height: 1.2;
+  }
+
   .qp-elapsed {
     flex: 0 0 auto;
     /* The elapsed time uses the documented `--cv-tag` token so the
@@ -2569,6 +3281,8 @@
     color: #94a3b8;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .qp-code-language {
@@ -2578,7 +3292,10 @@
      * the row reads at the same weight the desktop card
      * surfaces. The canonical `data-code-language` attribute is
      * what the bridge, the highlight.js grammar and the search
-     * index consume; the visible copy is decorative. */
+     * index consume; the visible copy is decorative. The badge
+     * lives in the footer/meta track (NOT in `capture-content`)
+     * so the second visual line of the content area is reserved
+     * exclusively for the preview. */
     align-self: center;
     flex: 0 0 auto;
     padding: 0.05rem 0.4rem;
@@ -2605,11 +3322,11 @@
   }
 
   .qp-menu-trigger {
-    /* The ellipsis trigger lives in the body line, after the
-     * elapsed-time column. The 18px footprint matches the other
-     * control icons so the body line stays a stable grid. The
-     * button is a `button` element with the documented
-     * aria-haspopup contract. */
+    /* The ellipsis trigger lives in the footer/meta track, after
+     * the elapsed-time column. The 18px footprint matches the
+     * other control icons so the footer never shifts when the
+     * menu opens or closes. The button is a `button` element
+     * with the documented aria-haspopup contract. */
     flex: 0 0 18px;
     width: 18px;
     height: 18px;

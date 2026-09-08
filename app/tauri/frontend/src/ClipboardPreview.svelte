@@ -182,7 +182,19 @@
 
   function onOverlayKeydown(event: KeyboardEvent): void {
     if (event.key === "Escape") {
+      // `stopPropagation` is required so the `Escape` keystroke does
+      // NOT bubble up to a parent `<svelte:window>` listener that
+      // would otherwise hide the Quick Paste window while the
+      // preview is the only visible surface. Quick Paste mounts the
+      // preview inside its own webview and installs a window-level
+      // `keydown` handler; without this guard, the overlay's
+      // `onClose` flips `previewEntryId = null` synchronously and
+      // the bubbled event reaches the window listener with the
+      // `surface` flag already flipped to `"list"`, which routes
+      // the same Escape into `hideQuickPasteWindow()`. Desktop is
+      // unaffected: it does not hide its main window on Escape.
       event.preventDefault();
+      event.stopPropagation();
       close();
     }
   }

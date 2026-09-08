@@ -38,8 +38,14 @@
     defaultCardTitle,
     validateTitle,
   } from "./lib/contentType";
-  import { canonicalLabel as canonicalCodeLanguageLabel } from "./lib/codeLanguageDetector";
-  import { shouldShowCodeLanguageBadge } from "./lib/codeLanguageProjections";
+  import {
+    canonicalLabel as canonicalCodeLanguageLabel,
+    renderHighlightedCode,
+  } from "./lib/codeLanguageDetector";
+  import {
+    shouldRenderHighlightedPreview,
+    shouldShowCodeLanguageBadge,
+  } from "./lib/codeLanguageProjections";
   import {
     previewShortcutAccessibleLabel,
     previewShortcutLabel,
@@ -68,6 +74,7 @@
   import {
     createClipboardAssetResolver,
     entryPreviewText,
+    entryRawContent,
     hasRenderableImage,
     hasRenderableRichText,
     imageDimensionsLabel,
@@ -270,6 +277,30 @@
    * (the thumbnail replaces it when the bytes load).
    */
   $: previewText = entryPreviewText(entry);
+  /**
+   * Highlighted preview HTML the card renders when the entry has a
+   * canonical, allowlist-accepted `code_language`. The computation
+   * reuses the same `renderHighlightedCode` helper the shared
+   * `ClipboardPreview` overlay consumes, so Desktop cards and the
+   * overlay render the same syntax colours, tabs, indentation and
+   * line breaks — the spec the
+   * `clipboard-history-cards` change pins as a non-negotiable
+   * contract between the two surfaces.
+   *
+   * The helper is gated by `shouldRenderHighlightedPreview` so a
+   * non-code entry, an image, a rich text row or a payload without
+   * a canonical language keeps the plain-text fallback path the
+   * regression suite pins. The computation falls through to an
+   * empty string when the entry does not qualify so the markup
+   * below only mounts the highlighted branch when the helper
+   * actually produced output.
+   */
+  $: highlightedPreviewHtml = (() => {
+    if (!shouldRenderHighlightedPreview(entry)) return "";
+    const raw = entryRawContent(entry);
+    if (raw.length === 0) return "";
+    return renderHighlightedCode(raw, entry.code_language).html;
+  })();
 
   // ---------------------------------------------------------------
   // Metadata strip: elapsed time + payload size / character count.
@@ -1145,7 +1176,13 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   on:keydown={(event) => onCardKeydown(event)}
 >
   <header class="card-header">
-    <span class="type" data-testid="history-card-type">
+    <span
+      class="type"
+      data-testid="history-card-type"
+      data-content-type={entry.content_type}
+      title={`Tipo: ${contentTypeIconLabel(entry.content_type)}`}
+      aria-label={`Tipo: ${contentTypeIconLabel(entry.content_type)}`}
+    >
       <svg
         aria-hidden="true"
         focusable="false"
@@ -1430,12 +1467,23 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       {/if}
     </div>
   {:else}
-    <pre
-      class="preview"
-      data-testid="history-card-preview"
-      data-content-type={isRich ? "rich_text" : "text"}
-      aria-label="Contenido capturado"
-    >{previewText}</pre>
+    {#if shouldRenderHighlightedPreview(entry)}
+      <pre
+        class="preview preview-code"
+        data-testid="history-card-preview"
+        data-content-type={entry.content_type}
+        data-code-language={entry.code_language ?? ""}
+        data-preview-kind="code"
+        aria-label="Contenido capturado"
+      >{@html highlightedPreviewHtml}</pre>
+    {:else}
+      <pre
+        class="preview"
+        data-testid="history-card-preview"
+        data-content-type={isRich ? "rich_text" : "text"}
+        aria-label="Contenido capturado"
+      >{previewText}</pre>
+    {/if}
   {/if}
 
   {#if shouldShowCodeLanguageBadge(entry)}
@@ -2014,6 +2062,58 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     -webkit-box-orient: vertical;
     white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  /*
+   * The code-preview variant of `.preview`. The card reuses the
+   * `renderHighlightedCode` helper the shared `ClipboardPreview`
+   * overlay consumes, so the markup carries the syntax colours
+   * the overlay paints. The whitespace contract is identical to
+   * the plain-text branch: `white-space: pre-wrap` and
+   * `tab-size: 4` keep the original tabs, indentation and
+   * line breaks visible. The `overflow: hidden` plus the
+   * `-webkit-line-clamp` rules bound the card geometry so a long
+   * capture never widens or grows the rail.
+   */
+  .preview-code {
+    padding: 0.5rem 0.6rem;
+    tab-size: 4;
+    -moz-tab-size: 4;
+    background: rgba(0, 0, 0, 0.28);
+    border: 1px solid rgba(147, 197, 253, 0.18);
+  }
+
+  .preview-code :global(.hljs-keyword),
+  .preview-code :global(.hljs-built_in),
+  .preview-code :global(.hljs-type) {
+    color: #93c5fd;
+  }
+
+  .preview-code :global(.hljs-string),
+  .preview-code :global(.hljs-attr) {
+    color: #f9a8d4;
+  }
+
+  .preview-code :global(.hljs-number),
+  .preview-code :global(.hljs-literal) {
+    color: #fcd34d;
+  }
+
+  .preview-code :global(.hljs-comment) {
+    color: #94a3b8;
+    font-style: italic;
+  }
+
+  .preview-code :global(.hljs-title),
+  .preview-code :global(.hljs-function),
+  .preview-code :global(.hljs-class),
+  .preview-code :global(.hljs-name) {
+    color: #5eead4;
+  }
+
+  .preview-code :global(.hljs-variable),
+  .preview-code :global(.hljs-params) {
+    color: #f0f4f8;
   }
 
   .card-code-language {
