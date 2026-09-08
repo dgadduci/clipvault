@@ -177,10 +177,13 @@ test("entryRawContent returns empty string for an image row", () => {
   assert.equal(entryRawContent(entry), "");
 });
 
-test("entryRawContent does not collapse whitespace (unlike entryFullPreviewText)", () => {
-  // The two helpers have distinct contracts. The helper the
-  // highlighted code preview feeds preserves every byte; the
-  // helper the plain-text preview feeds collapses runs.
+test("entryRawContent and entryFullPreviewText share the whitespace-preserving contract", () => {
+  // Both helpers preserve the bytes the source application produced
+  // so the highlighted code preview and the plain-text fallback
+  // render the captured block identically. The previous contract
+  // collapsed whitespace in `entryFullPreviewText`; the
+  // `preview-interaction-regressions` change makes the plain-text
+  // fallback preserve whitespace byte-for-byte too.
   const entry = textEntry({
     content: "a\n\nb\t\tc    d",
   });
@@ -188,12 +191,13 @@ test("entryRawContent does not collapse whitespace (unlike entryFullPreviewText)
   assert.equal(raw.includes("\n"), true);
   assert.equal(raw.includes("\t"), true);
   assert.equal(raw.includes("  "), true);
-  // The legacy helper still collapses whitespace for the
-  // plain-text fallback branch — the regression that surfaced the
-  // original bug must keep working byte-for-byte.
-  const collapsed = entryFullPreviewText(entry);
-  assert.equal(collapsed.includes("\n"), false);
-  assert.equal(collapsed.includes("\t"), false);
+  // The plain-text preview helper preserves the same whitespace
+  // characters so the `<pre>` mounted with `white-space: pre-wrap`
+  // can render them.
+  const preview = entryFullPreviewText(entry);
+  assert.equal(preview.includes("\n"), true);
+  assert.equal(preview.includes("\t"), true);
+  assert.equal(preview.includes("  "), true);
 });
 
 // ---------------------------------------------------------------------------
@@ -539,20 +543,29 @@ test("entryRawContent returns the canonical entry.content reference (no trim, no
   );
 });
 
-test("entryFullPreviewText keeps collapsing whitespace (legacy contract unchanged)", () => {
-  // The plain-text fallback helper keeps its existing behaviour:
-  // it collapses whitespace runs so the truncated preview never
-  // overflows. The helper the highlighted preview feeds is the
-  // separate `entryRawContent` accessor — a regression that
-  // accidentally swaps them would surface here.
+test("entryFullPreviewText preserves whitespace byte-for-byte (no collapse, no trim)", () => {
+  // The plain-text preview helper preserves the whitespace the
+  // source application produced: it never collapses whitespace
+  // runs and never trims the string. A regression that re-introduces
+  // the legacy collapse (or that re-uses `entryPreviewText`'s
+  // `replace(/\s+/g, " ").trim()` chain) would surface here so the
+  // Desktop and Quick Paste overlays stop dropping tabs and empty
+  // lines.
   const match = clipboardAssetSource.match(
     /export function entryFullPreviewText[\s\S]+?\n\}/,
   );
   assert.ok(match, "entryFullPreviewText must be declared in clipboardAsset.ts");
   const body = match![0];
-  assert.ok(
-    /\\s\+/.test(body) && /\.replace\(/.test(body),
-    "entryFullPreviewText must keep its whitespace collapse contract",
+  assert.equal(
+    /trim\(/.test(body),
+    false,
+    "entryFullPreviewText must never trim its input",
+  );
+  assert.equal(
+    /\.replace\(.\\s\+\/g/.test(body) ||
+      /replace\(\/\\\\s\+\/g/.test(body),
+    false,
+    "entryFullPreviewText must never collapse whitespace runs",
   );
 });
 

@@ -463,14 +463,20 @@ test("Fix 4 — entryFullPreviewText returns the canonical text without truncati
   assert.equal(preview.endsWith("…"), false);
 });
 
-test("Fix 4 — entryFullPreviewText collapses whitespace runs but never truncates", () => {
+test("Fix 4 — entryFullPreviewText preserves LF/CRLF, tabs and blank lines without truncating", () => {
+  // The plain-text fallback path renders the helper output inside a
+  // `<pre>` with `white-space: pre-wrap`, so the bytes the source
+  // application produced must reach the overlay unchanged. The
+  // previous contract collapsed runs to a single space; the manual
+  // test confirmed that regression destroys tabs, indentation and
+  // empty lines.
   const entry = textEntry({
     content: "line1\n\nline2\twith\ttabs    and    spaces",
   });
   const preview = entryFullPreviewText(entry);
-  assert.ok(preview.includes(" "));
-  assert.equal(preview.includes("\n"), false);
-  assert.equal(preview.includes("\t"), false);
+  assert.equal(preview.includes("\n"), true, "LF separators must reach the preview");
+  assert.equal(preview.includes("\t"), true, "tab characters must reach the preview");
+  assert.equal(preview.includes("    "), true, "consecutive spaces must reach the preview");
 });
 
 test("Fix 4 — entryFullPreviewText returns the empty string for an image row", () => {

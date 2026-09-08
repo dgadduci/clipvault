@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-08
+goal: Corregir la preservación de whitespace en previews rich text, el orden de Quick Paste y las interacciones de selección, menú y atajos de las cards del Desktop sin romper preview compartido ni drag-and-drop.

@@ -75,6 +75,10 @@
   } from "./lib/searchShortcut";
   import { combineMemberships, hasActiveDragSession } from "./lib/dragAndDrop";
   import { installPointerDragController } from "./lib/pointerDragAndDrop";
+  import {
+    matchesPreviewShortcut,
+    previewShortcutPlatform,
+  } from "./lib/clipboardPreview";
   import { visualTokenCss } from "./lib/visualTokens";
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
   import HistoryCardRail from "./HistoryCardRail.svelte";
@@ -190,6 +194,16 @@
    */
   let sourceAppOptions: SourceApplicationOption[] = [];
   let sourceAppOptionsLoading = false;
+  /**
+   * Local selection state mirrored from the HistoryCardRail. The
+   * rail owns the canonical id (so two cards racing a `mousedown`
+   * event can never end up with two selections) and exposes it
+   * through `bind:selectedEntryId`. The desktop-level
+   * `Cmd/Ctrl+Enter` matcher routes through this value so the
+   * keyboard shortcut and the click-to-select affordance cannot
+   * drift apart.
+   */
+  let railSelectedEntryId: number | null = null;
   let entryOrganization: Map<number, { tags: Tag[]; collections: Collection[] }> =
     new Map();
   type EntryOrganizationHydration = "pending" | "loaded" | "error";
@@ -279,6 +293,67 @@
   }
 
   $: visibleEntries, entries, bumpPreviewScope();
+
+  /**
+   * Document-level Escape handler the Desktop installs while the
+   * preview overlay is open. The contract the
+   * `preview-interaction-regressions` change pins:
+   *
+   *   - Escape MUST close the preview regardless of where the
+   *     focus sits (inside the overlay or on the document body).
+   *     `ClipboardPreview.svelte` already handles the
+   *     focus-inside-overlay branch through its overlay
+   *     `on:keydown` listener; this listener covers the
+   *     focus-outside-overlay case so the two surfaces cannot
+   *     drift.
+   *   - The listener is registered on `window` in capture phase
+   *     and runs BEFORE the rail's `document` keydown listener.
+   *     When the preview is open, `stopImmediatePropagation`
+   *     prevents the rail from collapsing the active menu or
+   *     clearing the selection — Escape must close the preview
+   *     alone, never accidentally reopen or close the menu the
+   *     user left open, and never change the rail's selection.
+   *   - The listener is idempotent: it installs only when the
+   *     preview opens, removes itself when the preview closes,
+   *     and `onDestroy` tears it down again so the App unmount
+   *     never leaks a handler.
+   *   - The handler ignores typing surfaces (input / textarea /
+   *     contenteditable) so the title editor / search input /
+   *     rename modal keep their default Escape behaviour even
+   *     while the preview is open.
+   */
+  let detachPreviewKeydown: (() => void) | null = null;
+
+  function onPreviewWindowKeydown(event: KeyboardEvent): void {
+    if (previewEntry === null) return;
+    if (event.key !== "Escape") return;
+    const target = event.target;
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      (target instanceof HTMLElement && target.isContentEditable)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    closePreview();
+  }
+
+  $: if (typeof window !== "undefined") {
+    if (previewEntry !== null) {
+      if (detachPreviewKeydown === null) {
+        const handler = (event: KeyboardEvent) => onPreviewWindowKeydown(event);
+        window.addEventListener("keydown", handler, true);
+        detachPreviewKeydown = () => {
+          window.removeEventListener("keydown", handler, true);
+        };
+      }
+    } else if (detachPreviewKeydown !== null) {
+      detachPreviewKeydown();
+      detachPreviewKeydown = null;
+    }
+  }
 
   async function refresh(): Promise<void> {
     loading = true;
@@ -665,6 +740,11 @@
     if (sourceAppFilter.kind !== "all") {
       sourceAppFilter = { kind: "all" };
     }
+    // The local selection is rail state; reset it so a card that
+    // was visible in the previous scope cannot silently remain
+    // selected after the user switches collection. The rail will
+    // also drop the value if it falls outside the visible scope.
+    railSelectedEntryId = null;
     // Reload the combobox options for the new scope and refresh
     // the rail so the cards reflect the new active collection
     // without stale options or stale rows.
@@ -960,34 +1040,90 @@
    *     preserved across shortcut presses.
    */
   function onSearchShortcutKeydown(event: KeyboardEvent): void {
-    if (!matchesSearchShortcut(event, shortcutPlatform)) {
-      return;
-    }
-    if (openModal !== null) {
-      return;
-    }
-    const target = event.target as HTMLElement | null;
-    const searchInput = document.querySelector<HTMLInputElement>(
-      "[data-testid='search-input']",
-    );
-    // If the user is already typing somewhere that is NOT the search
-    // input (the title editor, the rename input, the collection
-    // creator or any contenteditable), the shortcut MUST NOT steal
-    // focus. Typing in the search input itself is the expected case.
-    if (
-      target instanceof HTMLInputElement ||
-      target instanceof HTMLTextAreaElement ||
-      (target instanceof HTMLElement && target.isContentEditable)
-    ) {
-      if (!searchInput || target !== searchInput) {
+    if (matchesSearchShortcut(event, shortcutPlatform)) {
+      if (openModal !== null) {
         return;
       }
+      const target = event.target as HTMLElement | null;
+      const searchInput = document.querySelector<HTMLInputElement>(
+        "[data-testid='search-input']",
+      );
+      // If the user is already typing somewhere that is NOT the search
+      // input (the title editor, the rename input, the collection
+      // creator or any contenteditable), the shortcut MUST NOT steal
+      // focus. Typing in the search input itself is the expected case.
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        if (!searchInput || target !== searchInput) {
+          return;
+        }
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (searchInput) {
+        searchInput.focus();
+        searchInput.select();
+      }
+      return;
     }
-    event.preventDefault();
-    event.stopPropagation();
-    if (searchInput) {
-      searchInput.focus();
-      searchInput.select();
+    // Desktop-level `Cmd/Ctrl+Enter` matcher. The shortcut opens
+    // the preview overlay for the entry the user selected in the
+    // rail. The matcher is delegated to `matchesPreviewShortcut`
+    // (the same helper Quick Paste and the per-card listener
+    // consult) so the platform-aware modifier table cannot drift
+    // between the surfaces.
+    if (
+      matchesPreviewShortcut(event, previewShortcutPlatform(diagnostics?.platform_os ?? null))
+    ) {
+      if (openModal !== null || guidance !== null) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        // Typing surfaces keep focus and the typed character; the
+        // shortcut MUST NOT steal them.
+        return;
+      }
+      if (target instanceof HTMLElement) {
+        // The shortcut MUST NOT fire when the focus is inside a
+        // menu, the title editor, a tag / collection selector or a
+        // confirmation dialog. The card-level handler already
+        // guards against these targets; the document-level
+        // listener mirrors the check so the rail-wide keyboard
+        // matcher behaves the same.
+        if (
+          target.closest("[role='menu']") ||
+          target.closest("[role='menuitem']") ||
+          target.closest(".menu") ||
+          target.closest(".title-input") ||
+          target.closest("[role='dialog']") ||
+          target.closest("[data-testid='confirm-dialog']")
+        ) {
+          return;
+        }
+      }
+      if (railSelectedEntryId === null) {
+        // No card is selected: the shortcut is a no-op. The hint
+        // chip only appears on the selected card so the user
+        // expects the shortcut to be inert until they pick a row.
+        return;
+      }
+      const targetEntry = visibleEntries.find(
+        (entry) => entry.id === railSelectedEntryId,
+      ) ?? entries.find((entry) => entry.id === railSelectedEntryId);
+      if (!targetEntry) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const focusTarget =
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      requestPreview(targetEntry, focusTarget);
     }
   }
 
@@ -1317,6 +1453,10 @@
       detachPointerDragController();
       detachPointerDragController = null;
     }
+    if (detachPreviewKeydown) {
+      detachPreviewKeydown();
+      detachPreviewKeydown = null;
+    }
     if (searchController) {
       searchController.cancel();
       searchController = null;
@@ -1397,6 +1537,7 @@
           entryOrganization={entryOrganization}
           entryOrganizationHydration={entryOrganizationHydration}
           isFiltering={isFiltering}
+          bind:selectedEntryId={railSelectedEntryId}
           onTogglePin={(entry) => toggleFavorite(entry)}
           onRequestDelete={requestDelete}
           onAfterMutation={(entry) => handleAfterMutation(entry)}

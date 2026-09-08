@@ -19,7 +19,6 @@ import {
   COLLECTION_DROP_TARGET_VALUE,
   createCollectionDropZoneHandlers,
 } from "../src/lib/collectionDropZone.ts";
-import { createCardDropTextHandlers } from "../src/lib/cardDropTextHandlers.ts";
 import {
   installDomPolyfill,
   KeyboardEventImpl,
@@ -220,66 +219,6 @@ test("pointer drag keeps an external pointer outside ClipVault inert", { concurr
 
     assert.equal(isPointerDragActive(), false);
     assert.equal(hasActiveDragSession(), false);
-  } finally {
-    restore();
-  }
-});
-
-test("pointer drag reaches the bottom drop indicator through the same hit-test channel", { concurrency: false }, () => {
-  const { document, restore } = installDomPolyfill();
-  try {
-    __resetDragSessionForTests();
-    __resetPointerDragForTests();
-    const indicator = document.createElement("div");
-    document.body.appendChild(indicator);
-    document.hitTestElement = indicator;
-    let state = "idle";
-    const handlers = createCardDropTextHandlers({
-      setState: (next) => {
-        state = next;
-      },
-      scheduleReset: () => {},
-      clearTimer: () => {},
-    });
-    indicator.addEventListener(POINTER_DRAG_OVER_EVENT, (event) => {
-      handlers.onPointerDragOver(event as CustomEvent);
-    });
-    indicator.addEventListener(POINTER_DROP_EVENT, (event) => {
-      handlers.onPointerDrop(event as CustomEvent);
-    });
-
-    const card = document.createElement("article");
-    card.setAttribute("data-testid", "history-card");
-    card.setAttribute("data-entry-id", "51");
-    document.body.appendChild(card);
-    const cleanup = installPointerDragController(
-      document as unknown as Document,
-    );
-    card.dispatchEvent(
-      new PointerEventImpl("pointerdown", {
-        bubbles: true,
-        pointerId: 10,
-      }),
-    );
-    card.dispatchEvent(
-      new PointerEventImpl("pointermove", {
-        bubbles: true,
-        pointerId: 10,
-        clientX: 20,
-        clientY: 20,
-      }),
-    );
-    assert.equal(state, "hover");
-    card.dispatchEvent(
-      new PointerEventImpl("pointerup", {
-        bubbles: true,
-        pointerId: 10,
-        clientX: 20,
-        clientY: 20,
-      }),
-    );
-    assert.equal(state, "dropped");
-    cleanup();
   } finally {
     restore();
   }

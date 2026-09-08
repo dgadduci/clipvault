@@ -359,16 +359,30 @@ export function entryPreviewText(
 }
 
 /**
- * Full canonical text of an entry, never truncated.
+ * Full canonical text of an entry, never truncated and with the
+ * whitespace the source application produced preserved verbatim.
  *
- * The Quick Paste preview overlay is documented to render the
- * complete capture, not the truncated row preview — sharing the
- * `maxLength` helper would silently regress the overlay to the
- * same fragment the row renders. The helper collapses
- * whitespace runs exactly the way `entryPreviewText` does so the
- * preview does not visually break when the underlying payload has
- * long runs of newlines or tabs, but it never truncates the
- * resulting string.
+ * The Quick Paste preview overlay and the Desktop preview overlay
+ * are documented to render the complete capture (not the truncated
+ * row preview) so sharing the `maxLength` helper would silently
+ * regress the overlay to the same fragment the row renders. The
+ * helper also keeps the original whitespace — `LF` / `CRLF` line
+ * separators, consecutive tab characters, leading indentation and
+ * consecutive empty lines — so the `<pre>` the overlay mounts
+ * (with `white-space: pre-wrap`) renders the captured block
+ * byte-for-byte. The renderer pairs this string with
+ * `escapeForPreview` so the preview never re-introduces HTML
+ * active content.
+ *
+ * The whitespace contract is intentionally identical to
+ * `entryRawContent` so the two surfaces — Desktop preview and
+ * Quick Paste preview — share one implementation. The helpers
+ * stay distinct because `entryRawContent` is the typed accessor
+ * the highlight.js renderer reads (and therefore must not be
+ * collapsed by the helper itself), while `entryFullPreviewText`
+ * is the named entry-point the shared `<ClipboardPreview>` overlay
+ * consults for both the highlighted and the plain-text fallback
+ * branches.
  *
  * For an image row the helper returns the empty `content` sentinel
  * for backwards compatibility; callers rendering an image preview
@@ -378,8 +392,7 @@ export function entryFullPreviewText(
   entry: Pick<EntryRecord, "content" | "content_type" | "asset_ref">,
 ): string {
   if (isImageEntry(entry)) return "";
-  const collapsed = (entry.content ?? "").replace(/\s+/g, " ").trim();
-  return collapsed;
+  return entry.content ?? "";
 }
 
 /**
@@ -388,13 +401,23 @@ export function entryFullPreviewText(
  * The helper is the source of truth the shared `ClipboardPreview`
  * overlay feeds to `renderHighlightedCode` so the highlighted
  * preview keeps the original tabs, newlines, indentation and
- * empty lines the source application produced. Unlike
- * `entryFullPreviewText`, the helper never collapses whitespace
- * runs and never trims the string: a Python block with four
- * spaces of indentation, a JavaScript snippet with literal `\t`
- * characters or a multi-line block with empty lines must reach
- * the highlighter unchanged so the same characters can reach the
- * `<pre>` element the helper renders inside.
+ * empty lines the source application produced. The helper never
+ * collapses whitespace runs and never trims the string: a Python
+ * block with four spaces of indentation, a JavaScript snippet
+ * with literal `\t` characters or a multi-line block with empty
+ * lines must reach the highlighter unchanged so the same
+ * characters can reach the `<pre>` element the helper renders
+ * inside.
+ *
+ * The whitespace contract is intentionally aligned with
+ * `entryFullPreviewText`: both helpers return the unmodified
+ * payload so Desktop and Quick Paste render the same block. The
+ * helpers stay distinct because `entryRawContent` is the typed
+ * accessor the highlight.js renderer reads (and therefore must not
+ * be collapsed by the helper itself), while `entryFullPreviewText`
+ * is the named entry-point the shared `<ClipboardPreview>` overlay
+ * consults for both the highlighted and the plain-text fallback
+ * branches.
  *
  * The helper is metadata-only by construction: it reads the same
  * `content` field the rest of the preview pipeline consumes and

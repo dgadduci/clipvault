@@ -3,6 +3,7 @@ import * as assert from "node:assert/strict";
 
 import {
   capabilitiesOf,
+  clampedSelectedIndex,
   hasAnyQuickPasteAction,
   preserveSelectionAfterReorder,
   quickPasteConfirmAction,
@@ -387,14 +388,32 @@ function hit(record: EntryRecord): SearchHit {
   };
 }
 
-test("quickPasteOrderedIds: recents put favourites first and keep recents order within each group", () => {
-  const pinned1 = textEntry({ id: 30, is_pinned: true });
-  const pinned2 = textEntry({ id: 10, is_pinned: true });
-  const plain1 = textEntry({ id: 5 });
-  const plain2 = textEntry({ id: 20 });
-  const recents = [plain1, pinned1, plain2, pinned2];
+test("quickPasteOrderedIds: recents put favourites first and order each group by created_at DESC, id DESC", () => {
+  // Recent mode orders favourites first and then sorts each group
+  // chronologically. The source-feed ordering is intentionally
+  // overridden: a newer capture must never appear after an older one
+  // within the same group.
+  const pinnedNew = textEntry({
+    id: 30,
+    is_pinned: true,
+    created_at: "2026-09-03T12:00:00Z",
+  });
+  const pinnedOld = textEntry({
+    id: 10,
+    is_pinned: true,
+    created_at: "2026-09-01T12:00:00Z",
+  });
+  const plainNew = textEntry({
+    id: 5,
+    created_at: "2026-09-02T12:00:00Z",
+  });
+  const plainOld = textEntry({
+    id: 20,
+    created_at: "2026-08-30T12:00:00Z",
+  });
+  const recents = [plainOld, pinnedNew, plainNew, pinnedOld];
   const ids = quickPasteOrderedIds("recent", recents, []);
-  assert.deepEqual(ids, [pinned1.id, pinned2.id, plain1.id, plain2.id]);
+  assert.deepEqual(ids, [pinnedNew.id, pinnedOld.id, plainNew.id, plainOld.id]);
 });
 
 test("quickPasteOrderedIds: search puts favourites first and keeps search ranking within each group", () => {
@@ -411,15 +430,60 @@ test("quickPasteOrderedIds: empty input yields empty output", () => {
   assert.deepEqual(quickPasteOrderedIds("idle", [], []), []);
 });
 
-test("quickPasteOrderedIds: pinned order within the favourites group follows the source order", () => {
-  // The contract pins the favourites group to the order the recents
-  // or search feed produced, NOT to id-sorted order, so the helper
-  // cannot simply sort by id.
-  const firstPinned = textEntry({ id: 50, is_pinned: true });
-  const secondPinned = textEntry({ id: 10, is_pinned: true });
+test("quickPasteOrderedIds: pinned order within the favourites group follows created_at DESC", () => {
+  // Recent mode sorts each group by capture time, NOT by id. The
+  // earlier pinned entry (older `created_at`) must move to the back
+  // of the favourites group, regardless of its source position.
+  const firstPinned = textEntry({
+    id: 50,
+    is_pinned: true,
+    created_at: "2026-09-04T12:00:00Z",
+  });
+  const secondPinned = textEntry({
+    id: 10,
+    is_pinned: true,
+    created_at: "2026-09-02T12:00:00Z",
+  });
   const recents = [secondPinned, firstPinned];
   const ids = quickPasteOrderedIds("recent", recents, []);
-  assert.deepEqual(ids, [secondPinned.id, firstPinned.id]);
+  assert.deepEqual(ids, [firstPinned.id, secondPinned.id]);
+});
+
+test("quickPasteOrderedIds: ties on created_at use id DESC", () => {
+  // Two captures with identical timestamps must use the entry id as
+  // the tie-breaker so the order stays deterministic across
+  // `history-updated` cycles.
+  const pinned = textEntry({
+    id: 30,
+    is_pinned: true,
+    created_at: "2026-09-01T12:00:00Z",
+  });
+  const plain = textEntry({
+    id: 5,
+    created_at: "2026-09-01T12:00:00Z",
+  });
+  const older = textEntry({
+    id: 7,
+    created_at: "2026-08-30T12:00:00Z",
+  });
+  const recents = [older, plain, pinned];
+  const ids = quickPasteOrderedIds("recent", recents, []);
+  // Favourites first, then non-favourites sorted by created_at DESC.
+  assert.deepEqual(ids, [pinned.id, plain.id, older.id]);
+});
+
+test("quickPasteOrderedIds: identical timestamps use id DESC within the same group", () => {
+  const newerId = textEntry({
+    id: 12,
+    created_at: "2026-09-01T12:00:00Z",
+  });
+  const smallerId = textEntry({
+    id: 3,
+    created_at: "2026-09-01T12:00:00Z",
+  });
+  const recents = [smallerId, newerId];
+  const ids = quickPasteOrderedIds("recent", recents, []);
+  assert.deepEqual(ids, [newerId.id, smallerId.id]);
 });
 
 test("preserveSelectionAfterReorder keeps the index inside the bounds", () => {
@@ -558,4 +622,85 @@ test("selectedIndexForEntryId tolerates a null selected id", () => {
   // helper MUST NOT crash on it and MUST honour the fallback index.
   assert.equal(selectedIndexForEntryId([10, 20, 30], null, 0), 0);
   assert.equal(selectedIndexForEntryId([10, 20, 30], null, 2), 2);
+});
+
+// ---------------------------------------------------------------------------
+// Regression: arrow-key navigation clamps at the list bounds.
+//
+// The previous baseline wrapped `selectedIndex` with the modulo
+// operator on every ArrowDown press; pressing the key on the last
+// row silently teleported the selection back to the first row, which
+// surfaced as a regression during the second round of manual QA on
+// `preview-interaction-regressions`. The new contract is **clamp**:
+// the selection stays on the boundary row when the user overshoots.
+// Home / End remain the canonical wrap-around shortcuts; the
+// pure helper `clampedSelectedIndex` owns the math so the Svelte
+// layer stays a thin caller.
+// ---------------------------------------------------------------------------
+
+test("clampedSelectedIndex advances by the delta inside the list bounds", () => {
+  assert.equal(clampedSelectedIndex([10, 20, 30], 0, 1), 1);
+  assert.equal(clampedSelectedIndex([10, 20, 30], 1, 1), 2);
+});
+
+test("clampedSelectedIndex decrements by the delta inside the list bounds", () => {
+  assert.equal(clampedSelectedIndex([10, 20, 30], 2, -1), 1);
+  assert.equal(clampedSelectedIndex([10, 20, 30], 1, -1), 0);
+});
+
+test("clampedSelectedIndex clamps at the top edge (no negative index)", () => {
+  // ArrowUp on the first row MUST stay on the first row, not jump
+  // to the last entry. The helper pins this contract so a future
+  // refactor that introduces `delta < 0` cannot silently flip the
+  // selection across the entire list.
+  assert.equal(clampedSelectedIndex([10, 20, 30], 0, -1), 0);
+  assert.equal(clampedSelectedIndex([10, 20, 30], 0, -5), 0);
+});
+
+test("clampedSelectedIndex clamps at the bottom edge (no wrap-around)", () => {
+  // ArrowDown on the last row MUST stay on the last row, not wrap
+  // back to the first entry. The helper is the single switch that
+  // owns the math so a regression that reintroduces the modulo
+  // wrap surfaces here.
+  assert.equal(clampedSelectedIndex([10, 20, 30], 2, 1), 2);
+  assert.equal(clampedSelectedIndex([10, 20, 30], 2, 5), 2);
+});
+
+test("clampedSelectedIndex returns -1 for an empty list", () => {
+  // The Svelte layer checks `next < 0` to skip scrollIntoView and
+  // any state mutation, so the empty-list sentinel must be a
+  // negative value distinct from any valid index.
+  assert.equal(clampedSelectedIndex([], 0, 1), -1);
+  assert.equal(clampedSelectedIndex([], 5, -3), -1);
+});
+
+test("clampedSelectedIndex normalises an out-of-range current index", () => {
+  // A stale closure from a previous render can land on a current
+  // index outside the new list bounds (e.g. the user filtered
+  // down to a single row while selectedIndex was still 4). The
+  // helper MUST NOT crash; it normalises the index to a safe value
+  // before applying the delta so the next render never lands on a
+  // stale slot.
+  assert.equal(clampedSelectedIndex([10], 5, 1), 0);
+  assert.equal(clampedSelectedIndex([10], -1, 1), 0);
+  assert.equal(clampedSelectedIndex([10], 0, -1), 0);
+});
+
+test("clampedSelectedIndex never returns a value outside [0, total-1]", () => {
+  // Property-based check: every (currentIndex, delta) pair the
+  // regression suite can produce must return an index the Svelte
+  // layer can pass to `resultIds[...]` without an `undefined`
+  // lookup. The helper is total; the assertion sweeps the
+  // representative input space.
+  const ids = [10, 20, 30, 40, 50];
+  for (const current of [-3, -1, 0, 2, 4, 7, 99]) {
+    for (const delta of [-5, -1, 0, 1, 5]) {
+      const next = clampedSelectedIndex(ids, current, delta);
+      if (next < 0) continue;
+      assert.ok(
+        next >= 0 && next < ids.length,
+        `clampedSelectedIndex([10..], ${current}, ${delta}) returned ${next}, expected a value in [0, ${ids.length - 1}]`,
+      );
+    }
+  }
 });

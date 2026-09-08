@@ -705,3 +705,138 @@ test("confirmEntry is the single switch used by Enter and click", () => {
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// Regression: Quick Paste arrow keys must change `selectedIndex` (clamped)
+// and update the visual selection, even when the focus lives on the
+// search input. The previous baseline only registered the keydown handler
+// on `<svelte:window>`; while the focus sat inside the search field the
+// browser default (cursor at end of query) hijacked the keystroke and
+// the keyboard selection never advanced.
+// ---------------------------------------------------------------------------
+
+test("moveSelection clamps at the bounds of the list (no wrap-around)", () => {
+  // The previous baseline used `(selectedIndex + delta + total) % total`
+  // so ArrowDown on the last row silently teleported back to the first
+  // row. The documented contract for ArrowUp / ArrowDown is to clamp
+  // against the visible list bounds so the user keeps the same row
+  // when they overshoot the edge; Home / End stay the wrap-around
+  // shortcuts. The clamp math is delegated to the pure
+  // `clampedSelectedIndex` helper so the regression suite can exercise
+  // it without mounting Svelte.
+  const moveMatch = quickPasteSource.match(
+    /function moveSelection[\s\S]*?\n  \}/,
+  );
+  assert.ok(moveMatch, "moveSelection must exist in QuickPaste.svelte");
+  const body = moveMatch![0];
+  // The moveSelection implementation MUST delegate the clamp to the
+  // pure helper rather than re-implementing the modulo wrap inline.
+  assert.match(
+    body,
+    /clampedSelectedIndex\(/,
+    "moveSelection must delegate to clampedSelectedIndex for the clamp math",
+  );
+  // The clamp helper is the documented alternative to the modulo wrap.
+  // A regression that re-introduces the inline `(...) % total` would
+  // silently teleport the selection past the row the user was reading.
+  assert.equal(
+    /%\s*total/.test(body),
+    false,
+    "moveSelection must NOT wrap with the modulo operator — Arrow keys clamp at the list bounds",
+  );
+  // moveSelection MUST NOT scrollIntoView or mutate state when the
+  // helper returns the same index (boundary case); otherwise the
+  // browser default could still hijack the keystroke on the last row.
+  assert.match(
+    body,
+    /next\s*===\s*selectedIndex[\s\S]*?return/,
+    "moveSelection must short-circuit when the clamp lands on the same row (boundary case)",
+  );
+});
+
+test("search input installs an on:keydown handler so arrow keys work while typing", () => {
+  // The previous baseline only listened for ArrowDown / ArrowUp on
+  // `<svelte:window>`. When the user typed into the search field the
+  // browser default (cursor at end of query) hijacked the keystroke
+  // and the keyboard selection never advanced. The regression fix
+  // adds an explicit `on:keydown` to the input so the navigation
+  // works regardless of focus.
+  const inputTagMatch = quickPasteSource.match(
+    /<input[^>]*data-testid="quick-paste-input"[\s\S]*?\/>/,
+  );
+  assert.ok(inputTagMatch, "the search input must exist in QuickPaste.svelte");
+  const inputTag = inputTagMatch![0];
+  assert.match(
+    inputTag,
+    /on:keydown=\{onSearchInputKeydown\}/,
+    "the search input must register an on:keydown handler so arrow navigation works while typing",
+  );
+});
+
+test("onSearchInputKeydown routes ArrowUp / ArrowDown / Home / End to the moveSelection helpers", () => {
+  // The new per-input handler is the only switch that drives the
+  // navigation keys when the focus sits inside the search field.
+  // It MUST delegate to the documented `moveSelection` / `jumpToFirst`
+  // / `jumpToLast` helpers and call `preventDefault()` so the
+  // browser default (cursor movement / native list scroll) cannot
+  // run alongside the Quick Paste navigation.
+  const handlerMatch = quickPasteSource.match(
+    /function onSearchInputKeydown[\s\S]*?\n  \}/,
+  );
+  assert.ok(
+    handlerMatch,
+    "onSearchInputKeydown must exist in QuickPaste.svelte",
+  );
+  const body = handlerMatch![0];
+  assert.match(
+    body,
+    /ArrowDown[\s\S]*?moveSelection\(1\)/,
+    "ArrowDown on the search input must advance selectedIndex by 1",
+  );
+  assert.match(
+    body,
+    /ArrowUp[\s\S]*?moveSelection\(-1\)/,
+    "ArrowUp on the search input must decrement selectedIndex by 1",
+  );
+  assert.match(
+    body,
+    /Home[\s\S]*?jumpToFirst\(\)/,
+    "Home on the search input must jump to the first row",
+  );
+  assert.match(
+    body,
+    /End[\s\S]*?jumpToLast\(\)/,
+    "End on the search input must jump to the last row",
+  );
+  // preventDefault must accompany every handled key so the
+  // browser default (cursor movement / native scroll) cannot
+  // hijack the keystroke.
+  const preventDefaultCount = (body.match(/preventDefault\(\)/g) ?? []).length;
+  assert.ok(
+    preventDefaultCount >= 4,
+    `onSearchInputKeydown must call preventDefault() for every handled navigation key; found ${preventDefaultCount}`,
+  );
+});
+
+test("onSearchInputKeydown stops propagation so the window listener does not double-fire", () => {
+  // The window-level keydown listener (`onWindowKeydown`) routes
+  // ArrowUp / ArrowDown / Home / End through the same navigation
+  // helpers when the focus sits outside the input. Without
+  // `stopPropagation` the per-input handler would call
+  // `moveSelection(1)` once and the window listener would call
+  // it again on the same event, advancing the selection by two
+  // rows on a single ArrowDown press.
+  const handlerMatch = quickPasteSource.match(
+    /function onSearchInputKeydown[\s\S]*?\n  \}/,
+  );
+  assert.ok(
+    handlerMatch,
+    "onSearchInputKeydown must exist in QuickPaste.svelte",
+  );
+  const body = handlerMatch![0];
+  const stopPropagationCount = (body.match(/stopPropagation\(\)/g) ?? []).length;
+  assert.ok(
+    stopPropagationCount >= 4,
+    `onSearchInputKeydown must call stopPropagation() for every handled key; found ${stopPropagationCount}`,
+  );
+});

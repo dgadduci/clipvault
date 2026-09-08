@@ -305,17 +305,35 @@ test("ClipboardPreview keeps the entry.metadata-only contract", () => {
   }
 });
 
-test("ClipboardPreview mounts the icon sprite and fallback glyphs once", () => {
+test("ClipboardPreview mounts the icon sprite and never the fallback glyph", () => {
   // The sprite is shared with the rail and Quick Paste rows; the
-  // component mounts it through the documented constants so the
-  // `<use href="#cv-icon-…">` ids always resolve.
+  // component mounts it through the documented `CONTENT_TYPE_ICON_SPRITE`
+  // constant so the `<use href="#cv-icon-…">` ids inside the overlay
+  // always resolve. The sprite is intentionally a hidden
+  // `<svg width="0" height="0" style="position:absolute">`, so it
+  // produces zero visible geometry on its own — every `<use>`
+  // paints the same shared path data at the consumer's declared
+  // size.
+  //
+  // The `APP_FALLBACK_ICON_SVG` glyph is intentionally NOT mounted
+  // here: it has no `width` / `height` / `position:absolute` and
+  // is consumed inline (inside `<span class="…-fallback">` cells
+  // with explicit parent dimensions) by `HistoryCard.svelte`,
+  // `SourceAppFilter.svelte` and `QuickPaste.svelte`. Rendering it
+  // once at the component root would paint the fallback glyph at
+  // the document's intrinsic SVG size (≈ 300×150 px in headless
+  // Chrome) immediately below the Desktop rail, surfacing as the
+  // "icono grande debajo de la lista horizontal de cards del
+  // Desktop" the QA manual pinned. The contract: the overlay
+  // mounts the sprite but never the glyph.
   assert.ok(
     previewSource.includes("CONTENT_TYPE_ICON_SPRITE"),
     "ClipboardPreview must mount the shared content-type icon sprite",
   );
-  assert.ok(
+  assert.equal(
     previewSource.includes("APP_FALLBACK_ICON_SVG"),
-    "ClipboardPreview must mount the shared app fallback glyph",
+    false,
+    "ClipboardPreview must NOT mount the APP_FALLBACK_ICON_SVG glyph (it would render visibly below the rail)",
   );
 });
 

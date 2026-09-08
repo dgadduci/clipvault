@@ -47,7 +47,6 @@
   import { onDestroy, onMount, tick } from "svelte";
   import type { EntryRecord } from "./types.ts";
   import {
-    APP_FALLBACK_ICON_SVG,
     CONTENT_TYPE_ICON_SPRITE,
     contentTypeIconId,
     contentTypeIconLabel,
@@ -238,10 +237,10 @@
    * `renderHighlightedCode` so the same `\n`, `\r\n`, `\t` and empty
    * lines the source application produced survive both the
    * highlighting and the subsequent `<pre>` mount. The
-   * `entryFullPreviewText` helper above keeps collapsing whitespace
-   * for the plain-text fallback path — every regression that targets
-   * the non-highlighted branch (and every test pinned against it) is
-   * preserved byte-for-byte.
+   * `entryFullPreviewText` helper above preserves the same
+   * whitespace characters so the plain-text fallback path renders
+   * the captured block byte-for-byte, the same way the highlighted
+   * branch does — both surfaces consult the same canonical helper.
    */
   $: rawText = entry == null ? "" : entryRawContent(entry);
   $: highlightedHtml = (() => {
@@ -404,8 +403,17 @@
   </div>
 {/if}
 
+<!--
+  Icon sprite the `<use href="#cv-icon-…">` references inside the
+  overlay resolve against. The sprite mounts as a single offscreen
+  `<svg width="0" height="0" style="position:absolute">` so it never
+  produces a visible glyph on its own — every `<use>` inside the
+  overlay paints the same shared path data at the consumer's
+  declared size. Mounting the sprite at the component root keeps
+  the symbol registry alive for the lifetime of the dialog without
+  leaking any visible fallback mark below the rail.
+-->
 {@html CONTENT_TYPE_ICON_SPRITE}
-{@html APP_FALLBACK_ICON_SVG}
 
 <style>
   .cv-preview-overlay {

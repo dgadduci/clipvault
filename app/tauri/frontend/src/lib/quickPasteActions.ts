@@ -350,11 +350,19 @@ export function hasAnyQuickPasteAction(
  * Build the ordered list of ids the Quick Paste list renders.
  *
  * Modalities documented in `quick-paste/spec.md`:
- * - favourites come first;
- * - each group preserves the order the recents / search feed already
- *   produced;
- * - the search mode treats `searchHits` as the candidate set; the
- *   recent mode treats `recents` as the candidate set.
+ *
+ *   - Recent mode: favourites come first; the favourite group and the
+ *     non-favourite group are sorted by `created_at DESC` with `id DESC`
+ *     as the tie-breaker so a newer capture never appears after an
+ *     older one within the same group. The source-feed ordering is
+ *     intentionally overridden: the previous contract trusted the
+ *     recents feed to come pre-sorted, which silently broke whenever a
+ *     `history-updated` event landed while a stale response was still
+ *     pending.
+ *   - Search mode: favourites come first; the favourite group and the
+ *     non-favourite group preserve the ranking `SearchService`
+ *     returned. Relevance is never replaced by capture time — when the
+ *     user is searching, they expect matches by score.
  *
  * The helper is pure: it never mutates the input lists and never
  * rebuilds the records. The callers pass the typed `EntryRecord[]`
@@ -365,25 +373,33 @@ export function quickPasteOrderedIds(
   recents: EntryRecord[],
   searchHits: SearchHit[],
 ): number[] {
-  const records =
-    mode === "search"
-      ? searchHits.map((hit) => hit.record)
-      : recents;
-  if (records.length === 0) {
+  if (mode === "search") {
+    return orderWithSearchRanking(searchHits);
+  }
+  if (mode === "idle") {
     return [];
   }
-  // Pair each id with the position the source feed already produced
-  // so we can sort by favourite first and by position within each
-  // group without mutating the input list.
+  return orderRecentsChronologically(recents);
+}
+
+/**
+ * Order the search-result candidates with favourites first and the
+ * `SearchService` ranking intact within each group. The helper is
+ * total: an empty input yields an empty array.
+ */
+function orderWithSearchRanking(searchHits: SearchHit[]): number[] {
+  if (searchHits.length === 0) {
+    return [];
+  }
   const positions = new Map<number, number>();
-  records.forEach((record, index) => {
-    positions.set(record.id, index);
+  searchHits.forEach((hit, index) => {
+    positions.set(hit.entry_id, index);
   });
   const pinned: number[] = [];
   const unpinned: number[] = [];
-  for (const record of records) {
-    const bucket = record.is_pinned ? pinned : unpinned;
-    bucket.push(record.id);
+  for (const hit of searchHits) {
+    const bucket = hit.record.is_pinned ? pinned : unpinned;
+    bucket.push(hit.entry_id);
   }
   pinned.sort((a, b) => {
     const posA = positions.get(a) ?? 0;
@@ -395,6 +411,43 @@ export function quickPasteOrderedIds(
     const posB = positions.get(b) ?? 0;
     return posA - posB;
   });
+  return [...pinned, ...unpinned];
+}
+
+/**
+ * Order the recents feed chronologically. The favourite group comes
+ * first; both the favourite and the non-favourite groups are sorted
+ * by `created_at DESC` with `id DESC` as the tie-breaker. The helper
+ * treats `created_at` as an ISO 8601 string the backend already
+ * produces; a malformed value collapses to the empty string so the
+ * comparator never throws.
+ *
+ * The helper is total: an empty input yields an empty array.
+ */
+function orderRecentsChronologically(recents: EntryRecord[]): number[] {
+  if (recents.length === 0) {
+    return [];
+  }
+  const records = new Map<number, EntryRecord>();
+  const pinned: number[] = [];
+  const unpinned: number[] = [];
+  for (const record of recents) {
+    records.set(record.id, record);
+    const bucket = record.is_pinned ? pinned : unpinned;
+    bucket.push(record.id);
+  }
+  const compareByCreatedAtDesc = (a: number, b: number): number => {
+    const recordA = records.get(a);
+    const recordB = records.get(b);
+    const timeA = recordA ? recordA.created_at : "";
+    const timeB = recordB ? recordB.created_at : "";
+    if (timeA === timeB) {
+      return b - a;
+    }
+    return timeA < timeB ? 1 : -1;
+  };
+  pinned.sort(compareByCreatedAtDesc);
+  unpinned.sort(compareByCreatedAtDesc);
   return [...pinned, ...unpinned];
 }
 
@@ -496,6 +549,40 @@ export function selectedIndexForEntryId(
  */
 export interface ScrollableRowElement {
   scrollIntoView: (options?: ScrollIntoViewOptions) => void;
+}
+
+/**
+ * Resolve the next selected index for an ArrowUp / ArrowDown keypress.
+ *
+ * The contract is **clamp** rather than wrap: pressing ArrowDown on
+ * the last visible row MUST stay on that row instead of teleporting
+ * back to the first. Wrapping was the previous baseline but it
+ * silently moved the keyboard focus past the row the user was
+ * reading, which surfaced as a regression during a second round of
+ * manual QA on `preview-interaction-regressions`. The wrap-around
+ * shortcuts (`Home` / `End`) are still the canonical way to jump
+ * across the list; `ArrowDown` / `ArrowUp` are the focused
+ * "one-row-at-a-time" navigation primitives.
+ *
+ * The helper is total: an empty `resultIds` collapses to `-1` so
+ * the caller can detect "no row to select" without a second check,
+ * and an out-of-range `currentIndex` (e.g. a stale closure from a
+ * previous render) is normalised to `0` before applying the
+ * delta. The function never mutates any input and never touches
+ * the DOM.
+ */
+export function clampedSelectedIndex(
+  resultIds: readonly number[],
+  currentIndex: number,
+  delta: number,
+): number {
+  const total = resultIds.length;
+  if (total === 0) {
+    return -1;
+  }
+  const safeCurrent =
+    currentIndex < 0 || currentIndex >= total ? 0 : currentIndex;
+  return Math.max(0, Math.min(total - 1, safeCurrent + delta));
 }
 
 /**

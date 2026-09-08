@@ -23,6 +23,7 @@
   import { performCopyFlow } from "./lib/quickPasteController";
   import {
     capabilitiesOf,
+    clampedSelectedIndex,
     preserveSelectionAfterReorder,
     quickPasteConfirmAction,
     quickPasteMenuActions,
@@ -50,6 +51,8 @@
   } from "./lib/clipboardAsset";
   import {
     matchesPreviewShortcut,
+    previewShortcutAccessibleLabel,
+    previewShortcutLabel,
   } from "./lib/clipboardPreview";
   import {
     createIconResolver,
@@ -632,9 +635,21 @@
   }
 
   function moveSelection(delta: number): void {
-    const total = resultIds.length;
-    if (total === 0) return;
-    const next = (selectedIndex + delta + total) % total;
+    // Arrow keys CLAMP at the ends of the list. Wrapping with the
+    // modulo operator would silently teleport the selection from
+    // the last row back to the first (and vice versa) the moment the
+    // user pressed Down on the last entry, which felt like a glitch
+    // during the manual QA pass. Home / End are the documented
+    // shortcuts for the wrap-around jump; ArrowUp / ArrowDown stay
+    // on the boundary. The pure `clampedSelectedIndex` helper keeps
+    // the math unit-testable without a DOM.
+    const next = clampedSelectedIndex(resultIds, selectedIndex, delta);
+    if (next < 0 || next === selectedIndex) {
+      // No-op at the boundary or on an empty list: do NOT re-issue
+      // scrollIntoView so the browser keeps the row steady; the
+      // visible selection stays highlighted on the same row.
+      return;
+    }
     selectedIndex = next;
     selectedEntryId = resultIds[next] ?? null;
     scrollSelectedIntoView();
@@ -1274,6 +1289,52 @@
   }
 
   /**
+   * Per-input keydown handler for the search field. The
+   * `<svelte:window>` listener handles ArrowUp / ArrowDown when the
+   * focus lives outside the field, but the user typically types
+   * inside the search input and expects the keyboard shortcuts to
+   * navigate the list while the caret stays inside the field.
+   * Without this handler the browser default would only move the
+   * caret to the end of the typed query on ArrowDown / ArrowUp;
+   * the keyboard selection would NOT change.
+   *
+   * The handler is intentionally narrow: it ONLY routes the four
+   * documented navigation keys (ArrowUp / ArrowDown / Home / End)
+   * so a typing surface keeps every other keystroke (alphanumerics,
+   * backspace, modifiers, IME composition) intact. The `Enter`
+   * branch stays in the window listener so the search input can
+   * still receive an explicit Enter (which is the documented
+   * shortcut for "confirm the highlighted entry").
+   *
+   * `stopPropagation` is called for the four handled keys so the
+   * window-level listener cannot fire on the same event — otherwise
+   * the keyboard selection would advance by two rows on a single
+   * ArrowDown press because both branches would call
+   * `moveSelection(1)`. The window listener is still the canonical
+   * handler for the same keys when the focus sits outside the
+   * input (e.g. on the list or on the document body).
+   */
+  function onSearchInputKeydown(event: KeyboardEvent): void {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      event.stopPropagation();
+      moveSelection(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      event.stopPropagation();
+      moveSelection(-1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      event.stopPropagation();
+      jumpToFirst();
+    } else if (event.key === "End") {
+      event.preventDefault();
+      event.stopPropagation();
+      jumpToLast();
+    }
+  }
+
+  /**
    * Reference to the search input. The compact UI must autofocus the
    * input every time the window opens so the user can start typing
    * immediately after `Cmd/Ctrl+Shift+V`. The reference is captured
@@ -1609,6 +1670,7 @@
         placeholder="Buscar en el historial del portapapeles"
         value={query}
         on:input={onInput}
+        on:keydown={onSearchInputKeydown}
         aria-label="Buscar en el historial del portapapeles"
         data-testid="quick-paste-input"
         bind:this={searchInputEl}
@@ -1726,6 +1788,26 @@
               >
                 {title}
               </span>
+              {#if index === selectedIndex}
+                <span
+                  class="qp-preview-hint"
+                  data-testid="quick-paste-preview-hint"
+                  data-preview-platform={shortcutPlatform}
+                  title={previewShortcutAccessibleLabel(shortcutPlatform)}
+                  aria-label={previewShortcutAccessibleLabel(shortcutPlatform)}
+                  aria-keyshortcuts={shortcutPlatform === "macos"
+                    ? "Meta+Enter"
+                    : "Control+Enter"}
+                >
+                  <span class="qp-preview-hint-label">Preview</span>
+                  <span
+                    class="qp-preview-hint-keys"
+                    aria-hidden="true"
+                  >
+                    {previewShortcutLabel(shortcutPlatform)}
+                  </span>
+                </span>
+              {/if}
               <button
                 type="button"
                 class="qp-pin"
@@ -2262,15 +2344,17 @@
   }
 
   .qp-row-line-meta {
-    /* The metadata line carries the type icon, the title, the pin
-     * button and the source-app icon. Each column reuses the
+    /* The metadata line carries the type icon, the title, the
+     * preview-shortcut hint (only on the selected row), the pin
+     * button and the source-app icon. Each fixed column reuses the
      * documented card footprints (`1.5rem` for the type, `1.65rem`
      * for the pin / source-app icons) so the Quick Paste row and
      * the desktop rail render the same effective icon size. The
-     * title takes the remaining width and truncates with an
-     * ellipsis instead of pushing the source-app icon out of the
-     * visible area. */
-    grid-template-columns: 1.5rem 1fr 1.65rem 1.65rem;
+     * hint sits in an `auto` column so the row never reserves room
+     * for it when the row is not selected; the title still flexes
+     * in the `1fr` column and truncates with an ellipsis instead
+     * of pushing the source-app icon out of the visible area. */
+    grid-template-columns: 1.5rem minmax(0, 1fr) auto 1.65rem 1.65rem;
   }
 
   .qp-type {
@@ -2672,6 +2756,61 @@
      * affordance apart from the actions that mutate the clipboard. */
     color: #cbd5f5;
     font-style: italic;
+  }
+
+  /*
+   * Compact preview-shortcut hint that surfaces only for the
+   * currently selected row. The pill sits in the meta line AFTER
+   * the title (between the title and the pin button) so the
+   * visual reading order is type/icon → title → hint → pin →
+   * source-app, matching the documented UX flow. The pill is
+   * non-interactive (`pointer-events: none`) so a click on the
+   * hint never accidentally stops the row's selection / copy
+   * flow, and uses the same platform-aware matcher the
+   * `Cmd/Ctrl+Enter` shortcut consults so the visible glyph and
+   * the keyboard accelerator cannot drift apart. The row's
+   * documented 72 px height stays untouched because every change
+   * happens inside the meta line's intrinsic height, and the
+   * `auto` column the hint lives in collapses to `0` whenever the
+   * row is not selected so the type / pin / source-app icons
+   * keep their fixed columns.
+   */
+  .qp-preview-hint {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    background: rgba(96, 165, 250, 0.18);
+    border: 1px solid rgba(96, 165, 250, 0.45);
+    color: #cbd5f5;
+    font-size: var(--cv-tag, 0.65rem);
+    line-height: 1.1;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-select: none;
+    flex: 0 0 auto;
+    max-width: 9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .qp-preview-hint-label {
+    font-weight: 600;
+    color: #93c5fd;
+  }
+  .qp-preview-hint-keys {
+    font-weight: 700;
+    color: #f0f4f8;
+    font-variant-numeric: tabular-nums;
+  }
+  .qp-row-active .qp-preview-hint {
+    background: rgba(255, 255, 255, 0.22);
+    border-color: rgba(255, 255, 255, 0.4);
+    color: #ffffff;
+  }
+  .qp-row-active .qp-preview-hint-label {
+    color: #ecfeff;
   }
 
   .qp-visually-hidden {

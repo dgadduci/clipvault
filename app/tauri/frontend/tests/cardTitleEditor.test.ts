@@ -97,10 +97,17 @@ test("card menu wires Editar título through the shared startEditTitle entry poi
   // menu entry points call. A regression that wires the menu
   // through a parallel state machine would silently fork the
   // editor and the persistence path.
+  //
+  // The `preview-interaction-regressions` change lifted the
+  // canonical menu state out of the card and into the rail
+  // (`openCardId`), so the body delegates to the shared
+  // `closeMenuAfterAction` helper instead of resetting a local
+  // boolean. The helper is the single switch every close path
+  // consults so the menu cannot drift out of sync with the rail.
   assert.match(
     cardSource,
-    /function startEditTitle\([\s\S]*?menuOpen = false;[\s\S]*?dispatch\("menu-toggle"/,
-    "startEditTitle must close the menu exactly once",
+    /function startEditTitle\([\s\S]*?closeMenuAfterAction\(\)[\s\S]*?titleInputEl\?\.select/,
+    "startEditTitle must close the menu through the shared helper",
   );
   // The dblclick handler on the title element must call
   // startEditTitle without any intermediate state.

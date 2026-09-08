@@ -389,13 +389,20 @@ test("App.svelte registers exactly one search-shortcut listener and removes it",
     /detachSearchShortcut\(\)/,
     "the listener cleanup must run during onDestroy",
   );
-  // The handler must NOT register a second, hidden listener (e.g.
-  // `window.addEventListener` for the same shortcut) — a duplicate
-  // would fire the focus logic twice per keystroke.
+  // The handler must NOT register a second, hidden listener for the
+  // same `Cmd/Ctrl+F` shortcut (e.g. `window.addEventListener` for
+  // the same keystroke) — a duplicate would fire the focus logic
+  // twice per shortcut. The Desktop preview overlay installs its
+  // own `window.addEventListener("keydown", …)` to forward Escape
+  // to the overlay; that listener is intentionally separate and the
+  // helper it registers is not a duplicate of the search shortcut
+  // listener.
   assert.equal(
-    /window\.addEventListener\(\s*"keydown"/.test(source),
+    /window\.addEventListener\(\s*"keydown"\s*,\s*onSearchShortcutKeydown/.test(
+      source,
+    ),
     false,
-    "no duplicate keydown listener on window",
+    "no duplicate search-shortcut keydown listener on window",
   );
 });
 

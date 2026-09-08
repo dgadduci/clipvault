@@ -40,7 +40,20 @@
   } from "./lib/contentType";
   import { canonicalLabel as canonicalCodeLanguageLabel } from "./lib/codeLanguageDetector";
   import { shouldShowCodeLanguageBadge } from "./lib/codeLanguageProjections";
-  import type { PreviewShortcutPlatform } from "./lib/clipboardPreview";
+  import {
+    previewShortcutAccessibleLabel,
+    previewShortcutLabel,
+    type PreviewShortcutPlatform,
+  } from "./lib/clipboardPreview";
+  import {
+    cardMenuPreviewShortcutAccessibleLabel,
+    cardMenuPreviewShortcutKeyAttribute,
+    cardMenuPreviewShortcutLabel,
+    cardMenuStyle,
+    computeCardMenuPosition,
+    recomputeCardMenuPositionForActualHeight,
+    type CardMenuPosition,
+  } from "./lib/cardMenuPositioning.ts";
   import {
     APP_FALLBACK_ICON_SVG,
     CONTENT_TYPE_ICON_SPRITE,
@@ -112,10 +125,49 @@
     entry: EntryRecord,
     collectionId: number,
   ) => Promise<void> = async () => {};
+  /**
+   * Whether this card is the rail's currently selected entry. The
+   * flag is local UI state: a `true` value exposes `aria-selected`,
+   * paints the selected styling and shows the platform-aware preview
+   * shortcut hint (the same matcher `ClipboardPreview` consumes).
+   * Selection is purely visual; the card never writes the value back
+   * to SQLite, the clipboard or a backend command.
+   */
+  export let selected: boolean = false;
+  /**
+   * Forward the user gesture that flipped selection. The rail owns
+   * the canonical id so two cards racing a `mousedown`/`keydown`
+   * cannot end up with two selections; the helper receives the id
+   * the user just picked (or `null` to clear the selection).
+   */
+  export let onSelect: (entryId: number | null) => void = () => {};
+  /**
+   * Whether this card's ellipsis menu is currently open. The flag
+   * is owned by the rail (`openCardId === entry.id`); the card is
+   * the thin renderer and never persists or duplicates the value.
+   * Treating the rail as the single source of truth is what lets
+   * Escape, outside clicks and the rail's `closeAllMenus` helper
+   * dismiss the popover without racing the card's local state.
+   */
+  export let menuOpen: boolean = false;
+  /**
+   * Optional callback the rail installs to receive the card's
+   * root `<article>` element. The horizontal keyboard navigation
+   * the rail exposes (`ArrowLeft` / `ArrowRight`) calls
+   * `scrollIntoView({ block: "nearest", inline: "nearest" })` on
+   * the freshly selected card so the user can see the card that
+   * just became active without ever leaving the rail. The card
+   * invokes the callback once per mount and once per unmount so
+   * the rail's registry stays in lock-step with the DOM; the
+   * callback is no-op by default so consumers that don't need the
+   * element never have to think about it.
+   */
+  export let onCardRef: (el: HTMLElement | null) => void = () => {};
 
   const dispatch = createEventDispatcher<{
     "menu-toggle": { id: number; open: boolean };
     "preview-request": { id: number };
+    "select-request": { id: number | null };
   }>();
 
   /** Local override of the persisted title so edits feel instant. */
@@ -125,9 +177,22 @@
       ? (localTitle ?? entry.title ?? "").trim()
       : defaultCardTitle(entry.content_type);
 
-  /** Ellipsis-menu state. The rail enforces a single-open invariant. */
-  let menuOpen = false;
+  /** Stable DOM id for the popover. The rail enforces the
+   * single-open invariant; this card receives `menuOpen` from the
+   * parent and only renders the popover when the flag is true. */
   let menuId = `card-menu-${entry.id}`;
+
+  /**
+   * Reference to the root `<article>` element. The rail mounts a
+   * callback through `onCardRef` so it can drive
+   * `scrollIntoView({ block: "nearest", inline: "nearest" })` on
+   * the freshly selected card after an `ArrowLeft` / `ArrowRight`
+   * press. We forward the element reactively so the rail's
+   * registry stays in lock-step with the DOM through remounts and
+   * entry swaps.
+   */
+  let cardArticleEl: HTMLElement | null = null;
+  $: onCardRef(cardArticleEl);
 
   /** Title-editing state. */
   let editingTitle = false;
@@ -464,7 +529,11 @@
   });
 
   function closeMenuAfterAction(): void {
-    menuOpen = false;
+    // The rail owns the canonical menu state (`openCardId`). The
+    // card just emits the toggle event so the rail can collapse the
+    // active menu without a second source of truth racing the
+    // popover.
+    if (!menuOpen) return;
     dispatch("menu-toggle", { id: entry.id, open: false });
   }
 
@@ -554,19 +623,23 @@
   }
 
   function toggleMenu(): void {
-    menuOpen = !menuOpen;
+    // The rail owns the canonical menu state. The card flips the
+    // locally-rendered popover visibility through the toggle event
+    // and waits for the next `menuOpen` prop to land before the
+    // popover actually paints.
     if (menuOpen) {
-      titleError = null;
+      dispatch("menu-toggle", { id: entry.id, open: false });
+      return;
     }
-    dispatch("menu-toggle", { id: entry.id, open: menuOpen });
+    titleError = null;
+    dispatch("menu-toggle", { id: entry.id, open: true });
   }
 
   function startEditTitle(): void {
     titleDraft = entry.title ?? "";
     titleError = null;
     editingTitle = true;
-    menuOpen = false;
-    dispatch("menu-toggle", { id: entry.id, open: false });
+    closeMenuAfterAction();
     queueMicrotask(() => {
       titleInputEl?.focus();
       titleInputEl?.select();
@@ -650,8 +723,7 @@
     } finally {
       titleBusy = false;
     }
-    menuOpen = false;
-    dispatch("menu-toggle", { id: entry.id, open: false });
+    closeMenuAfterAction();
   }
 
   function handlePinClick(): void {
@@ -660,8 +732,7 @@
 
   function handleDeleteClick(): void {
     onRequestDelete(entry);
-    menuOpen = false;
-    dispatch("menu-toggle", { id: entry.id, open: false });
+    closeMenuAfterAction();
   }
 
   // ---------------------------------------------------------------
@@ -783,10 +854,166 @@
 
   function onMenuKeydown(event: KeyboardEvent): void {
     if (event.key === "Escape") {
+      // Escape closes the menu regardless of where the focus sits
+      // inside the popover. `preventDefault` and `stopPropagation`
+      // are only called once we know the menu is open, so a typing
+      // surface outside the popover keeps its default Escape
+      // behaviour. The rail's document-level listener mirrors this
+      // branch so closing the menu from outside the popover and
+      // from inside the popover produce the same observable state.
       event.preventDefault();
-      menuOpen = false;
-      dispatch("menu-toggle", { id: entry.id, open: false });
+      closeMenuAfterAction();
     }
+  }
+
+  /**
+   * Reference to the ellipsis trigger button. The popover reads
+   * its `getBoundingClientRect()` to anchor itself inside the
+   * viewport without depending on the card's clipping context.
+   * `bind:this` keeps the reference in lock-step with the rendered
+   * DOM node so a remount can re-anchor the popover the same tick
+   * the trigger paints.
+   */
+  let menuTriggerEl: HTMLButtonElement | null = null;
+
+  /**
+   * Reference to the popover element itself, captured the moment
+   * Svelte mounts it. The handle lets `recomputeMenuPosition`
+   * measure the popover's real height after the first render so
+   * the bottom edge can be pinned to `trigger.top` even when the
+   * popover's content height is smaller than the clamped
+   * `max-height` the helper initially produced. Without this
+   * re-pass the menu would visibly float above the trigger when
+   * the viewport is tall.
+   */
+  let menuEl: HTMLDivElement | null = null;
+
+  /** Live `position: fixed` style for the menu popover. The helper
+   * `cardMenuStyle` formats the `CardMenuPosition` so the menu
+   * template stays a thin renderer. */
+  let menuPositionStyle = "";
+  let menuFlippedAbove = false;
+  let menuScrollable = false;
+
+  /**
+   * Compute the popover's viewport-aware rectangle. The helper is
+   * called when the menu opens, when the window resizes and when
+   * the scroll surface moves; the rail owns the outside-click
+   * guard and the Escape cleanup.
+   *
+   * `getBoundingClientRect` and `innerWidth` / `innerHeight` are
+   * the only DOM hooks the helper consults; the position math lives
+   * in `lib/cardMenuPositioning.ts` so the regression suite can
+   * exercise it without mounting Svelte.
+   *
+   * The first pass computes a viewport-aware rectangle from the
+   * trigger's bounding box; the second pass re-anchors the popover
+   * against its real rendered height so `popover.bottom === trigger.top`
+   * (when the menu flipped above) holds even when the popover is
+   * shorter than the available height. `requestAnimationFrame` is
+   * used to guarantee the layout pass has run before the second
+   * measurement; the rail's window listener re-runs the helper
+   * whenever the viewport or scroll surface changes.
+   */
+  function recomputeMenuPosition(): void {
+    if (!menuOpen) {
+      menuPositionStyle = "";
+      menuFlippedAbove = false;
+      menuScrollable = false;
+      return;
+    }
+    if (
+      !menuTriggerEl ||
+      typeof menuTriggerEl.getBoundingClientRect !== "function"
+    ) {
+      menuPositionStyle = "";
+      return;
+    }
+    const rect = menuTriggerEl.getBoundingClientRect();
+    const viewport = {
+      width: typeof window === "undefined" ? 1024 : window.innerWidth,
+      height: typeof window === "undefined" ? 720 : window.innerHeight,
+    };
+const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
+    menuPositionStyle = cardMenuStyle(position);
+    menuFlippedAbove = position.flippedAbove;
+    menuScrollable = position.scrollable;
+    // Second pass: re-anchor using the popover's real height. The
+    // popover is `position: fixed` and shrinks to its content, so
+    // its measured height may be smaller than `position.maxHeight`;
+    // the helper computes the popover's bottom from
+    // `position.maxHeight`, but the visible bottom lives at
+    // `position.top + menuEl.getBoundingClientRect().height`. The
+    // re-anchoring helper keeps the viewport clamps and the
+    // `CARD_MENU_TRIGGER_GAP` invariant intact, so the popover's
+    // actual bottom edge lands on `trigger.top` when the menu
+    // flipped above and on `trigger.bottom` when it dropped below.
+    // `requestAnimationFrame` waits for the layout pass to run so
+    // `getBoundingClientRect` returns the rendered geometry instead
+    // of a zero height for an unmounted popover.
+    requestAnimationFrame(() => {
+      if (!menuEl || typeof menuEl.getBoundingClientRect !== "function") {
+        return;
+      }
+      const popoverHeight = menuEl.getBoundingClientRect().height;
+      if (popoverHeight <= 0) return;
+      const corrected = recomputeCardMenuPositionForActualHeight(
+        position,
+        rect,
+        viewport,
+        popoverHeight,
+      );
+      if (
+        Math.abs(corrected.top - position.top) > 0.5 ||
+        Math.abs(corrected.maxHeight - position.maxHeight) > 0.5
+      ) {
+        menuPositionStyle = cardMenuStyle(corrected);
+      }
+    });
+  }
+
+  /** Window-level listeners that keep the popover anchored when
+   * the rail scrolls or the viewport resizes. The listeners are
+   * added lazily when the menu opens and removed when it closes
+   * so the rail cannot leak handlers between menu activations. */
+  let menuWindowListeners: (() => void) | null = null;
+
+  function attachMenuWindowListeners(): void {
+    if (typeof window === "undefined") return;
+    if (menuWindowListeners !== null) return;
+    const handler = () => recomputeMenuPosition();
+    window.addEventListener("resize", handler);
+    window.addEventListener("scroll", handler, true);
+    menuWindowListeners = () => {
+      window.removeEventListener("resize", handler);
+      window.removeEventListener("scroll", handler, true);
+    };
+  }
+
+  function detachMenuWindowListeners(): void {
+    if (menuWindowListeners === null) return;
+    menuWindowListeners();
+    menuWindowListeners = null;
+  }
+
+  // Re-anchor the popover on every viewport / scroll surface change
+  // while it is open. The reactive block re-derives the style as
+  // soon as `menuOpen` flips so the `{#if menuOpen}` block mounts the
+  // popover with the correct inline `style` from its very first
+  // paint — there is no flash at `(0, 0)` while the microtask waits
+  // for the next tick. The post-render pass (the `requestAnimationFrame`
+  // inside `recomputeMenuPosition`) still runs on the next frame to
+  // re-anchor against the real rendered height, but the menu is
+  // already visible at the right place when the very first paint
+  // lands.
+  $: if (menuOpen) {
+    attachMenuWindowListeners();
+    recomputeMenuPosition();
+  } else {
+    detachMenuWindowListeners();
+    menuPositionStyle = "";
+    menuFlippedAbove = false;
+    menuScrollable = false;
   }
 
   /**
@@ -836,10 +1063,56 @@
 
   function onCardKeydown(event: KeyboardEvent): void {
     if (!previewMatcher) return;
-    if (!previewMatcher(event, previewPlatform)) return;
     if (isInteractiveTarget(event.target)) return;
+    if (event.key === "Escape") {
+      // Escape clears the selection only when the rail has focus
+      // (the document-level listener the rail installs also routes
+      // Escape to the same callback). The shortcut MUST NOT swallow
+      // Escape when the user is editing the title, browsing the menu
+      // or typing inside an input — `isInteractiveTarget` already
+      // covers those branches.
+      if (selected) {
+        event.preventDefault();
+        dispatchSelect(null);
+      }
+      return;
+    }
+    if (!previewMatcher(event, previewPlatform)) return;
+    // The preview shortcut only fires for the currently selected
+    // card. A card that is not selected ignores the shortcut so
+    // `Cmd/Ctrl+Enter` cannot silently open a preview for an entry
+    // the user did not pick.
+    if (!selected) return;
     event.preventDefault();
     requestPreview();
+  }
+
+  /**
+   * Forward the user's selection gesture to the rail owner. The
+   * helper centralises the dispatch path so the click handler and
+   * the `Escape` shortcut share one branch.
+   */
+  function dispatchSelect(next: number | null): void {
+    onSelect(next);
+    dispatch("select-request", { id: next });
+  }
+
+  /**
+   * Click handler the card surface installs. The handler routes
+   * through the same `isInteractiveTarget` guard the keyboard
+   * shortcut uses so a click on a pin / menu / title / tag /
+   * collection / paste / delete control keeps its existing action
+   * and never accidentally flips the selection.
+   *
+   * Clicking the non-interactive surface of the currently selected
+   * card clears the selection; clicking any other card moves the
+   * selection to that card. The helper never writes the value to
+   * SQLite or any backend command — the rail is the single source of
+   * truth.
+   */
+  function onCardSurfaceClick(event: MouseEvent): void {
+    if (isInteractiveTarget(event.target)) return;
+    dispatchSelect(selected ? null : entry.id);
   }
 
   // Dragging is delegated to the singleton pointer controller installed by
@@ -859,11 +1132,16 @@
 <article
   class="card"
   class:menu-open={menuOpen}
+  class:card-selected={selected}
   data-testid="history-card"
   data-entry-id={entry.id}
+  data-selected={selected ? "true" : "false"}
   aria-label={displayTitle}
+  aria-selected={selected}
   draggable="false"
   tabindex={menuOpen || editingTitle ? -1 : 0}
+  bind:this={cardArticleEl}
+  on:click={(event) => onCardSurfaceClick(event)}
   on:keydown={(event) => onCardKeydown(event)}
 >
   <header class="card-header">
@@ -1244,6 +1522,23 @@
   {/if}
 
   <footer class="card-actions">
+    {#if selected}
+      <span
+        class="preview-hint"
+        data-testid="history-card-preview-hint"
+        data-preview-platform={previewPlatform}
+        title={previewShortcutAccessibleLabel(previewPlatform)}
+        aria-label={previewShortcutAccessibleLabel(previewPlatform)}
+        aria-keyshortcuts={previewPlatform === "macos"
+          ? "Meta+Enter"
+          : "Control+Enter"}
+      >
+        <span class="preview-hint-label">Preview</span>
+        <span class="preview-hint-keys" aria-hidden="true">
+          {previewShortcutLabel(previewPlatform)}
+        </span>
+      </span>
+    {/if}
     <button
       type="button"
       class="pin"
@@ -1327,6 +1622,7 @@
       aria-label={`Más acciones para ${displayTitle}`}
       title="Más acciones"
       data-testid="history-card-menu-trigger"
+      bind:this={menuTriggerEl}
       on:click={toggleMenu}
     >
       ⋯
@@ -1334,10 +1630,16 @@
     {#if menuOpen}
       <div
         class="menu"
+        class:menu-above={menuFlippedAbove}
+        class:menu-scrollable={menuScrollable}
         role="menu"
         id={menuId}
         aria-label={`Acciones de ${displayTitle}`}
         data-testid="history-card-menu"
+        data-menu-flip={menuFlippedAbove ? "above" : "below"}
+        data-menu-scrollable={menuScrollable ? "true" : "false"}
+        style={menuPositionStyle}
+        bind:this={menuEl}
         on:keydown={onMenuKeydown}
       >
         <button
@@ -1365,9 +1667,19 @@
         role="menuitem"
         class="menu-item preview-action"
         data-testid="history-card-preview"
+        data-shortcut-platform={previewPlatform}
+        aria-keyshortcuts={cardMenuPreviewShortcutKeyAttribute(previewPlatform)}
+        title={cardMenuPreviewShortcutAccessibleLabel(previewPlatform)}
         on:click={requestPreview}
       >
-        Previsualizar
+        <span class="menu-item-label">Previsualizar</span>
+        <span
+          class="menu-item-shortcut"
+          data-testid="history-card-preview-shortcut"
+          aria-hidden="true"
+        >
+          {cardMenuPreviewShortcutLabel(previewPlatform)}
+        </span>
       </button>
       <button
         type="button"
@@ -1487,6 +1799,55 @@
     user-select: none;
     -webkit-user-select: none;
     touch-action: none;
+    transition: border-color 120ms ease, box-shadow 120ms ease,
+      background 120ms ease;
+  }
+
+  /*
+   * Visual selection state the rail drives through the `selected`
+   * prop. The contract is `entry.id === selectedEntryId` (strict);
+   * the same predicate powers `aria-selected`, the preview-shortcut
+   * hint and the `data-selected` attribute so the four indicators
+   * can never drift. The previous baseline painted the class on the
+   * DOM but never declared the rule so the user only ever saw the
+   * default card chrome and could not tell which row was active —
+   * the regression surfaced as "clicking card 3 still selects card 1".
+   * The accent border, the soft ring and the lighter background are
+   * the same palette the Quick Paste row uses so the two surfaces
+   * read as the same affordance.
+   */
+  .card.card-selected {
+    border-color: rgba(96, 165, 250, 0.85);
+    background: rgba(96, 165, 250, 0.08);
+    box-shadow:
+      0 0 0 1px rgba(96, 165, 250, 0.45),
+      0 6px 18px rgba(15, 23, 42, 0.55);
+  }
+
+  /*
+   * Visual cue for an open ellipsis menu. The pin button keeps its
+   * pressed / unpinned palette through `:global` rules below; this
+   * rule only nudges the card chrome so the user can tell which row
+   * owns the popover even when the popover itself sits over a
+   * different row (the popover is `position: fixed` and can render
+   * anywhere in the viewport). The previous baseline declared
+   * `class:menu-open` on the `<article>` without a rule so the cue
+   * was effectively invisible.
+   */
+  .card.menu-open {
+    border-color: rgba(148, 163, 184, 0.65);
+    box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.35);
+  }
+
+  /*
+   * Selection wins over the open-menu cue so a card that owns both
+   * flags keeps the blue accent the keyboard shortcut requires.
+   */
+  .card.card-selected.menu-open {
+    border-color: rgba(96, 165, 250, 0.85);
+    box-shadow:
+      0 0 0 1px rgba(96, 165, 250, 0.45),
+      0 6px 18px rgba(15, 23, 42, 0.55);
   }
 
   .card-header {
@@ -1797,6 +2158,51 @@
     position: relative;
   }
 
+  /*
+   * Compact preview-shortcut hint that surfaces only for the
+   * currently selected card. The pill lives in the footer flow,
+   * aligned to the left, so it reads as a continuation of the
+   * card instead of an overlay on the pin or the menu. The
+   * `margin-right: auto` keeps pin and menu-trigger pinned to the
+   * right edge while the hint takes the remaining width on the
+   * left; the `max-width` reserves enough room for both controls
+   * so the fixed `--cv-card-size` footprint never has to grow.
+   * The hint uses the platform-aware label the shared
+   * `ClipboardPreview` matcher consumes so the visible glyph and
+   * the keyboard shortcut cannot drift apart.
+   */
+  .preview-hint {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+    background: rgba(96, 165, 250, 0.18);
+    border: 1px solid rgba(96, 165, 250, 0.45);
+    color: #cbd5f5;
+    font-size: var(--cv-tag, 0.65rem);
+    line-height: 1;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-select: none;
+    max-width: calc(100% - 5rem);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-right: auto;
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  .preview-hint-label {
+    font-weight: 600;
+    color: #93c5fd;
+  }
+  .preview-hint-keys {
+    font-weight: 700;
+    color: #f0f4f8;
+    font-variant-numeric: tabular-nums;
+  }
+
   .card-actions :global(.pin),
   .card-actions :global(.menu-trigger) {
     background: #1f2937;
@@ -1859,9 +2265,20 @@
   }
 
   .menu {
-    position: absolute;
-    right: 0;
-    bottom: calc(100% + 0.35rem);
+    /*
+     * The popover is portalised through `position: fixed` (the
+     * inline `style` string `cardMenuStyle` produces). The card's
+     * own `overflow: hidden` clipping context cannot intercept a
+     * fixed-position descendant because the card does not create a
+     * containing block for fixed elements (no transform / filter /
+     * perspective / will-change on any ancestor). The geometry
+     * fields (top, left, width, max-height) and the `z-index`
+     * value live on the inline style so the helper is the single
+     * source of truth for the popover rectangle; the CSS class
+     * only carries the chrome (background, border, padding,
+     * shadow, layout) so the popover never doubles up the
+     * `position` declaration.
+     */
     display: flex;
     flex-direction: column;
     min-width: 11rem;
@@ -1870,7 +2287,6 @@
     border-radius: 8px;
     padding: 0.25rem;
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
-    z-index: 4;
   }
 
   .menu-item {
