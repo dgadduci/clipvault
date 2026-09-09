@@ -40,6 +40,8 @@ pub mod macos_paste;
 pub mod macos_settings;
 
 #[cfg(target_os = "linux")]
+pub mod linux_app_metadata;
+#[cfg(target_os = "linux")]
 pub mod linux_app_picker;
 #[cfg(target_os = "linux")]
 pub mod linux_settings;

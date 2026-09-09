@@ -62,7 +62,14 @@ impl ActiveAppError {
 #[serde(rename_all = "snake_case")]
 pub enum ActiveAppBackendKind {
     MacOsWorkspace,
+    /// Plain X11 session — `WAYLAND_DISPLAY` is unset and the EWMH
+    /// probe connected to the X server via `$DISPLAY`.
     X11Ewmh,
+    /// Wayland session where the active application is exposed by
+    /// XWayland. The EWMH probe still connects through `$DISPLAY`
+    /// but the host is structurally Wayland, so the diagnostics
+    /// surface distinguishes this branch from the plain X11 one.
+    XWaylandEwmh,
     Unavailable,
 }
 
@@ -71,6 +78,7 @@ impl ActiveAppBackendKind {
         match self {
             ActiveAppBackendKind::MacOsWorkspace => "macos_workspace",
             ActiveAppBackendKind::X11Ewmh => "x11_ewmh",
+            ActiveAppBackendKind::XWaylandEwmh => "xwayland_ewmh",
             ActiveAppBackendKind::Unavailable => "unavailable",
         }
     }
@@ -192,6 +200,7 @@ mod tests {
             "macos_workspace"
         );
         assert_eq!(ActiveAppBackendKind::X11Ewmh.as_str(), "x11_ewmh");
+        assert_eq!(ActiveAppBackendKind::XWaylandEwmh.as_str(), "xwayland_ewmh");
         assert_eq!(ActiveAppBackendKind::Unavailable.as_str(), "unavailable");
     }
 

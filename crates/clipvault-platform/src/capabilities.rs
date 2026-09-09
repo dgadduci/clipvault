@@ -458,8 +458,17 @@ fn capabilities_for(info: &PlatformInfo) -> Capabilities {
                 // No portable synthetic-paste API under Wayland: report
                 // unavailable so the UI disables the action.
                 synthetic_paste: false,
-                // No portable active-app query under Wayland either.
-                active_application: false,
+                // XWayland support is best-effort: when the session
+                // exposes a real X11 window the EWMH probe can
+                // identify the application, but a native Wayland
+                // window never publishes through X11. The probe stays
+                // `true` so the bootstrap tries the X11 connection
+                // when `$DISPLAY` is set; the diagnostics surface
+                // labels the result `xwayland_ewmh` (via
+                // [`crate::ActiveAppBackendKind`]) when it succeeds and
+                // a native Wayland application keeps reporting
+                // `unavailable` instead of a fabricated name.
+                active_application: true,
                 // Status-notifier-item is supported by every modern
                 // Wayland compositor.
                 tray: true,
@@ -550,13 +559,18 @@ mod tests {
     }
 
     #[test]
-    fn linux_wayland_disables_synthetic_paste_and_active_app() {
+    fn linux_wayland_disables_synthetic_paste_but_keeps_active_app_xwayland_attempt() {
         let caps = detect_capabilities(&info(OsFamily::Linux, DisplayServer::Wayland));
         assert!(caps.clipboard_read);
         assert!(caps.clipboard_write);
         assert!(caps.global_hotkey);
         assert!(!caps.synthetic_paste);
-        assert!(!caps.active_application);
+        // XWayland support is best-effort: the capability stays
+        // `true` so the bootstrap can attempt the EWMH probe when
+        // `$DISPLAY` is set, but a native Wayland window never
+        // publishes through X11 so the bootstrap falls back to the
+        // no-op probe without fabricating a name.
+        assert!(caps.active_application);
         assert!(caps.tray);
     }
 

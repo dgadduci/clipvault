@@ -492,7 +492,7 @@ impl AppBootstrap {
             IgnoredAppsService::new(Arc::clone(&self.options.clock), gate.clone());
         let active_app_diagnostics = ActiveAppDiagnosticsState::new(
             capabilities.active_application,
-            active_app_backend_kind(platform.os_family, capabilities.active_application),
+            active_app_backend_kind(&platform, capabilities.active_application),
             Some(cached_probe.clone()),
         );
 
@@ -575,19 +575,31 @@ pub fn default_database_path() -> Result<PathBuf, BootstrapError> {
 /// uses. Mirrors the platform crate's [`ActiveAppBackendKind`] so the
 /// diagnostics endpoint exposes a recognisable string instead of the
 /// raw capability flag.
-fn active_app_backend_kind(
-    os_family: clipvault_platform::OsFamily,
+///
+/// On Linux the value depends on the `display_server` the platform
+/// layer detected: a plain X11 session reports `x11_ewmh`, a Wayland
+/// session with a live `$DISPLAY` reports `xwayland_ewmh` (XWayland
+/// only ever reports applications that publish a real X11 window)
+/// and anything else collapses to `unavailable`. Splitting the two
+/// surfaces preserves the historical `x11_ewmh` identifier while
+/// giving the diagnostics card a metadata-only knob to distinguish a
+/// native Wayland application from a real X11/XWayland one.
+pub(crate) fn active_app_backend_kind(
+    info: &clipvault_platform::PlatformInfo,
     available: bool,
 ) -> clipvault_platform::ActiveAppBackendKind {
-    use clipvault_platform::OsFamily;
+    use clipvault_platform::{ActiveAppBackendKind, DisplayServer, OsFamily};
     if !available {
-        return clipvault_platform::ActiveAppBackendKind::Unavailable;
+        return ActiveAppBackendKind::Unavailable;
     }
-    match os_family {
-        OsFamily::Macos => clipvault_platform::ActiveAppBackendKind::MacOsWorkspace,
-        #[cfg(target_os = "linux")]
-        OsFamily::Linux => clipvault_platform::ActiveAppBackendKind::X11Ewmh,
-        _ => clipvault_platform::ActiveAppBackendKind::Unavailable,
+    match info.os_family {
+        OsFamily::Macos => ActiveAppBackendKind::MacOsWorkspace,
+        OsFamily::Linux => match info.display_server {
+            DisplayServer::X11 => ActiveAppBackendKind::X11Ewmh,
+            DisplayServer::Wayland => ActiveAppBackendKind::XWaylandEwmh,
+            DisplayServer::Unknown => ActiveAppBackendKind::Unavailable,
+        },
+        _ => ActiveAppBackendKind::Unavailable,
     }
 }
 
@@ -606,4 +618,60 @@ fn _ensure_traits_linked(
     _: &dyn PasteController,
     _: &dyn TrayController,
 ) {
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clipvault_platform::{ActiveAppBackendKind, DisplayServer, OsFamily, PlatformInfo};
+    use std::path::PathBuf;
+
+    fn info(os: OsFamily, display: DisplayServer) -> PlatformInfo {
+        PlatformInfo {
+            home_dir: PathBuf::from("/tmp"),
+            data_dir: PathBuf::from("/tmp/.clipvault"),
+            os_family: os,
+            display_server: display,
+        }
+    }
+
+    /// `x11_ewmh` on a plain X11 session, `xwayland_ewmh` on a
+    /// Wayland session (the diagnostics surface distinguishes the
+    /// two), and `unavailable` when the host is Linux without a
+    /// recognised display server. Mirrors the contract the
+    /// `desktop-platform-integration` spec pins for the
+    /// `linux-source-app-metadata` change.
+    #[test]
+    fn active_app_backend_kind_distinguishes_x11_and_xwayland() {
+        let info_x11 = info(OsFamily::Linux, DisplayServer::X11);
+        let info_wayland = info(OsFamily::Linux, DisplayServer::Wayland);
+        let info_unknown = info(OsFamily::Linux, DisplayServer::Unknown);
+        let info_macos = info(OsFamily::Macos, DisplayServer::Unknown);
+        assert_eq!(
+            active_app_backend_kind(&info_x11, true),
+            ActiveAppBackendKind::X11Ewmh
+        );
+        assert_eq!(
+            active_app_backend_kind(&info_wayland, true),
+            ActiveAppBackendKind::XWaylandEwmh
+        );
+        assert_eq!(
+            active_app_backend_kind(&info_unknown, true),
+            ActiveAppBackendKind::Unavailable
+        );
+        assert_eq!(
+            active_app_backend_kind(&info_macos, true),
+            ActiveAppBackendKind::MacOsWorkspace
+        );
+        // Unavailable overrides everything when the capability is
+        // off.
+        assert_eq!(
+            active_app_backend_kind(&info_x11, false),
+            ActiveAppBackendKind::Unavailable
+        );
+        assert_eq!(
+            active_app_backend_kind(&info_wayland, false),
+            ActiveAppBackendKind::Unavailable
+        );
+    }
 }

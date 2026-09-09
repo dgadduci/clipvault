@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-09
+goal: Identificar y mostrar el nombre e icono de la aplicación origen en Linux X11 y XWayland, manteniendo una indisponibilidad explícita y segura para Wayland nativo.

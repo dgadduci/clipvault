@@ -1149,6 +1149,21 @@ fn build_active_application(
         }
         #[cfg(all(target_os = "linux", feature = "linux-x11"))]
         OsFamily::Linux => {
+            // On a plain X11 session we always attempt the EWMH
+            // probe; on a Wayland session we only try the X11 probe
+            // when `$DISPLAY` is present so the XWayland fallback can
+            // answer for windows that publish through X11. Native
+            // Wayland applications never appear on `$DISPLAY`, so the
+            // probe falls back to the no-op adapter and the
+            // diagnostics surface reports `unavailable` instead of a
+            // fabricated identifier.
+            if matches!(
+                info.display_server,
+                clipvault_platform::DisplayServer::Wayland
+            ) && std::env::var_os("DISPLAY").is_none()
+            {
+                return Arc::new(clipvault_platform::NoopActiveApplicationProbe);
+            }
             match clipvault_platform::runtime::linux_x11_active_app::X11ActiveApplication::new() {
                 Ok(probe) => return Arc::new(probe),
                 Err(error) => {
@@ -1164,10 +1179,12 @@ fn build_active_application(
 /// Build the application-metadata provider used by the
 /// `history-card-layout` capability. macOS uses the bundle metadata
 /// helper (see [`clipvault_platform::runtime::macos_app_metadata`]
-/// when the `macos-native` feature is on); every other platform —
-/// Linux X11, Linux Wayland, hosts where the metadata backend is
-/// unavailable — falls back to the no-op adapter so the capture
-/// pipeline never blocks on metadata.
+/// when the `macos-native` feature is on); Linux wires the
+/// freedesktop-backed adapter so X11/XWayland captures enrich with
+/// the user-visible name and a controlled icon reference; every
+/// other host — Windows, unsupported platforms, hosts where the
+/// metadata backend is unavailable — falls back to the no-op adapter
+/// so the capture pipeline never blocks on metadata.
 fn build_application_metadata_provider(
     info: &PlatformInfo,
 ) -> Arc<dyn clipvault_platform::ApplicationMetadataProvider> {
@@ -1176,6 +1193,14 @@ fn build_application_metadata_provider(
         OsFamily::Macos => {
             return Arc::new(
                 clipvault_platform::runtime::macos_app_metadata::MacOsApplicationMetadataProvider::new(
+                    info.data_dir.join("assets"),
+                ),
+            );
+        }
+        #[cfg(target_os = "linux")]
+        OsFamily::Linux => {
+            return Arc::new(
+                clipvault_platform::runtime::linux_app_metadata::LinuxApplicationMetadataProvider::new(
                     info.data_dir.join("assets"),
                 ),
             );
