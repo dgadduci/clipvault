@@ -92,14 +92,22 @@ vacío. No se debe almacenar el contenido del archivo `.desktop` en SQLite.
 ## Resolución y persistencia del icono
 
 - `Icon=/ruta/icono.png` se resuelve como path absoluto sólo después de
-  validarlo como archivo regular local.
-- `Icon=nombre` se resuelve en los directorios de iconos XDG y temas locales,
-  prefiriendo tamaños adecuados y formatos que el bridge actual pueda servir.
-- La implementación debe soportar el formato que use el icono real de las
-  aplicaciones verificadas en Ubuntu. Si requiere rasterizar SVG u otro
-  formato para cumplir el bridge PNG existente, debe usar una solución local,
-  determinista y justificada en el diff; no debe invocar `convert`, `gio` u
-  otros procesos externos.
+  validarlo como archivo regular local que viva bajo una raíz XDG
+  permitida.
+- `Icon=nombre` se resuelve recorriendo el árbol canónico de iconos
+  XDG en este orden:
+  1. `<root>/icons/<theme>/<size>x<size>/apps/<name>.png`
+  2. `<root>/icons/<theme>/scalable/apps/<name>.png`
+  3. layout legacy `<root>/icons/<size>x<size>/apps/<name>.png`
+  Los temas se descubren dinámicamente con `hicolor` añadido al
+  final como fallback determinístico. La distribución real de Ubuntu
+  instala los iconos en `/usr/share/icons/hicolor/<size>x<size>/apps/`
+  y el árbol canónico es la única ruta que los encuentra.
+- Solo se aceptan PNGs validados con la firma canónica
+  (`\x89PNG\r\n\x1a\n`). El provider no rasteriza SVG ni invoca
+  procesos externos (`convert`, `gio`, `magick`, …) — esa limitación
+  está documentada en `tasks.md` y se justifica porque las
+  aplicaciones objetivo de las pruebas usan PNG.
 - El resultado se guarda como PNG bajo
   `<data_dir>/assets/application-icons/<safe-identifier>.png` y se persiste
   como referencia relativa mediante `icon_ref_for` o un helper compartido.
@@ -111,6 +119,52 @@ vacío. No se debe almacenar el contenido del archivo `.desktop` en SQLite.
 - No devolver paths absolutos al core, Tauri, frontend, logs ni eventos. El
   bridge existente sigue siendo el único lector de bytes.
 - No sobrescribir con un icono vacío una referencia válida ya persistida.
+
+## Probe X11/XWayland
+
+- `WM_CLASS` se consulta como `STRING` (con fallback a
+  `AnyPropertyType`). El ICCCM define `WM_CLASS` como lista de
+  cadenas Latin-1; pedirla como `UTF8_STRING` hacía que el servidor X
+  no devolviera bytes para ventanas GTK/Qt y la cache quedaba
+  vacía.
+- `_NET_WM_NAME` se consulta como `UTF8_STRING` (con fallback a
+  `AnyPropertyType`); el EWMH define este propiedad como texto
+  Unicode.
+- Cada respuesta se valida con `format == 8` y `bytes_after == 0`
+  antes de devolverla; si no cumple, el helper pasa al siguiente
+  candidato.
+- El segmento `class` de `WM_CLASS` es el identificador estable que
+  alimenta el blacklist y el provider `.desktop`; cuando falta, se
+  usa el segmento `instance`. Nunca se usa el título de la ventana.
+
+## Selección del active-app probe
+
+- En `DisplayServer::X11` se construye
+  `X11ActiveApplication::with_kind(None, ProbeKind::X11)`. La sonda
+  expone `name() = "x11_ewmh"`.
+- En `DisplayServer::Wayland` se construye
+  `X11ActiveApplication::with_kind(None, ProbeKind::XWayland)` cuando
+  `DISPLAY` está definido y la conexión X11 es válida. La sonda expone
+  `name() = "xwayland_ewmh"`. Si la conexión falla, el bootstrap cae
+  a `NoopActiveApplicationProbe` y la matriz de capacidades reporta
+  `active_application = false`.
+- En Wayland nativo sin DISPLAY se omite la sonda por completo.
+- La matriz de capacidades (`detect_capabilities_runtime`) no se
+  modifica por este cambio — el `active_application` se calcula a
+  partir del probe efectivamente instalado, no del display server
+  detectado.
+
+## Modal Acerca de
+
+- El desktop agrega el ítem "Acerca de" al menú global de puntos
+  suspensivos del toolbar. Las cards no exponen un ítem paralelo.
+- El modal reusa el patrón `Modal.svelte` existente: mismo shell,
+  mismo `onClose`, misma trampa de foco, mismo comportamiento de
+  `Escape` y backdrop.
+- La versión se lee siempre desde `diagnostics.version` (canal
+  `clipvault_diagnostics`), que a su vez lee
+  `Cargo.toml` `[workspace.package].version`. Nunca se usa un
+  literal hardcodeado en `Svelte`.
 
 ## Captura, backfill y privacidad
 

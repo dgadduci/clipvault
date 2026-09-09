@@ -39,7 +39,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   applyEntryOrganizationResults,
@@ -57,10 +56,7 @@ import type {
   Tag,
 } from "../src/types.ts";
 
-const FRONTEND_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
+const FRONTEND_ROOT = process.cwd();
 
 function loadFixture(absPath: string): string {
   return readFileSync(absPath, "utf8");

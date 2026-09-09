@@ -64,8 +64,16 @@ pub struct LinuxApplicationMetadataProvider {
     /// Roots the desktop-entry scanner walks. Cached at construction
     /// time so the lookup hot path never re-reads the environment.
     app_dirs: Vec<PathBuf>,
-    /// Roots the icon resolver walks. Cached for the same reason.
+    /// Resolved icon directories the resolver probes for theme
+    /// names (`<theme>/<size>x<size>/apps` or the legacy
+    /// `<size>x<size>/apps` layout). Cached for the same reason.
     icon_dirs: Vec<PathBuf>,
+    /// Canonical parent roots for every entry in `icon_dirs`. The
+    /// resolver refuses to follow any candidate whose canonical
+    /// path escapes one of these roots, which keeps symlink
+    /// traversal honest regardless of which theme the host
+    /// installed the file under.
+    icon_roots: Vec<PathBuf>,
     /// Sizes the icon resolver probes when the entry names a theme
     /// icon (e.g. `Icon=firefox`). The provider walks each size in
     /// order and returns the first hit that lives under an allowed
@@ -95,10 +103,13 @@ impl LinuxApplicationMetadataProvider {
         assets_dir: impl Into<PathBuf>,
         fs: std::sync::Arc<dyn DesktopFilesystem>,
     ) -> Self {
+        let icon_dirs = collect_icon_dirs(fs.as_ref());
+        let icon_roots = collect_icon_root_layout(fs.as_ref());
         Self {
             assets_dir: assets_dir.into(),
             app_dirs: collect_application_dirs(fs.as_ref()),
-            icon_dirs: collect_icon_dirs(fs.as_ref()),
+            icon_dirs,
+            icon_roots,
             icon_sizes: &[128, 64, 256, 48],
             fs,
         }
@@ -204,7 +215,10 @@ impl LinuxApplicationMetadataProvider {
     ///
     /// - absolute file paths under one of the allowed roots;
     /// - bare icon names looked up in the cached icon directories
-    ///   (in the order the configured `icon_sizes` walk them);
+    ///   (`<theme>/<size>x<size>/apps/`, `<theme>/scalable/apps/` or
+    ///   the legacy `<size>x<size>/apps/` layout). The directories
+    ///   are walked in the order `collect_icon_dirs` produced so the
+    ///   first hit wins;
     /// - PNG files only. Other formats (SVG, XPM) are silently
     ///   skipped — the spec only requires PNG compatibility so the
     ///   existing icon bridge can serve the bytes verbatim.
@@ -222,40 +236,43 @@ impl LinuxApplicationMetadataProvider {
         if candidate.is_absolute() {
             let path = self.fs.canonicalize_if_safe(candidate).ok()?;
             if path.extension().and_then(|ext| ext.to_str()) == Some("png")
-                && self.icon_dirs.iter().any(|root| path.starts_with(root))
+                && self.icon_roots.iter().any(|root| path.starts_with(root))
             {
                 return Some(path);
             }
             return None;
         }
-        // Theme-name lookup: walk `<root>/<size>/apps/<name>.png`.
+        // Theme-name lookup: each entry in `self.icon_dirs` already
+        // resolves to an `apps/` directory (legacy layout or the
+        // canonical theme-aware layout), so the helper only has to
+        // append `<stem>.png` and validate the canonicalised path
+        // lives under an allowed parent root.
         let stem = trimmed.trim_end_matches(".png");
+        let filename = format!("{stem}.png");
         let mut found: Option<PathBuf> = None;
-        for root in &self.icon_dirs {
-            for size in self.icon_sizes {
-                let candidate = root
-                    .join(format!("{size}x{size}"))
-                    .join("apps")
-                    .join(format!("{stem}.png"));
-                if self.fs.is_file(&candidate) {
-                    if let Ok(canonical) = self.fs.canonicalize_if_safe(&candidate) {
-                        // Belt-and-braces: refuse anything that points
-                        // outside the icon root via a symlink. The
-                        // canonical comparison is the same check the
-                        // existing `resolve_icon_path` helper uses.
-                        let canonical_root = self
-                            .fs
-                            .canonicalize_if_safe(root)
-                            .unwrap_or_else(|_| root.clone());
-                        if canonical.starts_with(&canonical_root) {
-                            found = Some(canonical);
-                            break;
-                        }
-                    }
-                }
+        'roots: for apps_dir in &self.icon_dirs {
+            let candidate = apps_dir.join(&filename);
+            if !self.fs.is_file(&candidate) {
+                continue;
             }
-            if found.is_some() {
-                break;
+            let canonical = match self.fs.canonicalize_if_safe(&candidate) {
+                Ok(path) => path,
+                Err(_) => continue,
+            };
+            // Refuse symlinks or other escape routes that would let the
+            // file resolve outside the configured icon roots. The
+            // `icon_roots` list carries the canonical parent root for
+            // every theme-aware entry, so a single comparison is
+            // enough.
+            for root in &self.icon_roots {
+                let canonical_root = self
+                    .fs
+                    .canonicalize_if_safe(root)
+                    .unwrap_or_else(|_| root.clone());
+                if canonical.starts_with(&canonical_root) {
+                    found = Some(canonical);
+                    break 'roots;
+                }
             }
         }
         found
@@ -522,9 +539,71 @@ impl PathOsStringExt for OsString {
 }
 
 /// Build the list of icon roots the resolver walks. The list mirrors
-/// the freedesktop icon-theme spec: every `<root>/icons/hicolor` and
-/// every `<root>/icons/<size>/apps` pair, deduplicated and ordered.
+/// the freedesktop icon-theme spec: every `<root>/icons/<theme>/<size>x<size>/apps`
+/// and every `<root>/icons/<theme>/scalable/apps` pair is included,
+/// plus the legacy `<root>/icons/<size>x<size>/apps` layout that some
+/// distributions still ship. Themes are walked in the order the
+/// environment advertises (the `hicolor` theme is added at the end
+/// as the universal fallback so any well-formed desktop install can
+/// satisfy the lookup).
+///
+/// Canonical Ubuntu layout (the regression the change fixes) lives
+/// under `/usr/share/icons/hicolor/<size>x<size>/apps/`, with the
+/// theme name introducing a second directory level between the
+/// `<root>/icons` parent and the size directory. The previous
+/// collector only walked the legacy three-level layout
+/// (`<root>/icons/<size>x<size>/apps`) and silently skipped every
+/// theme-installed icon, leaving the cards without an icon even
+/// when the `.desktop` declared `Icon=firefox`.
 fn collect_icon_dirs(fs: &dyn DesktopFilesystem) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let theme_roots = collect_icon_root_layout(fs);
+
+    // Walk every base root twice: once for the legacy
+    // `<root>/icons/<size>x<size>/apps` layout that some
+    // distributions still ship, then again for the canonical
+    // freedesktop layout (`<root>/icons/<theme>/<size>x<size>/apps`
+    // and `<root>/icons/<theme>/scalable/apps`).
+    for root in &theme_roots {
+        for size in [128u32, 64, 256, 48] {
+            let apps = root.join(format!("{size}x{size}")).join("apps");
+            if fs.is_dir(&apps) {
+                out.push(apps);
+            }
+        }
+    }
+
+    for root in &theme_roots {
+        let icons_root = root.join("icons");
+        if !fs.is_dir(&icons_root) {
+            continue;
+        }
+        let themes = discover_icon_themes(fs, &icons_root);
+        for theme in themes {
+            for size in [128u32, 64, 256, 48] {
+                let apps = icons_root
+                    .join(&theme)
+                    .join(format!("{size}x{size}"))
+                    .join("apps");
+                if fs.is_dir(&apps) {
+                    out.push(apps);
+                }
+            }
+            let scalable = icons_root.join(&theme).join("scalable").join("apps");
+            if fs.is_dir(&scalable) {
+                out.push(scalable);
+            }
+        }
+    }
+
+    out
+}
+
+/// Walk every XDG icon parent root the host exposes. Returns the
+/// `Vec<PathBuf>` that callers feed to the size / theme scanner.
+/// Mirrors `collect_application_dirs` so the icon and `.desktop`
+/// resolutions agree on what the host considers a valid data root.
+fn collect_icon_root_layout(fs: &dyn DesktopFilesystem) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     let home = env::var_os("HOME")
         .map(PathBuf::from)
@@ -553,16 +632,44 @@ fn collect_icon_dirs(fs: &dyn DesktopFilesystem) -> Vec<PathBuf> {
             roots.push(candidate);
         }
     }
-    let mut out: Vec<PathBuf> = Vec::new();
-    for root in roots {
-        for size in [128u32, 64, 256, 48] {
-            let apps = root.join(format!("{size}x{size}")).join("apps");
-            if fs.is_dir(&apps) {
-                out.push(apps);
-            }
+    roots
+}
+
+/// Discover the icon themes installed under `<icons_root>`. The
+/// walker is conservative: it inspects every direct child of the
+/// icons root that looks like a theme directory and includes
+/// `hicolor` last so it acts as a deterministic fallback for any
+/// theme that failed to register a custom directory. Returns the
+/// list in the order it should be probed.
+fn discover_icon_themes(fs: &dyn DesktopFilesystem, icons_root: &Path) -> Vec<String> {
+    let Ok(entries) = fs.read_dir_sorted(icons_root) else {
+        return vec!["hicolor".to_string()];
+    };
+    let mut themes: Vec<String> = Vec::new();
+    let mut has_hicolor = false;
+    for entry in entries {
+        let Some(name) = entry.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !fs.is_dir(&entry) {
+            continue;
         }
+        if name == "hicolor" {
+            has_hicolor = true;
+            continue;
+        }
+        themes.push(name.to_string());
     }
-    out
+    themes.sort();
+    if has_hicolor {
+        themes.push("hicolor".to_string());
+    } else if themes.is_empty() {
+        // No themes at all: keep `hicolor` as the deterministic
+        // fallback so the resolver still has a single, predictable
+        // directory to walk.
+        themes.push("hicolor".to_string());
+    }
+    themes
 }
 
 /// Validate the supplied bytes look like a PNG we can serve through

@@ -40,7 +40,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   clearUnorganizedHistoryCommand,
@@ -61,10 +60,7 @@ import type { EntryRecord } from "../src/types.ts";
 
 type InvokeRecord = { cmd: string; args?: Record<string, unknown> };
 
-const FRONTEND_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
+const FRONTEND_ROOT = process.cwd();
 const TAURI_ROOT = path.resolve(FRONTEND_ROOT, "..", "src-tauri");
 const APP_REPO_ROOT = path.resolve(FRONTEND_ROOT, "..", "..", "..");
 

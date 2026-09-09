@@ -95,6 +95,16 @@
   export let onOpenPrivacy: (event: MouseEvent) => void = () => {};
   export let onOpenRetention: (event: MouseEvent) => void = () => {};
   export let onOpenShortcut: (event: MouseEvent) => void = () => {};
+  /**
+   * Handler dispatched when the user picks the global "Acerca de"
+   * item from the ellipsis menu. The action opens a metadata-only
+   * modal that surfaces the canonical product name and version
+   * read from the diagnostics bridge (never a hard-coded Svelte
+   * constant). Only the global ellipsis menu exposes the entry;
+   * the per-card menus MUST NOT carry a parallel item so the
+   * version string stays single-sourced.
+   */
+  export let onOpenAbout: (event: MouseEvent) => void = () => {};
   export let onRequestClearHistory: (event: MouseEvent) => void = () => {};
   export let onSourceAppFilterChange: (next: SourceAppFilterValue) => void = () => {};
   export let onTagFilterChange: (next: TagFilterValue) => void = () => {};
@@ -322,6 +332,24 @@
               on:click={(event) => selectItem(onOpenShortcut, event)}
             >
               Atajo de pegado rápido
+            </button>
+            <!--
+              Single-source "Acerca de" entry: only the global
+              ellipsis menu on the desktop toolbar carries the
+              item, so the version string the user sees matches
+              the canonical diagnostics payload (Cargo workspace
+              + tauri.conf.json) without drift. The HistoryCard
+              rail and Quick Paste MUST NOT add a parallel
+              affordance.
+            -->
+            <button
+              type="button"
+              role="menuitem"
+              class="menu-item"
+              data-testid="open-about"
+              on:click={(event) => selectItem(onOpenAbout, event)}
+            >
+              Acerca de
             </button>
           </div>
         {/if}

@@ -370,6 +370,102 @@ fn provider_name_is_stable() {
     assert_eq!(provider.name(), "linux_app_metadata");
 }
 
+/// Canonical Ubuntu layout: the icon lives under
+/// `<root>/icons/hicolor/<size>x<size>/apps/<name>.png` (one
+/// directory level deeper than the legacy `<root>/icons/<size>x<size>/apps/`
+/// layout). The regression the change fixes used to skip this
+/// layout entirely, so the test pins the new behaviour.
+#[test]
+fn resolves_icon_from_hicolor_theme_layout() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join("applications");
+    let icons = home.join("icons/hicolor/128x128/apps");
+    fs.mkdir(&apps);
+    fs.mkdir(&icons);
+    fs.write_png(&icons.join("firefox.png"));
+    write_desktop(
+        &fs,
+        &apps,
+        "firefox",
+        "[Desktop Entry]\nType=Application\nName=Firefox\nStartupWMClass=Firefox\nIcon=firefox\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider
+        .lookup("Firefox")
+        .expect("ok")
+        .expect("some metadata");
+    assert_eq!(metadata.display_name, "Firefox");
+    let icon_ref = metadata
+        .icon_ref
+        .as_deref()
+        .expect("icon ref must point at the persisted PNG");
+    assert!(
+        icon_ref.starts_with("application-icons/"),
+        "icon ref must live under application-icons/, got {icon_ref}"
+    );
+    let target = assets.join(icon_ref);
+    assert!(target.is_file(), "icon must be persisted to {target:?}");
+}
+
+/// Scalable theme layout: the canonical theme-aware fallback also
+/// covers `<root>/icons/<theme>/scalable/apps/<name>.png`. Only PNGs
+/// are persisted, but the directory walk must reach that path so a
+/// later change can plug in an SVG-to-PNG converter without having
+/// to re-do the layout discovery.
+#[test]
+fn resolves_icon_from_scalable_theme_layout() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join("applications");
+    let icons = home.join("icons/hicolor/scalable/apps");
+    fs.mkdir(&apps);
+    fs.mkdir(&icons);
+    fs.write_png(&icons.join("code.png"));
+    write_desktop(
+        &fs,
+        &apps,
+        "code",
+        "[Desktop Entry]\nType=Application\nName=Code\nStartupWMClass=code\nIcon=code\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider.lookup("code").expect("ok").expect("some metadata");
+    assert_eq!(metadata.display_name, "Code");
+    assert!(metadata.icon_ref.is_some());
+}
+
+/// An unknown icon theme must not panic: the resolver falls through
+/// to `hicolor` and eventually returns `None` for the icon when no
+/// directory owns the file.
+#[test]
+fn missing_icon_in_known_theme_is_skipped() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join("applications");
+    let icons = home.join("icons/hicolor/128x128/apps");
+    fs.mkdir(&apps);
+    fs.mkdir(&icons);
+    write_desktop(
+        &fs,
+        &apps,
+        "firefox",
+        "[Desktop Entry]\nType=Application\nName=Firefox\nStartupWMClass=Firefox\nIcon=missing\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider
+        .lookup("Firefox")
+        .expect("ok")
+        .expect("some metadata");
+    assert_eq!(metadata.display_name, "Firefox");
+    assert!(
+        metadata.icon_ref.is_none(),
+        "missing icon must not produce an icon reference"
+    );
+}
+
 /// The provider's `lookup` returns the typed `ApplicationMetadataError`
 /// variant only on a backend failure; the in-memory harness never
 /// produces one but the contract is documented for callers that

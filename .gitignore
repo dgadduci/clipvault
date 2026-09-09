@@ -11,6 +11,11 @@ app/tauri/src-tauri/gen
 **/dist
 **/.svelte-kit
 **/.vite
+# Accidental non-npm lockfiles (the canonical lockfile is
+# `app/tauri/frontend/package-lock.json`).
+/pnpm-lock.yaml
+**/pnpm-lock.yaml
+**/pnpm-workspace.yaml
 
 # IDE
 .vscode

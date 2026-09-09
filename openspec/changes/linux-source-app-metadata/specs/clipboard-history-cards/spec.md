@@ -44,3 +44,46 @@ fallback rather than a fabricated value.
 - **THEN** its persisted name and icon reference are hydrated through the
   existing recent-entry and icon-asset paths
 - **AND** the card does not require a new clipboard capture to render them
+
+## ADDED Requirements
+
+### Requirement: Desktop "Acerca de" surface
+
+The desktop SHALL expose a single-source "Acerca de" entry inside the
+global ellipsis menu of the toolbar. The modal SHALL display the
+canonical product name (`ClipVault`) and version (`vX.Y.Z`) read from
+the existing `clipvault_diagnostics` Tauri command. The version SHALL
+NOT be hard-coded in `Svelte`. The entry SHALL NOT be duplicated on
+per-card menus or on Quick Paste. Closing the modal SHALL honour the
+shared `Modal` shell contract (Escape, backdrop click and the close
+button).
+
+#### Scenario: Open the About modal from the global menu
+
+- **WHEN** the user picks the "Acerca de" item inside the toolbar
+  ellipsis menu
+- **THEN** the menu closes and the modal opens
+- **AND** the version label reads `v` + the value of
+  `diagnostics.version` from the backend
+
+#### Scenario: Close the About modal with Escape
+
+- **WHEN** the About modal is open and the focus is inside it
+- **THEN** pressing Escape closes the modal
+- **AND** focus returns to the ellipsis menu trigger that opened it
+
+#### Scenario: Version matches the canonical manifest
+
+- **WHEN** the canonical version in `Cargo.toml` is `0.0.1`
+- **THEN** the modal renders `v0.0.1`
+- **AND** a future bump that updates `Cargo.toml`,
+  `tauri.conf.json` and `package.json` shows the new value without
+  any Svelte code change
+
+#### Scenario: About modal is single-sourced
+
+- **WHEN** the desktop renders the HistoryCard rail or Quick Paste
+- **THEN** no card-level or window-level menu exposes a parallel
+  "Acerca de" entry
+- **AND** the global ellipsis menu is the only affordance that opens
+  the modal

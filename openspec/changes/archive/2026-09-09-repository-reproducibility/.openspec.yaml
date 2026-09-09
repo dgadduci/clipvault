@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-09
+goal: Establecer una base reproducible y segura para desarrollar y validar ClipVault en macOS y Ubuntu sin mezclar toolchains, dependencias, ramas ni datos locales del usuario.

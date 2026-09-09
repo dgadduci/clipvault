@@ -91,6 +91,7 @@
   import PrivacyModal from "./PrivacyModal.svelte";
   import RetentionModal from "./RetentionModal.svelte";
   import QuickPasteShortcutModal from "./QuickPasteShortcutModal.svelte";
+  import AboutModal from "./AboutModal.svelte";
   import ClipboardPreview from "./ClipboardPreview.svelte";
 
   /**
@@ -112,7 +113,8 @@
     | "development"
     | "privacy"
     | "retention"
-    | "quick_paste_shortcut";
+    | "quick_paste_shortcut"
+    | "about";
 
   let diagnostics: Diagnostics | null = null;
   let capabilities: Capabilities | null = null;
@@ -1340,6 +1342,19 @@
     openModalWith("quick_paste_shortcut", event.currentTarget as HTMLElement | null);
   }
 
+  /**
+   * Single-source "Acerca de" handler. Only the global ellipsis
+   * menu on the desktop toolbar dispatches this callback, so the
+   * version string the user sees can never drift from the
+   * canonical diagnostics payload. Opening the modal closes the
+   * menu (the toolbar's `selectItem` already drops it before the
+   * parent opens the modal) and returns focus to the trigger once
+   * the modal closes.
+   */
+  function onOpenAbout(event: MouseEvent): void {
+    openModalWith("about", event.currentTarget as HTMLElement | null);
+  }
+
   function onRequestClearHistory(event: MouseEvent): void {
     modalReturnFocus = event.currentTarget as HTMLElement | null;
     void requestClearHistory();
@@ -1591,6 +1606,7 @@
           onOpenPrivacy={onOpenPrivacy}
           onOpenRetention={onOpenRetention}
           onOpenShortcut={onOpenShortcut}
+          onOpenAbout={onOpenAbout}
           onRequestClearHistory={onRequestClearHistory}
           onSourceAppFilterChange={(next) => handleSourceAppFilterChange(next)}
           onTagFilterChange={(next) => handleTagFilterChange(next)}
@@ -1767,6 +1783,26 @@
     listenerError={quickSearchError}
     platformOs={diagnostics?.platform_os ?? null}
   />
+</Modal>
+
+<!--
+  "Acerca de" modal. The version string lives in the canonical
+  diagnostics payload (the Rust `clipvault_core::DiagnosticsService`
+  reading from `Cargo.toml`'s `[workspace.package].version`), so a
+  drift between the modal copy and the manifests would surface as a
+  test failure on the validation suite. Only the global ellipsis
+  menu on the desktop toolbar opens this modal — the per-card
+  menus MUST NOT carry a parallel item so the version stays
+  single-sourced.
+-->
+<Modal
+  open={openModal === "about"}
+  titleId="about-title"
+  title="Acerca de"
+  returnFocusTo={modalReturnFocus}
+  onClose={closeModal}
+>
+  <AboutModal diagnostics={diagnostics} onClose={closeModal} />
 </Modal>
 
 {#if guidance}

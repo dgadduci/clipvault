@@ -16,13 +16,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { visualTokenCss } from "../src/lib/visualTokens.ts";
 
-const FRONTEND_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
+const FRONTEND_ROOT = process.cwd();
 
 function loadSource(...segments: string[]): string {
   return readFileSync(path.join(FRONTEND_ROOT, ...segments), "utf8");

@@ -1149,14 +1149,39 @@ fn build_active_application(
         }
         #[cfg(all(target_os = "linux", feature = "linux-x11"))]
         OsFamily::Linux => {
-            // On a plain X11 session we always attempt the EWMH
-            // probe; on a Wayland session we only try the X11 probe
-            // when `$DISPLAY` is present so the XWayland fallback can
-            // answer for windows that publish through X11. Native
-            // Wayland applications never appear on `$DISPLAY`, so the
-            // probe falls back to the no-op adapter and the
-            // diagnostics surface reports `unavailable` instead of a
-            // fabricated identifier.
+            // The session matrix documented in `design.md`:
+            //
+            // - Plain X11 session: build the EWMH probe and label it
+            //   `x11_ewmh`. The probe MUST connect through `$DISPLAY`.
+            //   If the connection fails we fall back to the no-op
+            //   probe instead of pretending a window manager answered.
+            // - Wayland session with a real XWayland: build the EWMH
+            //   probe through `$DISPLAY` and label it `xwayland_ewmh`.
+            //   Native Wayland applications never publish through X11,
+            //   so the probe returns `Ok(None)` for them — the
+            //   diagnostics surface stays honest.
+            // - Wayland session without `$DISPLAY` (no XWayland):
+            //   skip the probe entirely.
+            // - Wayland session with `$DISPLAY` but no usable
+            //   connection: fall back to the no-op probe and let the
+            //   diagnostics surface report `unavailable`.
+            //
+            // The probe's [`ProbeKind`] parameter feeds through to
+            // [`ActiveApplicationProbe::name`], which the diagnostics
+            // card surfaces verbatim, so the UI never sees a
+            // `x11_ewmh` identifier when the actual session is
+            // XWayland or vice versa.
+            let kind = match info.display_server {
+                clipvault_platform::DisplayServer::X11 => {
+                    clipvault_platform::runtime::linux_x11_active_app::ProbeKind::X11
+                }
+                clipvault_platform::DisplayServer::Wayland => {
+                    clipvault_platform::runtime::linux_x11_active_app::ProbeKind::XWayland
+                }
+                clipvault_platform::DisplayServer::Unknown => {
+                    return Arc::new(clipvault_platform::NoopActiveApplicationProbe);
+                }
+            };
             if matches!(
                 info.display_server,
                 clipvault_platform::DisplayServer::Wayland
@@ -1164,10 +1189,16 @@ fn build_active_application(
             {
                 return Arc::new(clipvault_platform::NoopActiveApplicationProbe);
             }
-            match clipvault_platform::runtime::linux_x11_active_app::X11ActiveApplication::new() {
+            match clipvault_platform::runtime::linux_x11_active_app::X11ActiveApplication::with_kind(
+                None, kind,
+            ) {
                 Ok(probe) => return Arc::new(probe),
                 Err(error) => {
-                    warn!(error = %error, "X11 active-app adapter unavailable");
+                    warn!(
+                        error = %error,
+                        display = %info.display_server,
+                        "X11 active-app adapter unavailable"
+                    );
                 }
             }
         }

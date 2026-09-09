@@ -32,6 +32,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 
 import {
   __resetDragSessionForTests,
@@ -1007,9 +1008,11 @@ test("drop still resolves correctly after a row is replaced (scroll-during-drag)
 
 test("the harness installs the production drop zone factory, not a hand-rolled copy", async () => {
   const { readFile } = await import("node:fs/promises");
-  const { fileURLToPath } = await import("node:url");
-  const helperPath = fileURLToPath(
-    new URL("../src/lib/collectionDropZone.ts", import.meta.url),
+  const helperPath = path.resolve(
+    process.cwd(),
+    "src",
+    "lib",
+    "collectionDropZone.ts",
   );
   const helperSource = await readFile(helperPath, "utf8");
   // The factory MUST be exported.
@@ -1033,9 +1036,11 @@ test("the harness installs the production drop zone factory, not a hand-rolled c
 
 test("the production helper does not log or echo clipboard content", async () => {
   const { readFile } = await import("node:fs/promises");
-  const { fileURLToPath } = await import("node:url");
-  const helperPath = fileURLToPath(
-    new URL("../src/lib/collectionDropZone.ts", import.meta.url),
+  const helperPath = path.resolve(
+    process.cwd(),
+    "src",
+    "lib",
+    "collectionDropZone.ts",
   );
   const helperSource = await readFile(helperPath, "utf8");
   // Strip comments so a regression pinned inside a comment cannot
