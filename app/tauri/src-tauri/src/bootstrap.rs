@@ -2797,6 +2797,511 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // `linux-source-app-metadata` follow-up patch: byte-decoding fix
+    // for `_NET_ACTIVE_WINDOW` + granular probe-stage tracking.
+    //
+    // The previous implementation read `reply.value.first()` for the
+    // `_NET_ACTIVE_WINDOW` reply (a `format=32` property that holds
+    // the 4-byte window id in native endianness) and converted the
+    // single-byte result to a `Window`. The upper three bytes were
+    // discarded, so every focus query landed on a wrong window id and
+    // `WM_CLASS` lookup consequently returned `None`. The fix:
+    //   1. Use `reply.value32()` / `parse_active_window_id` to read
+    //      the full 32-bit value in native endianness.
+    //   2. Surface a granular `ProbeStage` from the probe so the
+    //      diagnostics card distinguishes "no X11 window focused"
+    //      from "WM_CLASS is undeclared on the focused window".
+    //
+    // The tests below are intentionally host-agnostic: every test
+    // uses a scripted probe that mimics the documented EWMH replies
+    // (the dev.warp.Warp scenario the user reported on Ubuntu), so
+    // the suite runs on the macOS dev host without depending on a
+    // real X server. The macOS host keeps the previous
+    // `#[cfg(not(target_os = "macos"))]` gates for the existing
+    // production-flavoured cache-refresh tests so the no-op helper
+    // they exercise stays the same code path the production shell
+    // uses.
+    // -----------------------------------------------------------------
+
+    /// Scripted active-app probe wired to a programmable probe
+    /// stage. The test mutates the stage between calls so the
+    /// diagnostics surface can verify that `refresh_active_application`
+    /// mirrors the granular stage the Linux probe reached on its
+    /// most recent call (the regression the
+    /// `linux-source-app-metadata` follow-up patch fixes).
+    struct ScriptedStageActiveAppProbe {
+        queued: parking_lot::Mutex<
+            Vec<
+                Result<
+                    Option<clipvault_platform::ActiveApplication>,
+                    clipvault_platform::ActiveAppError,
+                >,
+            >,
+        >,
+        stage: parking_lot::Mutex<clipvault_platform::ProbeStage>,
+        calls: parking_lot::Mutex<usize>,
+    }
+
+    impl ScriptedStageActiveAppProbe {
+        fn new() -> Self {
+            Self {
+                queued: parking_lot::Mutex::new(Vec::new()),
+                stage: parking_lot::Mutex::new(clipvault_platform::ProbeStage::Started),
+                calls: parking_lot::Mutex::new(0),
+            }
+        }
+
+        fn push(
+            &self,
+            value: Result<
+                Option<clipvault_platform::ActiveApplication>,
+                clipvault_platform::ActiveAppError,
+            >,
+        ) {
+            self.queued.lock().push(value);
+        }
+
+        fn set_stage(&self, stage: clipvault_platform::ProbeStage) {
+            *self.stage.lock() = stage;
+        }
+
+        #[allow(dead_code)]
+        fn calls(&self) -> usize {
+            *self.calls.lock()
+        }
+    }
+
+    impl clipvault_platform::ActiveApplicationProbe for ScriptedStageActiveAppProbe {
+        fn active_application(
+            &self,
+        ) -> Result<Option<clipvault_platform::ActiveApplication>, clipvault_platform::ActiveAppError>
+        {
+            *self.calls.lock() += 1;
+            self.queued
+                .lock()
+                .pop()
+                .unwrap_or(Err(clipvault_platform::ActiveAppError::Unavailable))
+        }
+        fn name(&self) -> &'static str {
+            "linux-source-app-metadata-scripted-stage"
+        }
+        fn last_probe_stage(&self) -> clipvault_platform::ProbeStage {
+            *self.stage.lock()
+        }
+    }
+
+    /// Harness variant that mirrors
+    /// `harness_with_scripted_probe` but installs
+    /// `ScriptedStageActiveAppProbe` so a test can drive the
+    /// probe-stage transitions independently of the probe answer
+    /// (the doc delta the
+    /// `linux-source-app-metadata` follow-up pins). Keeping the
+    /// metadata provider (`FakeApplicationMetadataProvider`) in the
+    /// returned tuple preserves the existing assertions on
+    /// `source_app_name` / `source_app_icon_ref` enrichment. The
+    /// helper is platform-agnostic by design: the tests below want
+    /// to drive `refresh_active_application` directly without going
+    /// through the macOS-gated `capture_loop_tick` helper.
+    fn harness_with_staged_probe() -> (
+        tempfile::TempDir,
+        AppContext,
+        Arc<clipvault_core::FakeClipboardBackend>,
+        Arc<clipvault_core::FakeApplicationMetadataProvider>,
+        std::sync::Arc<ScriptedStageActiveAppProbe>,
+    ) {
+        use clipvault_core::{
+            FakeApplicationMetadataProvider, FakeClipboardBackend, FakeHotkeyManager,
+            FakePasteController, FakeSettingsNavigator, FakeTrayController, PlatformAdapters,
+        };
+        use clipvault_platform::{ApplicationMetadataProvider, DisplayServer, OsFamily};
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let probe = std::sync::Arc::new(ScriptedStageActiveAppProbe::new());
+        let provider = Arc::new(FakeApplicationMetadataProvider::new());
+        let provider_for_adapters: Arc<dyn ApplicationMetadataProvider> = provider.clone();
+        {
+            let mut db =
+                clipvault_db::Database::open(dir.path().join("clipvault.db")).expect("open");
+            db.run_migrations(&clipvault_db::builtin_migrations())
+                .expect("migrate");
+        }
+        let info = clipvault_platform::PlatformInfo {
+            home_dir: std::path::PathBuf::from("/tmp"),
+            data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+            os_family: OsFamily::Linux,
+            display_server: DisplayServer::Wayland,
+        };
+        let fake_clipboard = Arc::new(FakeClipboardBackend::new());
+        let platform_adapters = PlatformAdapters::new(
+            fake_clipboard.clone() as Arc<dyn clipvault_platform::ClipboardBackend>,
+            Arc::new(FakeHotkeyManager::new()) as Arc<dyn clipvault_platform::HotkeyManager>,
+            probe.clone() as Arc<dyn clipvault_platform::ActiveApplicationProbe>,
+            Arc::new(FakePasteController::new()) as Arc<dyn clipvault_platform::PasteController>,
+            Arc::new(FakeTrayController::new()) as Arc<dyn clipvault_platform::TrayController>,
+            Arc::new(FakeSettingsNavigator::new())
+                as Arc<dyn clipvault_platform::SettingsNavigator>,
+            provider_for_adapters,
+            clipvault_platform::Capabilities::ALL_AVAILABLE,
+            info,
+        );
+        let context = AppBootstrap::new()
+            .with_clock(Arc::new(clipvault_core::SystemClock) as Arc<dyn clipvault_core::Clock>)
+            .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new())
+                as Arc<dyn clipvault_core::Clipboard>)
+            .with_platform_adapters(platform_adapters)
+            .bootstrap_at(dir.path().join("clipvault.db"))
+            .expect("bootstrap");
+        (dir, context, fake_clipboard, provider, probe)
+    }
+
+    /// The fixture the user reported: Warp running under XWayland on
+    /// GNOME Wayland, with `WM_CLASS` = `("dev.warp.Warp",
+    /// "dev.warp.Warp")`. The capture loop MUST persist
+    /// `source_app = "dev.warp.Warp"` on the new row and the metadata
+    /// provider MUST receive the same identifier so it can resolve
+    /// `source_app_name` / `source_app_icon_ref`. The granularity here
+    /// simulates what the (now fixed) X11 probe reports on a real
+    /// Warp capture: `_NET_ACTIVE_WINDOW` → parsed window id →
+    /// `WM_CLASS` lookup → identifier parsed. Host-agnostic by
+    /// design: the test calls `refresh_active_application` directly
+    /// instead of routing through the macOS-gated
+    /// `capture_loop_tick` helper so it runs on the dev host too.
+    #[test]
+    fn capture_loop_persists_dev_warp_warp_source_app_end_to_end() {
+        use clipvault_core::ActiveApplication as PlatformActiveApplication;
+        let (_dir, context, fake_clipboard, provider, probe) = harness_with_staged_probe();
+        // The probe answers as if `WM_CLASS` had been read
+        // successfully — both segments equal `dev.warp.Warp`, so the
+        // active-app identifier the X11 probe returns is the class
+        // segment, exactly the regression-reported `dev.warp.Warp`.
+        probe.push(Ok(Some(PlatformActiveApplication::new(
+            "Warp",
+            "dev.warp.Warp",
+        ))));
+        // The Linux probe also surfaces a granular `Identified`
+        // stage on the successful path; the diagnostics endpoint
+        // mirrors it through `refresh_active_application`.
+        probe.set_stage(clipvault_platform::ProbeStage::Identified);
+        fake_clipboard.push_read(Ok(Some("cv-warp-payload".into())));
+        // Drive the refresh + watcher explicitly so the test does
+        // not depend on `capture_loop_tick`'s host-conditional
+        // refresh helper (the helper is a no-op on macOS by design
+        // — the production macOS path relies on the dispatch
+        // refresher, not the synchronous loop tick). The two-step
+        // sequence mirrors what `capture_loop_tick` does in the
+        // non-macOS branch the user reported: refresh first, then
+        // resolve the cached identifier through the watcher.
+        context.refresh_active_application().expect("refresh");
+        let source_app = resolved_source_identifier(&context);
+        let watcher = build_watcher_for_context(&context);
+        let outcome = watcher.tick(&context, source_app.as_deref());
+        assert!(
+            matches!(
+                outcome,
+                clipvault_core::WatchTickOutcome::Captured(
+                    clipvault_core::HistoryOutcome::Stored { .. }
+                )
+            ),
+            "first tick must store the capture, got {outcome:?}"
+        );
+        let recent = context.history().recent_entries(&context, 10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(
+            recent[0].source_app.as_deref(),
+            Some("dev.warp.Warp"),
+            "capture loop must persist the WM_CLASS class segment the probe reported"
+        );
+        // The provider MUST see the same identifier the row stored so
+        // the enrichment can resolve `source_app_name` /
+        // `source_app_icon_ref`. Without the byte-decoding fix the
+        // probe would return `Ok(None)` and the provider would never
+        // be consulted — the regression that produced empty rows in
+        // `~/.clipvault/clipvault.db`.
+        let calls = provider.calls();
+        assert!(
+            calls.iter().any(|id| id == "dev.warp.Warp"),
+            "metadata provider must see the refreshed identifier, got {calls:?}"
+        );
+        // The diagnostics surface mirrors the granular stage so the
+        // user can confirm the EWMH chain (`_NET_ACTIVE_WINDOW` →
+        // `WM_CLASS` → identifier) completed.
+        let diag = context.active_app_diagnostics();
+        assert_eq!(
+            diag.last_probe_stage,
+            Some("identified"),
+            "diagnostics must mirror the probe stage, got {diag:?}"
+        );
+        assert_eq!(
+            diag.net_active_window_seen,
+            Some(true),
+            "diag.net_active_window_seen must be true on the success path, got {diag:?}"
+        );
+        assert_eq!(
+            diag.wm_class_seen,
+            Some(true),
+            "diag.wm_class_seen must be true on the success path, got {diag:?}"
+        );
+        assert!(
+            diag.cache_populated,
+            "diag.cache_populated must be true after a successful refresh, got {diag:?}"
+        );
+    }
+
+    /// Mirrors the `_NET_ACTIVE_WINDOW → WM_CLASS → source_app`
+    /// pin expressed in the design:
+    /// - probe returns `dev.warp.Warp` (full XWayland success path),
+    /// - cache is populated for the next capture tick,
+    /// - source_app column stores the identifier the watcher
+    ///   forwarded.
+    ///
+    /// The scripted probe simulates the resolved probe outcome the
+    /// fixed code now produces; the test pins the cache and
+    /// persistence integration on every host.
+    #[test]
+    fn probe_dev_warp_warp_identifier_populates_cache_and_source_app() {
+        use clipvault_core::ActiveApplication as PlatformActiveApplication;
+        let (_dir, context, fake_clipboard, _provider, probe) = harness_with_staged_probe();
+        // Scripted probe returns the dev.warp.Warp identifier on
+        // both iterations so a second refresh does not fall back to
+        // `Unavailable` and clear the cache mid capture.
+        probe.push(Ok(Some(PlatformActiveApplication::new(
+            "Warp",
+            "dev.warp.Warp",
+        ))));
+        probe.push(Ok(Some(PlatformActiveApplication::new(
+            "Warp",
+            "dev.warp.Warp",
+        ))));
+        // The X11 probe surfaces the granular `Identified` stage on
+        // the success path; the diagnostics endpoint mirrors it.
+        probe.set_stage(clipvault_platform::ProbeStage::Identified);
+        fake_clipboard.push_read(Ok(Some("cv-warp-populated".into())));
+        assert!(
+            context.cached_active_application().is_none(),
+            "fresh harness must start with an empty cache"
+        );
+        context.refresh_active_application().expect("refresh");
+        let source_app = resolved_source_identifier(&context);
+        let watcher = build_watcher_for_context(&context);
+        let outcome = watcher.tick(&context, source_app.as_deref());
+        assert!(matches!(
+            outcome,
+            clipvault_core::WatchTickOutcome::Captured(
+                clipvault_core::HistoryOutcome::Stored { .. }
+            )
+        ));
+        // The cache now exposes `dev.warp.Warp` so the next loop
+        // tick (without a probe call) would still see the
+        // identifier. The persistence layer received the same
+        // identifier and persisted it on the new row — the chain
+        // the user reported missing on Ubuntu.
+        let cached = context
+            .cached_active_application()
+            .expect("cache must be populated");
+        assert_eq!(cached.identifier, "dev.warp.Warp");
+        let recent = context.history().recent_entries(&context, 10).unwrap();
+        assert_eq!(recent[0].source_app.as_deref(), Some("dev.warp.Warp"));
+    }
+
+    /// Verifies the Wayland + DISPLAY probe selection path the user
+    /// exercised on Ubuntu GNOME: even though the host detected as
+    /// Wayland, the bootstrap selects the X11 / XWayland backend
+    /// because `$DISPLAY` is set. The design pins that the probe
+    /// name MUST distinguish `x11_ewmh` from `xwayland_ewmh`; the
+    /// diagnostics mirror the choice so the user can confirm the
+    /// bootstrap took the XWayland branch. The test is purely
+    /// numeric — no platform adapter is wired.
+    #[test]
+    fn wayland_with_display_path_pins_xwayland_backend_selection() {
+        use clipvault_platform::{ActiveAppBackendKind, DisplayServer, OsFamily, PlatformInfo};
+        use std::path::PathBuf;
+        let info = PlatformInfo {
+            home_dir: PathBuf::from("/tmp"),
+            data_dir: PathBuf::from("/tmp/.clipvault"),
+            os_family: OsFamily::Linux,
+            display_server: DisplayServer::Wayland,
+        };
+        assert_eq!(
+            clipvault_core::active_app_backend_kind(&info, true),
+            ActiveAppBackendKind::XWaylandEwmh,
+            "Wayland + DISPLAY MUST classify as xwayland_ewmh"
+        );
+        // Plain X11 stays x11_ewmh (the regression-pin the design
+        // added so the bootstrap never labels a plain X11 session as
+        // XWayland).
+        let info_x11 = PlatformInfo {
+            display_server: DisplayServer::X11,
+            ..info.clone()
+        };
+        assert_eq!(
+            clipvault_core::active_app_backend_kind(&info_x11, true),
+            ActiveAppBackendKind::X11Ewmh,
+            "Plain X11 session MUST classify as x11_ewmh"
+        );
+    }
+
+    /// Pin the contract that the user-required diagnostics signal
+    /// surface stays honest when `_NET_ACTIVE_WINDOW` returns an
+    /// empty value (the regression case the audit captured as
+    /// `active_window_empty`): the cache stays empty, no row carries
+    /// a fabricated `source_app`, the diagnostics endpoint mirrors
+    /// `active_window_empty` so the user can tell the active-app
+    /// probe apart from a real blacklist hit, and the metadata
+    /// provider is never consulted for a `source_app = NULL` row.
+    #[test]
+    fn diagnostics_mirror_active_window_empty_stage() {
+        let (_dir, context, fake_clipboard, provider, probe) = harness_with_staged_probe();
+        // Probe answered `Ok(None)` because `_NET_ACTIVE_WINDOW`
+        // returned no parseable window id: the X11 probe sets
+        // `ProbeStage::ActiveWindowEmpty` and leaves the cache
+        // empty.
+        probe.push(Ok(None));
+        probe.push(Ok(None));
+        probe.set_stage(clipvault_platform::ProbeStage::ActiveWindowEmpty);
+        fake_clipboard.push_read(Ok(Some("cv-warp-no-window".into())));
+        context.refresh_active_application().expect("refresh");
+        let source_app = resolved_source_identifier(&context);
+        let watcher = build_watcher_for_context(&context);
+        let outcome = watcher.tick(&context, source_app.as_deref());
+        assert!(matches!(
+            outcome,
+            clipvault_core::WatchTickOutcome::Captured(
+                clipvault_core::HistoryOutcome::Stored { .. }
+            )
+        ));
+        let diag = context.active_app_diagnostics();
+        assert_eq!(
+            diag.last_probe_stage,
+            Some("active_window_empty"),
+            "diagnostics must mirror the active window stage, got {diag:?}"
+        );
+        assert_eq!(
+            diag.net_active_window_seen,
+            Some(false),
+            "diag.net_active_window_seen must be false on the empty path, got {diag:?}"
+        );
+        assert!(
+            diag.wm_class_seen.is_none(),
+            "wm_class_seen must be None when _NET_ACTIVE_WINDOW is empty, got {diag:?}"
+        );
+        // The cache stays empty: the next capture tick that runs
+        // before a fresh refresh returns `Ok(None)`.
+        assert!(
+            context.cached_active_application().is_none(),
+            "cache must stay empty when the probe reports no window"
+        );
+        // No fabricated source_app is persisted and the metadata
+        // provider is never consulted.
+        let recent = context.history().recent_entries(&context, 10).unwrap();
+        assert!(
+            recent[0].source_app.is_none(),
+            "row must persist source_app = NULL when the probe returned no window, got {:?}",
+            recent[0].source_app
+        );
+        assert!(
+            provider.calls().is_empty(),
+            "metadata provider must not be called when source_app is NULL, got {:?}",
+            provider.calls()
+        );
+    }
+
+    /// Confirms the cascade the design pins for the
+    /// `wm_class_missing` stage: `_NET_ACTIVE_WINDOW` succeeded but
+    /// the `WM_CLASS` lookup did not. The diagnostics surface
+    /// exposes the asymmetry (`net_active_window_seen = true`,
+    /// `wm_class_seen = false`) so the user can tell "no X11
+    /// window focused" apart from "WM_CLASS was undeclared on the
+    /// focused window" — a real distinction on a focused Warp
+    /// capture where the XWayland window id resolves but the
+    /// toolkit publishes an empty WM_CLASS in a deprecated form.
+    #[test]
+    fn diagnostics_mirror_wm_class_missing_stage() {
+        let (_dir, context, fake_clipboard, provider, probe) = harness_with_staged_probe();
+        // Probe returns no value (the watcher's contract is
+        // `Ok(None)` for the wm-class-missing case — the wrapper
+        // dropped into `set_stage` below records the granular
+        // cause).
+        probe.push(Ok(None));
+        probe.push(Ok(None));
+        probe.set_stage(clipvault_platform::ProbeStage::WmClassMissing);
+        fake_clipboard.push_read(Ok(Some("cv-wm-class-missing".into())));
+        context.refresh_active_application().expect("refresh");
+        let source_app = resolved_source_identifier(&context);
+        let watcher = build_watcher_for_context(&context);
+        let _ = watcher.tick(&context, source_app.as_deref());
+        let diag = context.active_app_diagnostics();
+        assert_eq!(
+            diag.last_probe_stage,
+            Some("wm_class_missing"),
+            "diagnostics must mirror the wm_class_missing stage, got {diag:?}"
+        );
+        assert_eq!(
+            diag.net_active_window_seen,
+            Some(true),
+            "diag.net_active_window_seen must be true when the window id was decoded, got {diag:?}"
+        );
+        assert_eq!(
+            diag.wm_class_seen,
+            Some(false),
+            "diag.wm_class_seen must be false when WM_CLASS is missing, got {diag:?}"
+        );
+        let recent = context.history().recent_entries(&context, 10).unwrap();
+        assert!(
+            recent[0].source_app.is_none(),
+            "row must not carry a fabricated source_app, got {:?}",
+            recent[0].source_app
+        );
+        assert!(
+            provider.calls().is_empty(),
+            "metadata provider must not be consulted for a NULL source_app row, got {:?}",
+            provider.calls()
+        );
+    }
+
+    /// Verifies the diagnostics endpoint reports the counters the
+    /// user explicitly requested: `successful_refreshes > 0`,
+    /// `refresh_attempts` equals the number of loop ticks, and
+    /// `cache_populated` flips on the first successful refresh.
+    /// The shell documents both fields as the contract the
+    /// `history-card-layout` regression pins.
+    #[test]
+    fn diagnostics_counters_track_successful_refresh_and_attempts() {
+        use clipvault_core::ActiveApplication as PlatformActiveApplication;
+        let (_dir, context, fake_clipboard, _provider, probe) = harness_with_staged_probe();
+        probe.push(Ok(Some(PlatformActiveApplication::new(
+            "Warp",
+            "dev.warp.Warp",
+        ))));
+        probe.push(Ok(Some(PlatformActiveApplication::new(
+            "Warp",
+            "dev.warp.Warp",
+        ))));
+        probe.set_stage(clipvault_platform::ProbeStage::Identified);
+        fake_clipboard.push_read(Ok(Some("cv-warp-counters".into())));
+        context.refresh_active_application().expect("refresh");
+        let source_app = resolved_source_identifier(&context);
+        let watcher = build_watcher_for_context(&context);
+        let _ = watcher.tick(&context, source_app.as_deref());
+        let diag = context.active_app_diagnostics();
+        assert!(
+            diag.refresh_attempts >= 1,
+            "refresh_attempts must reflect the synchronous refresh, got {diag:?}"
+        );
+        assert!(
+            diag.successful_refreshes >= 1,
+            "successful_refreshes must increment on success, got {diag:?}"
+        );
+        assert_eq!(
+            diag.failed_refreshes, 0,
+            "failed_refreshes must stay 0 on success, got {diag:?}"
+        );
+        assert!(
+            diag.cache_populated,
+            "cache_populated must flip to true after a successful refresh, got {diag:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
     // `pick_and_add_ignored_app` — macOS main-thread scheduling helper.
     // -----------------------------------------------------------------
 

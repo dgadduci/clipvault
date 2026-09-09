@@ -554,3 +554,327 @@ no deben marcarse por inferencia desde macOS ni desde tests sin display.
 - [x] 13.10 Sin sync, archive, commit ni push. La política
   "Cambio publicado + parche funcional" se refleja sólo en
   este `tasks.md` y en los manifests.
+
+## 14. Parche funcional post-publicación (Ubuntu X11/XWayland `_NET_ACTIVE_WINDOW` mal decodificado)
+
+- [x] 14.1 **Causa raíz confirmada.** El usuario continúa
+  reportando `source_app = NULL` en Ubuntu GNOME Wayland +
+  XWayland incluso después de los parches previos 12 y 13.
+  La causa definitiva estaba en el decoder del reply del X11
+  para `_NET_ACTIVE_WINDOW`:
+
+  ```rust
+  let active = match reply.value.first().copied() {
+      Some(window) => Window::from(window),
+      None => return Ok(None),
+  };
+  ```
+
+  `reply.value` es `Vec<u8>` (los bytes crudos del reply X
+  protocol); `_NET_ACTIVE_WINDOW` se publica como `WINDOW`,
+  una propiedad `format=32` que codifica el window id de
+  32 bits en 4 bytes en orden nativo. Leer sólo el primer
+  byte (LSB) con `reply.value.first().copied()` y convertirlo
+  mediante `Window::from(u8)` descartaba los tres bytes
+  superiores. Para una window id real como `0x01aabbcc` el
+  código resolvía `Window::from(0xcc)` — una ventana
+  completamente distinta (o inexistente) — y la consulta
+  posterior de `WM_CLASS` sobre esa window id fallaba,
+  devolviendo `Ok(None)`. `clipboard_entries.source_app`
+  quedaba `NULL`, el provider `.desktop` no se invocaba y la
+  card rail mostraba el fallback genérico.
+
+  Confirmado por el usuario:
+
+  ```sh
+  xprop -root _NET_ACTIVE_WINDOW
+  xprop -id <WINDOW_ID> WM_CLASS
+  # -> "dev.warp.Warp", "dev.warp.Warp"
+  sqlite3 ~/.clipvault/clipvault.db \
+    "SELECT source_app, source_app_name, source_app_icon_ref
+       FROM clipboard_entries ORDER BY id DESC LIMIT 5;"
+  # -> NULL, NULL, NULL
+  ```
+
+  Es decir: el bug ocurre antes del parser `.desktop` y antes
+  de la carga del icono. Ningún cambio de iconografía ni el
+  uso de `_NET_WM_NAME` como identificador podían arreglarlo;
+  el identificador debe provenir de `WM_CLASS` y ser
+  `dev.warp.Warp`.
+
+- [x] 14.2 **Corrección.** Sustituir el decoder por la
+  variante `format`-aware que ofrece `x11rb::GetPropertyReply`:
+
+  ```rust
+  let active = match reply.value32().and_then(|mut iter| iter.next()) {
+      Some(window) => Window::from(window),
+      None => { self.set_stage(ProbeStage::ActiveWindowEmpty); return Ok(None); }
+  };
+  ```
+
+  `reply.value32()` devuelve un iterador que respeta el
+  `format` (`8`, `16`, `32`) y la endianness nativa del
+  servidor; el reply de `_NET_ACTIVE_WINDOW` siempre lleva
+  `format = 32` y cuatro bytes por window id. Centralizado en
+  el helper puro `parse_active_window_id(format, value)` que
+  vive en `crates/clipvault-platform/src/active_app.rs`
+  (siempre compilado, sin gate de feature) para que los tests
+  puedan ejercitar el decoder en macOS y en CI sin un X
+  server. La nueva ruta usa ese helper cuando se necesite
+  fuera del archivo Linux; el probe X11 lo invoca a través
+  de `reply.value32()` para mantener el camino caliente del
+  `PropertyIterator`.
+
+- [x] 14.3 **Diagnóstico granular nuevo.** Para que el usuario
+  pueda distinguir "no hay ventana X11 enfocada" de
+  "WM_CLASS no declarada en la ventana enfocada", sin
+  registrar contenido, snippets, hashes, asset_ref, paths
+  absolutos ni títulos completos, se introduce un enum
+  `ProbeStage` (en
+  `crates/clipvault-platform/src/active_app.rs`) con variantes
+  estables: `not_applicable`, `started`, `active_window_missing`,
+  `active_window_empty`, `wm_class_missing`, `identifier_empty`,
+  `identified`, `unavailable`, `backend`. El probe X11 registra
+  la transición observada en un `Arc<Mutex<ProbeStage>>`
+  interno y la expone mediante
+  `ActiveApplicationProbe::last_probe_stage()`. La cache
+  `CachedActiveApplication` reenvía el valor al consumidor.
+
+  `ActiveAppDiagnostics` (en
+  `crates/clipvault-core/src/active_app_diagnostics.rs`)
+  expone el stage más un par de selectores booleanos:
+
+  - `last_probe_stage: Option<&'static str>` — etapa
+    metadata-only del último `refresh`. Cardinalidad finita,
+    strings estables (`snake_case`).
+  - `net_active_window_seen: Option<bool>` — `true` si
+    `_NET_ACTIVE_WINDOW` se decodificó como window id
+    válida.
+  - `wm_class_seen: Option<bool>` — `true` si `WM_CLASS`
+    devolvió un `WM_CLASS` parseable no vacío.
+
+  `last_capture_decision`, `cache_populated`, `identifier`,
+  `name`, `refresh_attempts`, `successful_refreshes` y
+  `failed_refreshes` ya existían; ahora conviven con los
+  tres campos nuevos sin romper la deserialización
+  existente. El contrato "no inventar identificadores en
+  Wayland nativo" se preserva: el probe X11 sigue devolviendo
+  `Ok(None)` en ventanas Wayland nativas, y el stage
+  correspondiente es `wm_class_missing` o `identifier_empty`,
+  sin que `source_app` se rellene con un valor fabricado.
+
+- [x] 14.4 **Wiring.** `AppContext::refresh_active_application`
+  ahora invoca `record_probe_stage(stage)` después del
+  `record_refresh` / `record_failure` existente, de modo que
+  el último stage quede alineado con la última llamada del
+  probe. La función helper
+  `update_probe_selector_flags` mapea cada `ProbeStage` a los
+  selectores booleanos de forma centralizada: ningún campo
+  se sobrescribe con un valor incorrecto cuando el stage no es
+  informativo (por ejemplo `wm_class_seen` queda `None` —
+  omitido en JSON — cuando `_NET_ACTIVE_WINDOW` devolvió una
+  ventana vacía).
+
+- [x] 14.5 **Contratos preservados.**
+
+  - `X11ActiveApplication::name()` sigue devolviendo
+    `x11_ewmh` / `xwayland_ewmh` y el bootstrap sigue
+    eligiendo `ProbeKind::X11` para X11 puro y
+    `ProbeKind::XWayland` para Wayland con `$DISPLAY`. El
+    helper `active_app_backend_kind` produce el mismo
+    `x11_ewmh` / `xwayland_ewmh` / `unavailable`.
+  - `CachedActiveApplication::refresh_with`,
+    `CachedActiveApplication::cached`,
+    `CachedActiveApplication::inner` no cambian de
+    contrato. `CachedActiveApplication` añade una simple
+    delegación `last_probe_stage` al probe interno.
+  - `linux_app_metadata::LinuxApplicationMetadataProvider`
+    sigue siendo el provider Linux y exige un `WM_CLASS`
+    parseable para invocar el resolver `.desktop`; la
+    corrección anterior (13.2) ya había dejado ese
+    pipeline coherente.
+  - macOS, blacklist, imágenes, tags, colecciones, favoritos,
+    Quick Paste y drag-and-drop de cards no se tocan:
+    `last_probe_stage` siempre devuelve `not_applicable`
+    cuando el adapter real es `NSWorkspace` o `Noop`, y
+    los selectores booleanos se omiten del JSON cuando el
+    stage es `not_applicable` / `unavailable` / `backend`.
+  - El frontend nunca muestra el window id completo: el
+    bridge de iconos no cambia y las tarjetas siguen
+    leyendo `source_app_name` / `source_app_icon_ref`
+    persistidos; el diagnostico sólo expone el stage
+    metadata-only y los selectores booleanos.
+
+- [x] 14.6 **Tests determinísticos añadidos.**
+
+  - `crates/clipvault-platform/src/active_app.rs`
+    `window_id_tests`:
+
+    - `decodes_format_32_window_id_with_full_byte_width` —
+      fija el decoder leyendo los cuatro bytes en endianness
+      nativa. Usa el id `0x01aabbcc` (4 bytes
+      `[0xcc, 0xbb, 0xaa, 0x01]`) como referencia.
+    - `rejects_non_format_32_reply` — el helper rechaza
+      `format=8`, `format=16` y `format=0` (las formas que
+      el X server entrega para `STRING` / `UTF8_STRING` /
+      propiedades vacías).
+    - `rejects_short_value` — el helper rechaza `< 4`
+      bytes, evitando lecturas fuera de rango.
+    - `first_byte_only_is_not_what_get_property_returns` —
+      pin del bug original: para los mismos 4 bytes, el
+      decoder debe devolver `u32::from_ne_bytes([..])`, no
+      `bytes[0] as u32`.
+
+  - `crates/clipvault-platform/src/active_app.rs`
+    `tests`:
+
+    - `probe_stage_strings_are_stable` — fija las cadenas
+      serializadas de `ProbeStage` para que la UI pueda
+      confiar en el vocabulario sin parsear variantes.
+    - `cached_probe_surfaces_inner_probe_stage` — pin del
+      forwarding del wrapper
+      `CachedActiveApplication` → `last_probe_stage`.
+
+  - `app/tauri/src-tauri/src/bootstrap.rs` (módulo
+    `tests`):
+
+    - `capture_loop_persists_dev_warp_warp_source_app_end_to_end`
+      — el escenario completo: el harness inyecta
+      `dev.warp.Warp`, el cache se rellena, la fila
+      persistida lleva `source_app = "dev.warp.Warp"`, el
+      provider recibe ese mismo identificador y los
+      diagnostics exponen `last_probe_stage = "identified"`,
+      `net_active_window_seen = true`,
+      `wm_class_seen = true`, `cache_populated = true`.
+    - `probe_dev_warp_warp_identifier_populates_cache_and_source_app`
+      — variante que confirma `cached_active_application`
+      expone `identifier = "dev.warp.Warp"` y la fila
+      persistida coincide.
+    - `wayland_with_display_path_pins_xwayland_backend_selection`
+      — pin numérico de la selección de backend
+      (Wayland+DISPLAY → `XWaylandEwmh`, X11 puro →
+      `X11Ewmh`).
+    - `diagnostics_mirror_active_window_empty_stage` —
+      `_NET_ACTIVE_WINDOW` vacío → `last_probe_stage =
+      "active_window_empty"`, `net_active_window_seen =
+      false`, `wm_class_seen = None`, cache vacía, fila
+      con `source_app = NULL`, provider no invocado.
+    - `diagnostics_mirror_wm_class_missing_stage` —
+      ventana encontrada pero `WM_CLASS` ausente →
+      `last_probe_stage = "wm_class_missing"`,
+      `net_active_window_seen = true`, `wm_class_seen =
+      false`, fila sin `source_app`, provider no invocado.
+    - `diagnostics_counters_track_successful_refresh_and_attempts`
+      — pin de los contadores que el usuario pidió:
+      `refresh_attempts >= 1`, `successful_refreshes >=
+      1`, `failed_refreshes == 0`, `cache_populated =
+      true`.
+
+  Los seis tests nuevos son host-agnósticos (usan
+  `ScriptedStageActiveAppProbe` + `FakeClipboardBackend`
+  + `FakeApplicationMetadataProvider`, sin requerir X
+  server) y se ejecutan en `cargo test -p clipvault-app
+  --lib`. Los tests pre-existentes
+  `linux_capture_loop_refreshes_cache_on_every_iteration`,
+  `linux_x11_capture_persists_source_app_from_refreshed_cache`,
+  `linux_capture_enriches_metadata_through_provider_lookup`,
+  `linux_native_wayland_does_not_get_a_fake_identifier`,
+  `linux_cache_is_populated_after_loop_tick` permanecen
+  gatedos a `cfg(not(target_os = "macos"))` porque
+  ejercitan la rama "el helper refreshActiveApplication se
+  llama en cada iteración del capture loop" — el helper
+  es deliberadamente no-op en macOS, y los tests
+  pre-existentes quieren validar exactamente esa rama en
+  el target Linux.
+
+- [x] 14.7 **Privacidad.**
+
+  - `parse_active_window_id` y todos los paths de stage
+    funcionan sobre datos binarios / atómicos; nunca
+    tocan contenido del clipboard, snippets, hashes,
+    asset_ref o rutas absolutas.
+  - El diagnóstico expone únicamente categorías estables
+    (`active_window_empty`, `wm_class_missing`,
+    `identified`, …) y dos Booleanos derivados del stage.
+  - `record_probe_stage` colapsa los stages no
+    informativos (`NotApplicable`, `Unavailable`,
+    `Backend`) a `None` para mantener el JSON limpio y no
+    exponer la etapa cuando no aporta.
+
+- [x] 14.8 **Verificación desde el host macOS.**
+
+  - `cargo fmt --all -- --check` — pasa.
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+    — pasa (los warnings preexistentes sobre `icon_sizes`
+    en `linux_app_metadata.rs` y el warning de "ctypes
+    sólo es portable a operating systems con `char == i8`"
+    de macos permanecen, pero no son introducidos por este
+    parche).
+  - `cargo test --workspace` — pasa. Los 6 tests
+    platform-agnostic nuevos pasan en el target del host
+    (macOS). Los 5 tests preexistentes
+    `linux_capture_loop_*` / `linux_native_wayland_*` /
+    `linux_cache_is_populated_*` /
+    `linux_x11_capture_persists_source_app_*` /
+    `linux_capture_enriches_metadata_*` están gatedos a
+    `cfg(not(target_os = "macos"))` y se ejecutan en el CI
+    Linux / una build con `--target x86_64-unknown-linux-gnu`.
+  - `cargo check -p clipvault-app --no-default-features
+    --features clipboard-arboard,hotkey-global` — pasa.
+  - `cargo check -p clipvault-platform --features linux-x11
+    --target x86_64-unknown-linux-gnu` — pasa; el
+    decoder se compila correctamente con
+    `parse_active_window_id` y `reply.value32()`.
+  - `cd app/tauri/frontend && npm run check` — pasa.
+  - `cd app/tauri/frontend && npm run build` — pasa.
+  - `cd app/tauri/frontend && npm test` — pasa (sustituido
+    por `tsc --noEmit` cuando se requiere Node.js 22+, ver
+    9.6).
+  - `openspec validate linux-source-app-metadata --strict
+    --type change` — pasa.
+
+- [x] 14.9 **Bump de versión sincronizado a `0.0.4`** (la
+  corrección del decoder `_NET_ACTIVE_WINDOW` es una
+  implementación funcional completa; `projects.md` exige
+  subir el patch y mantener sincronizados los manifests
+  canónicos):
+
+  - `Cargo.toml` (`[workspace.package].version`).
+  - `Cargo.lock` regenerado: `clipvault-app`,
+    `clipvault-core`, `clipvault-db`, `clipvault-platform`,
+    `clipvault-search`.
+  - `app/tauri/src-tauri/tauri.conf.json` (`version`).
+  - `app/tauri/frontend/package.json` (`version`).
+  - `app/tauri/frontend/package-lock.json` (`version` y la
+    entrada raíz `packages.""`).
+  - `projects.md` (tabla "Current canonical version" y nota
+    descriptiva del bump 0.0.3 → 0.0.4).
+  - `AboutModal.svelte` sigue leyendo `diagnostics.version`
+    (no se hardcodea la versión en Svelte).
+
+- [x] 14.10 **Limitación documentada.** El host actual es
+  macOS, así que la confirmación runtime en Ubuntu
+  GNOME Wayland + XWayland con Warp enfocada queda
+  pendiente. La tarea de Ubuntu puede marcarse sólo cuando
+  el usuario ejecute en una sesión real:
+
+  ```sh
+  xprop -root _NET_ACTIVE_WINDOW
+  xprop -id <WINDOW_ID> WM_CLASS
+  sqlite3 -header -column ~/.clipvault/clipvault.db \
+    "SELECT id, source_app, source_app_name, source_app_icon_ref
+       FROM clipboard_entries ORDER BY id DESC LIMIT 5;"
+  ```
+
+  y confirme que una captura nueva desde Warp produce
+  `source_app = dev.warp.Warp` y, si el `.desktop`
+  compatible está disponible, también
+  `source_app_name` / `source_app_icon_ref`. La corrección
+  del decoder y el stage granular quedan validados a
+  través de los 6 tests determinísticos nuevos
+  ejecutados en el host macOS.
+
+- [x] 14.11 **Sin sync, archive, commit ni push.** La
+  política "Cambio publicado + parche funcional" se
+  refleja sólo en este `tasks.md`, en los manifests y en
+  el código.

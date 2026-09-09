@@ -39,7 +39,9 @@ pub mod watcher;
 pub use active_app_diagnostics::{
     ActiveAppDiagnostics, ActiveAppDiagnosticsState, ActiveAppFailureKind, ActiveAppRefreshOutcome,
 };
-pub use bootstrap::{AppBootstrap, AppContext, BootstrapError, BootstrapOptions};
+pub use bootstrap::{
+    active_app_backend_kind, AppBootstrap, AppContext, BootstrapError, BootstrapOptions,
+};
 pub use clipboard::{Clipboard, ClipboardError, FakeClipboard};
 pub use clipboard_assets::{
     asset_ref_for_hash, decode_png, deflate_icc_profile, normalize_image,
@@ -62,7 +64,7 @@ pub use clipvault_platform::{
     NoopApplicationMetadataProvider, NoopClipboardBackend, NoopHotkeyManager, NoopPasteController,
     NoopSettingsNavigator, NoopTrayController, NoopTrayHandle, OsFamily, PasteBackendKind,
     PasteController, PasteError, PasteboardImageMetadata, PlatformError, PlatformGuidance,
-    PlatformInfo, PlatformIssueKind, PlatformSettingsTarget, PngMetadataSummary,
+    PlatformInfo, PlatformIssueKind, PlatformSettingsTarget, PngMetadataSummary, ProbeStage,
     RichTextClipboardSupport, RichTextPayload, SettingsNavigator, SettingsOpenOutcome,
     TiffMetadata, TiffResolutionUnit, TrayAction, TrayBackendKind, TrayController, TrayEntry,
     TrayError, TrayHandle, TrayOutcome, APPLICATION_ICONS_DIR, MAX_CLIPBOARD_IMAGE_DIM,

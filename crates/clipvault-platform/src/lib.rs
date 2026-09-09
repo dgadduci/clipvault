@@ -26,8 +26,8 @@ mod tiff_metadata;
 mod tray;
 
 pub use active_app::{
-    ActiveAppBackendKind, ActiveAppError, ActiveApplication, ActiveApplicationProbe,
-    CachedActiveApplication,
+    parse_active_window_id, ActiveAppBackendKind, ActiveAppError, ActiveApplication,
+    ActiveApplicationProbe, CachedActiveApplication, ProbeStage,
 };
 pub use app_assets::{
     read_icon_bytes, read_source_app_icon_bytes, resolve_icon_path, IconReadError, IconRefError,

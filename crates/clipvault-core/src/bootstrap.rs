@@ -244,6 +244,18 @@ impl AppContext {
                 self.active_app_diagnostics.record_failure(error);
             }
         }
+        // Snapshot the granular probe stage the wrapped inner
+        // probe reached on the most recent call. The X11 / XWayland
+        // probe stores `active_window_missing`, `wm_class_missing`,
+        // `identified`, … behind the cached wrapper; macOS / no-op
+        // probes report `not_applicable` and the helper collapses
+        // that into a `None` JSON slot. Recording the stage after
+        // `record_refresh` / `record_failure` keeps the field
+        // aligned with whatever the most recent platform call
+        // produced — the regression the `linux-source-app-metadata`
+        // follow-up patch ships.
+        let stage = self.cached_active_app.last_probe_stage();
+        self.active_app_diagnostics.record_probe_stage(stage);
         fresh
     }
 
@@ -584,7 +596,7 @@ pub fn default_database_path() -> Result<PathBuf, BootstrapError> {
 /// surfaces preserves the historical `x11_ewmh` identifier while
 /// giving the diagnostics card a metadata-only knob to distinguish a
 /// native Wayland application from a real X11/XWayland one.
-pub(crate) fn active_app_backend_kind(
+pub fn active_app_backend_kind(
     info: &clipvault_platform::PlatformInfo,
     available: bool,
 ) -> clipvault_platform::ActiveAppBackendKind {

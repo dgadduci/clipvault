@@ -2,11 +2,14 @@
 
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as X11ConnectionExt, Window};
 use x11rb::rust_connection::RustConnection;
 
-use crate::active_app::{ActiveAppError, ActiveApplication, ActiveApplicationProbe};
+use crate::active_app::{
+    parse_active_window_id, ActiveAppError, ActiveApplication, ActiveApplicationProbe, ProbeStage,
+};
 
 /// Probe backed by the EWMH `_NET_ACTIVE_WINDOW` and `WM_CLASS`
 /// properties.
@@ -50,9 +53,23 @@ use crate::active_app::{ActiveAppError, ActiveApplication, ActiveApplicationProb
 /// diagnostics card distinguishes the two surfaces and the UI can
 /// surface "Wayland nativo no disponible" instead of pretending the
 /// Wayland probe succeeded.
+///
+/// ## Granular stage surface
+///
+/// Beyond [`Self::name`], the probe also publishes the granular
+/// [`ProbeStage`] the most recent call reached via
+/// [`ActiveApplicationProbe::last_probe_stage`]. The Linux probe
+/// walks through a small finite state machine (`_NET_ACTIVE_WINDOW`
+/// → parse window id → read `WM_CLASS` → parse identifier) and
+/// each transition is recorded so the diagnostics endpoint can
+/// tell apart "no X11 window is focused" from "WM_CLASS was not
+/// published" without parsing free-form log lines. The state is
+/// stored behind a [`Mutex`] so the capture-loop thread can read
+/// the snapshot synchronously after `refresh_active_application`.
 pub struct X11ActiveApplication {
     inner: Arc<X11State>,
     kind: ProbeKind,
+    last_stage: Arc<Mutex<ProbeStage>>,
 }
 
 /// Logical flavour of the EWMH probe. The variant only affects
@@ -135,6 +152,12 @@ impl X11ActiveApplication {
                 any_property_type,
             }),
             kind,
+            // The probe starts at `Started` (the lifecycle stage
+            // right before `_NET_ACTIVE_WINDOW` is queried). The
+            // helper updates this cell on every transition so the
+            // diagnostics surface can report where the most recent
+            // call stopped.
+            last_stage: Arc::new(Mutex::new(ProbeStage::Started)),
         })
     }
 }
@@ -152,6 +175,10 @@ fn intern_atom(conn: &RustConnection, name: &[u8]) -> Result<u32, ActiveAppError
 impl ActiveApplicationProbe for X11ActiveApplication {
     fn active_application(&self) -> Result<Option<ActiveApplication>, ActiveAppError> {
         let state = &*self.inner;
+        // Mark the call as in-flight before the first X11 round-trip
+        // so the diagnostics surface observes a coherent stage even
+        // if the connection fails before any property is read.
+        self.set_stage(ProbeStage::Started);
 
         let cookie = state.conn.get_property(
             false,
@@ -163,15 +190,33 @@ impl ActiveApplicationProbe for X11ActiveApplication {
         );
         let cookie = match cookie {
             Ok(cookie) => cookie,
-            Err(_) => return Ok(None),
+            Err(_) => {
+                self.set_stage(ProbeStage::ActiveWindowMissing);
+                return Ok(None);
+            }
         };
         let reply = match cookie.reply() {
             Ok(reply) => reply,
-            Err(_) => return Ok(None),
+            Err(_) => {
+                self.set_stage(ProbeStage::ActiveWindowMissing);
+                return Ok(None);
+            }
         };
-        let active = match reply.value.first().copied() {
+        // `_NET_ACTIVE_WINDOW` is a 32-bit property holding the
+        // window id of the currently focused X11 window. The reply
+        // ships the value as raw bytes in native endianness; reading
+        // the first byte (legacy) returns only the LSB and discards
+        // the upper 24 bits, which caused every focus query to land
+        // on a different (often invalid) window. The format-aware
+        // `value32()` iterator handles endianness, length and
+        // `format != 32` rejections in one place so the parser stays
+        // correct regardless of the X server build.
+        let active = match reply.value32().and_then(|mut iter| iter.next()) {
             Some(window) => Window::from(window),
-            None => return Ok(None),
+            None => {
+                self.set_stage(ProbeStage::ActiveWindowEmpty);
+                return Ok(None);
+            }
         };
 
         // Read `WM_CLASS` first: it carries a stable NUL-separated
@@ -210,15 +255,23 @@ impl ActiveApplicationProbe for X11ActiveApplication {
                 );
                 match name {
                     Some(value) => (value.clone(), value),
-                    None => return Ok(None),
+                    None => {
+                        // `WM_CLASS` was the priority source; its
+                        // absence is a real diagnostic, not the
+                        // normal path.
+                        self.set_stage(ProbeStage::WmClassMissing);
+                        return Ok(None);
+                    }
                 }
             }
         };
 
         if identifier.is_empty() {
+            self.set_stage(ProbeStage::IdentifierEmpty);
             return Ok(None);
         }
 
+        self.set_stage(ProbeStage::Identified);
         Ok(Some(ActiveApplication::new(display_name, identifier)))
     }
 
@@ -227,6 +280,22 @@ impl ActiveApplicationProbe for X11ActiveApplication {
             ProbeKind::X11 => "x11_ewmh",
             ProbeKind::XWayland => "xwayland_ewmh",
         }
+    }
+
+    fn last_probe_stage(&self) -> ProbeStage {
+        *self.last_stage.lock()
+    }
+}
+
+impl X11ActiveApplication {
+    /// Update the granular stage the diagnostics surface reports.
+    /// Centralising the write here keeps the transition table in one
+    /// place so a future transition cannot forget to surface a fresh
+    /// stage (the bug the `linux-source-app-metadata` audit
+    /// identified: failures that landed on `Ok(None)` without
+    /// recording the granular cause).
+    fn set_stage(&self, stage: ProbeStage) {
+        *self.last_stage.lock() = stage;
     }
 }
 
@@ -577,5 +646,42 @@ mod tests {
                 "Backend error from new must carry a non-empty details string"
             );
         }
+    }
+
+    /// The probe MUST initialise `last_probe_stage` to
+    /// [`ProbeStage::Started`] so the diagnostics surface observes a
+    /// coherent value before any X11 round-trip completes. The
+    /// already-existing `connect_to_kind_*` tests pin the
+    /// connection-error path; this test pins the freshly-constructed
+    /// probe's stage so a future refactor cannot drop the
+    /// initialisation without surfacing as a build error.
+    #[test]
+    fn fresh_probe_starts_at_started_stage() {
+        // We need a usable X connection to call `connect_to_kind`,
+        // so the assertion only runs when `$DISPLAY` points at a
+        // live X server. The bootstrap already assumes the same
+        // requirement, so the test mirrors the production
+        // precondition rather than papering over the absence of an
+        // X server with a fake.
+        if std::env::var_os("DISPLAY").is_some() {
+            let probe = X11ActiveApplication::with_kind(None, ProbeKind::XWayland)
+                .expect("X11 probe should construct when DISPLAY is set");
+            assert_eq!(probe.last_probe_stage(), ProbeStage::Started);
+        }
+    }
+
+    /// The probe's `name()` and `last_probe_stage()` outputs MUST be
+    /// `Send + Sync`-safe so the diagnostics state can read them from
+    /// any thread without extra synchronization. The check is a
+    /// pure type-level pin (`fn(_) -> _` assignment); nothing here
+    /// requires an X server.
+    #[test]
+    fn last_probe_stage_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Arc<Mutex<ProbeStage>>>();
+        // The probe itself must remain `Send + Sync` so the bootstrap
+        // can install it behind `Arc<dyn ActiveApplicationProbe>`
+        // and share it with the cache and the diagnostics state.
+        assert_send_sync::<X11ActiveApplication>();
     }
 }

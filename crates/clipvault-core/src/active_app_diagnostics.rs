@@ -23,7 +23,7 @@ use parking_lot::RwLock;
 use serde::Serialize;
 
 use clipvault_platform::{
-    ActiveAppBackendKind, ActiveAppError, ActiveApplication, CachedActiveApplication,
+    ActiveAppBackendKind, ActiveAppError, ActiveApplication, CachedActiveApplication, ProbeStage,
 };
 
 /// Outcome of the most recent refresh attempt. The shell reports this
@@ -171,6 +171,35 @@ pub struct ActiveAppDiagnostics {
     /// `"allowed"`, `"discarded:blacklisted"`, `"unchanged"`).
     /// Never carries the clipboard content, snippet or hash.
     pub last_capture_decision: Option<String>,
+    /// Most recent granular stage the active-app probe reached. For
+    /// macOS / no-op probes this stays `not_applicable` (the
+    /// [`ProbeStage::NotApplicable`] default). For Linux X11 /
+    /// XWayland it surfaces the documented stages
+    /// (`active_window_missing`, `wm_class_missing`, `identified`,
+    /// …) so the UI can tell apart "no X11 window is focused" from
+    /// "WM_CLASS was undeclared on the focused window". The value
+    /// is recorded on every `record_refresh` / `record_failure*`
+    /// call; the diagnostics card renders it verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_probe_stage: Option<&'static str>,
+    /// Whether the most recent probe call observed `_NET_ACTIVE_WINDOW`
+    /// returning a parseable window id. `true` when the active
+    /// EWMH query found a focused window, `false` when the
+    /// property was empty or the connection returned no usable
+    /// data. Stays `None` on macOS / no-op probes that do not track
+    /// the underlying selector at all. Metadata-only: it never
+    /// carries the window id itself, only the Boolean outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub net_active_window_seen: Option<bool>,
+    /// Whether the most recent probe call observed `WM_CLASS`
+    /// returning a parseable, non-empty payload for the active
+    /// window. `true` when the focused window published a class
+    /// the probe could decode, `false` when `WM_CLASS` was
+    /// unreadable or empty. Stays `None` on macOS / no-op probes.
+    /// Metadata-only: it never carries the parsed class string,
+    /// only the Boolean outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wm_class_seen: Option<bool>,
 }
 
 impl ActiveAppDiagnostics {
@@ -194,6 +223,9 @@ impl ActiveAppDiagnostics {
             failed_refreshes: 0,
             last_refresh_unix_ms: None,
             last_capture_decision: None,
+            last_probe_stage: None,
+            net_active_window_seen: None,
+            wm_class_seen: None,
         }
     }
 }
@@ -242,6 +274,19 @@ struct ActiveAppDiagnosticsStateInner {
     /// loop evaluated. The shell sets it via
     /// [`ActiveAppDiagnosticsState::record_capture_decision`].
     last_capture_decision: Option<String>,
+    /// Most recent granular probe stage. Refreshed from the cached
+    /// probe via [`ActiveAppDiagnosticsState::record_probe_stage`].
+    /// `None` until the first refresh; stays at `None` for macOS
+    /// probes that report [`ProbeStage::NotApplicable`].
+    last_probe_stage: Option<&'static str>,
+    /// Whether the most recent probe call observed `_NET_ACTIVE_WINDOW`
+    /// returning a parseable window id. Always `None` for macOS and
+    /// no-op probes.
+    net_active_window_seen: Option<bool>,
+    /// Whether the most recent probe call observed `WM_CLASS`
+    /// returning a parseable, non-empty payload for the active
+    /// window. Always `None` for macOS and no-op probes.
+    wm_class_seen: Option<bool>,
 }
 
 impl ActiveAppDiagnosticsState {
@@ -268,6 +313,9 @@ impl ActiveAppDiagnosticsState {
                 failed_refreshes: 0,
                 last_refresh_unix_ms: None,
                 last_capture_decision: None,
+                last_probe_stage: None,
+                net_active_window_seen: None,
+                wm_class_seen: None,
             })),
         }
     }
@@ -310,6 +358,11 @@ impl ActiveAppDiagnosticsState {
             let mut guard = self.inner.write();
             if let Some(probe) = guard.probe.as_ref() {
                 probe.refresh_with(fresh.clone());
+                let stage = probe.last_probe_stage();
+                if !matches!(stage, ProbeStage::NotApplicable) {
+                    guard.last_probe_stage = Some(stage.as_str());
+                }
+                update_probe_selector_flags(&mut guard, stage);
             }
             guard.refresh_attempts = guard.refresh_attempts.saturating_add(1);
             guard.successful_refreshes = guard.successful_refreshes.saturating_add(1);
@@ -342,6 +395,9 @@ impl ActiveAppDiagnosticsState {
                 failed_refreshes: guard.failed_refreshes,
                 last_refresh_unix_ms: guard.last_refresh_unix_ms,
                 last_capture_decision: guard.last_capture_decision.clone(),
+                last_probe_stage: guard.last_probe_stage,
+                net_active_window_seen: guard.net_active_window_seen,
+                wm_class_seen: guard.wm_class_seen,
             };
             guard.last_outcome = diag.refresh_outcome.clone();
             diag
@@ -374,6 +430,13 @@ impl ActiveAppDiagnosticsState {
             Some(app) if !app.identifier.is_empty() => (true, Some(app.identifier), Some(app.name)),
             _ => (false, None, None),
         };
+        if let Some(probe) = guard.probe.as_ref() {
+            let stage = probe.last_probe_stage();
+            if !matches!(stage, ProbeStage::NotApplicable) {
+                guard.last_probe_stage = Some(stage.as_str());
+            }
+            update_probe_selector_flags(&mut guard, stage);
+        }
         guard.refresh_attempts = guard.refresh_attempts.saturating_add(1);
         guard.failed_refreshes = guard.failed_refreshes.saturating_add(1);
         guard.last_refresh_unix_ms = Some(unix_millis_now());
@@ -396,9 +459,74 @@ impl ActiveAppDiagnosticsState {
             failed_refreshes: guard.failed_refreshes,
             last_refresh_unix_ms: guard.last_refresh_unix_ms,
             last_capture_decision: guard.last_capture_decision.clone(),
+            last_probe_stage: guard.last_probe_stage,
+            net_active_window_seen: guard.net_active_window_seen,
+            wm_class_seen: guard.wm_class_seen,
         };
         guard.last_outcome = diag.refresh_outcome.clone();
         diag
+    }
+
+    /// Update the granular probe stage fields from the cached probe.
+    /// The helper is a no-op for probes that report
+    /// [`ProbeStage::NotApplicable`] (macOS, no-op probes, future
+    /// Windows adapters before they ship granular stages). Used by
+    /// [`AppContext::refresh_active_application`]
+    /// (see `crates/clipvault-core/src/bootstrap.rs`) when it wants
+    /// to refresh the stage snapshot independently of the
+    /// `record_refresh` / `record_failure*` paths (for example the
+    /// capture-loop background tick on non-macOS hosts).
+    pub fn record_probe_stage(&self, stage: ProbeStage) -> ActiveAppDiagnostics {
+        let mut guard = self.inner.write();
+        if !matches!(stage, ProbeStage::NotApplicable) {
+            guard.last_probe_stage = Some(stage.as_str());
+        }
+        update_probe_selector_flags(&mut guard, stage);
+        ActiveAppDiagnostics {
+            available: guard.available,
+            backend: guard.backend,
+            cache_populated: guard
+                .probe
+                .as_ref()
+                .and_then(|probe| probe.cached())
+                .map(|app| !app.identifier.is_empty())
+                .unwrap_or(false),
+            identifier: guard
+                .probe
+                .as_ref()
+                .and_then(|probe| probe.cached())
+                .and_then(|app| {
+                    if app.identifier.is_empty() {
+                        None
+                    } else {
+                        Some(app.identifier)
+                    }
+                }),
+            name: guard
+                .probe
+                .as_ref()
+                .and_then(|probe| probe.cached())
+                .and_then(|app| {
+                    if app.name.is_empty() {
+                        None
+                    } else {
+                        Some(app.name)
+                    }
+                }),
+            refresh_outcome: guard.last_outcome.clone(),
+            failure_kind: failure_kind_str(&guard.last_outcome),
+            loop_started: guard.loop_started,
+            refresher_installed: guard.refresher_installed,
+            timer_callback_count: guard.timer_callback_count,
+            refresh_attempts: guard.refresh_attempts,
+            successful_refreshes: guard.successful_refreshes,
+            failed_refreshes: guard.failed_refreshes,
+            last_refresh_unix_ms: guard.last_refresh_unix_ms,
+            last_capture_decision: guard.last_capture_decision.clone(),
+            last_probe_stage: guard.last_probe_stage,
+            net_active_window_seen: guard.net_active_window_seen,
+            wm_class_seen: guard.wm_class_seen,
+        }
     }
 
     /// Record the outcome category of the most recent capture tick.
@@ -446,6 +574,9 @@ impl ActiveAppDiagnosticsState {
                 failed_refreshes: guard.failed_refreshes,
                 last_refresh_unix_ms: guard.last_refresh_unix_ms,
                 last_capture_decision: guard.last_capture_decision.clone(),
+                last_probe_stage: guard.last_probe_stage,
+                net_active_window_seen: guard.net_active_window_seen,
+                wm_class_seen: guard.wm_class_seen,
             };
         }
         let cached = guard.probe.as_ref().and_then(|probe| probe.cached());
@@ -469,6 +600,9 @@ impl ActiveAppDiagnosticsState {
             failed_refreshes: guard.failed_refreshes,
             last_refresh_unix_ms: guard.last_refresh_unix_ms,
             last_capture_decision: guard.last_capture_decision.clone(),
+            last_probe_stage: guard.last_probe_stage,
+            net_active_window_seen: guard.net_active_window_seen,
+            wm_class_seen: guard.wm_class_seen,
         }
     }
 }
@@ -513,6 +647,72 @@ fn failure_kind_str(outcome: &ActiveAppRefreshOutcome) -> Option<&'static str> {
     match outcome {
         ActiveAppRefreshOutcome::Failed { failure_kind, .. } => Some(failure_kind.as_str()),
         ActiveAppRefreshOutcome::Pending | ActiveAppRefreshOutcome::Ok => None,
+    }
+}
+
+/// Map a granular [`ProbeStage`] to the Boolean selector outcomes
+/// the diagnostics card surfaces. The helper keeps the canonical
+/// stage → selector mapping in one place so the UI never sees a
+/// mismatched triplet.
+///
+/// The two selectors the card displays (per the
+/// `linux-source-app-metadata` design) are:
+///
+/// - `net_active_window_seen` — `true` once `_NET_ACTIVE_WINDOW` was
+///   observed returning a parseable window id (`Identified`,
+///   `WmClassMissing`, `IdentifierEmpty`). `false` whenever the
+///   probe stopped before the window id was decoded
+///   (`ActiveWindowMissing`, `ActiveWindowEmpty`).
+/// - `wm_class_seen` — `true` once `WM_CLASS` was observed returning
+///   a parseable, non-empty payload (`Identified`). `false` for every
+///   other outcome, including `IdentifierEmpty` (which means the
+///   server returned a class but the parser produced an empty
+///   identifier).
+///
+/// Stages that are not specific to the Linux probe (`NotApplicable`,
+/// `Unavailable`, `Backend`) leave both selectors at `None` so the
+/// JSON serialiser omits them; the dashboard only renders the
+/// selectors when the Linux probe is wired and reporting stages.
+fn update_probe_selector_flags(guard: &mut ActiveAppDiagnosticsStateInner, stage: ProbeStage) {
+    match stage {
+        ProbeStage::NotApplicable | ProbeStage::Unavailable | ProbeStage::Backend => {
+            // Do not overwrite a previously observed selector — the
+            // most recent granular Linux probe call still owns the
+            // truth. Leaving the slot `None` collapses the JSON, and
+            // a probe that reports only `Unavailable` without
+            // granular data never advertises either selector.
+        }
+        ProbeStage::Started => {
+            // The probe started but did not finish. Neither selector
+            // is known yet; keep the previous value so the card does
+            // not flicker.
+        }
+        ProbeStage::ActiveWindowMissing | ProbeStage::ActiveWindowEmpty => {
+            guard.net_active_window_seen = Some(false);
+            // `wm_class_seen` is unset (None) so the JSON omits the
+            // field for the case the spec calls "no X11 window was
+            // focused" — there is no `WM_CLASS` to talk about until a
+            // window appears.
+            guard.wm_class_seen = None;
+        }
+        ProbeStage::WmClassMissing => {
+            // The window id was decoded; only `WM_CLASS` failed.
+            guard.net_active_window_seen = Some(true);
+            guard.wm_class_seen = Some(false);
+        }
+        ProbeStage::IdentifierEmpty => {
+            // The probe reached `WM_CLASS` and parsed it but the
+            // identifier ended up empty after the `instance\0class`
+            // split. The selector surfaces this as "WM_CLASS seen
+            // but unparseable" so the user can tell it apart from
+            // "WM_CLASS missing entirely".
+            guard.net_active_window_seen = Some(true);
+            guard.wm_class_seen = Some(false);
+        }
+        ProbeStage::Identified => {
+            guard.net_active_window_seen = Some(true);
+            guard.wm_class_seen = Some(true);
+        }
     }
 }
 
