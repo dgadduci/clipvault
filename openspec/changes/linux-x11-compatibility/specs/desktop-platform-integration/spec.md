@@ -63,3 +63,35 @@ SHALL stay green.
 - **WHEN** ClipVault is built on macOS or `cargo test --workspace` runs
 - **THEN** every macOS-specific test passes and no macOS source file is
   modified by this change
+
+### Requirement: platform-neutral handle for the active-app refresher
+
+The Tauri shell carries an `Option<...>` slot on `AppState` so the
+installed active-app refresher stays alive for the lifetime of the
+application. ClipVault SHALL expose that slot through a
+`clipvault_platform::ActiveAppRefresherHandle` alias that resolves to
+the macOS timer on macOS builds and to `()` on every other platform,
+so the shell never needs to repeat the
+`#[cfg(all(target_os = "macos", feature = "macos-native"))]` gate at
+every reference site.
+
+#### Scenario: macOS shell wires the real timer through the alias
+
+- **WHEN** the shell starts on macOS with the `macos-native` feature
+  enabled
+- **THEN** `clipvault_platform::ActiveAppRefresherHandle` is type-equal to
+  `clipvault_platform::MainQueueActiveAppRefresher`, the
+  `install_active_app_main_queue_refresher` branch returns
+  `MainQueueInstallOutcome::Installed` and stores `Some(handle)`, and the
+  existing diagnostics surface (`refresher_installed`, callback counter,
+  cache refresh) keeps working unchanged.
+
+#### Scenario: Linux / non-macOS shell ignores the macOS refresher
+
+- **WHEN** the shell starts on Linux X11, Wayland, or any other
+  non-macOS host
+- **THEN** `clipvault_platform::ActiveAppRefresherHandle` resolves to
+  `()`, the `install_active_app_main_queue_refresher` branch returns
+  `MainQueueInstallOutcome::SkippedUnsupported` and `None`, and the
+  shell does not reference `MainQueueActiveAppRefresher` anywhere
+  outside a `#[cfg(target_os = "macos")]` gate.

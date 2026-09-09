@@ -80,6 +80,53 @@ no cambian:
   `NoopPasteController`.
 - El frontend y los tests TS no se ven afectados.
 
+## Apéndice: regresión cruzada del shell y corrección
+
+El primer build del shell en Ubuntu (host real, ya fuera del entorno
+de macOS) falló con
+`cannot find type MainQueueActiveAppRefresher in crate clipvault_platform`
+aunque los adapters X11 ya compilaban correctamente. La causa raíz fue
+que `app/tauri/src-tauri/src/bootstrap.rs` referenciaba el tipo
+macOS-only desde tres sitios sin `cfg` de protección:
+
+- el campo `AppState::active_app_refresher`;
+- la firma de la rama macOS y la firma de la rama Linux de
+  `install_active_app_main_queue_refresher`;
+- `MainQueueActiveAppRefresher::install(...)` dentro del cuerpo de la
+  rama macOS.
+
+El re-export del crate `clipvault-platform` se mantiene estrictamente
+detrás de `#[cfg(all(target_os = "macos", feature = "macos-native"))]`
+— no se relaja ni se mueve. La corrección introduce un alias neutral
+`clipvault_platform::ActiveAppRefresherHandle` con doble `cfg`:
+
+- `#[cfg(all(target_os = "macos", feature = "macos-native"))]` →
+  `pub type ActiveAppRefresherHandle = MainQueueActiveAppRefresher;`
+- `#[cfg(not(all(target_os = "macos", feature = "macos-native")))]` →
+  `pub type ActiveAppRefresherHandle = ();`
+
+El shell usa el alias en los tres sitios. La rama Linux sigue
+devolviendo `(MainQueueInstallOutcome::SkippedUnsupported, None)`,
+igual que antes, pero ahora `None` envuelve el alias neutral en vez
+de referenciar directamente el símbolo macOS-only. La rama macOS
+sigue llamando a `ActiveAppRefresherHandle::install(...)` — el alias
+resuelve al tipo real, así que el timer, el diagnóstico
+`refresher_installed`, el contador de callbacks y el refresco de la
+caché de la app activa se conservan sin cambios.
+
+Se añade `#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]`
+al parámetro `info: &PlatformInfo` de `build_clipboard` para silenciar
+el warning sin alterar el comportamiento: la rama macOS sigue
+consultando `info.os_family`, la rama Linux / no-macOS deja el slot
+sin usar sin tener que renombrar a `_info` (lo que generaría un
+`#[cfg(target_os = "macos")]` interno adicional en el cuerpo).
+
+No se introdujo ningún bloque `unsafe` nuevo (incluido `unsafe impl
+Send` / `unsafe impl Sync`); el alias neutral funciona vía reglas
+normales de auto-trait deduction. La rama Linux no necesita
+construir ni importar el refresher macOS, sino simplemente devolver
+`None` y mantener `AppState.active_app_refresher = None`.
+
 ## Tests
 
 - Tests unitarios puros (sin servidor X): el helper `parse_wm_class` ya es

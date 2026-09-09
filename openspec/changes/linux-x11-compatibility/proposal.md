@@ -3,7 +3,9 @@
 Corrección para que los adapters Linux X11 (`X11ActiveApplication` y
 `X11PasteController`) compilen y se ejecuten contra `x11rb 0.13.2`, que es la
 versión resuelta por el workspace. El frontend Vite ya funciona en Ubuntu y
-`x11rb 0.13.2` ya compila; los únicos puntos pendientes son los adapters.
+`x11rb 0.13.2` ya compila; los únicos puntos pendientes son los adapters y la
+regresión cruzada del shell que re-referenciaba el tipo macOS-only
+`MainQueueActiveAppRefresher` desde sitios sin `cfg` de protección.
 
 ## Why
 
@@ -26,6 +28,12 @@ no existen en `x11rb 0.13.2` o que están mal direccionadas:
 - `send_fake_key` ignora los errores de `send_request` y `flush`, y firma su
   tipo de retorno como `Result<(), x11rb::protocol::Error>`, que tampoco
   existe.
+- `app/tauri/src-tauri/src/bootstrap.rs` referenciaba
+  `clipvault_platform::MainQueueActiveAppRefresher` desde el campo
+  `AppState::active_app_refresher`, desde la firma macOS, desde la firma
+  Linux y desde el cuerpo de la rama macOS sin un `cfg` común, lo que
+  rompe la compilación cruzada del shell en Ubuntu cuando los adapters
+  X11 ya compilan.
 
 El comportamiento que sí debe conservarse:
 
@@ -38,6 +46,9 @@ El comportamiento que sí debe conservarse:
   añadir variantes nuevas).
 - Features `linux-x11`, `clipboard-arboard` y `hotkey-global`.
 - Adapters y comportamiento específicos de macOS.
+- En macOS, instalación real del `MainQueueActiveAppRefresher`,
+  diagnóstico `refresher_installed`, contador de callbacks, refresco de
+  la caché de la app activa y cleanup por ownership del handle.
 
 ## What Changes
 
@@ -62,6 +73,14 @@ El comportamiento que sí debe conservarse:
   - Conservación del flujo XTEST (`FakeInput` con keycodes 37 y 55).
   - No regresión de macOS (los tests existentes deben seguir pasando).
   - No uso de `unsafe` para ocultar problemas de `Send`/`Sync`.
+- Introducir el alias neutral `clipvault_platform::ActiveAppRefresherHandle`
+  (macOS → `MainQueueActiveAppRefresher`, otros → `()`) y reemplazar las
+  referencias directas en el shell para que `AppState`, las dos firmas de
+  `install_active_app_main_queue_refresher` y la llamada interna
+  `…::install(...)` ya no requieran el símbolo macOS-only.
+- Corregir el warning de `build_clipboard(info: &PlatformInfo, ...)` en
+  builds no-macOS con `#[cfg_attr(not(target_os = "macos"),
+  allow(unused_variables))] info`.
 
 ## Capabilities
 
@@ -69,12 +88,18 @@ El comportamiento que sí debe conservarse:
 
 - `desktop-platform-integration`: los adapters Linux X11 usan la API correcta
   de `x11rb 0.13.2` y son `Send + Sync` para poder ser consumidos como
-  `Arc<dyn ...>` desde el bootstrap.
+  `Arc<dyn ...>` desde el bootstrap; el shell referencia el refresher macOS
+  exclusivamente a través del alias neutral `ActiveAppRefresherHandle`.
 
 ## Impact
 
 - `crates/clipvault-platform/src/runtime/linux_x11_active_app.rs`.
 - `crates/clipvault-platform/src/runtime/linux_x11_paste.rs`.
+- `crates/clipvault-platform/src/lib.rs` (alias neutral).
+- `app/tauri/src-tauri/src/bootstrap.rs` (uso del alias en el campo y en
+  las firmas / llamada del helper de instalación; supresión del warning en
+  `build_clipboard`; tests cross-platform).
 - No se introducen dependencias nuevas.
-- No se modifica código compartido fuera de estos dos archivos.
 - No se cambia el comportamiento de macOS ni de Wayland.
+- No se introducen bloques `unsafe` (incluidos `unsafe impl Send` /
+  `unsafe impl Sync` manuales) en el shell.

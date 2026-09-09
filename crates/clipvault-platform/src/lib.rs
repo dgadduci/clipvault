@@ -81,3 +81,34 @@ pub use runtime::macos_main_queue_refresher::{
     outcome as active_app_refresh_outcome, MainQueueActiveAppRefresher, MainQueueRefresherError,
     DEFAULT_REFRESH_INTERVAL,
 };
+
+/// Platform-neutral handle the shell stores on `AppState` to keep the
+/// installed active-app refresher alive for the lifetime of the
+/// application.
+///
+/// On macOS with the `macos-native` feature enabled the alias
+/// resolves to [`MainQueueActiveAppRefresher`], the real
+/// `dispatch2`-backed timer that periodically re-evaluates the
+/// cached `NSWorkspace` probe on the Cocoa main thread. On every
+/// other platform — Linux X11, Linux Wayland, unsupported hosts,
+/// builds compiled without the `macos-native` feature — the alias
+/// resolves to the unit type `()`, which makes the slot
+/// `Option<ActiveAppRefresherHandle>` zero-cost on the non-macOS
+/// side without forcing the shell to repeat the
+/// `cfg(target_os = "macos", feature = "macos-native")` gate at every
+/// call site.
+///
+/// Dropping the value bound to this alias cancels the timer on
+/// macOS and is a no-op on every other platform. The shell relies
+/// on that contract to manage the lifetime of the refresher through
+/// field ownership on `AppState`, independent of the host platform.
+#[cfg(all(target_os = "macos", feature = "macos-native"))]
+pub type ActiveAppRefresherHandle = MainQueueActiveAppRefresher;
+
+/// Non-macOS / no-`macos-native` fallback for
+/// [`ActiveAppRefresherHandle`]. Resolves to `()` so the shell can
+/// carry an `Option<ActiveAppRefresherHandle>` slot without
+/// referencing the macOS-only symbol. See the docstring on the
+/// macOS-side alias for the full reasoning.
+#[cfg(not(all(target_os = "macos", feature = "macos-native")))]
+pub type ActiveAppRefresherHandle = ();
