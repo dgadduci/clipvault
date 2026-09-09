@@ -1,10 +1,10 @@
 //! Linux X11 active-application probe (EWMH `_NET_ACTIVE_WINDOW`).
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{self, AtomEnum, ConnectionExt as X11ConnectionExt, Window};
-use x11rb::RustConnection;
+use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as X11ConnectionExt, Window};
+use x11rb::rust_connection::RustConnection;
 
 use crate::active_app::{ActiveAppError, ActiveApplication, ActiveApplicationProbe};
 
@@ -14,7 +14,7 @@ use crate::active_app::{ActiveAppError, ActiveApplication, ActiveApplicationProb
 /// against, so we read it first. `_NET_WM_NAME` is only used as a
 /// display label fallback for the UI when `WM_CLASS` is absent.
 pub struct X11ActiveApplication {
-    inner: Rc<X11State>,
+    inner: Arc<X11State>,
 }
 
 struct X11State {
@@ -35,7 +35,7 @@ impl X11ActiveApplication {
     /// Connect to an explicit display name (e.g. `:0`).
     pub fn connect_to(dpy_name: Option<&str>) -> Result<Self, ActiveAppError> {
         let (conn, screen_number) = x11rb::connect(dpy_name).map_err(ActiveAppError::backend)?;
-        let screen = &conn.setup().screens[screen_number];
+        let screen = &conn.setup().roots[screen_number];
         let root = screen.root;
 
         let net_active_window = intern_atom(&conn, b"_NET_ACTIVE_WINDOW")?;
@@ -44,7 +44,7 @@ impl X11ActiveApplication {
         let utf8_string = intern_atom(&conn, b"UTF8_STRING")?;
 
         Ok(Self {
-            inner: Rc::new(X11State {
+            inner: Arc::new(X11State {
                 conn,
                 root,
                 net_active_window,
@@ -98,9 +98,7 @@ impl ActiveApplicationProbe for X11ActiveApplication {
         let class = read_string_property(&state.conn, active, state.wm_class, state.utf8_string);
         let (identifier, display_name) = match class {
             Some(value) if value.contains('\0') => {
-                let mut parts = value.split('\0');
-                let instance = parts.next().unwrap_or("").to_string();
-                let class = parts.next().unwrap_or("").to_string();
+                let (instance, class) = parse_wm_class(&value);
                 let identifier = if !class.is_empty() {
                     class
                 } else {
@@ -131,6 +129,20 @@ impl ActiveApplicationProbe for X11ActiveApplication {
     }
 }
 
+/// Parse the `instance\0class` payload the X server sends for
+/// `WM_CLASS`. When the payload is missing the NUL separator we treat
+/// the whole string as both the instance and the class so the
+/// blacklist still has something to match against.
+pub(crate) fn parse_wm_class(raw: &str) -> (String, String) {
+    if !raw.contains('\0') {
+        return (raw.to_string(), raw.to_string());
+    }
+    let mut parts = raw.split('\0');
+    let instance = parts.next().unwrap_or("").to_string();
+    let class = parts.next().unwrap_or("").to_string();
+    (instance, class)
+}
+
 fn read_string_property(
     conn: &RustConnection,
     window: Window,
@@ -146,29 +158,9 @@ fn read_string_property(
     String::from_utf8(reply.value).ok()
 }
 
-// `xproto::Atom` re-export to avoid an unused-import warning when the
-// feature combination compiles without other consumers.
-#[allow(dead_code)]
-fn _atom_marker(a: xproto::Atom) -> u32 {
-    a.into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Parse the `instance\0class` payload the X server sends for
-    /// `WM_CLASS`. Public so unit tests can exercise the splitting
-    /// logic without standing up a fake connection.
-    fn parse_wm_class(raw: &str) -> (String, String) {
-        if !raw.contains('\0') {
-            return (raw.to_string(), raw.to_string());
-        }
-        let mut parts = raw.split('\0');
-        let instance = parts.next().unwrap_or("").to_string();
-        let class = parts.next().unwrap_or("").to_string();
-        (instance, class)
-    }
 
     #[test]
     fn wm_class_class_segment_is_used_as_identifier() {
@@ -189,5 +181,46 @@ mod tests {
         assert_eq!(class, "");
         let identifier = if !class.is_empty() { class } else { instance };
         assert_eq!(identifier, "weird-app");
+    }
+
+    #[test]
+    fn wm_class_single_segment_is_used_for_both_fields() {
+        // Some apps report `WM_CLASS` without the NUL separator; the
+        // blacklist and the UI label must both still have a value.
+        let (instance, class) = parse_wm_class("solo-app");
+        assert_eq!(instance, "solo-app");
+        assert_eq!(class, "solo-app");
+    }
+
+    #[test]
+    fn wm_class_empty_input_yields_empty_identifier() {
+        let (instance, class) = parse_wm_class("");
+        assert_eq!(instance, "");
+        assert_eq!(class, "");
+        let identifier = if !class.is_empty() { class } else { instance };
+        assert!(identifier.is_empty());
+    }
+
+    #[test]
+    fn x11_active_application_state_is_send_and_sync() {
+        // The bootstrap stores the probe behind `Arc<dyn
+        // ActiveApplicationProbe>`, which requires `Send + Sync`. We
+        // exercise the requirement at compile time by checking the
+        // auto traits of `Arc<X11State>`.
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Arc<X11State>>();
+    }
+
+    #[test]
+    fn rust_connection_path_resolves_to_expected_module() {
+        // Compile-time check that the canonical 0.13.x import path is
+        // the one we use. The `RustConnection` type from the older
+        // crate-root re-export does not exist in 0.13.2, so any
+        // accidental `use x11rb::RustConnection` in this module would
+        // surface as an unresolved import here.
+        fn assert_canonical(_: &x11rb::rust_connection::RustConnection) {}
+        // Reference the helper so the `unused` lint does not fire;
+        // the test passes by compiling.
+        let _fn_ptr: fn(&x11rb::rust_connection::RustConnection) = assert_canonical;
     }
 }

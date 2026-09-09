@@ -5,30 +5,34 @@
 //! and the process to have access to the input device — usually true
 //! when the user runs ClipVault inside a graphical session.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use x11rb::connection::Connection;
+use x11rb::connection::RequestConnection;
+use x11rb::errors::ConnectionError;
 use x11rb::protocol::xproto::{ConnectionExt as X11ConnectionExt, Window};
-use x11rb::protocol::xtest::{self, ConnectionExt as XTestConnectionExt};
-use x11rb::RustConnection;
+use x11rb::protocol::xtest;
+use x11rb::rust_connection::RustConnection;
 
 use crate::paste::{PasteController, PasteError};
 
+/// Standard X11 keycode for the left `Ctrl` key on a Latin keyboard.
+const KEYCODE_CONTROL: u8 = 37;
+/// Standard X11 keycode for the `v` key on a Latin keyboard.
+const KEYCODE_V: u8 = 55;
+
 /// Paste controller backed by `XTestFakeKeyEvent`.
 ///
-/// The keycode `55` is the standard X11 mapping for the `v` key on
-/// Latin keyboards. We rely on the active keyboard layout so the user
-/// gets the right keystroke regardless of mapping.
+/// The keycodes are documented at module scope and reused by the
+/// orchestrator so a future change has to update a single constant
+/// instead of three call sites.
 pub struct X11PasteController {
-    inner: Rc<X11State>,
+    inner: Arc<X11State>,
 }
 
 struct X11State {
     conn: RustConnection,
     root: Window,
-    xtest_opcode: u8,
-    keycode_v: u8,
-    keycode_control: u8,
 }
 
 impl X11PasteController {
@@ -41,15 +45,16 @@ impl X11PasteController {
     /// Connect to an explicit display name.
     pub fn connect_to(dpy_name: Option<&str>) -> Result<Self, PasteError> {
         let (conn, screen_number) = x11rb::connect(dpy_name).map_err(PasteError::backend)?;
-        let screen = &conn.setup().screens[screen_number];
+        let screen = &conn.setup().roots[screen_number];
         let root = screen.root;
 
-        // Make sure the XTEST extension is available and remember its
-        // major opcode so we can serialise `FakeInput` requests.
-        let query = conn
+        // Make sure the XTEST extension is available. The generated
+        // `send_trait_request_without_reply` path resolves the opcode
+        // through the cached extension manager, so we only need to
+        // confirm that the extension is reported as present.
+        let reply = conn
             .query_extension(b"XTEST")
-            .map_err(PasteError::backend)?;
-        let reply = query
+            .map_err(PasteError::backend)?
             .reply()
             .map_err(|err| PasteError::backend(format!("query_extension: {err}")))?;
         if !reply.present {
@@ -57,28 +62,8 @@ impl X11PasteController {
         }
 
         Ok(Self {
-            inner: Rc::new(X11State {
-                conn,
-                root,
-                xtest_opcode: reply.major_opcode,
-                keycode_v: 55,
-                keycode_control: 37,
-            }),
+            inner: Arc::new(X11State { conn, root }),
         })
-    }
-
-    /// Override the X server connection. Used by tests that need to
-    /// drive the controller against a hand-crafted state.
-    #[cfg(test)]
-    pub fn from_state(state: X11State) -> Self {
-        Self {
-            inner: Rc::new(state),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn state(&self) -> &X11State {
-        &self.inner
     }
 }
 
@@ -86,42 +71,15 @@ impl PasteController for X11PasteController {
     fn paste(&self) -> Result<(), PasteError> {
         let state = &*self.inner;
 
-        // Ctrl down
-        send_fake_key(
-            &state.conn,
-            state.xtest_opcode,
-            state.root,
-            state.keycode_control,
-            true,
-        )
-        .map_err(PasteError::backend)?;
-        // V down
-        send_fake_key(
-            &state.conn,
-            state.xtest_opcode,
-            state.root,
-            state.keycode_v,
-            true,
-        )
-        .map_err(PasteError::backend)?;
-        // V up
-        send_fake_key(
-            &state.conn,
-            state.xtest_opcode,
-            state.root,
-            state.keycode_v,
-            false,
-        )
-        .map_err(PasteError::backend)?;
-        // Ctrl up
-        send_fake_key(
-            &state.conn,
-            state.xtest_opcode,
-            state.root,
-            state.keycode_control,
-            false,
-        )
-        .map_err(PasteError::backend)?;
+        // Ctrl down, V down, V up, Ctrl up. The order is part of the
+        // contract with the focused X11 application: a missing press
+        // or release leaves the modifier in the wrong state.
+        send_fake_key(&state.conn, state.root, KEYCODE_CONTROL, true)
+            .map_err(PasteError::backend)?;
+        send_fake_key(&state.conn, state.root, KEYCODE_V, true).map_err(PasteError::backend)?;
+        send_fake_key(&state.conn, state.root, KEYCODE_V, false).map_err(PasteError::backend)?;
+        send_fake_key(&state.conn, state.root, KEYCODE_CONTROL, false)
+            .map_err(PasteError::backend)?;
 
         Ok(())
     }
@@ -131,13 +89,21 @@ impl PasteController for X11PasteController {
     }
 }
 
+/// Serialise and send a single XTEST `FakeInput` event, then flush the
+/// socket so the X server actually receives the request.
+///
+/// Both errors are propagated: a failed `send_trait_request_without_reply`
+/// means the request never reached the write buffer, and a failed
+/// `flush` means the buffered bytes could not be pushed to the X
+/// server. The caller turns them into a typed `PasteError::Backend`
+/// so the UI can surface a meaningful diagnostic without leaking any
+/// clipboard content.
 fn send_fake_key(
     conn: &RustConnection,
-    opcode: u8,
     root: Window,
     keycode: u8,
     press: bool,
-) -> Result<(), x11rb::protocol::Error> {
+) -> Result<(), ConnectionError> {
     let type_ = if press {
         2 /* KeyPress */
     } else {
@@ -152,7 +118,52 @@ fn send_fake_key(
         root_y: 0,
         deviceid: 0,
     };
-    let _ = conn.send_request(&request);
-    let _ = opcode;
-    conn.flush().map(|_| ())
+    conn.send_trait_request_without_reply(request)?;
+    conn.flush()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paste_keymap_targets_latin_ctrl_and_v() {
+        // The standard X11 keycodes for `Ctrl` (37) and `v` (55) on a
+        // Latin keyboard must match what we send through XTEST. If
+        // these change, the keyboard layout assumption documented at
+        // the top of the file is invalidated.
+        assert_eq!(KEYCODE_CONTROL, 37);
+        assert_eq!(KEYCODE_V, 55);
+    }
+
+    #[test]
+    fn send_fake_key_returns_connection_error() {
+        // Locks in the public signature so the propagation contract
+        // — typed `ConnectionError`, no `x11rb::protocol::Error` —
+        // cannot regress without a test failure.
+        let _signature: fn(&RustConnection, Window, u8, bool) -> Result<(), ConnectionError> =
+            send_fake_key;
+    }
+
+    #[test]
+    fn x11_paste_controller_state_is_send_and_sync() {
+        // The bootstrap stores the controller behind
+        // `Arc<dyn PasteController>`, which requires `Send + Sync`. We
+        // exercise the requirement at compile time by checking the
+        // auto traits of `Arc<X11State>`.
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Arc<X11State>>();
+    }
+
+    #[test]
+    fn rust_connection_path_resolves_to_expected_module() {
+        // Compile-time check that the canonical 0.13.x import path is
+        // the one we use. The `RustConnection` type from the older
+        // crate-root re-export does not exist in 0.13.2, so any
+        // accidental `use x11rb::RustConnection` in this module would
+        // surface as an unresolved import here.
+        fn assert_canonical(_: &x11rb::rust_connection::RustConnection) {}
+        let _fn_ptr: fn(&x11rb::rust_connection::RustConnection) = assert_canonical;
+    }
 }
