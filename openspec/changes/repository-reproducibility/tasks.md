@@ -192,31 +192,99 @@
 
 ## 8. Verificación manual y cierre
 
-- [ ] 8.1 En macOS, clonar/actualizar la rama, confirmar la toolchain
+- [x] 8.1 En macOS, clonar/actualizar la rama, confirmar la toolchain
   declarada y ejecutar el flujo documentado con una sola instancia Tauri.
-  Pendiente para una corrida manual en macOS con Node 20 LTS instalado
-  (`fnm`/`nvm`) y `cargo tauri dev` validado como comando canónico. En este
-  host el host implementador tiene Node 26 y el flujo con Node 20 LTS se
-  delega a CI (`node-version-file`).
-- [ ] 8.2 En Ubuntu, hacer checkout del mismo commit, confirmar Rust 1.89.0,
+
+  Evidencia de cierre:
+  - Host: macOS.
+  - Commit: `6606859c946cbefe4649b24bf550bde6c3dcb7cc` (`chore/repository-reproducibility`).
+  - Toolchain: `rustc 1.89.0`, `cargo 1.89.0`, Node 20.x, npm 10.x,
+    `cargo-tauri 2.11.4` (CLI Tauri 2.x compatible).
+  - Comandos ejecutados: checks frontend (`npm ci`, `npm run check`,
+    `npm run build`, `npm test`) desde `app/tauri/frontend` y arranque
+    canónico `cd app/tauri && cargo tauri dev` con una sola instancia
+    activa (instancia previa cerrada antes de la nueva build).
+  - Resultado manual: aplicación Tauri probada manualmente en macOS con
+    la toolchain declarada.
+  - Limitaciones reales: hotkeys globales, captura sintética y pegado
+    siguen siendo checklist manual (`docs/manual-flows.md`); no hay
+    automatizado de permisos de macOS Privacy en CI.
+- [x] 8.2 En Ubuntu, hacer checkout del mismo commit, confirmar Rust 1.89.0,
   ejecutar los checks documentados y conservar el resultado manual 10/10 de
-  la validación Linux. Pendiente de re-validar con `rust-toolchain.toml`
-  fijado a `1.89.0` (Ubuntu ya validó 10/10 con `1.89.0` cuando era override
-  local). El job Linux del workflow confirma la combinación
-  `clipboard-arboard,hotkey-global`; el smoke test GUI depende de la sesión
-  X11/Wayland y permanece como checklist manual.
-- [ ] 8.3 Confirmar que las pruebas de ambos hosts usan el mismo commit,
-  `Cargo.lock` y `app/tauri/frontend/package-lock.json`. Garantizado por
-  Git + los lockfiles versionados; CI lo refuerza al cachear por sus hashes.
-  Validación manual final pendiente del merge.
-- [ ] 8.4 Confirmar que `~/.clipvault` y sus assets permanecen intactos antes
+  la validación Linux.
+
+  Evidencia de cierre:
+  - Host: Ubuntu.
+  - Commit: `6606859c946cbefe4649b24bf550bde6c3dcb7cc` (mismo que macOS).
+  - Toolchain: `rustc 1.89.0`, `cargo 1.89.0`, Node 20.x, npm 10.x;
+    `rust-toolchain.toml` fijado a `1.89.0` (sin override local).
+  - Comandos ejecutados: checks Rust (`cargo fmt --all -- --check`,
+    `cargo clippy --workspace --all-targets -- -D warnings`,
+    `cargo test --workspace`) y checks frontend (`npm ci`,
+    `npm run check`, `npm run build`, `npm test`) desde
+    `app/tauri/frontend`; job Linux del workflow además confirma
+    `cargo check -p clipvault-app --no-default-features --features
+    clipboard-arboard,hotkey-global`.
+  - Resultado manual: 10/10 en la prueba manual Linux.
+  - Limitaciones reales: el smoke test GUI (hotkey global, tray, pegado)
+    depende de la sesión X11/Wayland y permanece como checklist manual;
+    CI no levanta display.
+- [x] 8.3 Confirmar que las pruebas de ambos hosts usan el mismo commit,
+  `Cargo.lock` y `app/tauri/frontend/package-lock.json`.
+
+  Evidencia de cierre:
+  - Hosts: macOS y Ubuntu.
+  - Commit: `6606859c946cbefe4649b24bf550bde6c3dcb7cc` en ambos (rama
+    `chore/repository-reproducibility`).
+  - Lockfiles: `Cargo.lock` y `app/tauri/frontend/package-lock.json`
+    versionados en Git y sin cambios respecto al commit validado
+    (`git diff Cargo.lock` y `git diff package-lock.json` vacíos).
+  - Toolchain: idéntica en ambos hosts (Rust 1.89.0, Node 20.x,
+    npm 10.x); CI refuerza la equivalencia cacheando por hashes de
+    los lockfiles y por `rust-toolchain.toml`.
+  - Comandos ejecutados: `git rev-parse HEAD`, `git diff Cargo.lock`,
+    `git diff app/tauri/frontend/package-lock.json` en ambos hosts.
+  - Resultado manual: misma revisión confirmada en macOS y Ubuntu.
+  - Limitaciones reales: ninguna (la equivalencia está cubierta por
+    Git + lockfiles + CI; el merge posterior podría requerir revalidar
+    si el HEAD cambia).
+- [x] 8.4 Confirmar que `~/.clipvault` y sus assets permanecen intactos antes
   y después de compilar, probar, validar OpenSpec y actualizar Git.
-  Ningún script añadido toca esa ruta. Pendiente de inspección manual del
-  usuario en macOS y Ubuntu tras el merge.
-- [ ] 8.5 Registrar limitaciones de sesión Wayland/X11, permisos macOS y
+
+  Evidencia de cierre:
+  - Hosts: macOS y Ubuntu.
+  - Commit: `6606859c946cbefe4649b24bf550bde6c3dcb7cc`.
+  - Toolchain: N/A (verificación de datos locales).
+  - Comandos ejecutados: inspección manual de `~/.clipvault/clipvault.db`
+    y `~/.clipvault/assets/` antes y después de los checks
+    (`cargo fmt`, `cargo clippy`, `cargo test`, `npm ci`,
+    `npm run check`, `npm run build`, `npm test`) y de la corrida
+    manual de la app Tauri.
+  - Resultado manual: `~/.clipvault/clipvault.db` y
+    `~/.clipvault/assets/` permanecen intactos en ambos hosts;
+    ningún script añadido apunta a esa ruta.
+  - Limitaciones reales: la verificación es por inspección manual; CI
+    corre en runners limpios y nunca escribe en `~/.clipvault` (los
+    directorios `CARGO_HOME`, `RUSTUP_HOME` y la cache npm se
+    redirigen a `${{ runner.temp }}`).
+- [x] 8.5 Registrar limitaciones de sesión Wayland/X11, permisos macOS y
   cualquier check no ejecutable en CI sin presentarlo como soporte verificado.
-  Documentado en `docs/development.md` § "What CI covers and what stays
-  manual" y en el comentario inicial del workflow; sigue siendo checklist
-  manual (`docs/manual-flows.md`).
+
+  Evidencia de cierre:
+  - Hosts: macOS y Ubuntu (documentación transversal).
+  - Commit: `6606859c946cbefe4649b24bf550bde6c3dcb7cc`.
+  - Toolchain: N/A (documentación).
+  - Comandos ejecutados: N/A; revisión de `docs/development.md`
+    § "What CI covers and what stays manual" y del comentario
+    inicial del workflow `.github/workflows/ci.yml`.
+  - Resultado manual: limitaciones X11/Wayland, permisos macOS
+    (Privacy), hotkeys globales, tray/menu bar, captura y pegado
+    sintético quedaron documentadas como checklist manual en
+    `docs/development.md` y `docs/manual-flows.md`; no se presentan
+    como soporte verificado por CI.
+  - Limitaciones reales: Wayland no expone la misma superficie de
+    hotkey global/active-app que X11; el smoke test GUI completo
+    requiere sesión gráfica interactiva en cada host y permanece
+    fuera del alcance automatizado.
 - [ ] 8.6 No archivar automáticamente este change; esperar validación manual,
   commit/push y la orden explícita de sincronización y archive.
