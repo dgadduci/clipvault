@@ -47,15 +47,18 @@ canonical value and never fall back to a hard-coded constant.
 
 | Surface | Version |
 | --- | --- |
-| Cargo workspace (`Cargo.toml`) | 0.0.1 |
-| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.1 |
-| Frontend package (`app/tauri/frontend/package.json`) | 0.0.1 |
+| Cargo workspace (`Cargo.toml`) | 0.0.2 |
+| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.2 |
+| Frontend package (`app/tauri/frontend/package.json`) | 0.0.2 |
 
-The canonical public version is intentionally established at **0.0.1**.
+The canonical public version is intentionally established at **0.0.2**.
 The earlier `0.1.x` values were development manifest values and did not
-represent a public product release. The `npm-test-node-20-transpile`
-change is tooling-only and therefore does not create a product-version
-bump. The next functional change will increment the patch to **0.0.2**.
+represent a public product release. The `0.0.1` baseline pinned the
+first visible product version; the functional fix that
+`linux-source-app-metadata` ships on Ubuntu (the `with_kind` →
+`connect_to_kind` call) is a follow-up patch that bumps the canonical
+version to **0.0.2** without re-opening the v0.0.1 cut. The next
+functional change will increment the patch to **0.0.3**.
 
 ## Bumping the version
 

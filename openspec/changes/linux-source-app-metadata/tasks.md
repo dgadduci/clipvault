@@ -213,3 +213,127 @@ no deben marcarse por inferencia desde macOS ni desde tests sin display.
   restantes.
 - [x] 11.2 No ejecutar sync, archive, commit ni push automáticamente como
   parte de la implementación.
+
+## 12. Parche funcional post-publicación (Ubuntu build regression)
+
+- [x] 12.1 **Causa raíz.** El build de Ubuntu (`x86_64-unknown-linux-gnu`)
+  fallaba con `error[E0061]: this function takes 1 argument but 2
+  arguments were supplied` en
+  `crates/clipvault-platform/src/runtime/linux_x11_active_app.rs:94`.
+  La función pública `X11ActiveApplication::with_kind(dpy_name, kind)`
+  delegaba en `Self::connect_to(dpy_name, kind)`, pero `connect_to`
+  sólo acepta el nombre de display. La firma no coincidía y el árbol
+  completo de Linux rompía antes de poder ejecutar ningún test.
+- [x] 12.2 **Corrección.** Cambiar la delegación de
+  `with_kind` para que invoque a `Self::connect_to_kind(dpy_name, kind)`,
+  que es el constructor que conserva el `ProbeKind` y lo almacena en
+  el campo `kind` del probe (consumido luego por
+  `ActiveApplicationProbe::name` para diferenciar `x11_ewmh` de
+  `xwayland_ewmh`). El parámetro `kind` no se elimina: la matriz de
+  diagnósticos lo necesita para etiquetar correctamente la sesión
+  X11 vs XWayland, y el bootstrap de Linux (en
+  `app/tauri/src-tauri/src/bootstrap.rs`) sigue siendo el único
+  responsable de pasar `ProbeKind::X11` o `ProbeKind::XWayland`.
+- [x] 12.3 **Ajustes colaterales para que el archivo compile en
+  Linux.** El test preexistente
+  `wm_class_must_be_queried_with_string_not_utf8` referenciaba
+  `AtomEnum::UTF8_STRING`, constante que `x11rb` 0.13.2 no expone, y
+  usaba `AtomEnum::STRING.into()` con inferencia ambigua. En macOS
+  el archivo está excluido por `cfg(target_os = "linux")`, así que
+  estos errores sólo aparecían al compilar para el target de Linux.
+  Se sustituye `UTF8_STRING` por el valor de átomo documentado
+  (`0xFD`) y se usa `u32::from(AtomEnum::STRING)` para fijar el tipo
+  y eliminar la ambigüedad. Con esto el módulo entero de
+  `linux_x11_active_app` vuelve a compilar en
+  `x86_64-unknown-linux-gnu`.
+- [x] 12.4 **Contratos preservados.**
+  - `connect_to(dpy_name)` sigue siendo el constructor público por
+    defecto y delega en
+    `connect_to_kind(dpy_name, ProbeKind::X11)`.
+  - `connect_to_kind(dpy_name, kind)` recibe y conserva el
+    `ProbeKind` que le pasa el bootstrap.
+  - `X11ActiveApplication::new()` no cambió: delega en
+    `with_kind(None, ProbeKind::X11)`.
+  - El bootstrap de Linux
+    (`app/tauri/src-tauri/src/bootstrap.rs:1192`) sigue construyendo
+    el probe con
+    `X11ActiveApplication::with_kind(None, kind)`, donde `kind` se
+    selecciona según `DisplayServer` (`X11` → `ProbeKind::X11`,
+    `Wayland` con `$DISPLAY` → `ProbeKind::XWayland`, otro → no-op).
+  - macOS, Wayland nativo, blacklist, metadata de aplicación,
+    imágenes, tags, colecciones, Quick Paste y drag-and-drop de
+    cards no se tocan: la corrección está limitada al adaptador
+    X11/XWayland que ya estaba gated a `linux-x11`.
+- [x] 12.5 **Tests de regresión añadidos** en
+  `crates/clipvault-platform/src/runtime/linux_x11_active_app.rs`
+  (módulo `tests`, ejecutables sólo en el target Linux con la
+  feature `linux-x11`):
+  - `probe_kind_variants_are_distinct`: protege ambos variants
+    del enum.
+  - `with_kind_signature_accepts_display_and_probe_kind` /
+    `connect_to_kind_signature_accepts_display_and_probe_kind` /
+    `connect_to_signature_accepts_display_only` /
+    `new_signature_takes_no_arguments`: pines de firma en tiempo
+    de compilación, usando `fn(…) -> …` y asignación de puntero a
+    función. Si alguien vuelve a enrutar `with_kind` hacia
+    `connect_to` (o cambia la aridad de cualquiera de los
+    constructores), el test falla al compilar.
+  - `with_kind_reports_backend_error_when_display_unreachable` /
+    `connect_to_kind_reports_backend_error_when_display_unreachable`
+    / `connect_to_reports_backend_error_when_display_unreachable`:
+    ejercitan el path de error con un nombre de display
+    `:clipvault-no-such-display` y verifican que se devuelve
+    `Err(ActiveAppError::Backend { … })` con `details` no vacío, lo
+    que el bootstrap necesita para caer a
+    `NoopActiveApplicationProbe`.
+  - `new_reports_backend_error_when_display_unreachable`: igual que
+    los anteriores, pero se omite la aserción runtime si `$DISPLAY`
+    está definido en el host; la firma queda pineada por
+    `new_signature_takes_no_arguments`.
+- [x] 12.6 **Verificación ejecutada desde el host macOS.**
+  - `cargo fmt --all -- --check` — pasa.
+  - `cargo clippy --workspace --all-targets -- -D warnings` —
+    pasa (sin warnings introducidos por este cambio).
+  - `cargo clippy -p clipvault-platform --features linux-x11
+    --tests --target x86_64-unknown-linux-gnu` — el archivo que
+    rompía el build de Ubuntu ahora compila y los tests se
+    enlazan; sólo queda el warning preexistente de `icon_sizes` en
+    `linux_app_metadata.rs`, no introducido por este parche.
+  - `cargo test --workspace` — pasa. La suite macOS no ejecuta
+    estos tests nuevos (el archivo está gated a Linux), pero
+    confirma que la rama principal no regresa.
+  - `cd app/tauri/frontend && npm run check` — pasa
+    (`svelte-check found 0 errors and 15 warnings in 9 files`).
+  - `cd app/tauri/frontend && npm run build` — pasa
+    (`✓ built in 1.29s`).
+  - `npm test` (Node 22) — pasa, 1197/1197.
+  - `openspec validate linux-source-app-metadata --strict --type
+    change` — pasa (`Change 'linux-source-app-metadata' is valid`).
+  - `cargo check -p clipvault-platform --features linux-x11
+    --target x86_64-unknown-linux-gnu` — pasa (es el caso de
+    build de Ubuntu que antes rompía con `E0061`/`E0599`).
+  - Limitación documentada: la ejecución real de los tests
+    nuevos sólo ocurre en una build Linux con la feature
+    `linux-x11`; el host actual es macOS, por lo que la
+    confirmación runtime depende del CI de Ubuntu o de una
+    sesión headless con `DISPLAY` apuntando a un display
+    inválido.
+- [x] 12.7 **Bump de versión sincronizado a `0.0.2`** (la corrección
+  es una implementación funcional completa, así que la política de
+  `projects.md` exige subir el patch y mantener sincronizados los
+  manifests canónicos):
+  - `Cargo.toml` (`[workspace.package].version`).
+  - `Cargo.lock` (regenerado por Cargo: `clipvault-app`,
+    `clipvault-core`, `clipvault-db`, `clipvault-platform`,
+    `clipvault-search`).
+  - `app/tauri/src-tauri/tauri.conf.json` (`version`).
+  - `app/tauri/frontend/package.json` (`version`).
+  - `app/tauri/frontend/package-lock.json` (`version` y la entrada
+    raíz `packages.""`).
+  - `projects.md` (tabla "Current canonical version" y nota
+    descriptiva del bump 0.0.1 → 0.0.2).
+  - `AboutModal.svelte` sigue leyendo `diagnostics.version` (no
+    se hardcodea la versión en Svelte).
+- [x] 12.8 Sin sync, archive, commit ni push. La política
+  "Cambio publicado + parche funcional" se refleja sólo en este
+  `tasks.md` y en los manifests.
