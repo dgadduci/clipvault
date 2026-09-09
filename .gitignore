@@ -12,6 +12,14 @@ app/tauri/src-tauri/gen
 **/.svelte-kit
 **/.vite
 
+# Accidental package-manager files (we use npm and the tracked
+# app/tauri/frontend/package-lock.json). The patterns match at any depth
+# so an editor or one-off script that drops a pnpm lockfile does not
+# pollute `git status`. Existing local files are left untouched.
+/pnpm-lock.yaml
+**/pnpm-lock.yaml
+**/pnpm-workspace.yaml
+
 # IDE
 .vscode
 .idea

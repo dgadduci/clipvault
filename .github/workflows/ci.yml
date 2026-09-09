@@ -1,0 +1,151 @@
+name: ci
+
+# Cross-platform non-interactive checks for ClipVault.
+#
+# This workflow is intentionally headless:
+#   * It never runs `cargo tauri dev`.
+#   * It never opens a GUI window.
+#   * It never touches the developer's clipboard, hotkeys or `~/.clipvault`.
+# Manual platform flows (macOS permissions, X11/Wayland, tray, synthetic
+# paste) stay documented in `docs/manual-flows.md` and are not claimed here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same branch when a new commit lands.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    env:
+      # CI runners must not depend on or write to a developer home.
+      CARGO_HOME: ${{ runner.temp }}/cargo
+      RUSTUP_HOME: ${{ runner.temp }}/rustup
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.89.0 (pinned)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          # The action's `stable` channel does NOT honour
+          # `rust-toolchain.toml`; it always installs whatever the runner
+          # considers stable. Pinning `toolchain: 1.89.0` is the only way
+          # to guarantee CI uses the same compiler the local toolchain
+          # file selects for macOS and Ubuntu developers.
+          toolchain: 1.89.0
+          components: rustfmt, clippy
+
+      - name: Verify Rust toolchain is 1.89.0
+        # Hard-fail if the runner's "stable" channel ever drifts away from
+        # the declared `1.89.0`. Without this guard, a CI green run would
+        # not actually prove the pinned toolchain was used.
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          if ! rustc --version | grep -Eq '^rustc 1\.89\.0(\b|-)'; then
+            echo "::error::rustc --version did not report 1.89.0 (got: $(rustc --version))"
+            exit 1
+          fi
+          echo "rustc pinned to 1.89.0 and cargo reports a matching version."
+
+      - name: Cache Cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/cargo/registry
+            ${{ runner.temp }}/cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Install Linux Tauri system prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            patchelf \
+            build-essential \
+            curl \
+            wget \
+            file
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+      - name: Linux shell feature combination
+        if: runner.os == 'Linux'
+        run: |
+          cargo check -p clipvault-app \
+            --no-default-features \
+            --features clipboard-arboard,hotkey-global
+
+  frontend:
+    name: frontend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    env:
+      # Use a private cache directory so the runner never touches the
+      # developer's `~/.npm` or home directory.
+      npm_config_cache: ${{ runner.temp }}/npm-cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20 LTS (matches app/tauri/frontend/.nvmrc)
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: app/tauri/frontend/.nvmrc
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/npm-cache
+          # The lockfile is the only key: a change to it means a
+          # deliberate dependency update, never a regenerating install.
+          key: npm-${{ runner.os }}-${{ hashFiles('app/tauri/frontend/package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
+      - name: Install dependencies with npm ci
+        working-directory: app/tauri/frontend
+        run: npm ci
+
+      - name: Frontend check
+        working-directory: app/tauri/frontend
+        run: npm run check
+
+      - name: Frontend build
+        working-directory: app/tauri/frontend
+        run: npm run build
+
+      - name: Frontend tests
+        working-directory: app/tauri/frontend
+        run: npm test

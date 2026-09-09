@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Svelte + TypeScript frontend for the ClipVault desktop shell",
+  "engines": {
+    "node": ">=20.0.0 <21.0.0",
+    "npm": ">=10.0.0 <11.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "svelte-check --tsconfig ./tsconfig.json && vite build",

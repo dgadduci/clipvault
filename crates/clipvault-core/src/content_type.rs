@@ -757,6 +757,7 @@ const FILE_PATH_PREFIXES: &[&str] = &[
     "../",
 ];
 
+#[allow(dead_code)]
 const FILE_PATH_RELATIVE_TOKENS: &[&str] = &["~", "."];
 
 fn is_file_path(input: &str) -> bool {
@@ -781,7 +782,7 @@ fn is_file_path(input: &str) -> bool {
     }
     // Relative tokens like `~`, `.` alone are too ambiguous; require
     // at least one separator.
-    FILE_PATH_RELATIVE_TOKENS.contains(&input) && false
+    false
 }
 
 #[cfg(test)]
