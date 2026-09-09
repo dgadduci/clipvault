@@ -337,3 +337,220 @@ no deben marcarse por inferencia desde macOS ni desde tests sin display.
 - [x] 12.8 Sin sync, archive, commit ni push. La política
   "Cambio publicado + parche funcional" se refleja sólo en este
   `tasks.md` y en los manifests.
+
+## 13. Parche funcional post-publicación (Ubuntu Linux X11/XWayland cache vacío)
+
+- [x] 13.1 **Causa raíz confirmada.** El test manual en Ubuntu
+  GNOME Wayland mostró que las capturas no muestran ni detectan
+  la aplicación origen ni su icono. El diagnóstico en el código
+  es definitivo:
+
+  1. `install_active_app_main_queue_refresher` solo existe para
+     macOS; en Linux la rama `cfg(not(target_os = "macos"))`
+     devuelve `MainQueueInstallOutcome::SkippedUnsupported` y
+     ningún handle, así que ningún refresher periódico mantiene
+     la caché caliente.
+  2. `install_capture_loop` delega en `capture_loop_tick()`,
+     que solo consulta `cached_active_application()` a través
+     de `resolved_source_identifier()`. La caché nunca se
+     refresca en Linux porque nadie llama a
+     `refresh_active_application()`.
+  3. Sin `source_app`, `LinuxApplicationMetadataProvider` no
+     puede resolver `source_app_name` ni `source_app_icon_ref`
+     — su contrato exige un identificador `WM_CLASS` válido.
+  4. Consecuencia observable: la fila persistida tiene
+     `source_app = NULL`, el provider devuelve `Ok(None)` y la
+     card rail renderiza el fallback genérico.
+
+- [x] 13.2 **Corrección para Linux X11 / XWayland.** En
+  `app/tauri/src-tauri/src/bootstrap.rs` se añade la función
+  `refresh_active_application_cache_for_loop_tick(context)`:
+
+  ```rust
+  pub(crate) fn refresh_active_application_cache_for_loop_tick(context: &AppContext) {
+      #[cfg(not(target_os = "macos"))]
+      {
+          let _ = context.refresh_active_application();
+      }
+      #[cfg(target_os = "macos")]
+      {
+          let _ = context;
+      }
+  }
+  ```
+
+  - En Linux (incluido XWayland) la sonda `x11rb` es segura
+    fuera del main thread: la rama `cfg(not(target_os =
+    "macos"))` ejecuta `context.refresh_active_application()`
+    desde el hilo del capture loop sin pasar por
+    `run_on_main_thread` ni por el scheduler de Tauri.
+  - En macOS la rama `cfg(target_os = "macos")` compila a
+    no-op para preservar el refresher main-thread
+    (`MainQueueActiveAppRefresher`) instalado en el bootstrap;
+    invocar la sonda `NSWorkspace` desde un hilo de fondo no
+    está soportado por Apple.
+  - `capture_loop_tick` invoca la nueva función antes de
+    `resolved_source_identifier(context)` y de
+    `watcher.tick(...)` con la secuencia documentada:
+
+    ```text
+    refresh_active_application()
+    resolver source_app desde la caché
+    watcher.tick(context, source_app)
+    enriquecimiento de metadata
+    emisión de history-updated
+    ```
+
+  - El refresco ocurre en cada iteración para que la
+    aplicación origen corresponda a la aplicación enfocada
+    en el momento exacto de la captura (los usuarios cambian
+    de ventana entre ticks).
+  - `SharedState::tick` (consumido por el comando Tauri
+    manual `clipvault_capture_tick`) llama al mismo helper,
+    así que el tick manual comparte la caché y la watcher —
+    no se crea un segundo watcher ni un segundo estado de
+    deduplicación, y el comando manual no atribuye una
+    captura a ClipVault por usar un identificador inventado.
+
+- [x] 13.3 **Matriz X11 / XWayland / Wayland nativo.**
+
+  | Sesión | Sonda instalada | Resultado del refresh | Atribución |
+  |---|---|---|---|
+  | Linux X11 puro | `X11ActiveApplication::with_kind(None, ProbeKind::X11)` (`name() = "x11_ewmh"`) | `Ok(Some(WM_CLASS))` cuando hay ventana X11 enfocada | `source_app = class segment` |
+  | GNOME Wayland + app X11 (XWayland) | `X11ActiveApplication::with_kind(None, ProbeKind::XWayland)` (`name() = "xwayland_ewmh"`) si `$DISPLAY` está definido y la conexión X11 es válida | `Ok(Some(WM_CLASS))` cuando la app XWayland enfocada tiene ventana X11 | `source_app = class segment` y el provider Linux resuelve nombre/icono desde `.desktop` |
+  | GNOME Wayland nativo | `NoopActiveApplicationProbe` (o `X11ActiveApplication` si `$DISPLAY` está definido pero la app activa es Wayland nativa) | `Ok(None)` o `Err(ActiveAppError::Unavailable)` | `source_app = NULL` — sin nombre ni icono inventado; el contrato `unavailable` se conserva |
+  | Sin display usable | `NoopActiveApplicationProbe` | `Ok(None)` | `source_app = NULL`; la captura sigue siendo válida y el historial funciona |
+
+  El protocolo Wayland genérico no expone un mecanismo seguro
+  para consultar la aplicación activa desde este proceso: no
+  se inventa un nombre ni un icono y el resultado tipado se
+  conserva como `unavailable`. No se marca la prueba nativa
+  Wayland como pasada si no existe un mecanismo real y
+  seguro para obtener la aplicación origen.
+
+- [x] 13.4 **Contratos preservados.**
+
+  - `install_active_app_main_queue_refresher` mantiene su
+    rama macOS (`MainQueueInstallOutcome::Installed`) y la
+    rama stub de no-macOS
+    (`MainQueueInstallOutcome::SkippedUnsupported`); no se
+    introduce un refresher Linux paralelo ni se duplica la
+    caché.
+  - `CachedActiveApplication` sigue siendo la única fuente
+    de verdad para el identificador: `capture_loop_tick`,
+    `SharedState::tick` y el refresher macOS escriben y leen
+    sobre la misma instancia vía `AppContext`.
+  - `CaptureWatcher` y su `last_hash` siguen siendo una sola
+    instancia compartida (`Arc<CaptureWatcher>` en
+    `AppState`); no se crea un segundo watcher ni un segundo
+    estado de deduplicación.
+  - `LinuxApplicationMetadataProvider`, `ActiveApplication`,
+    `ActiveApplicationProbe`, `ProbeKind` y la caché de
+    iconos `application-icons/` no cambian su contrato.
+  - macOS, blacklist, imágenes, tags, colecciones, favoritos,
+    Quick Paste y drag-and-drop de cards no se tocan: la
+    corrección está limitada a refrescar la caché activa-app
+    desde el hilo del capture loop en Linux antes de leer el
+    clipboard.
+
+- [x] 13.5 **Tests obligatorios añadidos.**
+
+  - `linux_capture_loop_refreshes_cache_on_every_iteration`:
+    la sonda interna se invoca en cada iteración y la caché
+    refleja el último identificador.
+  - `linux_x11_capture_persists_source_app_from_refreshed_cache`:
+    una captura con caché caliente para `firefox` persiste
+    `source_app = "firefox"` en la fila.
+  - `linux_capture_enriches_metadata_through_provider_lookup`:
+    el `LinuxApplicationMetadataProvider` recibe el
+    identificador que la caché acaba de refrescar; el
+    `FakeApplicationMetadataProvider` ve el lookup con
+    `"gnome-terminal"`.
+  - `linux_native_wayland_does_not_get_a_fake_identifier`:
+    una sonda que devuelve `Ok(None)` deja la caché vacía,
+    persiste `source_app = NULL`, no invoca el provider y
+    registra el intento de refresh en
+    `active_app_diagnostics.refresh_attempts`.
+  - `linux_cache_is_populated_after_loop_tick`: la caché
+    comienza vacía y termina poblada tras la primera
+    iteración.
+  - `macos_capture_loop_does_not_refresh_cache_from_background_thread`
+    (sólo macOS): el helper no incrementa el contador de
+    invocaciones de la sonda — pin del contrato "no-op en
+    macOS" que protege el `MainQueueActiveAppRefresher`.
+  - `probe_kind_variants_are_distinct` (existente) y
+    `probe_name_reports_x11_ewmh_for_x11_kind_and_xwayland_ewmh_for_xwayland_kind`
+    (nuevo): ambos `ProbeKind::X11` y `ProbeKind::XWayland`
+    producen los nombres `x11_ewmh` y `xwayland_ewmh`
+    respectivamente.
+  - `cargo check -p clipvault-platform --features linux-x11
+    --target x86_64-unknown-linux-gnu` sigue compilando; los
+    tests nuevos usan `FakeClipboardBackend` y
+    `FakeApplicationMetadataProvider` y no tocan
+    `~/.clipvault` ni contenido del clipboard.
+
+- [x] 13.6 **Privacidad y telemetría.**
+
+  - `refresh_active_application_cache_for_loop_tick` solo
+    llama a la sonda interna y a los contadores del
+    `ActiveAppDiagnosticsState`; no se registra contenido
+    del clipboard, snippets, hashes, paths absolutos ni
+    bytes de iconos.
+  - El provider Linux mantiene su contrato metadata-only
+    (no ejecuta `Exec`, no inspecciona contenido de
+    ventana).
+  - La rama `cfg(target_os = "macos")` no introduce red,
+    telemetría ni procesos externos.
+
+- [x] 13.7 **Verificación ejecutada desde el host macOS.**
+
+  - `cargo fmt --all -- --check` — pasa.
+  - `cargo clippy --workspace --all-targets -- -D warnings` —
+    pasa (sin warnings nuevos introducidos por este parche).
+  - `cargo test --workspace` — pasa; los tests nuevos
+    (`linux_capture_loop_refreshes_cache_on_every_iteration`,
+    `linux_x11_capture_persists_source_app_from_refreshed_cache`,
+    `linux_capture_enriches_metadata_through_provider_lookup`,
+    `linux_native_wayland_does_not_get_a_fake_identifier`,
+    `linux_cache_is_populated_after_loop_tick`,
+    `macos_capture_loop_does_not_refresh_cache_from_background_thread`)
+    se ejecutan en el target del host.
+  - `cargo check -p clipvault-app --no-default-features
+    --features clipboard-arboard,hotkey-global` — pasa.
+  - `cd app/tauri/frontend && npm run check` — pasa.
+  - `cd app/tauri/frontend && npm run build` — pasa.
+  - `cd app/tauri/frontend && npm test` — pasa.
+  - `openspec validate linux-source-app-metadata --strict
+    --type change` — pasa.
+
+- [x] 13.8 **Bump de versión sincronizado a `0.0.3`**
+  (corrección funcional completa de la regresión Ubuntu;
+  `projects.md` exige subir el patch y mantener
+  sincronizados los manifests canónicos):
+
+  - `Cargo.toml` (`[workspace.package].version`).
+  - `Cargo.lock` (`clipvault-app`, `clipvault-core`,
+    `clipvault-db`, `clipvault-platform`,
+    `clipvault-search`).
+  - `app/tauri/src-tauri/tauri.conf.json` (`version`).
+  - `app/tauri/frontend/package.json` (`version`).
+  - `app/tauri/frontend/package-lock.json` (`version` y la
+    entrada raíz `packages.""`).
+  - `projects.md` (tabla "Current canonical version" y nota
+    descriptiva del bump 0.0.2 → 0.0.3).
+  - `AboutModal.svelte` sigue leyendo `diagnostics.version`
+    (no se hardcodea la versión en Svelte).
+
+- [x] 13.9 **Limitación documentada.** Las verificaciones
+  manuales en Ubuntu X11, GNOME Wayland con app XWayland y
+  GNOME Wayland con app nativa siguen pendientes de una
+  sesión real; el host actual es macOS y la matriz
+  X11/XWayland/Wayland nativo se valida sólo con tests
+  determinísticos sobre el probe real y `FakeClipboardBackend`
+  / `FakeApplicationMetadataProvider`. Las pruebas de Ubuntu
+  no se marcan como completadas por inferencia desde macOS ni
+  desde tests sin display.
+
+- [x] 13.10 Sin sync, archive, commit ni push. La política
+  "Cambio publicado + parche funcional" se refleja sólo en
+  este `tasks.md` y en los manifests.

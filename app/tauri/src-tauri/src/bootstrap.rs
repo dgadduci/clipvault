@@ -864,13 +864,22 @@ fn record_capture_decision(
 /// that keeps the `last_hash` deduplicated across both entry points.
 ///
 /// The helper resolves the source-application identifier from the
-/// cached active-app probe (kept fresh on macOS by the main-queue
-/// refresher, refreshed on demand by the **Refrescar diagnóstico**
-/// Tauri command on every other platform) instead of forwarding
-/// `None` or whatever the frontend sent. The snapshot is read without
-/// touching the platform probe — `cached_active_application` only
-/// reads the in-memory cache — so the background loop never blocks
-/// on the main thread for the identifier.
+/// cached active-app probe instead of forwarding `None` or whatever
+/// the frontend sent. On non-macOS hosts the cache is refreshed
+/// synchronously here (via
+/// [`refresh_active_application_cache_for_loop_tick`]) so the X11 /
+/// XWayland identifier the watcher evaluates against matches the
+/// currently-focused application at the moment of the capture — the
+/// regression the `linux-source-app-metadata` change ships as a
+/// follow-up patch on Ubuntu. On macOS the main-queue refresher
+/// installed at bootstrap already keeps the cache populated, so the
+/// helper compiles to a no-op there and the existing behaviour stays
+/// intact.
+///
+/// The snapshot is read without touching the platform probe after
+/// the refresh — `cached_active_application` only reads the in-memory
+/// cache — so the background loop never blocks on the main thread
+/// for the identifier.
 ///
 /// The same identifier feeds:
 /// - the [`PrivacyGate`] consulted inside
@@ -891,10 +900,49 @@ pub(crate) fn capture_loop_tick(
     watcher: &CaptureWatcher,
     context: &AppContext,
 ) -> WatchTickOutcome {
+    refresh_active_application_cache_for_loop_tick(context);
     let source_app = resolved_source_identifier(context);
     let outcome = watcher.tick(context, source_app.as_deref());
     log_capture_outcome(&outcome);
     outcome
+}
+
+/// Refresh the cached active-app probe before the watcher reads the
+/// identifier. Called from the capture-loop thread on every
+/// iteration so the source identifier reflects the currently
+/// focused application at the moment of the capture.
+///
+/// Platform split:
+///
+/// - **macOS** — the main-queue refresher installed at bootstrap
+///   keeps the cache fresh on the Cocoa main thread. Calling
+///   [`AppContext::refresh_active_application`] from the capture-loop
+///   thread would invoke the inner `NSWorkspace` probe off the main
+///   thread, which Apple does not support, so the helper compiles
+///   to a no-op on macOS.
+/// - **Linux / Windows / any non-macOS host** — the bootstrap does
+///   NOT install a periodic refresher (the X11 / XWayland probe is
+///   safe to call from any thread). Refreshing the cache here
+///   guarantees the identifier the watcher evaluates against is
+///   the one the focused application reported for the current
+///   capture tick. The probe also reports `Ok(None)` for native
+///   Wayland applications that do not publish an X11 window; the
+///   refresh call leaves the cache empty in that case so the
+///   capture does not receive a fabricated identifier (the
+///   `unavailable` contract the spec pins).
+///
+/// The refresh outcome is recorded on the diagnostics state by
+/// `refresh_active_application` itself, so the existing counters
+/// stay consistent across platforms.
+pub(crate) fn refresh_active_application_cache_for_loop_tick(context: &AppContext) {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = context.refresh_active_application();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = context;
+    }
 }
 
 /// Resolve the source-application identifier the capture pipeline
@@ -2359,6 +2407,392 @@ mod tests {
         assert_eq!(
             diagnostics.snapshot().last_capture_decision.as_deref(),
             Some("metadata_lookup_failed")
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `linux-source-app-metadata` patch: capture-loop cache refresh.
+    //
+    // The user reported that on Ubuntu GNOME Wayland captures never
+    // carry the source application identifier or its icon. The cause
+    // was that `install_active_app_main_queue_refresher` only runs
+    // on macOS; on Linux nobody calls `refresh_active_application`
+    // and the cached probe stays empty, so the provider has nothing
+    // to resolve. The fix refreshes the cache synchronously on every
+    // iteration of `capture_loop_tick` (and on every manual tick
+    // routed through `SharedState::tick`) on non-macOS hosts.
+    //
+    // The tests below pin the contract end-to-end on every platform
+    // (the `cfg(not(target_os = "macos"))` paths exercise the
+    // Linux-shaped behaviour on the macOS dev host too, because the
+    // helper itself is gated on the target so the tests run as the
+    // production code would).
+    // -----------------------------------------------------------------
+
+    /// Harness variant that wires a scripted active-app probe and
+    /// a programmable metadata provider so the test can exercise the
+    /// exact contract the user reported without depending on the
+    /// production `NoopApplicationMetadataProvider`. Mirrors
+    /// `harness_for_shared_watcher` but lets the test queue the
+    /// probe answer for each call (and observe the metadata lookup
+    /// call list).
+    fn harness_with_scripted_probe(
+        os_family: clipvault_platform::OsFamily,
+    ) -> (
+        tempfile::TempDir,
+        AppContext,
+        Arc<clipvault_core::FakeClipboardBackend>,
+        Arc<clipvault_core::FakeApplicationMetadataProvider>,
+        std::sync::Arc<ScriptedActiveAppProbe>,
+    ) {
+        use clipvault_core::{
+            FakeApplicationMetadataProvider, FakeClipboardBackend, FakeHotkeyManager,
+            FakePasteController, FakeSettingsNavigator, FakeTrayController, PlatformAdapters,
+        };
+        use clipvault_platform::{ApplicationMetadataProvider, OsFamily};
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let probe = std::sync::Arc::new(ScriptedActiveAppProbe::new());
+        let provider = Arc::new(FakeApplicationMetadataProvider::new());
+        let provider_for_adapters: Arc<dyn ApplicationMetadataProvider> = provider.clone();
+        {
+            let mut db =
+                clipvault_db::Database::open(dir.path().join("clipvault.db")).expect("open");
+            db.run_migrations(&clipvault_db::builtin_migrations())
+                .expect("migrate");
+        }
+        let info = clipvault_platform::PlatformInfo {
+            home_dir: std::path::PathBuf::from("/tmp"),
+            data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+            os_family,
+            display_server: match os_family {
+                OsFamily::Linux => clipvault_platform::DisplayServer::Wayland,
+                _ => clipvault_platform::DisplayServer::Unknown,
+            },
+        };
+        let fake_clipboard = Arc::new(FakeClipboardBackend::new());
+        let platform_adapters = PlatformAdapters::new(
+            fake_clipboard.clone() as Arc<dyn clipvault_platform::ClipboardBackend>,
+            Arc::new(FakeHotkeyManager::new()) as Arc<dyn clipvault_platform::HotkeyManager>,
+            probe.clone() as Arc<dyn clipvault_platform::ActiveApplicationProbe>,
+            Arc::new(FakePasteController::new()) as Arc<dyn clipvault_platform::PasteController>,
+            Arc::new(FakeTrayController::new()) as Arc<dyn clipvault_platform::TrayController>,
+            Arc::new(FakeSettingsNavigator::new())
+                as Arc<dyn clipvault_platform::SettingsNavigator>,
+            provider_for_adapters,
+            clipvault_platform::Capabilities::ALL_AVAILABLE,
+            info,
+        );
+        let context = AppBootstrap::new()
+            .with_clock(Arc::new(clipvault_core::SystemClock) as Arc<dyn clipvault_core::Clock>)
+            .with_clipboard(Arc::new(clipvault_core::FakeClipboard::new())
+                as Arc<dyn clipvault_core::Clipboard>)
+            .with_platform_adapters(platform_adapters)
+            .bootstrap_at(dir.path().join("clipvault.db"))
+            .expect("bootstrap");
+        (dir, context, fake_clipboard, provider, probe)
+    }
+
+    /// Scripted active-app probe that returns the queued
+    /// `Result<Option<ActiveApplication>, ActiveAppError>` and
+    /// exposes the call counter so the test can verify the loop
+    /// really does invoke the inner probe on every iteration (the
+    /// regression the user reported was that nobody refreshed the
+    /// cache on Linux).
+    struct ScriptedActiveAppProbe {
+        queued: parking_lot::Mutex<
+            Vec<
+                Result<
+                    Option<clipvault_platform::ActiveApplication>,
+                    clipvault_platform::ActiveAppError,
+                >,
+            >,
+        >,
+        calls: parking_lot::Mutex<usize>,
+    }
+
+    impl ScriptedActiveAppProbe {
+        fn new() -> Self {
+            Self {
+                queued: parking_lot::Mutex::new(Vec::new()),
+                calls: parking_lot::Mutex::new(0),
+            }
+        }
+
+        fn push(
+            &self,
+            value: Result<
+                Option<clipvault_platform::ActiveApplication>,
+                clipvault_platform::ActiveAppError,
+            >,
+        ) {
+            self.queued.lock().push(value);
+        }
+
+        fn calls(&self) -> usize {
+            *self.calls.lock()
+        }
+    }
+
+    impl clipvault_platform::ActiveApplicationProbe for ScriptedActiveAppProbe {
+        fn active_application(
+            &self,
+        ) -> Result<Option<clipvault_platform::ActiveApplication>, clipvault_platform::ActiveAppError>
+        {
+            *self.calls.lock() += 1;
+            self.queued
+                .lock()
+                .pop()
+                .unwrap_or(Err(clipvault_platform::ActiveAppError::Unavailable))
+        }
+        fn name(&self) -> &'static str {
+            "linux-source-app-metadata-scripted"
+        }
+    }
+
+    /// Linux-only contract: the capture loop must call
+    /// `refresh_active_application` (and therefore the inner probe)
+    /// on every iteration. Before this fix the loop never refreshed
+    /// the cache on Linux, the diagnostics counters stayed at zero,
+    /// and every capture landed with `source_app = NULL`. The test
+    /// guards the regression by counting probe invocations across
+    /// two ticks.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn linux_capture_loop_refreshes_cache_on_every_iteration() {
+        use clipvault_core::ActiveApplication as PlatformActiveApplication;
+        let (_dir, context, _clipboard, _provider, probe) =
+            harness_with_scripted_probe(clipvault_platform::OsFamily::Linux);
+        // The cache must start empty: the harness does not refresh
+        // it, so a probe call is the only way the loop can populate
+        // it.
+        assert!(context.cached_active_application().is_none());
+        probe.push(Ok(Some(PlatformActiveApplication::new(
+            "Firefox", "firefox",
+        ))));
+        probe.push(Ok(Some(PlatformActiveApplication::new(
+            "Terminal",
+            "com.apple.Terminal",
+        ))));
+        // Build a fresh watcher through the existing helper so the
+        // loop runs the same dedupe state the production shell
+        // would observe.
+        let watcher = build_watcher_for_context(&context);
+        // First tick refreshes the cache to `Firefox`.
+        let _ = capture_loop_tick(&watcher, &context);
+        assert_eq!(
+            context
+                .cached_active_application()
+                .as_ref()
+                .map(|app| app.identifier.as_str()),
+            Some("firefox"),
+            "first tick must refresh the cache from the inner probe"
+        );
+        // Second tick refreshes the cache to `com.apple.Terminal`.
+        let _ = capture_loop_tick(&watcher, &context);
+        assert_eq!(
+            context
+                .cached_active_application()
+                .as_ref()
+                .map(|app| app.identifier.as_str()),
+            Some("com.apple.Terminal"),
+            "second tick must refresh the cache again, not reuse the first answer"
+        );
+        assert!(
+            probe.calls() >= 2,
+            "Linux capture loop must call the probe at least twice, got {}",
+            probe.calls()
+        );
+    }
+
+    /// Linux contract: an X11/XWayland capture with a populated
+    /// cache must persist `source_app` so the metadata enrichment
+    /// can resolve the user-visible name. Before this fix the cache
+    /// was empty and the row stored `source_app = NULL`, so the
+    /// provider had nothing to look up.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn linux_x11_capture_persists_source_app_from_refreshed_cache() {
+        use clipvault_core::{ActiveApplication as PlatformActiveApplication, HistoryOutcome};
+        let (_dir, context, fake_clipboard, _provider, probe) =
+            harness_with_scripted_probe(clipvault_platform::OsFamily::Linux);
+        // Script the probe to answer `firefox` (typical X11 WM_CLASS
+        // class segment). Push two answers so a second refresh does
+        // not fall back to `Unavailable` and clear the cache mid
+        // capture.
+        probe.push(Ok(Some(PlatformActiveApplication::new(
+            "Firefox", "firefox",
+        ))));
+        probe.push(Ok(Some(PlatformActiveApplication::new(
+            "Firefox", "firefox",
+        ))));
+        fake_clipboard.push_read(Ok(Some("cv-linux-x11-payload".into())));
+        let watcher = build_watcher_for_context(&context);
+        let outcome = capture_loop_tick(&watcher, &context);
+        assert!(
+            matches!(
+                outcome,
+                clipvault_core::WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
+            ),
+            "first tick must store the capture, got {outcome:?}"
+        );
+        let recent = context.history().recent_entries(&context, 10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(
+            recent[0].source_app.as_deref(),
+            Some("firefox"),
+            "Linux X11 capture must carry the WM_CLASS identifier the probe reported"
+        );
+    }
+
+    /// Linux contract: the metadata provider MUST be asked for the
+    /// same identifier the row persisted. Before this fix the cache
+    /// stayed empty and the provider never saw a `lookup` call; the
+    /// regression the user reported is "captures never show the
+    /// application icon" — both the row and the lookup list must
+    /// reflect the refreshed identifier.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn linux_capture_enriches_metadata_through_provider_lookup() {
+        use clipvault_core::{ActiveApplication as PlatformActiveApplication, ApplicationMetadata};
+        let (_dir, context, fake_clipboard, provider, probe) =
+            harness_with_scripted_probe(clipvault_platform::OsFamily::Linux);
+        probe.push(Ok(Some(PlatformActiveApplication::new(
+            "GNOME Terminal",
+            "gnome-terminal",
+        ))));
+        provider.push_lookup(Ok(Some(ApplicationMetadata {
+            display_name: "GNOME Terminal".to_string(),
+            icon_ref: Some("application-icons/gnome-terminal.png".to_string()),
+        })));
+        fake_clipboard.push_read(Ok(Some("cv-linux-enrich-payload".into())));
+        let watcher = build_watcher_for_context(&context);
+        let outcome = capture_loop_tick(&watcher, &context);
+        assert!(matches!(
+            outcome,
+            clipvault_core::WatchTickOutcome::Captured(
+                clipvault_core::HistoryOutcome::Stored { .. }
+            )
+        ));
+        let calls = provider.calls();
+        assert!(
+            calls.iter().any(|id| id == "gnome-terminal"),
+            "provider must see the refreshed identifier, got {calls:?}"
+        );
+        // The row stored by the loop MUST carry the source_app the
+        // metadata lookup used, so the enrichment target (which the
+        // production shell schedules on the platform thread) can
+        // re-run the provider without a second refresh.
+        let recent = context.history().recent_entries(&context, 10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].source_app.as_deref(), Some("gnome-terminal"));
+    }
+
+    /// Linux contract: native Wayland (no X11 window focused)
+    /// MUST leave the cache empty and never attribute the capture
+    /// to a synthetic identifier. The probe reports `Ok(None)` —
+    /// the contract the spec pins — so the watcher evaluates an
+    /// empty cache, the row stores `source_app = NULL`, and the
+    /// metadata provider is never asked.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn linux_native_wayland_does_not_get_a_fake_identifier() {
+        let (_dir, context, fake_clipboard, provider, probe) =
+            harness_with_scripted_probe(clipvault_platform::OsFamily::Linux);
+        // Probe answers `Ok(None)`: this is what the X11 probe
+        // returns for a focused native Wayland window because it
+        // cannot see X11 windows it did not publish.
+        probe.push(Ok(None));
+        probe.push(Ok(None));
+        fake_clipboard.push_read(Ok(Some("cv-linux-native-wayland-payload".into())));
+        let watcher = build_watcher_for_context(&context);
+        let outcome = capture_loop_tick(&watcher, &context);
+        assert!(matches!(
+            outcome,
+            clipvault_core::WatchTickOutcome::Captured(
+                clipvault_core::HistoryOutcome::Stored { .. }
+            )
+        ));
+        assert!(
+            context.cached_active_application().is_none(),
+            "native Wayland probe answer must leave the cache empty"
+        );
+        let recent = context.history().recent_entries(&context, 10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert!(
+            recent[0].source_app.is_none(),
+            "native Wayland capture MUST NOT carry a fabricated source_app, got {:?}",
+            recent[0].source_app
+        );
+        assert!(
+            provider.calls().is_empty(),
+            "native Wayland capture must not invoke the metadata provider, got {:?}",
+            provider.calls()
+        );
+        // The diagnostics surface MUST still record the refresh
+        // attempt so the user can tell apart "the loop never tried"
+        // from "the loop tried and the probe reported unavailable".
+        let diag = context.active_app_diagnostics();
+        assert!(
+            diag.refresh_attempts >= 1,
+            "refresh_attempts must reflect the synchronous refresh, got {diag:?}"
+        );
+    }
+
+    /// Linux contract: the cache must not be empty after the loop
+    /// has run at least once. The previous behaviour — `Ok(None)`
+    /// probe answer — left the cache empty permanently because the
+    /// loop never refreshed it; this assertion pins that the new
+    /// helper populates the cache when the probe has an answer to
+    /// give.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn linux_cache_is_populated_after_loop_tick() {
+        use clipvault_core::ActiveApplication as PlatformActiveApplication;
+        let (_dir, context, fake_clipboard, _provider, probe) =
+            harness_with_scripted_probe(clipvault_platform::OsFamily::Linux);
+        probe.push(Ok(Some(PlatformActiveApplication::new(
+            "Files",
+            "org.gnome.Nautilus",
+        ))));
+        fake_clipboard.push_read(Ok(Some("cv-linux-cache-populated".into())));
+        let watcher = build_watcher_for_context(&context);
+        assert!(
+            context.cached_active_application().is_none(),
+            "fresh harness must start with an empty cache"
+        );
+        let _ = capture_loop_tick(&watcher, &context);
+        assert!(
+            context.cached_active_application().is_some(),
+            "after one loop tick the cache must hold the probe answer"
+        );
+    }
+
+    /// Contract: the helper that refreshes the cache before each
+    /// tick MUST be a no-op on macOS. The macOS path relies on the
+    /// main-queue refresher installed at bootstrap; calling
+    /// `refresh_active_application` from the capture-loop thread
+    /// would invoke `NSWorkspace` off the main thread, which Apple
+    /// does not support. We verify the contract on every target by
+    /// observing that the probe counter does not increment when the
+    /// helper is invoked on macOS (the `cfg` gate compiles the body
+    /// away on macOS).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_capture_loop_does_not_refresh_cache_from_background_thread() {
+        use clipvault_core::ActiveApplication as PlatformActiveApplication;
+        let (_dir, context, _clipboard, _provider, probe) =
+            harness_with_scripted_probe(clipvault_platform::OsFamily::Macos);
+        probe.push(Ok(Some(PlatformActiveApplication::new(
+            "TextEdit",
+            "com.apple.TextEdit",
+        ))));
+        let calls_before = probe.calls();
+        refresh_active_application_cache_for_loop_tick(&context);
+        let calls_after = probe.calls();
+        assert_eq!(
+            calls_before, calls_after,
+            "macOS capture loop must NOT invoke the probe from the background thread"
         );
     }
 

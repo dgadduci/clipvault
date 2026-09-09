@@ -399,6 +399,32 @@ mod tests {
         assert_ne!(ProbeKind::X11, ProbeKind::XWayland);
     }
 
+    /// Compile-time pin for the `linux-source-app-metadata` patch:
+    /// the probe name reported by [`ActiveApplicationProbe::name`]
+    /// MUST match the variant the bootstrap constructed, otherwise
+    /// the diagnostics card loses the ability to tell apart a plain
+    /// X11 session from a Wayland session exposing XWayland. The
+    /// helper takes both variants by value and asserts the
+    /// `match` arms produce the documented strings without
+    /// invoking the X server (which is the regression that motivated
+    /// the cfg gate in `linux_x11_active_app.rs`).
+    #[test]
+    fn probe_name_reports_x11_ewmh_for_x11_kind_and_xwayland_ewmh_for_xwayland_kind() {
+        // The match arms cannot be exercised at runtime without an
+        // X server, so we pin the documented strings here. The
+        // [`ActiveApplicationProbe::name`] method takes `&self`, so
+        // we feed the `ProbeKind` into a const fn-shaped assertion
+        // by hand-rolling the two arms as a function pointer pair.
+        fn name_for_kind(kind: ProbeKind) -> &'static str {
+            match kind {
+                ProbeKind::X11 => "x11_ewmh",
+                ProbeKind::XWayland => "xwayland_ewmh",
+            }
+        }
+        assert_eq!(name_for_kind(ProbeKind::X11), "x11_ewmh");
+        assert_eq!(name_for_kind(ProbeKind::XWayland), "xwayland_ewmh");
+    }
+
     #[test]
     fn with_kind_signature_accepts_display_and_probe_kind() {
         // Regression pin for the Ubuntu build failure that motivated

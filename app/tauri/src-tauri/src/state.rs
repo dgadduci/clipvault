@@ -39,7 +39,15 @@ impl SharedState {
     /// attribute a capture to ClipVault (the focused window) and the
     /// `PrivacyGate` observes the same identifier the background
     /// loop would have consulted on the next tick.
+    ///
+    /// The helper shares the cached probe with the background
+    /// capture loop (no second watcher, no second dedupe state)
+    /// and refreshes the cache synchronously on non-macOS hosts so
+    /// the manual tick observes the identifier the user actually
+    /// has focused after switching windows. On macOS the main-queue
+    /// refresher keeps the cache populated.
     pub fn tick(&self, _source_app: Option<&str>) -> WatchTickOutcome {
+        crate::bootstrap::refresh_active_application_cache_for_loop_tick(&self.inner.context);
         let identifier = crate::bootstrap::resolved_source_identifier(&self.inner.context);
         self.inner
             .watcher

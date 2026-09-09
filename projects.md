@@ -47,18 +47,20 @@ canonical value and never fall back to a hard-coded constant.
 
 | Surface | Version |
 | --- | --- |
-| Cargo workspace (`Cargo.toml`) | 0.0.2 |
-| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.2 |
-| Frontend package (`app/tauri/frontend/package.json`) | 0.0.2 |
+| Cargo workspace (`Cargo.toml`) | 0.0.3 |
+| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.3 |
+| Frontend package (`app/tauri/frontend/package.json`) | 0.0.3 |
 
-The canonical public version is intentionally established at **0.0.2**.
+The canonical public version is intentionally established at **0.0.3**.
 The earlier `0.1.x` values were development manifest values and did not
 represent a public product release. The `0.0.1` baseline pinned the
-first visible product version; the functional fix that
-`linux-source-app-metadata` ships on Ubuntu (the `with_kind` →
-`connect_to_kind` call) is a follow-up patch that bumps the canonical
-version to **0.0.2** without re-opening the v0.0.1 cut. The next
-functional change will increment the patch to **0.0.3**.
+first visible product version; the `with_kind` → `connect_to_kind`
+build fix in `linux-source-app-metadata` was a follow-up patch that
+bumped the canonical version to **0.0.2**. The follow-up patch this
+change ships (the Linux capture-loop cache refresh that lets the
+`LinuxApplicationMetadataProvider` resolve name and icon for X11 /
+XWayland captures) is the next functional change, so the patch is
+incremented to **0.0.3**.
 
 ## Bumping the version
 
