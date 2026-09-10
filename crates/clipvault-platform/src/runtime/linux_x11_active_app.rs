@@ -7,9 +7,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as X11ConnectionExt, Window};
 use x11rb::rust_connection::RustConnection;
 
-use crate::active_app::{
-    parse_active_window_id, ActiveAppError, ActiveApplication, ActiveApplicationProbe, ProbeStage,
-};
+use crate::active_app::{ActiveAppError, ActiveApplication, ActiveApplicationProbe, ProbeStage};
 
 /// Probe backed by the EWMH `_NET_ACTIVE_WINDOW` and `WM_CLASS`
 /// properties.

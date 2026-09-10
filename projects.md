@@ -47,11 +47,11 @@ canonical value and never fall back to a hard-coded constant.
 
 | Surface | Version |
 | --- | --- |
-| Cargo workspace (`Cargo.toml`) | 0.0.5 |
-| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.5 |
-| Frontend package (`app/tauri/frontend/package.json`) | 0.0.5 |
+| Cargo workspace (`Cargo.toml`) | 0.0.6 |
+| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.6 |
+| Frontend package (`app/tauri/frontend/package.json`) | 0.0.6 |
 
-The canonical public version is intentionally established at **0.0.5**.
+The canonical public version is intentionally established at **0.0.6**.
 The earlier `0.1.x` values were development manifest values and did not
 represent a public product release. The `0.0.1` baseline pinned the
 first visible product version; the `with_kind` → `connect_to_kind`
@@ -63,10 +63,17 @@ the byte-decoding fix for `_NET_ACTIVE_WINDOW` and the granular
 `ProbeStage` diagnostics surface that lets the user tell apart "no
 X11 window focused" from "WM_CLASS undeclared" landed at
 **0.0.4**. The opt-in `CLIPVAULT_DEBUG_CAPTURE=1` instrumentation
-this change ships — a metadata-only capture pipeline the user can
-toggle on to confirm the `_NET_ACTIVE_WINDOW → WM_CLASS →
-source identifier` chain on Ubuntu GNOME Wayland + XWayland — is
-a functional change, so the patch is incremented to **0.0.5**.
+that lets the operator confirm the `_NET_ACTIVE_WINDOW → WM_CLASS →
+source identifier` chain on Ubuntu GNOME Wayland + XWayland
+landed at **0.0.5**. The follow-up patch that drops the
+`#[cfg(all(target_os = "linux", feature = "linux-x11"))]` arms on
+`build_active_application` / `build_paste_controller` (the shell
+was gating the Linux X11 adapter wiring on a feature the
+`clipvault-app` crate never enables, so the bootstrap returned
+`NoopActiveApplicationProbe` while `capabilities.active_application`
+stayed `true` and every Ubuntu capture landed with `source_app =
+NULL`) is a functional change, so the patch is incremented to
+**0.0.6**.
 
 ## Bumping the version
 

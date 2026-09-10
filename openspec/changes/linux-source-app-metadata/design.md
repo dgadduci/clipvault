@@ -223,6 +223,155 @@ disponible`; no mostrar paths ni identificadores internos innecesarios.
   tags, pin/unpin, preview, Quick Paste y drag-and-drop.
 - macOS y `platform-permission-guidance` no sufren cambios funcionales.
 
+## Parche funcional post‑publicación: cfg del shell (`v0.0.5 → v0.0.6`)
+
+### Causa raíz
+
+El `probe_kind_variants_are_distinct` y los demás tests de
+forma de `X11ActiveApplication` validan su contrato pero no su
+compilación en cada target del shell: la suite macOS ignora el
+archivo (`cfg(target_os = "linux")`), de modo que el bug podía
+permanecer invisible mientras Linux no se compilase desde CI.
+
+Una vez que el usuario ejecutó `cargo tauri dev` en Ubuntu, el
+log expuso el problema definitivamente. La función de bootstrap
+que construye el probe activo en `clipvault-app` está
+condicionada a una feature que el propio shell nunca activa:
+
+```rust
+#[cfg(all(target_os = "linux", feature = "linux-x11"))]
+OsFamily::Linux => { ... }
+```
+
+La feature `linux-x11` figura en la tabla `[features]` de
+`clipvault-app` pero no está incluida en su `default = [...]`,
+así que la conjunción se evalúa a `false` en el shell. El
+adaptador `X11ActiveApplication` y el helper
+`parse_active_window_id` viven en `clipvault-platform`, donde la
+feature `linux-x11` ya se activa por la dependencia
+target-specific existente:
+
+```toml
+[target.'cfg(all(target_os = "linux", not(target_os = "macos")))'.dependencies]
+clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
+    "clipboard-arboard",
+    "hotkey-global",
+    "linux-x11",
+] }
+```
+
+Por tanto, el adaptador reside en el sitio correcto pero la rama
+de construcción está mal cerrada en el shell. El bootstrap
+compila su brazo sin adaptadores Linux y devuelve
+`NoopActiveApplicationProbe`; mientras tanto, la matriz de
+capacidades sigue declarando `active_application = true` para
+intentar XWayland y los diagnósticos reportan "probe
+no disponible" sin que el usuario pueda saber que la causa es
+un cfg mal puesto.
+
+La misma conjunción estaba en `build_paste_controller`, aunque
+la regresión funcional observable procedía del probe activo
+(la falta del `source_app`); el síntoma era idéntico: todo el
+brazo Linux se descarta en tiempo de compilación.
+
+### Corrección
+
+1. Cambiar los atributos del shell:
+
+   ```rust
+   #[cfg(target_os = "linux")]
+   OsFamily::Linux => { /* build_active_application */ }
+   ```
+
+   ```rust
+   #[cfg(target_os = "linux")]
+   OsFamily::Linux => { /* build_paste_controller */ }
+   ```
+
+   La decisión deja el gate en manos de la dependencia
+   target-specific de `clipvault-platform` (que ya activa
+   `linux-x11` cuando `target_os = "linux"`) y elimina la
+   dependencia artificial de la feature del shell.
+
+2. Limpiar el `use` redundante de `parse_active_window_id` en
+   `linux_x11_active_app.rs`: el decoder activo usa
+   `reply.value32()` y el helper puro se ejerce únicamente desde
+   el módulo de tests `active_app::window_id_tests`, así que el
+   import del shell-side ya no traía nada a la compilación real
+   y contribuyó al warning `unused_import` que el usuario
+   reportó.
+
+3. Añadir regresiones estructurales que recorran
+   `app/tauri/src-tauri/src/bootstrap.rs` y fallen si vuelve a
+   aparecer `#[cfg(all(target_os = "linux", feature =
+   "linux-x11"))]` en los brazos shell de
+   `build_active_application` o `build_paste_controller`. La
+   superficie prose-friendly del parser recorre líneas, salta
+   comentarios `/* ... */` y `// ...`, y exige ambas subcadenas
+   ("`target_os = \"linux\"`" **y** "`feature = \"linux-x11\"`")
+   en una línea que empiece por `#[cfg(all(`). Cualquier intento
+   futuro de reintroducir el patrón dispara el guard.
+
+4. Añadir regresiones conductuales que ejecuten el camino del
+   `bootstrap` desde un probe `ScriptedStageActiveAppProbe`:
+
+   - `shell_linux_x11_adapter_attaches_dev_warp_warp_wm_class_to_source_app`:
+     simula la ventana XWayland con `WM_CLASS = dev.warp.Warp` y
+     comprueba que la fila persistida lleva `source_app =
+     dev.warp.Warp` y que el provider recibe ese identificador.
+   - `shell_native_wayland_keeps_empty_source_contract`: el
+     probe devuelve `Ok(None)`, la fila persistida tiene
+     `source_app = NULL`, el provider NO se invoca y la caché
+     queda vacía.
+
+### Contratos preservados
+
+- `X11ActiveApplication::with_kind(display, kind)` se sigue
+  construyendo a través de `Self::connect_to_kind(display,
+  kind)`. La firma se mantiene y los tests
+  `with_kind_signature_accepts_display_and_probe_kind` y
+  `connect_to_kind_signature_accepts_display_and_probe_kind`
+  siguen pasando como pin de regresión.
+- `connect_to(display)` → `connect_to_kind(display, X11)` se
+  conserva como atajo por defecto.
+- `X11ActiveApplication::new()` → `with_kind(None, X11)` se
+  conserva como constructor sin argumentos.
+- `parse_active_window_id(format, value)` se mantiene en el
+  módulo compilado-siempre (`crates/clipvault-platform/src/
+  active_app.rs`) con la regresión contra el byte único
+  (`first_byte_only_is_not_what_get_property_returns`).
+- macOS, Wayland nativo, blacklist, metadata, imágenes, tags,
+  colecciones, Quick Paste y drag‑and‑drop no cambian.
+- `synthetic_paste = false` en Wayland nativo sigue siendo el
+  valor por defecto. La matriz de capacidades no se modifica.
+
+### Privacidad
+
+- La corrección del cfg y las regresiones estructurales no
+  registran contenido del portapapeles, snippets, hashes,
+  asset_ref, paths absolutos, títulos completos de ventanas ni
+  secretos: la suite trabaja sobre el AST sintáctico y sobre
+  probes scriptados con datos no sensibles.
+- El campo `ProbeStage` continúa siendo la única señal del
+  `_NET_ACTIVE_WINDOW → WM_CLASS → identifier`, alineado con los
+  selectores `net_active_window_seen` y `wm_class_seen` que ya
+  expone `ActiveAppDiagnostics`.
+- El import depurado de `parse_active_window_id` no participa
+  en la superficie diagnostics; la única ruta activa es
+  `reply.value32()`.
+
+### Limitaciones que se documentan
+
+- La ejecución runtime en Ubuntu GNOME Wayland + XWayland con
+  `dev.warp.Warp` enfocada queda como tarea manual del
+  usuario. El host actual es macOS y desde aquí no podemos
+  invocar `cargo tauri dev` contra una sesión real.
+- `cargo check -p clipvault-platform --features linux-x11
+  --target x86_64-unknown-linux-gnu --tests` se ejecuta como
+  smoke test de la rama Linux sobre el toolchain del dev host.
+- Los tests específicos del cfg Linux se ejecutan en el CI de
+  Ubuntu o en una build headed con `DISPLAY` válido.
+
 ### Manuales Ubuntu
 
 - Sesión X11: copiar desde una aplicación con `.desktop`, confirmar nombre e

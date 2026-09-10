@@ -291,3 +291,107 @@ redaction layer SHALL remain active on every emitted error message.
   `CaptureDebugSinkHandle::from_predicate` rather than the global
   environment
 - **AND** no test relies on `std::env::var("CLIPVAULT_DEBUG_CAPTURE")`
+
+### Requirement: Shell wiring of Linux X11 / XWayland adapters
+
+The Tauri shell MUST compile the Linux arms of
+`build_active_application` and `build_paste_controller` on every
+Linux build, regardless of whether the `clipvault-app` crate
+itself enables the `linux-x11` feature. The Linux‑X11 adapters
+live in `clipvault-platform` and the workspace `Cargo.toml`
+target‑specific dependency declaration already enables the
+`linux-x11` feature on `clipvault-platform` for every Linux
+build; the shell MUST rely on that target‑specific dependency
+instead of duplicating the `feature = "linux-x11"` gate at the
+shell's own `#[cfg(...)]` attributes. Gating the shell-side
+wiring on the `clipvault-app` `linux-x11` feature caused the
+`build_active_application` Linux arm to compile out at build
+time, the bootstrap to silently return `NoopActiveApplicationProbe`,
+`capabilities.active_application` to stay `true`, and every
+capture to land with `source_app = NULL` on Ubuntu GNOME Wayland
++ XWayland — the regression this requirement addresses.
+
+#### Scenario: Linux shell arms compile without the shell feature
+
+- **WHEN** `cargo tauri dev` runs on a Linux target
+- **THEN** the `build_active_application` and
+  `build_paste_controller` Linux arms are present in the shell
+  binary
+- **AND** the shell does not introduce a
+  `#[cfg(all(target_os = "linux", feature = "linux-x11"))]`
+  attribute on either arm
+
+#### Scenario: Wayland + DISPLAY selects XWayland backend
+
+- **WHEN** the host detects `DisplayServer::Wayland` and
+  `$DISPLAY` is set to a reachable X server
+- **THEN** the shell builds `X11ActiveApplication::with_kind(None,
+  ProbeKind::XWayland)`
+- **AND** the probe name reported by the bootstrap diagnostics
+  is `xwayland_ewmh`
+
+#### Scenario: XWayland capture persists the X11 identifier
+
+- **WHEN** an X11 application focused under XWayland publishes
+  `WM_CLASS = ("dev.warp.Warp", "dev.warp.Warp")` and the user
+  copies a payload from it
+- **THEN** the new `clipboard_entries` row stores
+  `source_app = "dev.warp.Warp"`
+- **AND** the `ApplicationMetadataProvider::lookup` receives
+  `"dev.warp.Warp"` as the identifier
+
+#### Scenario: Native Wayland keeps the empty-source contract
+
+- **WHEN** the focused application is native Wayland and no X11
+  window is exposed by XWayland
+- **THEN** the cached probe is empty
+- **AND** the persisted row carries `source_app = NULL`,
+  `source_app_name = NULL` and `source_app_icon_ref = NULL`
+- **AND** the `ApplicationMetadataProvider::lookup` is never
+  consulted for the empty identifier
+
+#### Scenario: Active-app diagnostics distinguish every state
+
+- **WHEN** the operator inspects the
+  `clipvault_active_app_diagnostics` JSON
+- **THEN** the JSON exposes, at minimum, the following boolean /
+  string / numeric fields, each capable of differentiating the
+  states below:
+  - `capabilities.active_application` — the capability the
+    platform layer declares.
+  - `available: bool` — the adapter the bootstrap actually
+    constructed (`true` ⇔ a real adapter, `false` ⇔ the no‑op
+    fallback).
+  - `backend: &'static str` — the active probe name
+    (`macos_workspace`, `x11_ewmh`, `xwayland_ewmh`,
+    `unavailable`).
+  - `cache_populated: bool` — the cached probe has a non-empty
+    identifier.
+  - `identifier: Option<String>` — the source identifier the
+    matcher will use.
+  - `last_probe_stage` — `not_applicable`, `started`,
+    `active_window_missing`, `active_window_empty`,
+    `wm_class_missing`, `identifier_empty`, `identified`,
+    `unavailable`, `backend`.
+  - `net_active_window_seen: Option<bool>` — `_NET_ACTIVE_WINDOW`
+    returned a parseable window id.
+  - `wm_class_seen: Option<bool>` — `WM_CLASS` returned a
+    parseable non-empty payload.
+  - `refresh_attempts`, `successful_refreshes`,
+    `failed_refreshes`, `last_refresh_unix_ms`,
+    `failure_kind`, `loop_started`, `refresher_installed`,
+    `timer_callback_count`, `last_capture_decision` — the
+    surrounding context.
+- **AND** no clipboard content, snippet, content hash, asset
+  reference, full window title, environment-variable value or
+  absolute filesystem path appears in any field
+
+#### Scenario: Debug snapshot never logs content, identifiers, paths or secrets
+
+- **WHEN** `clipvault_active_app_diagnostics` runs
+- **THEN** the JSON payload never includes the clipboard
+  payload, snippets, hashes, full `asset_ref` values,
+  full window titles, environment-variable values, or
+  absolute filesystem paths
+- **AND** the existing redaction layer continues to apply to
+  every emitted error message
