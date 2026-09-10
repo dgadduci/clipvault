@@ -655,6 +655,97 @@ fn svg_only_icon_is_rasterized_and_persisted() {
     assert!(diagnostics.rasterization_succeeded);
 }
 
+/// Regression pin for the v0.0.7 → v0.0.8 fix: a `.desktop` whose
+/// `Icon=` resolves to an SVG-only payload (the case the user
+/// reported on Ubuntu, Debian, Fedora, Arch and openSUSE) MUST
+/// yield a PNG persisted under
+/// `<data_dir>/assets/application-icons/<safe-id>.png` so the icon
+/// bridge can serve the bytes through the existing
+/// `application-icons/` namespace. Without the
+/// `linux-svg-raster` feature enabled on the Linux shell target
+/// dependency, the provider falls back to
+/// `IconFailureKind::SvgRejected`, no PNG is written and the
+/// `application-icons/` directory stays empty. The Cargo.toml
+/// parser regression in `bootstrap.rs::tests` pins the feature
+/// gate; this test pins the actual SVG → PNG persistence path the
+/// gate is meant to enable.
+///
+/// The test is intentionally generic (no Warp, no Ubuntu-specific
+/// names): the regression only depended on the feature being
+/// enabled in the shell, not on the application identity. Any
+/// `freedesktop`-compliant `.desktop` file whose `Icon=` resolves
+/// to an SVG must follow this contract.
+#[cfg(feature = "linux-svg-raster")]
+#[test]
+fn svg_only_icon_persists_png_under_application_icons() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    let scalable = home.join(".local/share/icons/hicolor/scalable/apps");
+    fs.mkdir(&apps);
+    fs.mkdir(&home.join(".local/share/icons"));
+    fs.mkdir(&scalable);
+    // `Icon=svg-only-icon` resolves to the SVG below; no PNG sibling
+    // exists on disk so the resolver MUST fall back to the SVG →
+    // PNG rasterizer.
+    fs.write_svg(&scalable.join("svg-only-icon.svg"), MINIMAL_SVG);
+    write_desktop(
+        &fs,
+        &apps,
+        "svg-only-icon",
+        "[Desktop Entry]\nType=Application\nName=SVG Only Icon\nStartupWMClass=svg-only-icon\nIcon=svg-only-icon\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider
+        .lookup("svg-only-icon")
+        .expect("ok")
+        .expect("some metadata");
+    let icon_ref = metadata
+        .icon_ref
+        .as_deref()
+        .expect("SVG-only icon must persist an icon reference");
+    // The reference MUST be relative to `<data_dir>/assets/`, never
+    // absolute, and MUST live under the `application-icons/`
+    // namespace so the icon bridge can serve the bytes through the
+    // existing API.
+    assert!(
+        icon_ref.starts_with("application-icons/"),
+        "icon_ref must live under application-icons/, got {icon_ref}"
+    );
+    assert!(
+        !std::path::Path::new(icon_ref).is_absolute(),
+        "icon_ref must stay relative, got {icon_ref}"
+    );
+    assert!(
+        icon_ref.ends_with(".png"),
+        "icon_ref must point at a PNG (rasterized SVG), got {icon_ref}"
+    );
+    let target = assets.join(icon_ref);
+    let bytes = std::fs::read(&target).expect("PNG bytes persisted under application-icons/");
+    // PNG canonical signature.
+    assert_eq!(
+        &bytes[..8],
+        &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+        "persisted icon must be a valid PNG"
+    );
+    let diagnostics = provider.last_icon_diagnostics();
+    assert_eq!(diagnostics.kind, IconSourceKind::Svg);
+    assert!(
+        diagnostics.rasterization_attempted,
+        "diagnostics must report the rasterizer was attempted"
+    );
+    assert!(
+        diagnostics.rasterization_succeeded,
+        "diagnostics must report the rasterizer succeeded"
+    );
+    assert_eq!(
+        diagnostics.failure_kind,
+        IconFailureKind::None,
+        "diagnostics must not record a failure when the SVG was rasterized"
+    );
+}
+
 /// Malformed SVG icons surface `IconFailureKind::InvalidSvg`.
 #[cfg(feature = "linux-svg-raster")]
 #[test]

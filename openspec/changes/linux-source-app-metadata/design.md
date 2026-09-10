@@ -738,3 +738,182 @@ muestra tres regresiones:
 - GNOME Wayland nativo: confirmar fallback explícito sin
   nombre/icono falso y sin romper captura, historial o
   blacklist.
+
+## Parche funcional post‑publicación: shell sin `linux-svg-raster` (`v0.0.7 → v0.0.8`)
+
+### Causa raíz
+
+El parche de iconos (`v0.0.6 → v0.0.7`) introdujo el rasterizador
+`resvg` y la feature `linux-svg-raster` dentro de
+`crates/clipvault-platform/src/runtime/linux_svg_raster.rs`, y dejó
+la lista de pruebas (`svg_only_icon_is_rasterized_and_persisted`,
+`malformed_svg_records_invalid_svg_failure`,
+`png_icon_is_preferred_over_svg`, …) gated a
+`#[cfg(feature = "linux-svg-raster")]`. Sin embargo, la dependencia
+target-specific de Linux en `app/tauri/src-tauri/Cargo.toml`
+olvidó habilitar esa feature:
+
+```toml
+[target.'cfg(all(target_os = "linux", not(target_os = "macos")))'.dependencies]
+clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
+    "clipboard-arboard",
+    "hotkey-global",
+    "linux-x11",
+] }
+```
+
+El binario Ubuntu que produce `cargo build` /
+`cargo tauri dev` enlaza el crate `clipvault-platform` con la
+feature `linux-svg-raster` **inactiva**. En
+`runtime/linux_app_metadata.rs`, la rama SVG del resolver cae al
+fallback explícito:
+
+```rust
+#[cfg(not(feature = "linux-svg-raster"))]
+{
+    let _ = resolved;
+    Err(IconFailureKind::SvgRejected)
+}
+```
+
+Consecuencia observable: cualquier `.desktop` cuyo `Icon=` resuelva
+a un SVG (Ubuntu, Debian, Fedora, Arch, openSUSE, GNOME, KDE — la
+mayoría de los paquetes oficiales distribuyen iconos en
+`scalable/apps/<name>.svg`) produce `IconFailureKind::SvgRejected`,
+no escribe PNG en `<data_dir>/assets/application-icons/`,
+`source_app_icon_ref` queda `NULL` y la card rail renderiza el
+fallback genérico. La regresión es exactamente la que el usuario
+reportó después de `v0.0.7`: "los iconos vuelven a estar vacíos en
+Ubuntu, Debian y Fedora".
+
+El bug es invisible en el host macOS del dev:
+
+- El módulo `linux_app_metadata` está gated a `cfg(target_os =
+  "linux")`, así que la suite macOS nunca compila el resolver.
+- `cargo check -p clipvault-platform --features linux-svg-raster
+  --target x86_64-unknown-linux-gnu --tests` valida la rama
+  `linux-svg-raster` aislada, pero no la configuración real del
+  binario `clipvault-app`.
+- `cargo check -p clipvault-app --target x86_64-unknown-linux-gnu`
+  pasa porque el shell compila; simplemente no enlaza el código
+  que el rasterizador aporta.
+
+El `Cargo.lock` del commit `e8db63a` (`fix: resolve Linux
+application icons`) ya muestra la característica `resvg`
+disponible para el crate `clipvault-platform`, pero sólo porque
+los tests con `--features linux-x11,linux-svg-raster` se compilaron
+al menos una vez; la feature nunca llegó al binario real.
+
+### Corrección
+
+Una línea en `app/tauri/src-tauri/Cargo.toml`:
+
+```toml
+[target.'cfg(all(target_os = "linux", not(target_os = "macos")))'.dependencies]
+clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
+    "clipboard-arboard",
+    "hotkey-global",
+    "linux-x11",
+    "linux-svg-raster",
+] }
+```
+
+El rasterizador `resvg` y el módulo `linux_svg_raster.rs` ahora
+sí se enlazan en el binario Ubuntu. No se cambia
+`default = [...]`, no se añade la feature al shell como
+`default` (la convención del repo es que el shell sólo declare
+las suyas propias: `clipboard-arboard`, `hotkey-global`,
+`linux-x11`); la feature `linux-svg-raster` pertenece a la
+plataforma y se activa por dependencia target-specific, igual que
+`linux-x11` desde el parche anterior.
+
+### Regresión añadida
+
+Dos tests cubren el bug:
+
+1. **Regresión estructural en el shell.** Test nuevo en
+   `app/tauri/src-tauri/src/bootstrap.rs::tests`:
+
+   - `shell_linux_svg_raster_feature_is_enabled_for_linux_target`:
+     parsea el `Cargo.toml` del shell, localiza la tabla
+     `[target.'cfg(all(target_os = "linux", not(target_os =
+     "macos")))'.dependencies]` y exige que
+     `linux-svg-raster` esté en la lista de features del
+     `clipvault-platform` inline-table. El parser es un walker
+     TOML mínimo (no introduce una dependencia nueva): busca la
+     cabecera, avanza hasta la siguiente `[ ... ]`, balancea las
+     llaves del inline-table, extrae la lista y la divide por
+     comas. Si un futuro refactor elimina la feature del shell,
+     el test falla con la lista observada.
+
+   El test corre en macOS, Linux y CI (no usa `cfg(target_os = …)`)
+   porque el bug es estrictamente sintáctico del manifest del shell.
+
+2. **Regresión funcional del rasterizador.** Test nuevo en
+   `crates/clipvault-platform/tests/linux_app_metadata.rs`:
+
+   - `svg_only_icon_persists_png_under_application_icons`:
+     comprueba que un `.desktop` cuyo `Icon=` resuelve únicamente a
+     un SVG produce un PNG persistido bajo
+     `<data_dir>/assets/application-icons/<safe-id>.png` con la
+     firma canónica. Valida además que la referencia `icon_ref`
+     sea relativa, que `IconDiagnostics` reporte
+     `kind = Svg`, `rasterization_attempted = true`,
+     `rasterization_succeeded = true` y `failure_kind = None`.
+     El test es genérico (no hardcodea Warp ni Ubuntu) y está
+     gated a `cfg(feature = "linux-svg-raster")`. Combinado con
+     el test estructural del shell, los dos cubren tanto el
+     wiring de la feature como el camino real que el binario
+     enlaza.
+
+   El test existente `svg_only_icon_is_rasterized_and_persisted`
+   sigue siendo la prueba de cobertura del rasterizador; el nuevo
+   test documenta explícitamente la regresión del shell.
+
+### Contratos preservados
+
+- La lista de features del shell (`default`, `custom-protocol`,
+  `clipboard-arboard`, `hotkey-global`, `linux-x11`) no cambia.
+- `clipvault-platform` no introduce dependencia nueva: `resvg` ya
+  figuraba como dependencia opcional (`default-features = false`)
+  y se activa exclusivamente a través de `linux-svg-raster`.
+- macOS, Wayland nativo, blacklist, captura, imágenes, tags,
+  colecciones, favoritos, Quick Paste y drag-and-drop no se
+  tocan: el cambio está limitado al bloque target-specific de
+  Linux en el `Cargo.toml` del shell y a las dos regresiones
+  nuevas.
+- `defaults = [...]` del shell sigue siendo
+  `["custom-protocol", "clipboard-arboard", "hotkey-global"]`; no
+  se añade `linux-x11` ni `linux-svg-raster` para no enmascarar
+  regresiones futuras de tipo "el shell olvidó habilitar la
+  feature".
+- El contrato `source_app` no cambia. El contrato
+  `source_app_icon_ref` se llena correctamente con SVG-only
+  icons, igual que ya lo hacía con PNG / pixmap.
+
+### Privacidad y seguridad
+
+- La lista de features del shell sigue siendo explícita: ninguna
+  feature nueva entra en el `default`. El rasterizador
+  `linux-svg-raster` mantiene `default-features = false` y los
+  resolvedores `ImageHrefResolver` desactivados (sin red, sin
+  archivos externos, sin scripts). Los límites
+  `MAX_SVG_BYTES` (4 MB) y `MAX_SVG_SOURCE_DIM` (1024 × 1024)
+  siguen activos.
+- Los tests del regresión no escriben en `~/.clipvault`, no
+  registran contenido del clipboard, snippets, hashes,
+  `asset_ref`, paths absolutos ni secretos. El parser del
+  `Cargo.toml` opera sobre el AST sintáctico y los nombres de
+  features; el test funcional usa el `MemoryFilesystem` con un
+  directorio temporal.
+
+### Limitaciones documentadas
+
+- El host del dev sigue siendo macOS, así que la confirmación
+  runtime del PNG persistido en una sesión Ubuntu real (X11 y
+  GNOME Wayland + XWayland) queda como tarea del usuario. Las
+  pruebas de Ubuntu (10.1–10.4) no se marcan desde macOS.
+- `cargo check -p clipvault-platform --features
+  linux-x11,linux-svg-raster --target x86_64-unknown-linux-gnu
+  --tests` sigue siendo el smoke test de la rama Linux sobre el
+  toolchain del dev host.

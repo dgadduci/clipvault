@@ -60,6 +60,7 @@ clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
     "clipboard-arboard",
     "hotkey-global",
     "linux-x11",
+    "linux-svg-raster",
 ] }
 
 [dev-dependencies]

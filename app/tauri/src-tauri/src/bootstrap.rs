@@ -4300,6 +4300,115 @@ mod tests {
         );
     }
 
+    /// Structural regression: the Linux shell dependency declaration
+    /// on `clipvault-platform` MUST enable the `linux-svg-raster`
+    /// feature. The shell pulls the platform crate in through a
+    /// `[target.'cfg(all(target_os = "linux", not(target_os =
+    /// "macos")))'.dependencies]` block; without the
+    /// `linux-svg-raster` feature the SVG → PNG rasterizer is left
+    /// out of the Linux build graph and the provider falls back to
+    /// `IconFailureKind::SvgRejected` for any `.desktop` whose
+    /// `Icon=` resolves to an SVG-only payload. The user reported
+    /// `source_app_icon_ref = NULL` and an empty
+    /// `~/.clipvault/assets/application-icons/` directory on every
+    /// distribution that ships SVG icons (Ubuntu, Debian, Fedora,
+    /// Arch, openSUSE) — the rasterizer was already merged in
+    /// `clipvault-platform` but the shell forgot to opt in.
+    ///
+    /// The test parses the shell `Cargo.toml` and verifies that
+    /// the Linux target-specific `clipvault-platform` dependency
+    /// lists `linux-svg-raster` among its features. The parser is
+    /// a minimal TOML walker: it locates the Linux target section
+    /// by its `[target.'cfg(all(target_os = "linux", not(target_os
+    /// = "macos")))'.dependencies]` header, scoops up the literal
+    /// `features = [ ... ]` array that follows, and checks for the
+    /// `"linux-svg-raster"` entry. TOML's surface here is small
+    /// enough that a hand-rolled scan is more honest than pulling
+    /// in a full TOML parser for the test: a future migration to a
+    /// proper TOML dependency would only strengthen the regression.
+    ///
+    /// The test runs on every target (including macOS dev hosts)
+    /// so the regression is caught by the `cargo test --workspace`
+    /// run the dev workflow already executes — the bug surfaced on
+    /// Linux precisely because the existing Linux-only CI skipped
+    /// this assertion.
+    #[test]
+    fn shell_linux_svg_raster_feature_is_enabled_for_linux_target() {
+        let manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let source = std::fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|error| panic!("read shell Cargo.toml: {error}"));
+        let features = linux_target_clipvault_platform_features(&source)
+            .expect("shell Cargo.toml must declare a Linux target section with a clipvault-platform dependency and features = [...]");
+        assert!(
+            features.iter().any(|feature| feature == "linux-svg-raster"),
+            "Linux target dependency on clipvault-platform must enable the `linux-svg-raster` feature so the SVG -> PNG rasterizer ships in the Ubuntu binary. features = {features:?}"
+        );
+    }
+
+    /// Locate the `[target.'cfg(all(target_os = "linux", not(target_os
+    /// = "macos")))'.dependencies]` table in the shell Cargo.toml and
+    /// return the `features = [ ... ]` array the
+    /// `clipvault-platform` dependency declares. Returns `None` when
+    /// either section is missing so the caller can panic with a
+    /// descriptive message instead of indexing into an empty vector.
+    ///
+    /// The walker is deliberately tiny — the shell Cargo.toml only
+    /// has a handful of features in the Linux block and the test
+    /// already documents the expected shape. Any future contributor
+    /// who restructures the table gets an immediate test failure
+    /// here, which is the desired regression semantics.
+    fn linux_target_clipvault_platform_features(source: &str) -> Option<Vec<String>> {
+        const HEADER: &str =
+            "[target.'cfg(all(target_os = \"linux\", not(target_os = \"macos\")))'.dependencies]";
+        let header_idx = source.find(HEADER)?;
+        // Locate the body of the Linux target section by walking
+        // forward until we either hit the next `[ ... ]` header (which
+        // would terminate the table) or the end of the file.
+        let rest = &source[header_idx + HEADER.len()..];
+        let section_body: String = rest
+            .lines()
+            .take_while(|line| !line.trim_start().starts_with('['))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Within the body, locate the `clipvault-platform = { ... }`
+        // inline-table and balance the braces so a future refactor that
+        // adds inner tables or arrays still extracts the right entry.
+        let entry_marker = "clipvault-platform = {";
+        let entry_open = section_body.find(entry_marker)?;
+        let entry_open_brace = entry_open + entry_marker.len() - 1;
+        let mut depth: usize = 1;
+        let mut entry_close = None;
+        for (offset, ch) in section_body[entry_open_brace + 1..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        entry_close = Some(entry_open_brace + 1 + offset + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let entry_close = entry_close?;
+        let entry_body = &section_body[entry_open_brace + 1..entry_close];
+        // Extract the literal `features = [ ... ]` array. We only
+        // read the substring between the `[` and `]` and ignore
+        // whatever may follow in the same line.
+        let features_marker = "features = [";
+        let feat_open = entry_body.find(features_marker)? + features_marker.len();
+        let feat_close = entry_body[feat_open..].find(']')? + feat_open;
+        let raw = &entry_body[feat_open..feat_close];
+        Some(
+            raw.split(',')
+                .map(str::trim)
+                .map(|item| item.trim_matches('"').to_string())
+                .filter(|item| !item.is_empty())
+                .collect(),
+        )
+    }
+
     /// Behavioural regression: a probe that has answered with the
     /// `dev.warp.Warp` `WM_CLASS` class segment must end up persisted
     /// on the new row as `source_app = "dev.warp.Warp"`. The test

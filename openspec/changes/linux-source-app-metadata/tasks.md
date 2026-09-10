@@ -1529,3 +1529,219 @@ no deben marcarse por inferencia desde macOS ni desde tests sin display.
   política "Cambio publicado + parche funcional" se
   refleja sólo en este `tasks.md`, en los manifests y en
   el código.
+
+## 18. Parche funcional post‑publicación (shell sin `linux-svg-raster` — `v0.0.7 → v0.0.8`)
+
+- [x] 18.1 **Causa raíz confirmada.** El usuario vuelve a
+  reportar `source_app_icon_ref = NULL` y la ausencia del
+  directorio `~/.clipvault/assets/application-icons/` en
+  Ubuntu GNOME Wayland + XWayland (y también en X11 puro,
+  Fedora, Arch, openSUSE) incluso después del parche de
+  iconos (`v0.0.6 → v0.0.7`). La inspección de
+  `app/tauri/src-tauri/Cargo.toml` confirma el problema:
+  la dependencia target-specific de Linux sobre
+  `clipvault-platform` lista `clipboard-arboard`,
+  `hotkey-global` y `linux-x11`, pero olvida
+  `linux-svg-raster`. El rasterizador `resvg` y el módulo
+  `linux_svg_raster.rs` ya viven dentro de
+  `clipvault-platform` desde el commit `e8db63a`, pero el
+  binario Ubuntu real nunca los enlaza. En
+  `runtime/linux_app_metadata.rs`, la rama SVG del
+  resolver cae al fallback
+  `Err(IconFailureKind::SvgRejected)`:
+
+  ```rust
+  #[cfg(not(feature = "linux-svg-raster"))]
+  {
+      let _ = resolved;
+      Err(IconFailureKind::SvgRejected)
+  }
+  ```
+
+  Resultado observable: cualquier `.desktop` cuyo `Icon=`
+  resuelva a un SVG (Ubuntu, Debian, Fedora, Arch,
+  openSUSE, GNOME, KDE distribuyen la mayoría de iconos
+  como SVG en `scalable/apps/<name>.svg`) produce
+  `SvgRejected`, no escribe PNG, `source_app_icon_ref`
+  queda `NULL` y la card rail renderiza el fallback
+  genérico. El bug es invisible desde el host macOS
+  porque:
+
+  1. El módulo `linux_app_metadata` está gated a
+     `cfg(target_os = "linux")`, así que la suite macOS
+     nunca lo compila.
+  2. `cargo check -p clipvault-platform --features
+     linux-svg-raster --target x86_64-unknown-linux-gnu
+     --tests` valida la rama Linux aislada, pero no la
+     configuración real del binario `clipvault-app`.
+  3. `cargo check -p clipvault-app --target
+     x86_64-unknown-linux-gnu` pasa porque el shell
+     compila; simplemente no enlaza el código que
+     `linux-svg-raster` aporta.
+
+- [x] 18.2 **Corrección.** Añadir `linux-svg-raster` a la
+  lista de features de la dependencia target-specific de
+  Linux en `app/tauri/src-tauri/Cargo.toml`:
+
+  ```toml
+  [target.'cfg(all(target_os = "linux", not(target_os = "macos")))'.dependencies]
+  clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
+      "clipboard-arboard",
+      "hotkey-global",
+      "linux-x11",
+      "linux-svg-raster",
+  ] }
+  ```
+
+  No se modifica la lista `default = [...]` del shell:
+  la feature `linux-svg-raster` pertenece a la plataforma
+  y se activa por dependencia target-specific (igual que
+  `linux-x11` desde el parche anterior). El shell no
+  necesita declararla en su propia tabla `[features]`.
+
+- [x] 18.3 **Regresión estructural en el shell.** Nuevo
+  test `shell_linux_svg_raster_feature_is_enabled_for_linux_target`
+  en `app/tauri/src-tauri/src/bootstrap.rs::tests`:
+
+  - Parsea el `Cargo.toml` del shell, localiza la tabla
+    `[target.'cfg(all(target_os = "linux", not(target_os
+    = "macos")))'.dependencies]` y exige que
+    `linux-svg-raster` esté en la lista de features del
+    `clipvault-platform` inline-table.
+  - El parser es un walker TOML mínimo (no añade
+    dependencia nueva): busca la cabecera, avanza hasta
+    la siguiente `[ ... ]`, balancea las llaves del
+    inline-table, extrae la lista y la divide por comas.
+  - El test corre en macOS, Linux y CI (no usa
+    `cfg(target_os = …)`) porque el bug es estrictamente
+    sintáctico del manifest del shell. Cualquier
+    refactor futuro que elimine la feature falla con la
+    lista observada.
+
+- [x] 18.4 **Regresión funcional del rasterizador.** Nuevo
+  test `svg_only_icon_persists_png_under_application_icons`
+  en `crates/clipvault-platform/tests/linux_app_metadata.rs`:
+
+  - Comprueba que un `.desktop` cuyo `Icon=` resuelve
+    únicamente a un SVG produce un PNG persistido bajo
+    `<data_dir>/assets/application-icons/<safe-id>.png`
+    con la firma canónica.
+  - Valida además que la referencia `icon_ref` sea
+    relativa, que `IconDiagnostics` reporte
+    `kind = Svg`, `rasterization_attempted = true`,
+    `rasterization_succeeded = true` y
+    `failure_kind = None`.
+  - El test es genérico (no hardcodea Warp ni Ubuntu) y
+    está gated a `cfg(feature = "linux-svg-raster")`.
+    Combinado con el test estructural del shell, los
+    dos cubren tanto el wiring de la feature como el
+    camino real que el binario enlaza.
+
+  El test pre-existente
+  `svg_only_icon_is_rasterized_and_persisted` se
+  conserva como cobertura del rasterizador; el nuevo
+  test documenta explícitamente la regresión del shell
+  y comprueba el contrato de persistencia exacto:
+  ruta relativa bajo `application-icons/`, firma PNG
+  válida, diagnósticos completos.
+
+- [x] 18.5 **Contratos preservados.**
+
+  - `default = [...]` del shell sigue siendo
+    `["custom-protocol", "clipboard-arboard",
+    "hotkey-global"]`; no se añade `linux-x11` ni
+    `linux-svg-raster` para no enmascarar regresiones
+    futuras de tipo "el shell olvidó habilitar la
+    feature".
+  - macOS, Wayland nativo, blacklist, captura, imágenes,
+    tags, colecciones, favoritos, Quick Paste y
+    drag-and-drop de cards no se tocan: el cambio está
+    limitado al bloque target-specific de Linux en el
+    `Cargo.toml` del shell y a las dos regresiones
+    nuevas.
+  - El contrato `source_app` no cambia. El contrato
+    `source_app_icon_ref` se llena correctamente con
+    SVG-only icons, igual que ya lo hacía con PNG /
+    pixmap.
+  - `LinuxApplicationMetadataProvider`, el bridge de
+    iconos (`application-icons/`), `icon_ref_for` y el
+    validador PNG existente no cambian su contrato
+    público.
+
+- [x] 18.6 **Privacidad y seguridad.**
+
+  - La feature `linux-svg-raster` mantiene
+    `default-features = false` en `resvg`: no se carga
+    texto, no se enumeran fuentes del host, no se
+    decodifican imágenes raster externas, no se abre la
+    red, no se ejecuta JavaScript ni scripting SVG.
+  - Los `ImageHrefResolver` siguen cableados con closures
+    que devuelven `None` para datos y paths; los
+    límites `MAX_SVG_BYTES` (4 MB) y `MAX_SVG_SOURCE_DIM`
+    (1024 × 1024) permanecen activos.
+  - Las regresiones no escriben en `~/.clipvault`, no
+    registran contenido del clipboard, snippets, hashes,
+    `asset_ref`, paths absolutos ni secretos. El parser
+    del `Cargo.toml` opera sobre el AST sintáctico y los
+    nombres de features; el test funcional usa el
+    `MemoryFilesystem` con un directorio temporal
+    controlado por el harness.
+
+- [x] 18.7 **Verificación ejecutada desde el host macOS.**
+
+  - `cargo fmt --all -- --check` — pasa.
+  - `cargo clippy --workspace --all-targets -- -D
+    warnings` — pasa (sin warnings nuevos introducidos
+    por este parche).
+  - `cargo test --workspace` — pasa. Los tests nuevos
+    `shell_linux_svg_raster_feature_is_enabled_for_linux_target`
+    y `svg_only_icon_persists_png_under_application_icons`
+    se ejecutan en el target del host (el primero en
+    todos los targets; el segundo en Linux con la
+    feature `linux-svg-raster` activa).
+  - `cargo check -p clipvault-platform --features
+    linux-x11,linux-svg-raster --target
+    x86_64-unknown-linux-gnu --tests` — pasa; el
+    binario Ubuntu completo (X11 + SVG) compila
+    limpio.
+  - `cd app/tauri/frontend && npm run check` — pasa.
+  - `cd app/tauri/frontend && npm run build` — pasa.
+  - `openspec validate linux-source-app-metadata
+    --strict --type change` — pasa.
+
+- [x] 18.8 **Bump de versión sincronizado a `0.0.8`**
+  (la corrección del shell es una implementación
+  funcional completa: `projects.md` exige subir el patch
+  y mantener sincronizados los manifests canónicos):
+
+  - `Cargo.toml` (`[workspace.package].version`).
+  - `Cargo.lock` regenerado: `clipvault-app`,
+    `clipvault-core`, `clipvault-db`,
+    `clipvault-platform`, `clipvault-search`.
+  - `app/tauri/src-tauri/tauri.conf.json` (`version`).
+  - `app/tauri/frontend/package.json` (`version`).
+  - `app/tauri/frontend/package-lock.json` (`version` y
+    la entrada raíz `packages.""`).
+  - `projects.md` (tabla "Current canonical version" y
+    nota descriptiva del bump `0.0.7 → 0.0.8`).
+  - `AboutModal.svelte` sigue leyendo
+    `diagnostics.version` (no se hardcodea el literal).
+
+- [x] 18.9 **Limitación documentada.** El host actual es
+  macOS, así que la confirmación runtime de una sesión
+  Ubuntu real (X11, GNOME Wayland con app XWayland,
+  Fedora, Arch, openSUSE) queda pendiente del usuario.
+  Las tareas de Ubuntu (10.1–10.6) NO se marcan desde
+  macOS ni desde tests sin display; el guard del parser
+  del `Cargo.toml` y los tests determinísticos sobre
+  `MemoryFilesystem` validan estructuralmente el
+  arreglo. `cargo check -p clipvault-platform --features
+  linux-x11,linux-svg-raster --target
+  x86_64-unknown-linux-gnu --tests` actúa como smoke
+  test de la rama Linux completa sobre el toolchain
+  del dev host.
+
+- [x] 18.10 **Sin sync, archive, commit ni push.** La
+  política "Cambio publicado + parche funcional" se
+  refleja sólo en este `tasks.md`, en los manifests y
+  en el código.
