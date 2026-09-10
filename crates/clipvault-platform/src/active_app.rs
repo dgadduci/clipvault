@@ -70,6 +70,13 @@ pub enum ActiveAppBackendKind {
     /// but the host is structurally Wayland, so the diagnostics
     /// surface distinguishes this branch from the plain X11 one.
     XWaylandEwmh,
+    /// Wayland session where the compositor announced
+    /// `ext-foreign-toplevel-list-v1` and the probe bound it.
+    WaylandForeignToplevel,
+    /// Wayland session where the compositor announced
+    /// `zwlr_foreign_toplevel_management_unstable_v1` (the wlroots
+    /// fallback) and the probe bound it.
+    WaylandWlrForeignToplevel,
     Unavailable,
 }
 
@@ -79,6 +86,8 @@ impl ActiveAppBackendKind {
             ActiveAppBackendKind::MacOsWorkspace => "macos_workspace",
             ActiveAppBackendKind::X11Ewmh => "x11_ewmh",
             ActiveAppBackendKind::XWaylandEwmh => "xwayland_ewmh",
+            ActiveAppBackendKind::WaylandForeignToplevel => "wayland_foreign_toplevel",
+            ActiveAppBackendKind::WaylandWlrForeignToplevel => "wayland_wlr_foreign_toplevel",
             ActiveAppBackendKind::Unavailable => "unavailable",
         }
     }

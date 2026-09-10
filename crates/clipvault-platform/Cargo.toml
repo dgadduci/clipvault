@@ -24,6 +24,20 @@ macos-native = [
 ]
 # Linux X11 active app + synthetic paste via `x11rb`.
 linux-x11 = ["dep:x11rb"]
+# Linux native Wayland active-app probe. Uses only `std::os::unix`
+# primitives plus the bundled protocol parser so the build does not
+# need `wayland-scanner`, `libwayland-bin` or any external tool at
+# runtime. The probe targets two public protocols:
+#
+# 1. `ext-foreign-toplevel-list-v1` (preferred).
+# 2. `zwlr_foreign_toplevel_management_unstable_v1` (fallback for
+#    wlroots-based compositors when the first protocol is missing).
+#
+# Both protocols are spoken by the same hand-written marshal/unmarshal
+# logic; the choice between them is driven by the registry the
+# compositor publishes and the only on-disk artefact the build
+# needs is the protocol XML, which is bundled with the source tree.
+linux-wayland-active-app = []
 # Pure-Rust SVG → PNG rasterizer used by the Linux metadata provider
 # to honour `Icon=<name>` entries that ship as SVG instead of PNG.
 # `default-features = false` keeps the parser/raster stack free of

@@ -42,23 +42,23 @@ canonical value and never fall back to a hard-coded constant.
   string in `Svelte`. A drift between the modal copy and the
   manifests is a regression that the change must surface as a test
   failure.
-
 ### Current canonical version
 
 | Surface | Version |
 | --- | --- |
-| Cargo workspace (`Cargo.toml`) | 0.0.8 |
-| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.8 |
-| Frontend package (`app/tauri/frontend/package.json`) | 0.0.8 |
+| Cargo workspace (`Cargo.toml`) | 0.0.9 |
+| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.9 |
+| Frontend package (`app/tauri/frontend/package.json`) | 0.0.9 |
 
-The canonical public version is intentionally established at **0.0.8**.
+The canonical public version is intentionally established at **0.0.9**.
 The earlier `0.1.x` values were development manifest values and did not
 represent a public product release. The `0.0.1` baseline pinned the
 first visible product version; the `with_kind` → `connect_to_kind`
 build fix in `linux-source-app-metadata` was a follow-up patch that
 bumped the canonical version to **0.0.2**; the capture-loop cache
 refresh that lets the `LinuxApplicationMetadataProvider` resolve
-name and icon for X11 / XWayland captures lifted it to **0.0.3**;
+name and icon for X11 / XWayland captures lifted it to
+**0.0.3**;
 the byte-decoding fix for `_NET_ACTIVE_WINDOW` and the granular
 `ProbeStage` diagnostics surface that lets the user tell apart "no
 X11 window focused" from "WM_CLASS undeclared" landed at
@@ -90,7 +90,18 @@ linked the SVG → PNG path, the resolver fell back to
 `IconFailureKind::SvgRejected` and the
 `application-icons/` directory stayed empty for any application
 whose `Icon=` resolved to an SVG) is a functional change, so the
-patch is incremented to **0.0.8**.
+patch is incremented to **0.0.8**. The follow-up that adds the
+Linux native Wayland active-app probe (`ext-foreign-toplevel-list-v1`
+with the `zwlr_foreign_toplevel_management_unstable_v1` fallback)
+behind the `linux-wayland-active-app` feature, wires it as the
+authoritative source on Wayland sessions before falling back to the
+XWayland EWMH probe, integrates the resolved `app_id` through the
+existing `LinuxApplicationMetadataProvider` and `PrivacyGate`, and
+extends the diagnostics surface with the new
+`wayland_foreign_toplevel` / `wayland_wlr_foreign_toplevel`
+backend identifiers plus the granular `Identified` /
+`ActiveWindowEmpty` / `Unavailable` / `Backend` stages is a
+functional change, so the patch is incremented to **0.0.9**.
 
 ## Bumping the version
 

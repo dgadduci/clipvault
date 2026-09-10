@@ -21,6 +21,12 @@ custom-protocol = ["tauri/custom-protocol"]
 clipboard-arboard = []
 hotkey-global = []
 linux-x11 = []
+# Linux native Wayland active-app detection (`ext-foreign-toplevel-list-v1`
+# with `zwlr_foreign_toplevel_management_unstable_v1` fallback). The
+# feature is opt-in so macOS / non-Linux builds never link the Wayland
+# code path. The shell enables it from the target-specific dependency
+# block below.
+linux-wayland-active-app = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -61,6 +67,7 @@ clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
     "hotkey-global",
     "linux-x11",
     "linux-svg-raster",
+    "linux-wayland-active-app",
 ] }
 
 [dev-dependencies]
