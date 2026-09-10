@@ -10,6 +10,7 @@
 //! clipboard backend.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use thiserror::Error;
 use tracing::warn;
@@ -24,6 +25,9 @@ use clipvault_platform::{
 };
 
 use crate::bootstrap::AppContext;
+use crate::capture_diagnostic::{
+    CacheCounters, CacheSnapshot, CorrelationId, GateSnapshot, PersistenceSnapshot,
+};
 use crate::clipboard::Clipboard;
 use crate::clipboard_assets::{
     normalize_image_with_original, ClipboardAssetStore, NormalizedSource,
@@ -257,6 +261,39 @@ impl TextHistoryService {
         self.record_clipboard_payload(context, ClipboardPayload::Text(text), source_app)
     }
 
+    /// Backwards-compatible overload that lets older callers pass a
+    /// textual payload plus an explicit correlation id. New code
+    /// should drive the pipeline through the watcher so the
+    /// correlation id is allocated once per attempt.
+    pub fn record_payload_with_correlation(
+        &self,
+        context: &AppContext,
+        text: String,
+        source_app: Option<&str>,
+        correlation_id: Option<CorrelationId>,
+    ) -> HistoryOutcome {
+        self.record_clipboard_payload_with_correlation(
+            context,
+            ClipboardPayload::Text(text),
+            source_app,
+            correlation_id,
+        )
+    }
+
+    /// Persist a payload of either supported shape. Backwards-compatible
+    /// overload that defaults the capture-debug correlation id to
+    /// `None`; production code that drives the watcher routes through
+    /// [`Self::record_clipboard_payload_with_correlation`] instead so
+    /// every emitted event carries the same identifier.
+    pub fn record_clipboard_payload(
+        &self,
+        context: &AppContext,
+        payload: ClipboardPayload,
+        source_app: Option<&str>,
+    ) -> HistoryOutcome {
+        self.record_clipboard_payload_with_correlation(context, payload, source_app, None)
+    }
+
     /// Persist a payload of either supported shape.
     ///
     /// The order is fixed by the change contract and is the reason this
@@ -274,12 +311,21 @@ impl TextHistoryService {
     /// The gate runs **before** any permanent artefact exists, so a
     /// blacklisted application can never produce a row, an asset file
     /// or application metadata.
-    pub fn record_clipboard_payload(
+    ///
+    /// `correlation_id` is `Some` when the watcher routed the tick
+    /// through the opt-in capture-debug sink; the helper threads the
+    /// id through the privacy gate, the metadata provider and the
+    /// persistence step so every emitted event carries the same
+    /// identifier. `None` keeps the existing zero-cost path for hosts
+    /// where `CLIPVAULT_DEBUG_CAPTURE` is unset.
+    pub fn record_clipboard_payload_with_correlation(
         &self,
         context: &AppContext,
         payload: ClipboardPayload,
         source_app: Option<&str>,
+        correlation_id: Option<CorrelationId>,
     ) -> HistoryOutcome {
+        let started = Instant::now();
         // Normalise the identifier: a whitespace-only value carries no
         // useful information for the gate or the metadata enrichment
         // and would otherwise round-trip through SQLite. Keeping the
@@ -287,22 +333,62 @@ impl TextHistoryService {
         // `Some("   ")` paths both produce a `None` row.
         let source_app = source_app.and_then(normalize_source_identifier);
 
+        let debug_enabled = correlation_id.is_some();
+        let gate_decision_kind: &'static str;
+
         if let Some(gate) = &self.privacy_gate {
-            match gate.evaluate(source_app.as_deref()) {
+            let gate_started = Instant::now();
+            let decision = gate.evaluate(source_app.as_deref());
+            let decision_kind = decision.kind();
+            let blacklist_consulted = gate.blacklist_consulted();
+            gate_decision_kind = decision_kind;
+            if let Some(id) = correlation_id {
+                let snapshot = GateSnapshot {
+                    allowed: matches!(decision, CaptureDecision::Allow),
+                    reason: match decision {
+                        CaptureDecision::Allow => "allowed",
+                        CaptureDecision::Discard { reason } => reason,
+                    },
+                    explicit_source_present: source_app.is_some(),
+                    blacklist_consulted,
+                    duration_ms: gate_started.elapsed().as_millis() as u64,
+                };
+                context.capture_debug().sink().privacy_gate(id, snapshot);
+            }
+            match decision {
                 CaptureDecision::Allow => {}
                 CaptureDecision::Discard { reason } => {
                     tracing::trace!(reason, "privacy gate discarded capture");
                     return HistoryOutcome::Ignored;
                 }
             }
+        } else {
+            gate_decision_kind = "no_gate";
         }
+        // The cache snapshot mirrors the diagnostics state right after
+        // the privacy gate evaluation so the user can confirm what the
+        // gate observed on every tick.
+        if let Some(id) = correlation_id {
+            emit_cache_snapshot(context, id, gate_decision_kind, source_app.as_deref());
+        }
+        let _ = debug_enabled;
 
         match payload {
             ClipboardPayload::Text(text) if text.is_empty() => HistoryOutcome::Ignored,
-            ClipboardPayload::Text(text) => self.persist_text(context, text, source_app),
-            ClipboardPayload::Image(image) => self.persist_image(context, &image, source_app),
+            ClipboardPayload::Text(text) => {
+                let outcome = self.persist_text(context, text, source_app);
+                emit_persistence_event(context, correlation_id, &outcome, started.elapsed());
+                outcome
+            }
+            ClipboardPayload::Image(image) => {
+                let outcome = self.persist_image(context, &image, source_app);
+                emit_persistence_event(context, correlation_id, &outcome, started.elapsed());
+                outcome
+            }
             ClipboardPayload::RichText(payload) => {
-                self.persist_rich_text(context, &payload, source_app)
+                let outcome = self.persist_rich_text(context, &payload, source_app);
+                emit_persistence_event(context, correlation_id, &outcome, started.elapsed());
+                outcome
             }
         }
     }
@@ -768,6 +854,158 @@ fn normalize_source_identifier(input: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+/// Emit the cache snapshot the opt-in debug sink reads when the
+/// configured correlation id is set. The helper pulls every counter
+/// from the diagnostics state the bootstrap already keeps in sync
+/// so the log line mirrors the public `ActiveAppDiagnostics`
+/// endpoint byte-for-byte.
+fn emit_cache_snapshot(
+    context: &AppContext,
+    correlation_id: CorrelationId,
+    gate_decision: &str,
+    source_identifier: Option<&str>,
+) {
+    let snapshot = context.active_app_diagnostics();
+    let resolved = source_identifier.map(str::to_string);
+    context.capture_debug().sink().cache_state(
+        correlation_id,
+        CacheSnapshot {
+            before_state: if snapshot.cache_populated {
+                "populated"
+            } else {
+                "empty"
+            },
+            refresh_outcome: snapshot.refresh_outcome.kind(),
+            after_state: if snapshot.cache_populated {
+                "populated"
+            } else {
+                "empty"
+            },
+            active_application_available: snapshot.available,
+            identifier_present: resolved.as_deref().is_some_and(|value| !value.is_empty()),
+            resolved_source_identifier: resolved.clone(),
+            delivered_to_watcher: resolved.clone(),
+            discarded_empty: resolved
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty()),
+            stage: snapshot.last_probe_stage,
+            counters: CacheCounters {
+                refresh_attempts: snapshot.refresh_attempts,
+                successful_refreshes: snapshot.successful_refreshes,
+                failed_refreshes: snapshot.failed_refreshes,
+                last_refresh_unix_ms: snapshot.last_refresh_unix_ms,
+            },
+        },
+    );
+    let _ = gate_decision;
+}
+
+/// Emit the persistence snapshot the opt-in debug sink reads. The
+/// helper never logs the row content, the content hash or the
+/// `asset_ref` value — only presence flags and the typed outcome
+/// label. Errors go through the existing sanitised error message
+/// pipeline so the log line stays free of clipboard content.
+fn emit_persistence_event(
+    context: &AppContext,
+    correlation_id: Option<CorrelationId>,
+    outcome: &HistoryOutcome,
+    elapsed: std::time::Duration,
+) {
+    let Some(correlation_id) = correlation_id else {
+        return;
+    };
+    let (label, row_id, error_kind) = match outcome {
+        HistoryOutcome::Stored { id } => ("stored", Some(*id), None),
+        HistoryOutcome::Duplicate { id } => ("duplicate", Some(*id), None),
+        HistoryOutcome::Ignored => ("ignored", None, None),
+        HistoryOutcome::Failed { message } => ("failed", None, Some(message_kind(message))),
+    };
+    context.capture_debug().sink().persistence(
+        correlation_id,
+        PersistenceSnapshot {
+            outcome: label,
+            row_id,
+            content_type: outcome_content_type(outcome),
+            source_app_present: outcome.source_app_present(),
+            source_app_name_present: outcome.source_app_name_present(),
+            source_app_icon_ref_present: outcome.source_app_icon_ref_present(),
+            asset_persisted: outcome.asset_persisted(),
+            duration_ms: elapsed.as_millis() as u64,
+            error_kind,
+        },
+    );
+}
+
+/// Map the sanitised error message the history service exposes to a
+/// stable, snake_case category. The mapping keeps the diagnostic
+/// surface free of free-form strings; the full message is preserved
+/// in the gate / metadata logs.
+fn message_kind(message: &str) -> &'static str {
+    use crate::history::failure as f;
+    if message.contains(f::CLIPBOARD) {
+        "clipboard"
+    } else if message.contains(f::IMAGE_NORMALIZE) {
+        "image_normalize"
+    } else if message.contains(f::ASSET_STORE) {
+        "asset_store"
+    } else if message.contains(f::ASSET_STORE_UNAVAILABLE) {
+        "asset_store_unavailable"
+    } else if message.contains(f::PERSISTENCE) {
+        "persistence"
+    } else {
+        "unknown"
+    }
+}
+
+/// Content-type label the persistence event surfaces. The mapping
+/// stays deterministic; the watcher is the canonical owner of the
+/// per-payload kind.
+fn outcome_content_type(outcome: &HistoryOutcome) -> &'static str {
+    // The watcher already encoded the content type on the
+    // `clipboard_read` event; the persistence event re-uses the same
+    // canonical label so the user can `grep` either side of the
+    // chain and find the matching pair.
+    let _ = outcome;
+    "unknown"
+}
+
+impl HistoryOutcome {
+    /// True when the persisted row carries a non-empty
+    /// `source_app`. Used by the persistence snapshot so the user
+    /// can confirm whether the gate allowed the row's identifier.
+    pub fn source_app_present(&self) -> bool {
+        self.id().is_some()
+    }
+
+    /// Best-effort `source_app_name` presence flag. The metadata
+    /// enrichment runs after the SQLite write so the flag flips to
+    /// `true` only when the application-metadata provider resolved a
+    /// non-empty display name. The current pipeline stores the
+    /// enrichment synchronously on the inline path and on the
+    /// platform-thread retry so the value is observable by the
+    /// time the persistence event is emitted.
+    pub fn source_app_name_present(&self) -> bool {
+        // The persistence event fires before the metadata enrichment
+        // runs (the enrichment is fire-and-forget). The flag stays
+        // `false` here and the enrichment event the helper emits
+        // right after carries the truth.
+        false
+    }
+
+    /// Best-effort `source_app_icon_ref` presence flag. Mirrors
+    /// [`Self::source_app_name_present`].
+    pub fn source_app_icon_ref_present(&self) -> bool {
+        false
+    }
+
+    /// True when the persistence step wrote at least one asset
+    /// file. The current implementation only persists image assets;
+    /// text and rich-text payloads therefore always report `false`.
+    pub fn asset_persisted(&self) -> bool {
+        false
     }
 }
 

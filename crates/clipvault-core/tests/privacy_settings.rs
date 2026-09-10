@@ -450,7 +450,11 @@ fn shared_watcher_dedupes_blacklisted_capture_and_tick_returns_unchanged() {
     // Loop tick: gate matches the cached probe, returns `Discard`,
     // history returns `Ignored`. The shared watcher records the
     // hash so the next tick dedupes.
-    let loop_outcome = loop_handle.tick(&context, None);
+    let loop_outcome = loop_handle.tick(
+        &context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert!(
         matches!(
             loop_outcome,
@@ -474,7 +478,11 @@ fn shared_watcher_dedupes_blacklisted_capture_and_tick_returns_unchanged() {
     // — the gate would happily say `Allow` because the cached
     // probe now reports ClipVault — and the secret would
     // silently land in SQLite.
-    let tick_outcome = tick_handle.tick(&context, None);
+    let tick_outcome = tick_handle.tick(
+        &context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert_eq!(
         tick_outcome,
         clipvault_core::WatchTickOutcome::Unchanged,
@@ -571,7 +579,11 @@ fn shared_watcher_stores_allowed_capture_in_database() {
         Duration::from_millis(10),
     ));
 
-    let first = watcher.tick(&context, None);
+    let first = watcher.tick(
+        &context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert!(
         matches!(
             first,
@@ -579,7 +591,11 @@ fn shared_watcher_stores_allowed_capture_in_database() {
         ),
         "first tick on a fresh watcher with an allowed source must persist, got {first:?}"
     );
-    let second = watcher.tick(&context, None);
+    let second = watcher.tick(
+        &context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert_eq!(
         second,
         clipvault_core::WatchTickOutcome::Unchanged,
@@ -1487,7 +1503,11 @@ fn integration_textedit_blacklist_drops_capture_and_keeps_db_empty() {
     let clipboard_backend = Arc::new(clipvault_core::FakeClipboardBackend::new());
     clipboard_backend.push_read(Ok(Some("cv-textedit-marker-Q9-2026".into())));
     let watcher = CaptureWatcher::new(clipboard_backend, Duration::from_millis(10));
-    let outcome = watcher.tick(&context, None);
+    let outcome = watcher.tick(
+        &context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert_eq!(
         outcome,
         clipvault_core::WatchTickOutcome::Captured(HistoryOutcome::Ignored),
@@ -1579,7 +1599,11 @@ fn integration_allowed_capture_persists_in_database() {
     clipboard_backend.push_read(Ok(Some("cv-allowed-end-to-end".into())));
     clipboard_backend.push_read(Ok(Some("cv-allowed-end-to-end".into())));
     let watcher = CaptureWatcher::new(clipboard_backend, Duration::from_millis(10));
-    let first = watcher.tick(&context, None);
+    let first = watcher.tick(
+        &context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert!(
         matches!(
             first,
@@ -1587,7 +1611,11 @@ fn integration_allowed_capture_persists_in_database() {
         ),
         "allowed capture must persist, got {first:?}"
     );
-    let second = watcher.tick(&context, None);
+    let second = watcher.tick(
+        &context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert_eq!(
         second,
         clipvault_core::WatchTickOutcome::Unchanged,

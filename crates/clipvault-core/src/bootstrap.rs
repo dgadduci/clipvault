@@ -3,6 +3,7 @@
 //! CLI) can consume.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -19,6 +20,7 @@ use clipvault_platform::{
 use clipvault_platform::{Capabilities, DefaultPlatform, PlatformError, PlatformInfo};
 
 use crate::active_app_diagnostics::ActiveAppDiagnosticsState;
+use crate::capture_diagnostic::CaptureDebugSinkHandle;
 use crate::clipboard::{Clipboard, FakeClipboard};
 use crate::clipboard_assets::ClipboardAssetStore;
 use crate::clock::{Clock, SystemClock};
@@ -93,6 +95,12 @@ pub struct BootstrapOptions {
     /// a fake clipboard. Production shells construct one with real
     /// adapters and pass it through.
     pub platform_adapters: Option<PlatformAdapters>,
+    /// Optional capture-debug sink the bootstrap installs. When
+    /// `None`, the bootstrap reads `CLIPVAULT_DEBUG_CAPTURE` and
+    /// either installs a tracing sink or leaves the diagnostics
+    /// inert. Tests inject a recording sink through
+    /// [`crate::bootstrap::AppBootstrap::with_capture_debug_sink`].
+    pub capture_debug_sink: Option<CaptureDebugSinkHandle>,
 }
 
 impl Default for BootstrapOptions {
@@ -101,6 +109,7 @@ impl Default for BootstrapOptions {
             clock: Arc::new(SystemClock),
             clipboard: Arc::new(FakeClipboard::new()),
             platform_adapters: None,
+            capture_debug_sink: None,
         }
     }
 }
@@ -142,6 +151,19 @@ pub struct AppContext {
     /// command, paste command) sees the same registry without
     /// threading a separate handle through the call sites.
     paste_suppression: PasteSuppression,
+    /// Optional, opt-in capture-debug instrumentation the
+    /// `linux-source-app-metadata` change ships. Wired by the
+    /// production bootstrap when `CLIPVAULT_DEBUG_CAPTURE=1`; tests
+    /// inject a recording sink directly. The handle is cheap to
+    /// clone and the watcher / history services route every event
+    /// through it without further plumbing.
+    capture_debug: CaptureDebugSinkHandle,
+    /// One-shot flag the watcher uses to ensure the environment
+    /// snapshot is emitted at most once per process. Resetting the
+    /// flag is intentionally unsupported: the environment does not
+    /// change during a single boot, so a second emission would only
+    /// duplicate the same metadata.
+    environment_snapshot_emitted: Arc<AtomicBool>,
 }
 
 impl AppContext {
@@ -298,6 +320,31 @@ impl AppContext {
         &self.paste_suppression
     }
 
+    /// Optional, opt-in capture-debug sink the `linux-source-app-metadata`
+    /// instrumentation installs. The bootstrap wires this from the
+    /// `CLIPVAULT_DEBUG_CAPTURE` environment variable; tests inject
+    /// a recording sink through
+    /// [`crate::bootstrap::AppBootstrap::with_capture_debug_sink`].
+    pub fn capture_debug(&self) -> &CaptureDebugSinkHandle {
+        &self.capture_debug
+    }
+
+    /// Whether the watcher has already emitted the one-shot
+    /// environment snapshot through the configured sink. The flag is
+    /// sticky; the watcher only emits the snapshot once per
+    /// process so the diagnostic stream does not duplicate the same
+    /// metadata on every iteration.
+    pub fn environment_snapshot_emitted(&self) -> bool {
+        self.environment_snapshot_emitted.load(Ordering::Acquire)
+    }
+
+    /// Mark the environment snapshot as emitted so subsequent ticks
+    /// skip the duplicate emission.
+    pub fn mark_environment_snapshot_emitted(&self) {
+        self.environment_snapshot_emitted
+            .store(true, Ordering::Release);
+    }
+
     /// Record a synchronous-refresh failure observed by the shell
     /// (for example `MainThreadSyncError::Schedule` or `Timeout`).
     /// The error is sanitised to an `ActiveAppError::Backend` with a
@@ -361,6 +408,17 @@ impl AppBootstrap {
 
     pub fn with_platform_adapters(mut self, adapters: PlatformAdapters) -> Self {
         self.options.platform_adapters = Some(adapters);
+        self
+    }
+
+    /// Inject a capture-debug sink the bootstrap installs instead of
+    /// the default `CLIPVAULT_DEBUG_CAPTURE`-driven wiring. Tests use
+    /// this to attach a [`crate::capture_diagnostic::RecordingCaptureDebugSink`]
+    /// without touching the global environment; production shells
+    /// leave the field empty so the bootstrap reads the env var
+    /// exactly once at startup.
+    pub fn with_capture_debug_sink(mut self, sink: CaptureDebugSinkHandle) -> Self {
+        self.options.capture_debug_sink = Some(sink);
         self
     }
 
@@ -566,6 +624,17 @@ impl AppBootstrap {
             cached_active_app: cached_probe,
             active_app_diagnostics,
             paste_suppression,
+            // The capture-debug sink is either the caller-supplied
+            // handle (tests) or the production wiring that consults
+            // `CLIPVAULT_DEBUG_CAPTURE` exactly once at startup. When
+            // the env var is unset the handle resolves to a
+            // [`NullCaptureDebugSink`] and the capture pipeline never
+            // emits an event.
+            capture_debug: self
+                .options
+                .capture_debug_sink
+                .unwrap_or_else(CaptureDebugSinkHandle::enabled),
+            environment_snapshot_emitted: Arc::new(AtomicBool::new(false)),
         })
     }
 }

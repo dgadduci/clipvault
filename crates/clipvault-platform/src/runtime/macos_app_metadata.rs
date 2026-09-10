@@ -42,7 +42,9 @@ use tracing::warn;
 use crate::app_assets::{APPLICATION_ICONS_DIR, MAX_ICON_DIM};
 use crate::app_metadata::{
     icon_ref_for, ApplicationMetadata, ApplicationMetadataError, ApplicationMetadataProvider,
+    IconDiagnostics, MatchStrategy,
 };
+use parking_lot::Mutex;
 
 /// macOS-backed application-metadata provider. Stores rendered icons
 /// under `<data_dir>/assets/application-icons/<safe-id>.png` and
@@ -50,6 +52,15 @@ use crate::app_metadata::{
 /// never records an arbitrary user-supplied filesystem location.
 pub struct MacOsApplicationMetadataProvider {
     assets_dir: PathBuf,
+    /// Strategy the most recent [`Self::lookup`] used. macOS resolves
+    /// identifiers through `NSRunningApplication::bundleURL`, which
+    /// maps cleanly onto the [`MatchStrategy::DesktopFilename`] arm
+    /// the diagnostic contract pins for "file-name match".
+    last_strategy: Mutex<MatchStrategy>,
+    /// Snapshot the icon writer reported on the most recent
+    /// successful lookup. Mirrors the `IconDiagnostics` shape the
+    /// Linux provider publishes.
+    last_icon: Mutex<IconDiagnostics>,
 }
 
 impl Default for MacOsApplicationMetadataProvider {
@@ -62,6 +73,8 @@ impl MacOsApplicationMetadataProvider {
     pub fn new(assets_dir: impl Into<PathBuf>) -> Self {
         Self {
             assets_dir: assets_dir.into(),
+            last_strategy: Mutex::new(MatchStrategy::None),
+            last_icon: Mutex::new(IconDiagnostics::default()),
         }
     }
 }
@@ -78,12 +91,18 @@ impl ApplicationMetadataProvider for MacOsApplicationMetadataProvider {
         // mask the platform's capability contract, so we surface a
         // typed error here and let the caller downgrade.
         let Some(_mtm) = MainThreadMarker::new() else {
+            *self.last_strategy.lock() = MatchStrategy::None;
+            *self.last_icon.lock() = IconDiagnostics::default();
             return Err(ApplicationMetadataError::Unavailable);
         };
 
         let bundle_path = match resolve_bundle_path(identifier) {
             Some(path) => path,
-            None => return Ok(None),
+            None => {
+                *self.last_strategy.lock() = MatchStrategy::None;
+                *self.last_icon.lock() = IconDiagnostics::default();
+                return Ok(None);
+            }
         };
         let display_name = extract_display_name(&bundle_path).unwrap_or_else(|| {
             bundle_path
@@ -92,8 +111,11 @@ impl ApplicationMetadataProvider for MacOsApplicationMetadataProvider {
                 .unwrap_or_default()
         });
         if display_name.is_empty() {
+            *self.last_strategy.lock() = MatchStrategy::None;
+            *self.last_icon.lock() = IconDiagnostics::default();
             return Ok(None);
         }
+        *self.last_strategy.lock() = MatchStrategy::DesktopFilename;
         let icon_ref = self.persist_icon_for_bundle(&bundle_path, identifier);
         Ok(Some(ApplicationMetadata {
             display_name,
@@ -104,6 +126,14 @@ impl ApplicationMetadataProvider for MacOsApplicationMetadataProvider {
     fn name(&self) -> &'static str {
         "macos_app_metadata"
     }
+
+    fn last_match_strategy(&self) -> MatchStrategy {
+        *self.last_strategy.lock()
+    }
+
+    fn last_icon_diagnostics(&self) -> IconDiagnostics {
+        *self.last_icon.lock()
+    }
 }
 
 impl MacOsApplicationMetadataProvider {
@@ -111,11 +141,38 @@ impl MacOsApplicationMetadataProvider {
     /// `<assets_dir>/application-icons/<safe-id>.png`. The function
     /// never fails the lookup when icon extraction is unavailable:
     /// per the spec the metadata rule must hold even without an icon.
+    ///
+    /// The function records every step of the icon resolution onto
+    /// the provider's `IconDiagnostics` slot so the
+    /// `linux-source-app-metadata` capture diagnostic can confirm
+    /// whether a missing icon is a missing render, a missing
+    /// directory or a writer failure.
     fn persist_icon_for_bundle(&self, path: &Path, identifier: &str) -> Option<String> {
-        let png_bytes = render_bundle_icon_png(path)?;
+        let png_bytes = match render_bundle_icon_png(path) {
+            Some(bytes) => bytes,
+            None => {
+                *self.last_icon.lock() = IconDiagnostics {
+                    declared: true,
+                    resolved: false,
+                    png_validated: false,
+                    persisted: false,
+                    bytes: None,
+                    dimensions: None,
+                };
+                return None;
+            }
+        };
         let target_dir = self.assets_dir.join(APPLICATION_ICONS_DIR);
         if let Err(error) = fs::create_dir_all(&target_dir) {
             warn!(error = %error, "could not create application-icons directory");
+            *self.last_icon.lock() = IconDiagnostics {
+                declared: true,
+                resolved: true,
+                png_validated: true,
+                persisted: false,
+                bytes: Some(png_bytes.len()),
+                dimensions: png_header_dimensions(&png_bytes),
+            };
             return None;
         }
         let safe_id = sanitize_identifier(identifier);
@@ -124,15 +181,65 @@ impl MacOsApplicationMetadataProvider {
             Ok(file) => file,
             Err(error) => {
                 warn!(error = %error, path = %target.display(), "could not open icon file");
+                *self.last_icon.lock() = IconDiagnostics {
+                    declared: true,
+                    resolved: true,
+                    png_validated: true,
+                    persisted: false,
+                    bytes: Some(png_bytes.len()),
+                    dimensions: png_header_dimensions(&png_bytes),
+                };
                 return None;
             }
         };
         if let Err(error) = file.write_all(&png_bytes) {
             warn!(error = %error, "failed to write PNG icon");
+            *self.last_icon.lock() = IconDiagnostics {
+                declared: true,
+                resolved: true,
+                png_validated: true,
+                persisted: false,
+                bytes: Some(png_bytes.len()),
+                dimensions: png_header_dimensions(&png_bytes),
+            };
             return None;
         }
+        *self.last_icon.lock() = IconDiagnostics {
+            declared: true,
+            resolved: true,
+            png_validated: true,
+            persisted: true,
+            bytes: Some(png_bytes.len()),
+            dimensions: png_header_dimensions(&png_bytes),
+        };
         Some(icon_ref_for(identifier))
     }
+}
+
+/// Decode the IHDR width / height from the bytes the icon writer
+/// just validated. Mirrors the Linux provider helper so both
+/// adapters populate the same `dimensions` field the capture
+/// diagnostic reads.
+fn png_header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    // PNG layout: 8-byte signature + 4-byte length + 4-byte
+    // chunk type (`IHDR`) + 4-byte width + 4-byte height.
+    const HEADER_OFFSET: usize = 8 + 4 + 4;
+    if bytes.len() < HEADER_OFFSET + 8 {
+        return None;
+    }
+    let width = u32::from_be_bytes([
+        bytes[HEADER_OFFSET],
+        bytes[HEADER_OFFSET + 1],
+        bytes[HEADER_OFFSET + 2],
+        bytes[HEADER_OFFSET + 3],
+    ]);
+    let height = u32::from_be_bytes([
+        bytes[HEADER_OFFSET + 4],
+        bytes[HEADER_OFFSET + 5],
+        bytes[HEADER_OFFSET + 6],
+        bytes[HEADER_OFFSET + 7],
+    ]);
+    Some((width, height))
 }
 
 /// Resolve the bundle path on disk for a stable bundle identifier.

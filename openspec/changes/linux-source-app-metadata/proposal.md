@@ -36,7 +36,7 @@ limitación cuando la aplicación activa sea Wayland nativa.
 
 ## No objetivos
 
-- No implementar una integración genérica o una extensión específica de GNOME
+- No implementar una integración genérica o o una extensión específica de GNOME
   para consultar la ventana activa Wayland nativa.
 - No afirmar que XWayland identifica aplicaciones Wayland nativas: sólo cubre
   ventanas que realmente estén publicadas en X11.
@@ -44,7 +44,7 @@ limitación cuando la aplicación activa sea Wayland nativa.
   en una coincidencia inventada.
 - No cambiar captura, historial, búsqueda, filtros, pegado, imágenes, rich
   text, tags, colecciones, favoritos o drag-and-drop.
-- No modificar adapters de macOS ni el cambio `linux-x11-compatibility`.
+- No modificar adapters modOSOS ni el el de macOS ni el cambio `linux-x11-compatibility`.
 - No añadir red, telemetría, embeddings, procesos externos ni dependencias
   innecesarias.
 
@@ -57,6 +57,33 @@ limitación cuando la aplicación activa sea Wayland nativa.
   forma tipada.
 - `clipboard-history-cards`: las capturas Linux pueden persistir el nombre e
   icono de la aplicación origen mediante los campos existentes.
+
+### Instrumentación opcional de diagnóstico (temporal, opt-in)
+
+Este cambio también envía una instrumentación **opt-in y
+estrictamente metadata-only** del flujo de captura para diagnosticar
+por qué `source_app` queda vacío en Ubuntu GNOME Wayland + XWayland
+cuando el usuario lo reporta. La instrumentación se activa
+exclusivamente con la variable de entorno `CLIPVAULT_DEBUG_CAPTURE=1`
+y:
+
+- **No modifica la matriz funcional de Wayland/X11/XWayland.**
+  Cuando la variable está ausente o vale `0`, el sink permanece
+  inerte y la captura se comporta exactamente como antes.
+- **No afecta a la persistencia.** Ningún evento de la
+  instrumentación puede convertir una captura válida en `Failed`.
+- **Es estrictamente metadata-only.** Nunca registra contenido del
+  portapapeles, snippets, hashes, valores completos de `asset_ref`,
+  rutas absolutas, títulos completos de ventana, valores de variables
+  de entorno ni secretos. Los mensajes pasan por la redacción
+  existente.
+- **Es temporal y no permanente.** Si en una versión futuro se
+  pudiera quitar sin perder cobertura, esta instrumentación se
+  considera candidata a eliminación. Los tests garantizan que la
+  salida sigue siendo metadata-only aunque el flag esté activo.
+
+El contrato formal vive en el requisito `Capture debug instrumentation`
+de la capacidad `desktop-platform-integration` (este mismo cambio).
 
 ## Impacto esperado
 

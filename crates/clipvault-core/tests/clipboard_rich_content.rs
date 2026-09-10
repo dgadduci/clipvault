@@ -254,12 +254,23 @@ fn unsupported_representation_is_ignored_and_keeps_the_watcher_alive() {
     h.clipboard.push_read(Ok(None));
     h.clipboard
         .push_image_read(Err(ClipboardBackendError::UnsupportedFormat));
-    assert_eq!(watcher.tick(&h.context, None), WatchTickOutcome::Ignored);
+    assert_eq!(
+        watcher.tick(
+            &h.context,
+            None,
+            clipvault_core::AttemptOrigin::BackgroundLoop
+        ),
+        WatchTickOutcome::Ignored
+    );
 
     // The watcher is still usable: the next real payload is captured.
     h.clipboard.push_read(Ok(Some("still alive".into())));
     assert!(matches!(
-        watcher.tick(&h.context, None),
+        watcher.tick(
+            &h.context,
+            None,
+            clipvault_core::AttemptOrigin::BackgroundLoop
+        ),
         WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
     ));
     assert_eq!(h.history_count(), 1);
@@ -278,7 +289,11 @@ fn watcher_reports_an_invalid_image_without_dying() {
         clipvault_core::ImageValidationError::ZeroDimension,
     )));
 
-    match watcher.tick(&h.context, None) {
+    match watcher.tick(
+        &h.context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    ) {
         WatchTickOutcome::Failed { message } => {
             // Metadata only: dimensions, never pixels.
             assert!(message.contains("invalid"), "got {message}");
@@ -288,7 +303,11 @@ fn watcher_reports_an_invalid_image_without_dying() {
 
     h.clipboard.push_read(Ok(Some("recovered".into())));
     assert!(matches!(
-        watcher.tick(&h.context, None),
+        watcher.tick(
+            &h.context,
+            None,
+            clipvault_core::AttemptOrigin::BackgroundLoop
+        ),
         WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
     ));
 }
@@ -303,7 +322,11 @@ fn watcher_captures_an_image_through_the_same_pipeline() {
     h.clipboard.push_read(Ok(None));
     h.clipboard.push_image_read(Ok(Some(bitmap(8, 8, 0x33))));
 
-    match watcher.tick(&h.context, Some("com.apple.Preview")) {
+    match watcher.tick(
+        &h.context,
+        Some("com.apple.Preview"),
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    ) {
         WatchTickOutcome::Captured(HistoryOutcome::Stored { id }) => {
             let record = h.record(id);
             assert_eq!(record.content_type, ContentType::Image);
@@ -317,7 +340,11 @@ fn watcher_captures_an_image_through_the_same_pipeline() {
     h.clipboard.push_read(Ok(None));
     h.clipboard.push_image_read(Ok(Some(bitmap(8, 8, 0x33))));
     assert_eq!(
-        watcher.tick(&h.context, Some("com.apple.Preview")),
+        watcher.tick(
+            &h.context,
+            Some("com.apple.Preview"),
+            clipvault_core::AttemptOrigin::BackgroundLoop
+        ),
         WatchTickOutcome::Unchanged
     );
     assert_eq!(h.history_count(), 1);
@@ -1993,7 +2020,11 @@ fn watcher_failure_messages_stay_metadata_only() {
     h.clipboard
         .push_read(Err(ClipboardBackendError::backend("ContentNotAvailable")));
 
-    match watcher.tick(&h.context, None) {
+    match watcher.tick(
+        &h.context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    ) {
         WatchTickOutcome::Failed { message } => {
             assert_eq!(message, "clipboard backend failed: ContentNotAvailable");
         }

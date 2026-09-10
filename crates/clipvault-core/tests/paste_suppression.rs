@@ -160,7 +160,11 @@ fn plain_paste_does_not_create_a_new_card() {
     assert!(matches!(outcome, PasteOutcome::Pasted { id: pid } if pid == id));
 
     let before = entry_count(&h);
-    let tick = h.watcher.tick(&h.context, None);
+    let tick = h.watcher.tick(
+        &h.context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert_eq!(tick, WatchTickOutcome::Suppressed);
     assert_eq!(
         entry_count(&h),
@@ -186,7 +190,11 @@ fn rich_paste_does_not_create_a_new_card() {
     assert!(matches!(outcome, PasteOutcome::Pasted { id: pid } if pid == id));
 
     let before = entry_count(&h);
-    let tick = h.watcher.tick(&h.context, None);
+    let tick = h.watcher.tick(
+        &h.context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert_eq!(tick, WatchTickOutcome::Suppressed);
     assert_eq!(entry_count(&h), before);
 }
@@ -213,7 +221,11 @@ fn rich_paste_with_rtf_falls_back_when_rtf_unavailable() {
     assert!(matches!(outcome, PasteOutcome::PastedPlainFallback { id: pid } if pid == id));
 
     let before = entry_count(&h);
-    let tick = h.watcher.tick(&h.context, None);
+    let tick = h.watcher.tick(
+        &h.context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert_eq!(tick, WatchTickOutcome::Suppressed);
     assert_eq!(entry_count(&h), before);
 }
@@ -237,7 +249,11 @@ fn image_paste_does_not_create_a_new_card() {
     // match the text payload and the watcher reports a normal
     // capture.
     h.clipboard.push_read(Ok(Some("next text".into())));
-    let tick = h.watcher.tick(&h.context, None);
+    let tick = h.watcher.tick(
+        &h.context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert!(matches!(tick, WatchTickOutcome::Captured(_)));
 }
 
@@ -268,7 +284,11 @@ fn synthetic_paste_failure_does_not_create_a_card() {
     // a different payload must capture it; a tick on the same
     // payload is just a normal capture too.
     h.clipboard.push_read(Ok(Some("next user copy".into())));
-    let tick = h.watcher.tick(&h.context, None);
+    let tick = h.watcher.tick(
+        &h.context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert!(matches!(tick, WatchTickOutcome::Captured(_)));
 }
 
@@ -289,12 +309,20 @@ fn distinct_copy_during_suppression_window_is_captured() {
         .paste_entry(&h.context, id, PasteMode::Plain);
 
     // First observation matches the armed token and is suppressed.
-    let first = h.watcher.tick(&h.context, None);
+    let first = h.watcher.tick(
+        &h.context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert_eq!(first, WatchTickOutcome::Suppressed);
 
     // Second observation is a different payload: the token is
     // already consumed, so the watcher captures the new copy.
-    let second = h.watcher.tick(&h.context, None);
+    let second = h.watcher.tick(
+        &h.context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert!(matches!(second, WatchTickOutcome::Captured(_)));
 }
 
@@ -311,18 +339,30 @@ fn token_is_consumed_by_the_first_matching_observation() {
         .paste()
         .paste_entry(&h.context, id, PasteMode::Plain);
     assert_eq!(
-        h.watcher.tick(&h.context, None),
+        h.watcher.tick(
+            &h.context,
+            None,
+            clipvault_core::AttemptOrigin::BackgroundLoop
+        ),
         WatchTickOutcome::Suppressed
     );
     // Subsequent identical reads are unchanged because the dedupe
     // state has already recorded the fingerprint; the token is
     // not re-armed.
     assert_eq!(
-        h.watcher.tick(&h.context, None),
+        h.watcher.tick(
+            &h.context,
+            None,
+            clipvault_core::AttemptOrigin::BackgroundLoop
+        ),
         WatchTickOutcome::Unchanged
     );
     assert_eq!(
-        h.watcher.tick(&h.context, None),
+        h.watcher.tick(
+            &h.context,
+            None,
+            clipvault_core::AttemptOrigin::BackgroundLoop
+        ),
         WatchTickOutcome::Unchanged
     );
 }
@@ -356,7 +396,11 @@ fn write_failure_clears_the_token() {
     // cleared when the write failed.
     h.clipboard
         .push_read(Ok(Some("next legitimate copy".into())));
-    let tick = h.watcher.tick(&h.context, None);
+    let tick = h.watcher.tick(
+        &h.context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert!(matches!(tick, WatchTickOutcome::Captured(_)));
 }
 
@@ -430,7 +474,11 @@ fn app_context_exposes_the_suppression_registry() {
         .context
         .paste()
         .paste_entry(&h.context, id, PasteMode::Plain);
-    let tick = h.watcher.tick(&h.context, None);
+    let tick = h.watcher.tick(
+        &h.context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert_eq!(tick, WatchTickOutcome::Suppressed);
 }
 
@@ -461,7 +509,11 @@ fn capability_unavailable_keeps_card_unchanged() {
     ));
 
     let before = entry_count(&h);
-    let tick = h.watcher.tick(&h.context, None);
+    let tick = h.watcher.tick(
+        &h.context,
+        None,
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert_eq!(tick, WatchTickOutcome::Suppressed);
     assert_eq!(entry_count(&h), before);
 }

@@ -49,9 +49,11 @@ impl SharedState {
     pub fn tick(&self, _source_app: Option<&str>) -> WatchTickOutcome {
         crate::bootstrap::refresh_active_application_cache_for_loop_tick(&self.inner.context);
         let identifier = crate::bootstrap::resolved_source_identifier(&self.inner.context);
-        self.inner
-            .watcher
-            .tick(&self.inner.context, identifier.as_deref())
+        self.inner.watcher.tick(
+            &self.inner.context,
+            identifier.as_deref(),
+            clipvault_core::AttemptOrigin::ManualTick,
+        )
     }
 
     /// Recompute the capability matrix from the cached platform info.

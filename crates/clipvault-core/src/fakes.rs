@@ -14,9 +14,10 @@ use parking_lot::Mutex;
 use clipvault_platform::{
     ActiveAppError, ActiveApplication, ActiveApplicationProbe, ApplicationMetadata,
     ApplicationMetadataError, ApplicationMetadataProvider, ClipboardBackend, ClipboardBackendError,
-    ClipboardImage, HotkeyBinding, HotkeyError, HotkeyManager, HotkeyOutcome, PasteController,
-    PasteError, PlatformSettingsTarget, RichTextPayload, SettingsNavigator, SettingsOpenOutcome,
-    TrayAction, TrayController, TrayEntry, TrayError, TrayHandle, TrayOutcome,
+    ClipboardImage, HotkeyBinding, HotkeyError, HotkeyManager, HotkeyOutcome, IconDiagnostics,
+    MatchStrategy, PasteController, PasteError, PlatformSettingsTarget, RichTextPayload,
+    SettingsNavigator, SettingsOpenOutcome, TrayAction, TrayController, TrayEntry, TrayError,
+    TrayHandle, TrayOutcome,
 };
 
 /// Programmable clipboard backend for tests.
@@ -520,6 +521,15 @@ impl SettingsNavigator for FakeSettingsNavigator {
 pub struct FakeApplicationMetadataProvider {
     queued: Mutex<Vec<Result<Option<ApplicationMetadata>, ApplicationMetadataError>>>,
     calls: Mutex<Vec<String>>,
+    /// Strategy the next scripted lookup should report back through
+    /// [`ApplicationMetadataProvider::last_match_strategy`]. Tests
+    /// queue a strategy alongside every lookup outcome so the
+    /// diagnostic sink can confirm the contract end-to-end.
+    strategy_queue: Mutex<Vec<MatchStrategy>>,
+    /// Icon snapshot the next scripted lookup should report. Mirrors
+    /// the [`MatchStrategy`] queue above; the diagnostic sink reads
+    /// the value after every `lookup`.
+    icon_queue: Mutex<Vec<IconDiagnostics>>,
 }
 
 impl FakeApplicationMetadataProvider {
@@ -534,6 +544,22 @@ impl FakeApplicationMetadataProvider {
         response: Result<Option<ApplicationMetadata>, ApplicationMetadataError>,
     ) {
         self.queued.lock().push(response);
+    }
+
+    /// Queue the next lookup outcome together with the strategy and
+    /// icon snapshot the diagnostic sink should observe. The
+    /// defaults ([`MatchStrategy::None`] and the empty
+    /// [`IconDiagnostics`]) preserve the pre-extension behaviour when
+    /// a test does not care about the diagnostic.
+    pub fn push_lookup_with_diagnostics(
+        &self,
+        response: Result<Option<ApplicationMetadata>, ApplicationMetadataError>,
+        strategy: MatchStrategy,
+        icon: IconDiagnostics,
+    ) {
+        self.queued.lock().push(response);
+        self.strategy_queue.lock().push(strategy);
+        self.icon_queue.lock().push(icon);
     }
 
     /// Identifiers passed to `lookup`, in invocation order.
@@ -553,5 +579,16 @@ impl ApplicationMetadataProvider for FakeApplicationMetadataProvider {
 
     fn name(&self) -> &'static str {
         "fake"
+    }
+
+    fn last_match_strategy(&self) -> MatchStrategy {
+        self.strategy_queue
+            .lock()
+            .pop()
+            .unwrap_or(MatchStrategy::None)
+    }
+
+    fn last_icon_diagnostics(&self) -> IconDiagnostics {
+        self.icon_queue.lock().pop().unwrap_or_default()
     }
 }

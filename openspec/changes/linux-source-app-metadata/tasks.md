@@ -878,3 +878,129 @@ no deben marcarse por inferencia desde macOS ni desde tests sin display.
   política "Cambio publicado + parche funcional" se
   refleja sólo en este `tasks.md`, en los manifests y en
   el código.
+
+## 15. Instrumentación opt-in de captura (`CLIPVAULT_DEBUG_CAPTURE=1`)
+
+- [x] 15.1 **Trait `CaptureDebugSink` y snapshots metadata-only.**
+  `crates/clipvault-core/src/capture_diagnostic.rs` define
+  `EnvironmentSnapshot`, `AttemptSnapshot`, `ClipboardSnapshot`,
+  `ProbeSnapshot`, `CacheSnapshot`, `GateSnapshot`,
+  `MetadataSnapshot`, `PersistenceSnapshot` y `OutcomeSnapshot`
+  como structs serializables. Cada campo textual expone sólo
+  presencia / bytes / mime; nunca el contenido del portapapeles.
+
+- [x] 15.2 **Correlation id monotónico.** `CorrelationId`
+  (`u64`, `#[serde(transparent)]`) emitido por
+  `CorrelationIdAllocator` (`AtomicU64` monotónico por proceso).
+  `CorrelationId::ZERO` es el sentinela para "no asignado" usado
+  por los tests que llaman directo al trait.
+
+- [x] 15.3 **`CaptureDebugSinkHandle::from_predicate`** + sink
+  por defecto (`TracingCaptureDebugSink`) + sink de tests
+  (`RecordingCaptureDebugSink`). El handle se construye una vez en
+  `AppBootstrap::finish`: si no se inyecta, se construye
+  `from_env()` y lee `CLIPVAULT_DEBUG_CAPTURE` exactamente una vez.
+  El `EnvAwareSink` cortocircuita cada evento cuando el flag
+  está desactivado, así el camino caliente nunca construye
+  snapshots.
+
+- [x] 15.4 **Cableado en `AppContext`.** Nuevo campo
+  `capture_debug: CaptureDebugSinkHandle` (checo: barato de
+  clonar, vive junto a `cached_active_app` y
+  `active_app_diagnostics`). Nuevo accesor
+  `AppContext::capture_debug()` y helpers
+  `environment_snapshot_emitted()` /
+  `mark_environment_snapshot_emitted()` que el watcher usa para
+  emitir el snapshot de plataforma una sola vez por proceso.
+
+- [x] 15.5 **`CaptureWatcher::tick(context, source_app, origin)`.**
+  El watcher acepta un nuevo parámetro `AttemptOrigin`
+  (`BackgroundLoop` o `ManualTick`). El thread del loop y la
+  bandera `shared_watcher_used` se reportan en cada
+  `attempt_start`. El correlation id se asigna una vez por tick y
+  se propaga por `record_clipboard_payload_with_correlation` y
+  `enrich_metadata_with_correlation` para que todos los eventos
+  de un mismo intento lleven el mismo identificador.
+
+- [x] 15.6 **`record_clipboard_payload_with_correlation`.**
+  Evalúa el privacy gate, emite `privacy_gate` y `cache_state`,
+  persiste y emite `persistence`. Mantenemos un overload
+  `record_clipboard_payload` de 3 argumentos que delega con
+  `correlation_id = None` para que los tests pre-existentes
+  compilen sin cambios estructurales.
+
+- [x] 15.7 **`ApplicationMetadataProvider::last_match_strategy` /
+  `last_icon_diagnostics`.** Extensiones del trait con defaults
+  seguros. El `LinuxApplicationMetadataProvider` actualiza el
+  estado interno en cada lookup y la macOS provider hace lo
+  propio. El sink de producción emite el evento
+  `metadata_provider` con `strategy`, `display_name_resolved`,
+  `icon_declared`, `icon_resolved`, `png_validated`,
+  `icon_persisted`, `icon_bytes`, `icon_dimensions` y
+  `error_kind`.
+
+- [x] 15.8 **Parser de IHDR para `icon_dimensions`.** Helper
+  `png_header_dimensions` que decodifica width / height del
+  chunk `IHDR` en big-endian (alineado con la cabecera PNG canónica).
+  Se invoca en `persist_icon` antes de renombrar el temporal para
+  que el snapshot refleje las dimensiones reales.
+
+- [x] 15.9 **Privacidad.** `assert_no_forbidden_substrings`
+  itera una lista cerrada de marcadores sensibles
+  (`/Users/`, `/home/`, `/tmp/.clipvault`, `asset_ref`,
+  `secret-text`, `password=hunter2`, `Bearer eyJ`, hashes,
+  `.desktop`, `secret-window-title`, …) y falla el test si
+  cualquiera aparece. La redacción existente sigue activa para
+  los mensajes de error. El test
+  `json_render_does_not_include_clipboard_payload` valida que el
+  contenido nunca llega al JSON del sink.
+
+- [x] 15.10 **Tests obligatorios.** 31 tests pasan en
+  `capture_diagnostic::tests` y
+  `capture_diagnostic::capture_pipeline_tests`. Cubre:
+  `disabled_sink_does_not_emit_any_event`,
+  `enabled_sink_emits_attempt_clipboard_and_outcome_for_text_capture`,
+  `correlation_id_groups_every_event_of_a_single_attempt`,
+  `disabled_sink_still_persists_capture`,
+  `empty_clipboard_records_ignored_outcome`,
+  `duplicate_capture_records_outcome_without_persisting`,
+  `clipboard_failure_records_failed_outcome_with_metadata_only_kind`,
+  `cache_unavailable_records_unavailable_active_app_backend`,
+  `metadata_provider_failure_does_not_convert_capture_to_failed`,
+  `blacklisted_identifier_does_not_persist_capture`,
+  `allowed_identifier_persists_source_app`,
+  `environment_snapshot_records_metadata_only_fields`,
+  `metadata_provider_records_strategy_and_icon_diagnostics`,
+  `persistence_failure_records_typed_error_kind`,
+  `pipeline_emits_every_event_in_documented_order`,
+  `json_render_does_not_include_clipboard_payload`.
+
+- [x] 15.11 **Version bump.** `Cargo.toml`,
+  `Cargo.lock`, `app/tauri/src-tauri/tauri.conf.json`,
+  `app/tauri/frontend/package.json` y
+  `app/tauri/frontend/package-lock.json` se sincronizan a
+  `0.0.5`. `projects.md` documenta el bump 0.0.4 → 0.0.5 con
+  la regla "cada implementación funcional completa incrementa
+  sólo el patch". `AboutModal.svelte` sigue leyendo
+  `diagnostics.version` (no se hardcodea el literal).
+
+- [x] 15.12 **Verificación ejecutada desde el host macOS.**
+  `cargo fmt --all -- --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace`,
+  `cargo check -p clipvault-platform --features linux-x11
+  --target x86_64-unknown-linux-gnu --tests` pasan. Los tests del
+  nuevo módulo (`capture_diagnostic`) y de los tests
+  pre-existentes (`watcher`, `history`, `privacy`) confirman el
+  contrato end-to-end. La validación manual en Ubuntu GNOME
+  Wayland + XWayland queda como tarea del usuario.
+
+- [x] 15.13 **Limitación documentada.** El host actual es
+  macOS; las pruebas de Ubuntu X11, GNOME Wayland con app
+  XWayland y GNOME Wayland con app nativa requieren una sesión
+  real y quedan como tareas del usuario. La matriz
+  Wayland/X11/XWayland funcional no se modifica — la
+  instrumentación es estrictamente opt-in.
+
+- [x] 15.14 **Sin sync, archive, commit ni push.** La
+  política "Cambio publicado + parche funcional" se refleja
+  sólo en este `tasks.md`, en los manifests y en el código.

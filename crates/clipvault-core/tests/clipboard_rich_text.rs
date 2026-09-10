@@ -1033,7 +1033,11 @@ fn watcher_captures_rich_payload_through_the_same_pipeline() {
     h.clipboard.push_read(Ok(Some("plain".into())));
     h.clipboard
         .push_rich_read(Ok(Some(rich_text(Some("<b>watched</b>"), None))));
-    match watcher.tick(&h.context, Some("com.apple.TextEdit")) {
+    match watcher.tick(
+        &h.context,
+        Some("com.apple.TextEdit"),
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    ) {
         WatchTickOutcome::Captured(HistoryOutcome::Stored { id }) => {
             let row = record(&h, id);
             assert!(row.has_rich_text());
@@ -1226,7 +1230,11 @@ fn watcher_never_fails_on_unavailable_rich_leg() {
     // returns the scripted plain text. The watcher must observe a
     // successful capture, not a `Failed`.
     backend.push_plain(Ok(Some("plain capture".to_string())));
-    let outcome = watcher.tick(&context, Some("com.apple.TextEdit"));
+    let outcome = watcher.tick(
+        &context,
+        Some("com.apple.TextEdit"),
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     match outcome {
         WatchTickOutcome::Captured(HistoryOutcome::Stored { id }) => {
             let mut db = context.database().lock();
@@ -1253,7 +1261,11 @@ fn watcher_never_fails_on_unavailable_rich_leg() {
     // text the same way), proving the capture loop does not
     // regress to `Failed` for repeated ticks.
     backend.push_plain(Ok(Some("plain capture".to_string())));
-    let outcome = watcher.tick(&context, Some("com.apple.TextEdit"));
+    let outcome = watcher.tick(
+        &context,
+        Some("com.apple.TextEdit"),
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     assert_eq!(outcome, WatchTickOutcome::Unchanged);
 }
 
@@ -1304,7 +1316,11 @@ fn watcher_produces_ignored_when_rich_unavailable_and_plain_empty() {
     );
     backend.push_plain(Ok(None));
 
-    let outcome = watcher.tick(&context, Some("com.apple.TextEdit"));
+    let outcome = watcher.tick(
+        &context,
+        Some("com.apple.TextEdit"),
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     // Rich adapter returns `Unavailable` (the post-fix thread
     // limitation outcome), plain adapter returns `Ok(None)`. The
     // priority helper collapses both soft misses into `Ok(None)`,
@@ -1446,7 +1462,11 @@ fn metadata_enrichment_warning_does_not_convert_capture_to_failed() {
         Arc::clone(&clipboard) as Arc<dyn ClipboardBackend>,
         std::time::Duration::from_millis(10),
     );
-    let outcome = watcher.tick(&context, Some("com.apple.TextEdit"));
+    let outcome = watcher.tick(
+        &context,
+        Some("com.apple.TextEdit"),
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     match outcome {
         WatchTickOutcome::Captured(HistoryOutcome::Stored { id }) => {
             let mut db = context.database().lock();

@@ -189,3 +189,105 @@ frontend attributes.
 - **WHEN** native Wayland metadata is unavailable
 - **THEN** the UI describes it as an unsupported/ unavailable capability
 - **AND** it does not present the condition as a user permission problem
+
+### Requirement: Capture debug instrumentation
+
+The core SHALL expose an opt-in, metadata-only capture-debug
+instrumentation the operator can enable with the
+`CLIPVAULT_DEBUG_CAPTURE` environment variable. The default value
+SHALL be `0` (disabled). The instrumentation SHALL be inert when
+disabled — no allocation, no event emission, no observable change
+in the capture pipeline. The instrumentation SHALL be
+strictly metadata-only: clipboard content, snippets, hashes,
+`asset_ref` values, full window titles, environment-variable values,
+absolute filesystem paths and any other user payload SHALL NOT
+appear in any captured event. A diagnostic event MUST NOT convert
+a valid capture into a `Failed` outcome. Each capture attempt
+SHALL carry a monotonic, process-scoped numeric `correlation_id`
+that ties every emitted event of the same attempt together. The
+debug surface SHALL be gated on the production paths
+(`PrivacyGate`, `TextHistoryService::record_clipboard_payload`,
+`ApplicationMetadataProvider::lookup`, persistence write, outcome)
+so a debug sink records the documented chain
+`attempt_start → clipboard_read → cache_state → privacy_gate →
+metadata_provider → persistence → outcome`. The pre-existing
+redaction layer SHALL remain active on every emitted error message.
+
+#### Scenario: Disabled by default
+
+- **WHEN** `CLIPVAULT_DEBUG_CAPTURE` is unset or set to anything
+  other than the literal string `"1"`
+- **THEN** the capture pipeline does not allocate a debug sink
+- **AND** no debug event is emitted
+- **AND** the capture outcome matches the pre-instrumentation
+  behaviour bit-for-bit
+
+#### Scenario: Enabled through the environment variable
+
+- **WHEN** `CLIPVAULT_DEBUG_CAPTURE=1` is set at startup
+- **THEN** the bootstrap installs a debug sink that emits the
+  documented events for every capture attempt
+- **AND** every event is metadata-only (no content, no paths,
+  no secrets, no full window titles)
+
+#### Scenario: Per-attempt correlation id
+
+- **WHEN** the sink observes two consecutive capture attempts
+- **THEN** the first attempt's events all share `correlation_id = 1`
+- **AND** the second attempt's events all share `correlation_id = 2`
+- **AND** no event is emitted without a correlation id when the
+  sink is enabled
+
+#### Scenario: Environment snapshot fires once per process
+
+- **WHEN** the first capture tick runs
+- **THEN** the environment snapshot event fires exactly once
+- **AND** subsequent ticks do not re-emit it
+
+#### Scenario: Blacklisted source
+
+- **WHEN** the privacy gate evaluates a blacklisted identifier
+- **THEN** the persistence event fires with `outcome = "ignored"`
+  and no row is created
+- **AND** the gate decision label reflects the `blacklisted`
+  reason
+
+#### Scenario: Cache unavailable
+
+- **WHEN** the active-app probe returns `Err(Unavailable)`
+- **THEN** the cache snapshot reports `available = false`
+- **AND** the outcome records `cache_populated = false`
+- **AND** the capture still succeeds with `source_app = NULL`
+
+#### Scenario: Metadata provider failure
+
+- **WHEN** the application-metadata provider returns an error
+- **THEN** the metadata snapshot fires with `error_kind` set
+- **AND** the persisted row carries `source_app` and
+  `source_app_name = NULL`
+- **AND** the capture outcome stays `Stored` (not `Failed`)
+
+#### Scenario: Persistence failure
+
+- **WHEN** the SQLite write fails
+- **THEN** the persistence snapshot fires with `outcome = "failed"`
+  and a typed `error_kind`
+- **AND** the outcome event reports `row_persisted = false`
+
+#### Scenario: Debug sink serialises only metadata
+
+- **WHEN** the rendering helper turns a recorded event stream
+  into JSON
+- **THEN** no substring matching `/Users/`, `/home/`,
+  `/tmp/.clipvault`, `asset_ref`, `secret-text`,
+  `password=hunter2`, `Bearer eyJ`, `.desktop`,
+  `secret-window-title`, `WAYLAND_DISPLAY=` or `DISPLAY=` appears
+  in the serialised payload
+
+#### Scenario: Production paths are observable without race
+
+- **WHEN** concurrent tests exercise the capture flow
+- **THEN** each test constructs a deterministic debug sink through
+  `CaptureDebugSinkHandle::from_predicate` rather than the global
+  environment
+- **AND** no test relies on `std::env::var("CLIPVAULT_DEBUG_CAPTURE")`

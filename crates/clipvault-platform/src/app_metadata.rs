@@ -58,6 +58,74 @@ pub enum ApplicationMetadataError {
     Backend { details: String },
 }
 
+/// Strategy the provider used to match the most recent
+/// [`ApplicationMetadataProvider::lookup`] call. The values are the
+/// stable, snake_case identifiers the
+/// `linux-source-app-metadata` capture diagnostic reads so the user
+/// can confirm whether the resolver hit
+/// [`MatchStrategy::StartupWmClass`],
+/// [`MatchStrategy::XGnomeWmClass`] or the file-name fallback.
+///
+/// Renaming a variant is a breaking change for the diagnostic; tests
+/// pin the strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchStrategy {
+    /// No lookup has been performed yet, or the lookup produced no
+    /// match. The default for adapters that do not track the field.
+    None,
+    /// The entry matched because its `StartupWMClass=` key equals the
+    /// identifier.
+    StartupWmClass,
+    /// The entry matched because its `X-GNOME-WMClass=` key equals the
+    /// identifier.
+    XGnomeWmClass,
+    /// The entry matched because the `.desktop` file basename (without
+    /// the extension) equals the identifier.
+    DesktopFilename,
+}
+
+impl MatchStrategy {
+    /// Stable snake_case identifier consumed by the diagnostic sink and
+    /// the front-end label. Renaming the strings is a breaking change.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MatchStrategy::None => "none",
+            MatchStrategy::StartupWmClass => "startup_wm_class",
+            MatchStrategy::XGnomeWmClass => "x_gnome_wm_class",
+            MatchStrategy::DesktopFilename => "desktop_filename",
+        }
+    }
+}
+
+/// Metadata the icon writer reported on the most recent successful
+/// lookup. The fields are metadata-only — never the icon bytes or an
+/// absolute path. The default is the "nothing happened yet" snapshot
+/// adapters that do not track icons return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IconDiagnostics {
+    /// `true` when the matched `.desktop` entry declared an `Icon=`
+    /// key the resolver could interpret (either an absolute PNG path
+    /// under an allowed root or a theme-name lookup).
+    pub declared: bool,
+    /// `true` when the resolver produced a canonical PNG path on
+    /// disk. `false` when the icon was missing, escaped the allowed
+    /// roots or failed the format check.
+    pub resolved: bool,
+    /// `true` when the PNG signature the resolver expected matched
+    /// the bytes on disk. Mirrors the
+    /// `read_validated_png` validator the Linux provider runs.
+    pub png_validated: bool,
+    /// `true` when the writer successfully renamed a temporary file
+    /// over the destination.
+    pub persisted: bool,
+    /// Byte length of the validated PNG payload. `None` when no
+    /// payload reached the writer.
+    pub bytes: Option<usize>,
+    /// IHDR dimensions the validator parsed from the PNG header.
+    /// `None` when the payload never reached the validator.
+    pub dimensions: Option<(u32, u32)>,
+}
+
 impl ApplicationMetadataError {
     pub fn backend(details: impl fmt::Display) -> Self {
         ApplicationMetadataError::Backend {
@@ -87,6 +155,26 @@ pub trait ApplicationMetadataProvider: Send + Sync {
 
     /// Stable identifier for diagnostics.
     fn name(&self) -> &'static str;
+
+    /// Strategy the implementation used to match the most recent
+    /// [`Self::lookup`] call. Defaults to [`MatchStrategy::None`] for
+    /// adapters that do not track the field — every production
+    /// provider overrides this helper so the
+    /// `linux-source-app-metadata` capture diagnostic can confirm the
+    /// `_NET_ACTIVE_WINDOW → WM_CLASS → source identifier` chain on
+    /// every iteration. Reading the value MUST NOT mutate provider
+    /// state.
+    fn last_match_strategy(&self) -> MatchStrategy {
+        MatchStrategy::None
+    }
+
+    /// Metadata the icon writer reported on the most recent
+    /// [`Self::lookup`] call. Defaults to the empty snapshot for
+    /// adapters that do not track icons (the macOS picker reads the
+    /// field so the diagnostic can confirm the persistence step ran).
+    fn last_icon_diagnostics(&self) -> IconDiagnostics {
+        IconDiagnostics::default()
+    }
 }
 
 /// No-op provider. The capture pipeline installs this provider when
@@ -105,6 +193,10 @@ impl ApplicationMetadataProvider for NoopApplicationMetadataProvider {
 
     fn name(&self) -> &'static str {
         "noop"
+    }
+
+    fn last_match_strategy(&self) -> MatchStrategy {
+        MatchStrategy::None
     }
 }
 

@@ -136,6 +136,15 @@ impl PrivacyGate {
         self.matcher.replace_ignored(ignored);
     }
 
+    /// Whether the current matcher carries a non-empty blacklist
+    /// snapshot. Used by the opt-in capture-debug sink so the log
+    /// line can confirm whether a `Discard` decision came from a
+    /// populated matcher or from an empty one (the latter collapses
+    /// to the "unknown source → Allow" branch the contract pins).
+    pub fn blacklist_consulted(&self) -> bool {
+        !self.matcher.ignored().is_empty()
+    }
+
     /// Evaluate a candidate capture event. The caller MAY pass a
     /// pre-resolved `source_identifier`; when `None` the gate will ask
     /// the platform probe.

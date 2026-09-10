@@ -8,6 +8,7 @@
 
 pub mod active_app_diagnostics;
 pub mod bootstrap;
+pub mod capture_diagnostic;
 pub mod clipboard;
 pub mod clipboard_assets;
 pub mod clock;
@@ -41,6 +42,14 @@ pub use active_app_diagnostics::{
 };
 pub use bootstrap::{
     active_app_backend_kind, AppBootstrap, AppContext, BootstrapError, BootstrapOptions,
+};
+pub use capture_diagnostic::{
+    active_app_backend_kind_label, env_capture_debug_enabled, probe_stage_label, AttemptOrigin,
+    AttemptSnapshot, CacheCounters, CacheSnapshot, CaptureDebugSink, CaptureDebugSinkHandle,
+    ClipboardSnapshot, CorrelationId, CorrelationIdAllocator, EnvironmentSnapshot, GateSnapshot,
+    MetadataSnapshot, NullCaptureDebugSink, OutcomeSnapshot, PersistenceSnapshot, ProbeSnapshot,
+    RecordedEvent, RecordingCaptureDebugSink, TracingCaptureDebugSink, CAPTURE_DEBUG_TARGET,
+    CLIPVAULT_DEBUG_CAPTURE_ENV,
 };
 pub use clipboard::{Clipboard, ClipboardError, FakeClipboard};
 pub use clipboard_assets::{

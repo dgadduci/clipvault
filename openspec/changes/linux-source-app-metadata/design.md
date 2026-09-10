@@ -248,3 +248,153 @@ openspec validate linux-source-app-metadata --strict --type change
 
 Las pruebas reales de Ubuntu X11 y GNOME Wayland quedan como tareas manuales
 y no pueden marcarse por inferencia desde macOS.
+
+## Instrumentación opt-in de captura (`CLIPVAULT_DEBUG_CAPTURE=1`)
+
+### Principio
+
+El usuario necesita confirmar en producción por qué `_NET_ACTIVE_WINDOW`
+se decodifica correctamente pero `WM_CLASS` queda vacío en Ubuntu GNOME
+Wayland + XWayland. Para responderlo sin pedir al usuario que adjunte
+logs de producción con datos sensibles, el cambio envía un sink de
+diagnóstico estrictamente metadata-only que el operador activa con
+`CLIPVAULT_DEBUG_CAPTURE=1`.
+
+El sink vive en `crates/clipvault-core/src/capture_diagnostic.rs` y
+expone un trait `CaptureDebugSink` con un evento por fase del pipeline.
+La instrumentación está desacada por la matriz funcional: la rama
+Wayland/X11/XWayland no se modifica, sólo se hace observable.
+
+### Trait y snapshots
+
+```rust
+pub trait CaptureDebugSink: Send + Sync {
+    fn is_enabled(&self) -> bool;
+    fn environment(&self, id: CorrelationId, snapshot: EnvironmentSnapshot);
+    fn attempt_start(&self, id: CorrelationId, snapshot: AttemptSnapshot);
+    fn clipboard_read(&self, id: CorrelationId, snapshot: ClipboardSnapshot);
+    fn active_app_probe(&self, id: CorrelationId, snapshot: ProbeSnapshot);
+    fn cache_state(&self, id: CorrelationId, snapshot: CacheSnapshot);
+    fn privacy_gate(&self, id: CorrelationId, snapshot: GateSnapshot);
+    fn metadata_provider(&self, id: CorrelationId, snapshot: MetadataSnapshot);
+    fn persistence(&self, id: CorrelationId, snapshot: PersistenceSnapshot);
+    fn outcome(&self, id: CorrelationId, snapshot: OutcomeSnapshot);
+}
+```
+
+Cada snapshot es metadata-only. Los campos textuales exponen `kind` /
+`bytes` / `mime` / `disponible: bool`, nunca el contenido. Los
+identificadores (`source_app`) sólo aparecen cuando la cache los tiene
+y son siempre la versión normalizada (`WM_CLASS` class segment).
+
+El correlation id es un `u64` monótono por proceso, asignado por el
+`CorrelationIdAllocator` que el `AppContext` mantiene. Nunca se
+deriva de contenido del portapapeles.
+
+### Sink de producción
+
+`TracingCaptureDebugSink` emite cada evento como `tracing::debug!` con
+campos estructurados (sin mensajes libres). Los identificadores del
+log stream se mantienen estables: `target = "clipvault_capture_debug"`
+y los mensajes (`"capture debug attempt start"`,
+`"capture debug clipboard read"`, …) son constantes.
+
+### Sink de tests
+
+`RecordingCaptureDebugSink` acumula `RecordedEvent` para que los tests
+del core inspeccionen el flujo sin tocar `tracing::Subscriber` ni
+variables de entorno globales. La función
+`CaptureDebugSinkHandle::from_predicate` permite inyectar un predicado
+sincrónico en lugar del closure que envuelve `std::env::var`, así
+los tests concurrentes no compiten por la lectura del entorno.
+
+### Cableado
+
+`CaptureDebugSinkHandle` se construye en
+`AppBootstrap::AppBootstrap::finish` exactamente una vez:
+
+```rust
+capture_debug: self
+    .options
+    .capture_debug_sink
+    .unwrap_or_else(CaptureDebugSinkHandle::enabled),
+```
+
+`CaptureDebugSinkHandle::enabled()` lee `CLIPVAULT_DEBUG_CAPTURE` en
+ese mismo momento y construye un `EnvAwareSink` que cortocircuita
+todas las llamadas cuando el flag está desactivado.
+
+`CaptureWatcher::tick` recibe el `origin: AttemptOrigin` (background
+loop o manual tick) y un `correlation_id: Option<CorrelationId>`
+que propaga a `TextHistoryService::record_clipboard_payload_with_correlation`.
+Ah se emite el evento `privacy_gate`, el `cache_state` (que
+relee `ActiveAppDiagnostics`) y, después de `commit`, el evento
+`persistence`. `TextHistoryService::enrich_metadata_with_correlation`
+emite el `metadata_provider` con la `MatchStrategy` y la
+`IconDiagnostics` que el provider expone. El evento terminal
+`outcome` se emite al final del tick para que el operador tenga
+una línea por intento.
+
+### Privacidad
+
+Los eventos se redactan antes de salir al log:
+
+- Nunca `plain_text`, `html`, `rtf`, `rgba`, `original_png`,
+  `content_hash`, `asset_ref`, `icon_ref` (valor), `path`,
+  `home_dir`, `data_dir`, `WAYLAND_DISPLAY=…`, `DISPLAY=…`,
+  títulos completos de ventana, secretos.
+- Las rutas del filesystem sólo aparecen como flags booleanos
+  (`display_env_present`, `wayland_display_env_present`).
+- `display_name_resolved` puede aparecer (es el nombre visible de
+  la aplicación origen, no el contenido).
+- `correlation_id` es numérico, nunca derivado de contenido.
+- Los `error_kind` se reducen a una categoría tipada
+  (`"backend"`, `"empty"`, `"unavailable"`, `"invalid_image"`,
+  `"clipboard"`, `"image_normalize"`, `"asset_store"`,
+  `"asset_store_unavailable"`, `"persistence"`).
+
+`assert_no_forbidden_substrings` recorre el JSON del sink y falla
+si encuentra uno de los marcadores sensibles: rutas absolutas,
+hashes, `asset_ref`, `secret-text`, `password=hunter2`, `Bearer`,
+`/Users`, `/home`, `/tmp/.clipvault`, etc.
+
+### Tests obligatorios
+
+Los tests viven en
+`crates/clipvault-core/src/capture_diagnostic.rs::capture_pipeline_tests`
+y cubren los escenarios del usuario:
+
+- flujo completo `_NET_ACTIVE_WINDOW format=32 → WM_CLASS → dev.warp.Warp`
+  (mediante el decoder `parse_active_window_size` y los tests
+  determinísticos pre-existentes en `linux_x11_active_app.rs`).
+- decodificación del window id completo, no sólo el primer byte
+  (`parse_active_window_id`).
+- X11 puro, GNOME Wayland + aplicación XWayland, GNOME Wayland
+  + aplicación Wayland nativa, DISPLAY ausente, active-app probe
+  unavailable — todos modelados por el `ScriptedProbe` con sus
+  respuestas controladas.
+- caché vacía, caché poblada, origen bloqueado por blacklist
+  (inserción previa al bootstrap para que el matcher vea la lista),
+  origen permitido.
+- captura de texto, captura de imagen (con el fake habilitado),
+  captura duplicada.
+- fallo del clipboard, fallo del metadata provider (no convierte la
+  captura en `Failed`), fallo de persistencia.
+- correlación de todos los eventos de un mismo intento
+  (`correlation_id_groups_every_event_of_a_single_attempt`).
+- logs desactivados por defecto
+  (`disabled_sink_does_not_emit_any_event`,
+  `disabled_sink_still_persists_capture`).
+- logs activados con `CLIPVAULT_DEBUG_CAPTURE=1`
+  (`enabled_sink_emits_attempt_clipboard_and_outcome_for_text_capture`).
+- ausencia de contenido, hashes, asset_ref, bytes, rutas absolutas y
+  títulos en todos los logs (`assert_no_forbidden_substrings`).
+
+### Garantías arquitectónicas
+
+- No se crea un segundo `CaptureWatcher`.
+- No se duplica la lógica del probe ni del watcher.
+- El contrato `source_app` no cambia.
+- No se fabrican identificadores para aplicaciones Wayland nativas.
+- `AboutModal.svelte` sigue leyendo la versión de
+  `diagnostics.version` (no se hardcodea el literal `v0.0.5`).

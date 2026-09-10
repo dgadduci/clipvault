@@ -902,7 +902,11 @@ pub(crate) fn capture_loop_tick(
 ) -> WatchTickOutcome {
     refresh_active_application_cache_for_loop_tick(context);
     let source_app = resolved_source_identifier(context);
-    let outcome = watcher.tick(context, source_app.as_deref());
+    let outcome = watcher.tick(
+        context,
+        source_app.as_deref(),
+        clipvault_core::AttemptOrigin::BackgroundLoop,
+    );
     log_capture_outcome(&outcome);
     outcome
 }
@@ -2994,7 +2998,11 @@ mod tests {
         context.refresh_active_application().expect("refresh");
         let source_app = resolved_source_identifier(&context);
         let watcher = build_watcher_for_context(&context);
-        let outcome = watcher.tick(&context, source_app.as_deref());
+        let outcome = watcher.tick(
+            &context,
+            source_app.as_deref(),
+            clipvault_core::AttemptOrigin::BackgroundLoop,
+        );
         assert!(
             matches!(
                 outcome,
@@ -3083,7 +3091,11 @@ mod tests {
         context.refresh_active_application().expect("refresh");
         let source_app = resolved_source_identifier(&context);
         let watcher = build_watcher_for_context(&context);
-        let outcome = watcher.tick(&context, source_app.as_deref());
+        let outcome = watcher.tick(
+            &context,
+            source_app.as_deref(),
+            clipvault_core::AttemptOrigin::BackgroundLoop,
+        );
         assert!(matches!(
             outcome,
             clipvault_core::WatchTickOutcome::Captured(
@@ -3162,7 +3174,11 @@ mod tests {
         context.refresh_active_application().expect("refresh");
         let source_app = resolved_source_identifier(&context);
         let watcher = build_watcher_for_context(&context);
-        let outcome = watcher.tick(&context, source_app.as_deref());
+        let outcome = watcher.tick(
+            &context,
+            source_app.as_deref(),
+            clipvault_core::AttemptOrigin::BackgroundLoop,
+        );
         assert!(matches!(
             outcome,
             clipvault_core::WatchTickOutcome::Captured(
@@ -3228,7 +3244,11 @@ mod tests {
         context.refresh_active_application().expect("refresh");
         let source_app = resolved_source_identifier(&context);
         let watcher = build_watcher_for_context(&context);
-        let _ = watcher.tick(&context, source_app.as_deref());
+        let _ = watcher.tick(
+            &context,
+            source_app.as_deref(),
+            clipvault_core::AttemptOrigin::BackgroundLoop,
+        );
         let diag = context.active_app_diagnostics();
         assert_eq!(
             diag.last_probe_stage,
@@ -3281,7 +3301,11 @@ mod tests {
         context.refresh_active_application().expect("refresh");
         let source_app = resolved_source_identifier(&context);
         let watcher = build_watcher_for_context(&context);
-        let _ = watcher.tick(&context, source_app.as_deref());
+        let _ = watcher.tick(
+            &context,
+            source_app.as_deref(),
+            clipvault_core::AttemptOrigin::BackgroundLoop,
+        );
         let diag = context.active_app_diagnostics();
         assert!(
             diag.refresh_attempts >= 1,

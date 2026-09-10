@@ -50,9 +50,12 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use parking_lot::Mutex;
+
 use crate::app_assets::APPLICATION_ICONS_DIR;
 use crate::app_metadata::{
     icon_ref_for, ApplicationMetadata, ApplicationMetadataError, ApplicationMetadataProvider,
+    IconDiagnostics, MatchStrategy,
 };
 
 /// Linux-backed application-metadata provider. Resolves a stable
@@ -84,6 +87,18 @@ pub struct LinuxApplicationMetadataProvider {
     /// so the unit suite can drive the parser without standing up a
     /// real `.desktop` installation.
     fs: std::sync::Arc<dyn DesktopFilesystem>,
+    /// Strategy the most recent [`Self::lookup`] used to pick the
+    /// candidate entry. Exposed through
+    /// [`ApplicationMetadataProvider::last_match_strategy`] so the
+    /// `linux-source-app-metadata` capture diagnostic can confirm
+    /// whether the resolver hit [`MatchStrategy::StartupWmClass`],
+    /// [`MatchStrategy::XGnomeWmClass`] or the file-name fallback.
+    last_strategy: Mutex<MatchStrategy>,
+    /// Snapshot the icon writer reported on the most recent
+    /// successful lookup. Exposed through
+    /// [`ApplicationMetadataProvider::last_icon_diagnostics`] so the
+    /// capture diagnostic can confirm the persistence step ran.
+    last_icon: Mutex<IconDiagnostics>,
 }
 
 impl LinuxApplicationMetadataProvider {
@@ -112,6 +127,8 @@ impl LinuxApplicationMetadataProvider {
             icon_roots,
             icon_sizes: &[128, 64, 256, 48],
             fs,
+            last_strategy: Mutex::new(MatchStrategy::None),
+            last_icon: Mutex::new(IconDiagnostics::default()),
         }
     }
 }
@@ -123,15 +140,31 @@ impl ApplicationMetadataProvider for LinuxApplicationMetadataProvider {
     ) -> Result<Option<ApplicationMetadata>, ApplicationMetadataError> {
         let trimmed = identifier.trim();
         if trimmed.is_empty() {
+            // Reset the diagnostic slots so a subsequent non-empty
+            // identifier never reads stale strategy/icon state from
+            // a previous lookup.
+            self.record_strategy(MatchStrategy::None);
+            self.record_icon(IconDiagnostics::default());
             return Ok(None);
         }
-        let candidate = match self.find_entry(trimmed) {
-            Some(entry) => entry,
-            None => return Ok(None),
+        let needle = trimmed.to_ascii_lowercase();
+        let candidate = match self.find_entry_with_strategy(&needle) {
+            Some((priority, entry)) => {
+                self.record_strategy(match_priority_to_strategy(priority));
+                entry
+            }
+            None => {
+                self.record_strategy(MatchStrategy::None);
+                self.record_icon(IconDiagnostics::default());
+                return Ok(None);
+            }
         };
         let display_name = match resolve_display_name(&candidate, &current_locale_candidates()) {
             Some(name) if !name.is_empty() => name,
-            _ => return Ok(None),
+            _ => {
+                self.record_icon(IconDiagnostics::default());
+                return Ok(None);
+            }
         };
         let icon_ref = self.persist_icon(&candidate, trimmed);
         Ok(Some(ApplicationMetadata {
@@ -142,6 +175,41 @@ impl ApplicationMetadataProvider for LinuxApplicationMetadataProvider {
 
     fn name(&self) -> &'static str {
         "linux_app_metadata"
+    }
+
+    fn last_match_strategy(&self) -> MatchStrategy {
+        *self.last_strategy.lock()
+    }
+
+    fn last_icon_diagnostics(&self) -> IconDiagnostics {
+        *self.last_icon.lock()
+    }
+}
+
+impl LinuxApplicationMetadataProvider {
+    /// Update the strategy slot the diagnostic sink reads. Kept
+    /// private so the only writers are the lookup paths above.
+    fn record_strategy(&self, strategy: MatchStrategy) {
+        *self.last_strategy.lock() = strategy;
+    }
+
+    /// Update the icon snapshot the diagnostic sink reads.
+    fn record_icon(&self, snapshot: IconDiagnostics) {
+        *self.last_icon.lock() = snapshot;
+    }
+}
+
+/// Translate the internal [`MatchPriority`] the resolver uses to rank
+/// candidates into the public [`MatchStrategy`] enum the diagnostic
+/// sink consumes. The mapping is part of the contract
+/// `linux-source-app-metadata` pins: every test reads back the
+/// `as_str` value to confirm the resolver landed on the priority
+/// branch the `.desktop` declared.
+fn match_priority_to_strategy(priority: MatchPriority) -> MatchStrategy {
+    match priority {
+        MatchPriority::StartupWmClass => MatchStrategy::StartupWmClass,
+        MatchPriority::GnomeWmClass => MatchStrategy::XGnomeWmClass,
+        MatchPriority::Filename => MatchStrategy::DesktopFilename,
     }
 }
 
@@ -158,18 +226,78 @@ impl LinuxApplicationMetadataProvider {
     /// missing, unparseable, points outside an allowed root or
     /// points at a path that cannot be read, the function returns
     /// `None` without touching the destination file.
+    ///
+    /// The function records every step of the icon resolution onto
+    /// the provider's `IconDiagnostics` slot so the
+    /// `linux-source-app-metadata` capture diagnostic can confirm
+    /// whether a missing icon is a missing entry, a missing file, a
+    /// malformed PNG or a writer failure.
     fn persist_icon(&self, entry: &DesktopEntry, identifier: &str) -> Option<String> {
         let icon_value = entry.icon.as_deref()?;
-        let source = self.resolve_icon_path(icon_value)?;
-        let png_bytes = read_validated_png(&source)?;
+        let source = match self.resolve_icon_path(icon_value) {
+            Some(path) => path,
+            None => {
+                self.record_icon(IconDiagnostics {
+                    declared: true,
+                    resolved: false,
+                    png_validated: false,
+                    persisted: false,
+                    bytes: None,
+                    dimensions: None,
+                });
+                return None;
+            }
+        };
+        let png_bytes = match read_validated_png(&source) {
+            Some(bytes) => bytes,
+            None => {
+                self.record_icon(IconDiagnostics {
+                    declared: true,
+                    resolved: true,
+                    png_validated: false,
+                    persisted: false,
+                    bytes: None,
+                    dimensions: None,
+                });
+                return None;
+            }
+        };
+        let dimensions = png_header_dimensions(&png_bytes);
         let target_dir = self.assets_dir.join(APPLICATION_ICONS_DIR);
-        write_icon_atomic(&target_dir, identifier, &png_bytes).ok()
+        match write_icon_atomic(&target_dir, identifier, &png_bytes) {
+            Ok(icon_ref) => {
+                self.record_icon(IconDiagnostics {
+                    declared: true,
+                    resolved: true,
+                    png_validated: true,
+                    persisted: true,
+                    bytes: Some(png_bytes.len()),
+                    dimensions,
+                });
+                Some(icon_ref)
+            }
+            Err(_) => {
+                self.record_icon(IconDiagnostics {
+                    declared: true,
+                    resolved: true,
+                    png_validated: true,
+                    persisted: false,
+                    bytes: Some(png_bytes.len()),
+                    dimensions,
+                });
+                None
+            }
+        }
     }
 
     /// Walk the configured XDG roots and return the best-matching
-    /// `DesktopEntry` for `identifier`. Returns `None` when no
-    /// unambiguous match is found.
-    fn find_entry(&self, identifier: &str) -> Option<DesktopEntry> {
+    /// `DesktopEntry` for `identifier` together with the
+    /// [`MatchPriority`] of the winning candidate. The priority is
+    /// exposed so the diagnostic sink can confirm whether the
+    /// resolver hit `StartupWMClass`, `X-GNOME-WMClass` or the
+    /// file-name fallback. Returns `None` when no unambiguous
+    /// match is found.
+    fn find_entry_with_strategy(&self, identifier: &str) -> Option<(MatchPriority, DesktopEntry)> {
         let needle = identifier.to_ascii_lowercase();
         let mut best: Option<(MatchPriority, DesktopEntry)> = None;
         for dir in &self.app_dirs {
@@ -207,7 +335,7 @@ impl LinuxApplicationMetadataProvider {
                 };
             }
         }
-        best.map(|(_, entry)| entry)
+        best
     }
 
     /// Resolve the `Icon=` value declared by an entry against the
@@ -697,6 +825,32 @@ fn looks_like_png(bytes: &[u8]) -> bool {
     bytes.len() >= SIGNATURE.len() && bytes[..SIGNATURE.len()] == SIGNATURE
 }
 
+/// Decode the IHDR width / height from the bytes the icon writer
+/// just validated. The helper honours the PNG big-endian wire
+/// format and returns `None` when the buffer is too short to
+/// carry the IHDR chunk.
+fn png_header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    // PNG layout: 8-byte signature + 4-byte length + 4-byte
+    // chunk type (`IHDR`) + 4-byte width + 4-byte height.
+    const HEADER_OFFSET: usize = 8 + 4 + 4;
+    if bytes.len() < HEADER_OFFSET + 8 {
+        return None;
+    }
+    let width = u32::from_be_bytes([
+        bytes[HEADER_OFFSET],
+        bytes[HEADER_OFFSET + 1],
+        bytes[HEADER_OFFSET + 2],
+        bytes[HEADER_OFFSET + 3],
+    ]);
+    let height = u32::from_be_bytes([
+        bytes[HEADER_OFFSET + 4],
+        bytes[HEADER_OFFSET + 5],
+        bytes[HEADER_OFFSET + 6],
+        bytes[HEADER_OFFSET + 7],
+    ]);
+    Some((width, height))
+}
+
 /// Persist `bytes` to `<dir>/<safe-id>.png` atomically: create a
 /// temporary file inside the destination directory, write the bytes,
 /// flush, sync, validate the file and rename over the destination.
@@ -1037,7 +1191,10 @@ mod tests {
         // Lookups for the basename `firefox` find both files; the
         // lexicographic tie break selects the `firefox.desktop`
         // entry.
-        let entry = provider.find_entry("firefox").expect("match");
+        let entry = provider
+            .find_entry_with_strategy("firefox")
+            .expect("match")
+            .1;
         assert!(entry.path.ends_with("firefox.desktop"));
     }
 
@@ -1053,7 +1210,7 @@ mod tests {
         );
         let provider =
             LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
-        assert!(provider.find_entry("ghost-app").is_none());
+        assert!(provider.find_entry_with_strategy("ghost-app").is_none());
     }
 
     #[test]
