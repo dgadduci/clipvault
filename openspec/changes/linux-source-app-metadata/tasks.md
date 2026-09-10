@@ -1274,3 +1274,258 @@ no deben marcarse por inferencia desde macOS ni desde tests sin display.
   política "Cambio publicado + parche funcional" se
   refleja sólo en este `tasks.md`, en los manifests y en
   el código.
+
+## 17. Parche funcional post‑publicación (iconos de Linux — `v0.0.6 → v0.0.7`)
+
+- [x] 17.1 **Causa raíz confirmada.** El usuario vuelve a
+  reportar `source_app_icon_ref = NULL` en Ubuntu GNOME
+  Wayland + XWayland (también X11 puro, también Fedora /
+  Arch / openSUSE con GNOME o KDE) incluso después del
+  parche del cfg del shell (sección 16). La inspección de
+  `crates/clipvault-platform/src/runtime/linux_app_metadata.rs`
+  confirma tres regresiones:
+
+  1. `collect_icon_root_layout()` ya devolvía los data
+     roots correctos (`/usr/share/icons`,
+     `/usr/local/share/icons`,
+     `$HOME/.local/share/icons`), pero
+     `collect_icon_dirs()` volvía a concatenar `/icons` y
+     producía rutas inexistentes como
+     `/usr/share/icons/icons/...`, saltándose el layout
+     canónico
+     `/usr/share/icons/hicolor/48x48/apps/<icon>.png` /
+     `/usr/share/icons/hicolor/scalable/apps/<icon>.svg`.
+  2. Cuando `XDG_DATA_HOME` no estaba definido,
+     `collect_application_dirs()` buscaba
+     `$HOME/applications` en lugar de
+     `$HOME/.local/share/applications`.
+  3. El resolver sólo aceptaba PNG; la mayoría de los
+     iconos distribuidos por los paquetes oficiales viven
+     como SVG, especialmente en `scalable/`.
+
+- [x] 17.2 **Refactor de raíces XDG.** Nueva función
+  `data_roots(fs)` en `linux_app_metadata.rs`:
+
+  - `XDG_DATA_HOME` si está definido; en caso contrario
+    `$HOME/.local/share`.
+  - Cada ruta de `XDG_DATA_DIRS`.
+  - Si `XDG_DATA_DIRS` está vacío, `/usr/local/share` y
+    `/usr/share`.
+  - Fallbacks opcionales que se incluyen sólo cuando
+    existen en disco y sin desplazar los XDG_DATA_DIRS:
+    `~/.local/share/flatpak/exports/share`,
+    `/var/lib/flatpak/exports/share`,
+    `/var/lib/snapd/desktop`,
+    `/run/current-system/sw/share`.
+  - Deduplicado, normalizado, orden determinista.
+
+  A partir de estos `data_roots` se derivan los
+  directorios `<root>/applications`,
+  `<root>/icons/<theme>/<size>x<size>/apps/`,
+  `<root>/icons/<theme>/scalable/apps/`,
+  `<root>/icons/<size>x<size>/apps/` (layout legacy) y
+  `<root>/pixmaps`. Cada segmento se concatena
+  exactamente una vez. `collect_icon_dirs` deja de
+  existir; `collect_application_dirs` se reduce a un
+  filtrado `is_dir` sobre los derivados.
+
+- [x] 17.3 **Resolución de iconos ampliada.** El resolver
+  recorre, en orden determinista, los tamaños
+  `16, 22, 24, 32, 48, 64, 96, 128, 256` y los formatos
+  `.png` y `.svg`. PNG tiene prioridad sobre SVG cuando
+  ambos existen. Para `Icon=/ruta/absoluta`, la ruta se
+  canonicaliza, se exige que sea un archivo regular y que
+  viva bajo una raíz permitida; los symlinks que escapan
+  de las raíces se rechazan. El layout legacy
+  `<root>/icons/<size>x<size>/apps/` se conserva.
+
+- [x] 17.4 **Soporte SVG vía `resvg`.** Nuevo módulo
+  `crates/clipvault-platform/src/runtime/linux_svg_raster.rs`
+  detrás de la feature `linux-svg-raster`:
+
+  - `resvg = { version = "0.45", default-features = false }`
+    como dependencia del workspace y de
+    `clipvault-platform`.
+  - `usvg::ImageHrefResolver` se cablea con closures que
+    devuelven `None` para datos y paths, de modo que
+    ningún recurso externo puede cargarse (no se cargan
+    archivos locales, no se hacen llamadas de red).
+  - Cap del byte length a `MAX_SVG_BYTES` (4 MB).
+  - Cap de las dimensiones de origen a
+    `MAX_SVG_SOURCE_DIM` (1024 × 1024).
+  - El rasterizador escala el resultado a
+    `MAX_ICON_DIM` × `MAX_ICON_DIM` (256 × 256)
+    preservando proporción y transparencia.
+  - El PNG se valida por la firma canónica antes de
+    persistirse.
+  - Nunca invoca `convert`, `magick`, `gio` ni ningún
+    proceso externo; nunca abre la red; nunca ejecuta
+    JavaScript / scripting SVG.
+
+  El PNG se persiste en el namespace existente
+  `~/.clipvault/assets/application-icons/<safe-id>.png`
+  y la referencia se conserva relativa
+  (`application-icons/<safe-id>.png`). El icono sigue
+  siendo siempre PNG — el SVG sólo se usa como entrada y
+  no se persiste en disco.
+
+- [x] 17.5 **`IconDiagnostics` extendido.** Se agregan
+  los campos:
+
+  - `kind: IconSourceKind` (`png`, `svg`, `pixmap`,
+    `unknown`, `none`).
+  - `rasterization_attempted: bool`.
+  - `rasterization_succeeded: bool`.
+  - `failure_kind: IconFailureKind` (`not_declared`,
+    `not_found`, `out_of_roots`, `invalid_png`,
+    `invalid_svg`, `svg_rejected`,
+    `rasterization_failed`, `write_error`, `none`).
+
+  Los strings `as_str()` son el contrato estable que el
+  sink `capture_debug metadata_provider` consume. La
+  superficie nunca expone rutas absolutas, contenido del
+  portapapeles, snippets, hashes, `asset_ref`, títulos de
+  ventana ni secretos.
+
+  `MetadataSnapshot` (en
+  `crates/clipvault-core/src/capture_diagnostic.rs`)
+  expone los mismos campos (`icon_kind`,
+  `rasterization_attempted`,
+  `rasterization_succeeded`, `icon_failure_kind`) sin
+  romper la deserialización existente.
+
+  Los consumidores de macOS y `FakeApplicationMetadataProvider`
+  se actualizan para reflejar el nuevo snapshot:
+  `IconSourceKind::Png` con `IconFailureKind::None` por
+  defecto, `IconFailureKind::WriteError` cuando el
+  filesystem rechaza la escritura.
+
+- [x] 17.6 **Persistencia y backfill.** `write_icon_atomic`
+  sigue creando el directorio `application-icons/` sólo
+  cuando un icono válido está disponible, escribe el
+  temporal en el mismo directorio, valida el PNG, hace
+  `sync_all` y renombra atómicamente; en cualquier error
+  elimina el temporal. Nunca reemplaza un icono existente
+  por una respuesta vacía. El backfill de filas con
+  `source_app` y `source_app_name` pero
+  `source_app_icon_ref = NULL` re‑corre el provider en el
+  siguiente arranque y persiste el icono cuando ahora
+  puede resolverlo. No se borran ni renombran assets
+  existentes.
+
+- [x] 17.7 **Tests obligatorios.** Se añaden en
+  `crates/clipvault-platform/src/runtime/linux_app_metadata.rs`
+  (módulo `tests`) y en
+  `crates/clipvault-platform/tests/linux_app_metadata.rs`:
+
+  - `data_roots_falls_back_to_local_share_when_xdg_data_home_is_unset`
+  - `data_roots_respects_xdg_data_home_when_set`
+  - `data_roots_deduplicates_entries`
+  - `data_roots_appends_usr_share_fallback_when_xdg_data_dirs_empty`
+  - `collect_icon_apps_dirs_never_produces_duplicated_icons_segment`
+    (guard explícito anti-`<root>/icons/icons/...`)
+  - `collect_icon_apps_dirs_walks_hicolor_theme`
+  - `collect_icon_apps_dirs_walks_scalable_theme_layout`
+  - `collect_icon_apps_dirs_walks_pixmaps_namespace`
+  - `resolve_icon_prefers_png_over_svg_for_the_same_icon`
+  - `resolve_icon_falls_back_to_svg_when_only_svg_is_present`
+    (cuando la feature `linux-svg-raster` está activa)
+  - `resolve_icon_reports_invalid_svg_failure`
+  - `lookup_falls_back_to_pixmaps_layout`
+  - `lookup_with_no_icon_declared_keeps_display_name`
+  - `lookup_with_wm_class_distinct_from_display_name_matches_via_startup_wm_class`
+    (cubre Warp sin hardcodearlo)
+  - `lookup_with_source_app_distinct_from_visible_name_resolves_metadata`
+  - `lookup_with_arbitrary_application_resolves_name`
+  - `lookup_creates_application_icons_only_on_success`
+  - `lookup_reports_out_of_roots_failure_for_absolute_paths`
+  - `resolves_multiple_distinct_applications`
+  - `icon_not_found_failure_is_typed`
+  - `icon_outside_roots_is_rejected`
+  - `svg_only_icon_is_rasterized_and_persisted`
+  - `malformed_svg_records_invalid_svg_failure`
+  - `png_icon_is_preferred_over_svg`
+  - `pixmaps_layout_is_supported`
+  - `yaru_theme_layout_is_supported`
+  - `adwaita_theme_layout_is_supported`
+  - `multiple_icon_sizes_resolve`
+  - `symlink_outside_root_is_rejected`
+  - `existing_icon_is_preserved_when_lookup_fails`
+  - `application_icons_dir_only_created_on_persistence`
+
+  En `crates/clipvault-core/src/capture_diagnostic.rs`:
+
+  - `metadata_snapshot_from_provider_propagates_icon_dimensions`
+    (extendido para `kind`, `rasterization_attempted`,
+    `icon_failure_kind`).
+  - `metadata_snapshot_propagates_svg_rasterization_diagnostics`.
+  - `metadata_snapshot_propagates_typed_icon_failure`.
+
+  Los tests del módulo `runtime/linux_svg_raster.rs`
+  incluyen rasterización de un SVG mínimo, rechazo de
+  payload demasiado grande, rechazo de SVG malformado,
+  cap del output a `MAX_ICON_DIM`, rechazo de dimensiones
+  de origen mayores a `MAX_SVG_SOURCE_DIM` y descarte de
+  recursos `xlink:href` (la rasterización no carga
+  archivos ni URLs externos).
+
+- [x] 17.8 **Verificación ejecutada desde el host macOS.**
+
+  - `cargo fmt --all -- --check` — pasa.
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+    — pasa.
+  - `cargo clippy -p clipvault-platform --features
+    linux-svg-raster -- -D warnings` — pasa.
+  - `cargo test --workspace` — pasa. Los tests del módulo
+    Linux están gated a `cfg(target_os = "linux")` y se
+    ejecutan en el CI de Linux o en una build cross-
+    compilada desde macOS.
+  - `cargo check -p clipvault-platform --features
+    linux-svg-raster --target x86_64-unknown-linux-gnu
+    --tests` — pasa; el rasterizador y el provider Linux
+    compilan en el target Ubuntu con la feature
+    `linux-svg-raster`.
+  - `cargo check -p clipvault-platform --features
+    linux-svg-raster,linux-x11 --target
+    x86_64-unknown-linux-gnu --tests` — pasa; el binario
+    Ubuntu completo (X11 + SVG) compila limpio.
+  - `cd app/tauri/frontend && npm run check` — pasa.
+  - `cd app/tauri/frontend && npm run build` — pasa.
+  - `openspec validate linux-source-app-metadata --strict
+    --type change` — pasa (`Change
+    'linux-source-app-metadata' is valid`).
+
+- [x] 17.9 **Bump de versión sincronizado a `0.0.7`** (la
+  corrección de los iconos es una implementación funcional
+  completa: `projects.md` exige subir el patch y mantener
+  sincronizados los manifests canónicos):
+
+  - `Cargo.toml` (`[workspace.package].version`).
+  - `Cargo.lock` regenerado: `clipvault-app`,
+    `clipvault-core`, `clipvault-db`, `clipvault-platform`,
+    `clipvault-search`.
+  - `app/tauri/src-tauri/tauri.conf.json` (`version`).
+  - `app/tauri/frontend/package.json` (`version`).
+  - `app/tauri/frontend/package-lock.json` (`version` y la
+    entrada raíz `packages.""`).
+  - `projects.md` (tabla "Current canonical version" y nota
+    descriptiva del bump `0.0.6 → 0.0.7`).
+  - `AboutModal.svelte` sigue leyendo `diagnostics.version`
+    (no se hardcodea la versión en Svelte).
+
+- [x] 17.10 **Limitación documentada.** El host actual es
+  macOS, así que la confirmación runtime de una sesión
+  Ubuntu real (X11, GNOME Wayland con app XWayland, GNOME
+  Wayland nativo, Fedora, Arch, openSUSE, KDE) queda
+  pendiente del usuario. La matriz de XDG icon roots se
+  valida estructuralmente con el guard
+  `collect_icon_apps_dirs_never_produces_duplicated_icons_segment`
+  y con los tests determinísticos sobre `MemoryFilesystem`
+  que se invocan en `cargo test --workspace` cuando el
+  target es Linux. Las tareas de Ubuntu (10.1–10.6) NO
+  se marcan desde macOS ni desde tests sin display.
+
+- [x] 17.11 **Sin sync, archive, commit ni push.** La
+  política "Cambio publicado + parche funcional" se
+  refleja sólo en este `tasks.md`, en los manifests y en
+  el código.

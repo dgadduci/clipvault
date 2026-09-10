@@ -255,3 +255,185 @@ ni secretos.
   cross-compiladas desde macOS con
   `cargo check -p clipvault-platform --features linux-x11
   --target x86_64-unknown-linux-gnu`.
+
+## Por qué (parche funcional post‑publicación: iconos de Linux)
+
+Después del parche del cfg del shell (v0.0.5 → v0.0.6) el
+identificador `source_app` se persiste correctamente y el
+`LinuxApplicationMetadataProvider` se invoca con un `WM_CLASS`
+válido. Sin embargo el icono (`source_app_icon_ref`) sigue
+quedando `NULL` y el directorio `~/.clipvault/assets/application-icons/`
+ni siquiera se crea. El usuario confirma que las capturas desde
+Ubuntu, Debian, Fedora, Arch, openSUSE, GNOME, KDE y los flujos
+X11 + XWayland muestran el icono genérico en lugar del icono
+declarado por el `.desktop` correspondiente. La inspección del
+diagnóstico confirma que las aplicaciones X11/XWayland se
+detectan correctamente y `source_app_name` también se persiste,
+así que el cuello de botella está exclusivamente en la
+resolución de iconos del provider Linux.
+
+La causa raíz reside en
+`crates/clipvault-platform/src/runtime/linux_app_metadata.rs`:
+
+1. `collect_icon_root_layout()` ya devuelve rutas como
+   `/usr/share/icons`, `/usr/local/share/icons`,
+   `/home/<usuario>/.local/share/icons`; pero
+   `collect_icon_dirs()` vuelve a agregar `/icons` y produce
+   rutas duplicadas como `/usr/share/icons/icons/...` que no
+   existen en ningún host y se saltan el layout canónico
+   `/usr/share/icons/hicolor/48x48/apps/<icon>.png` /
+   `/usr/share/icons/hicolor/scalable/apps/<icon>.svg`.
+2. Cuando `XDG_DATA_HOME` no está definido,
+   `collect_application_dirs()` busca
+   `$HOME/applications` en lugar del `$HOME/.local/share/applications`
+   correcto.
+3. El resolver sólo acepta PNG. La mayoría de las aplicaciones
+   Linux distribuyen sus iconos como SVG, especialmente en el
+   directorio `scalable/`, por lo que la cobertura real queda
+   muy por debajo de lo que Ubuntu/Debian/Fedora/Arch/openSUSE
+   exponen.
+
+### Qué cambia este parche
+
+1. Se introduce una única colección `data_roots()` que se
+   construye a partir de `XDG_DATA_HOME` (o, en su defecto,
+   `$HOME/.local/share`), `XDG_DATA_DIRS` y los fallbacks
+   estándar `/usr/local/share` y `/usr/share`. Se deduplica,
+   se normaliza y se itera exactamente una vez por segmento, lo
+   que elimina la regresión `<root>/icons/icons/...`. Los
+   directorios derivados (`<root>/applications`,
+   `<root>/icons`, `<root>/pixmaps`) se generan a partir de esos
+   `data_roots()` y se filtran por `is_dir`, de modo que las
+   rutas inexistentes se ignoran sin abortar.
+2. Se aceptan fallbacks opcionales sólo cuando existen y sin
+   desplazar `XDG_DATA_DIRS`: `~/.local/share/flatpak/exports/share`,
+   `/var/lib/flatpak/exports/share`, `/var/lib/snapd/desktop`,
+   `/run/current-system/sw/share`. La lista es determinista y
+   no introduce dependencias nuevas.
+3. La resolución de iconos por nombre recorre, en orden
+   determinista:
+   `<root>/icons/<theme>/<size>x<size>/apps/<name>.png`,
+   `<root>/icons/<theme>/<size>x<size>/apps/<name>.svg`,
+   `<root>/icons/<theme>/scalable/apps/<name>.png`,
+   `<root>/icons/<theme>/scalable/apps/<name>.svg`,
+   `<root>/pixmaps/<name>.png`,
+   `<root>/pixmaps/<name>.svg`,
+   más el layout legacy equivalente. Los tamaños cubiertos son
+   `16, 22, 24, 32, 48, 64, 96, 128 y 256`. El PNG tiene
+   prioridad sobre el SVG cuando ambos existen.
+4. Las rutas absolutas declaradas en `Icon=` se canonicalizan,
+   se acepta únicamente si son archivos regulares, se verifica
+   que vivan bajo una raíz permitida y se rechazan los symlinks
+   que escapen de las raíces.
+5. Se añade soporte para SVG mediante una biblioteca Rust pura
+   (`resvg` con `default-features = false`, expuesta por la
+   feature `linux-svg-raster`): el rasterizador desactiva todos
+   los resolvedores externos, limita dimensiones, complejidad y
+   tamaño, produce un PNG RGBA válido con dimensiones
+   controladas, conserva proporción y transparencia, y nunca
+   invoca `convert`, `magick`, `gio` ni ningún proceso externo.
+   El resultado se persiste en el namespace existente
+   `~/.clipvault/assets/application-icons/<safe-id>.png` y la
+   referencia se conserva relativa (`application-icons/<safe-id>.png`).
+6. `IconDiagnostics` se extiende con el formato de origen
+   (`png` / `svg` / `pixmap` / `unknown`), las banderas
+   `rasterization_attempted` / `rasterization_succeeded`, las
+   dimensiones y un motivo tipado de fallo (`not_declared`,
+   `not_found`, `out_of_roots`, `invalid_png`, `invalid_svg`,
+   `svg_rejected`, `rasterization_failed`, `write_error`). El
+   diagnóstico nunca expone rutas absolutas, contenido del
+   portapapeles, snippets, hashes, `asset_ref`, títulos de
+   ventana ni secretos.
+7. Se añade una batería de tests unitarios e integración que
+   cubren: `Firefox`, `GNOME Terminal`, una aplicación
+   arbitraria, `source_app` distinto del nombre visible,
+   aplicación sin icono, `theme` `hicolor`, `Yaru` y `Adwaita`,
+   `scalable`, `pixmaps`, PNG directo, SVG rasterizado a PNG,
+   PNG preferido sobre SVG, icono inexistente, `.desktop` sin
+   `Icon=`, symlink fuera de raíz, SVG malformado,
+   rasterización segura, persistencia atómica, creación del
+   directorio `application-icons`, backfill de filas anteriores
+   y un guard explícito que rompe si el código vuelve a
+   construir rutas `<root>/icons/icons/...`.
+
+### No objetivos del parche
+
+- No hardcodear Ubuntu ni Warp: el provider sigue siendo
+  genérico para cualquier aplicación freedesktop.
+- No introducir LLMs, embeddings, llamadas de red, telemetría
+  ni procesos externos.
+- No tocar el shell de Tauri, macOS, el blacklist, el ciclo de
+  captura, las imágenes, los tags, las colecciones, los
+  favoritos, el Quick Paste ni el drag-and-drop de cards.
+- No cambiar el contrato `source_app` ni la matriz de
+  capacidades.
+
+### Contratos que se preservan
+
+- Linux X11 → EWMH y `WM_CLASS` cuando hay ventana X11
+  enfocada; GNOME Wayland + XWayland → `_NET_ACTIVE_WINDOW`
+  + `WM_CLASS` cuando hay ventana X11; Wayland nativo →
+  `unavailable` sin identificador fabricado.
+- El identificador estable sigue siendo el segmento `class`
+  de `WM_CLASS`. `parse_active_window_id` sigue leyendo los
+  cuatro bytes del reply (`u32::from_ne_bytes`) y nunca cae a
+  `reply.value.first()`.
+- El bridge de iconos (`application-icons/`), `icon_ref_for`,
+  `write_icon_atomic` y el validador PNG existente siguen
+  siendo los únicos lectores / escritores de bytes.
+- El namespace de assets nunca se contamina con rutas
+  absolutas, contenido de `.desktop`, SVG persistido, secretos
+  ni snippets.
+
+### Diagnóstico
+
+`IconDiagnostics` se conserva como la única señal que la
+captura diagnóstica inspecciona: ahora expone
+`kind` (`png` / `svg` / `pixmap` / `unknown`),
+`rasterization_attempted`, `rasterization_succeeded`,
+`png_validated`, `persisted`, `bytes`, `dimensions` y
+`failure_kind` (estable, sin rutas absolutas). La superficie
+sigue siendo estrictamente metadata-only: nunca clipboard,
+snippets, hashes, `asset_ref`, paths absolutas, títulos de
+ventana ni secretos. La superficie JSON del sink
+`capture_debug metadata_provider` añade los campos
+`icon_kind`, `rasterization_attempted`,
+`rasterization_succeeded` y `icon_failure_kind` sin romper la
+deserialización existente.
+
+### Impacto esperado
+
+- `crates/clipvault-platform/src/runtime/linux_app_metadata.rs`:
+  refactor de `data_roots()` + `collect_directories()`, nuevo
+  resolver que prefiere PNG sobre SVG y recorre los tamaños
+  `16, 22, 24, 32, 48, 64, 96, 128, 256`.
+- `crates/clipvault-platform/src/runtime/linux_svg_raster.rs`
+  (nuevo): rasterizador SVG → PNG con `resvg`
+  (`default-features = false`), sin red ni procesos externos,
+  con límites de tamaño y dimensiones.
+- `crates/clipvault-platform/src/app_metadata.rs`:
+  `IconSourceKind`, `IconFailureKind` y campos adicionales en
+  `IconDiagnostics`; las cadenas `as_str()` son el contrato
+  estable del sink `capture_debug`.
+- `crates/clipvault-core/src/capture_diagnostic.rs`:
+  `MetadataSnapshot` expone `icon_kind`,
+  `rasterization_attempted`, `rasterization_succeeded` y
+  `icon_failure_kind`.
+- Manifiestos canónicos (`Cargo.toml`, `Cargo.lock`,
+  `tauri.conf.json`, `package.json`, `package-lock.json`) y
+  `projects.md`: versión patch `0.0.6 → 0.0.7`.
+- Artefactos OpenSpec actualizados (`proposal.md`, `design.md`,
+  `tasks.md`, `specs/desktop-platform-integration/spec.md`).
+
+### Limitaciones que se documentan
+
+- El host actual es macOS, así que la confirmación runtime en
+  una sesión Ubuntu real (X11 y Wayland con app XWayland) queda
+  pendiente del usuario. Las tareas de Ubuntu (10.1–10.6) NO se
+  marcan como completadas desde macOS ni desde tests sin
+  display; el guard anti-`<root>/icons/icons/...>` y los tests
+  determinísticos sobre `MemoryFilesystem` validan
+  estructuralmente el refactor.
+- `cargo check -p clipvault-platform --features linux-svg-raster
+  --target x86_64-unknown-linux-gnu --tests` actúa como smoke
+  test de la rama Linux sobre el toolchain del dev host.

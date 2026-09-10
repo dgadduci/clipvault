@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.6"
+version = "0.0.7"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -41,6 +41,14 @@ sha2 = "0.10"
 flate2 = "1"
 global-hotkey = "0.6"
 x11rb = "0.13"
+# Pure-Rust SVG → PNG rasterizer used by the Linux application
+# metadata provider to honour `.desktop` entries whose `Icon=` value
+# ships as SVG instead of PNG. With `default-features = false` we
+# skip text rendering, font database access and raster image
+# decoding so the parser can never load arbitrary host files or
+# reach the network during a metadata lookup. The provider already
+# caps the output dimensions and rejects over-sized payloads.
+resvg = { version = "0.45", default-features = false }
 objc2 = "0.6"
 # `NSBitmapImageRep`, `NSImage` and `NSGraphicsContext` are required by
 # the macOS application picker to downscale the bundle icon to

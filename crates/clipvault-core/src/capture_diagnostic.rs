@@ -31,7 +31,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde::Serialize;
 
-use clipvault_platform::{ActiveAppBackendKind, IconDiagnostics, MatchStrategy, ProbeStage};
+use clipvault_platform::{
+    ActiveAppBackendKind, IconDiagnostics, IconFailureKind, MatchStrategy, ProbeStage,
+};
 
 /// Environment variable that enables the capture debug sink. The
 /// helper reads the variable exactly once at startup so the capture
@@ -248,11 +250,25 @@ pub struct MetadataSnapshot {
     pub display_name_resolved: Option<String>,
     pub icon_declared: bool,
     pub icon_resolved: bool,
+    /// Source format the resolver identified for the matched icon:
+    /// `png`, `svg`, `pixmap` or `unknown`. `None` when the entry
+    /// never declared an `Icon=` key.
     pub icon_kind: Option<&'static str>,
+    /// `true` when the resolver attempted to rasterize a SVG source
+    /// into a PNG payload. Always `false` for PNG / pixmap sources.
+    pub rasterization_attempted: bool,
+    /// `true` when the rasterizer produced a valid PNG payload the
+    /// writer accepted. Only meaningful when `rasterization_attempted`
+    /// is `true`.
+    pub rasterization_succeeded: bool,
     pub png_validated: bool,
     pub icon_persisted: bool,
     pub icon_bytes: Option<u64>,
     pub icon_dimensions: Option<(u32, u32)>,
+    /// Stable identifier the resolver associated with the most
+    /// recent icon-resolution failure. `None` when no failure was
+    /// recorded.
+    pub icon_failure_kind: Option<&'static str>,
     pub error_kind: Option<&'static str>,
     pub duration_ms: u64,
 }
@@ -272,6 +288,15 @@ impl MetadataSnapshot {
         error_kind: Option<&'static str>,
         duration_ms: u64,
     ) -> Self {
+        let icon_kind = if icon.declared {
+            Some(icon.kind.as_str())
+        } else {
+            None
+        };
+        let icon_failure_kind = match icon.failure_kind {
+            IconFailureKind::None => None,
+            kind => Some(kind.as_str()),
+        };
         Self {
             provider_name,
             received_identifier,
@@ -280,11 +305,14 @@ impl MetadataSnapshot {
             display_name_resolved,
             icon_declared: icon.declared,
             icon_resolved: icon.resolved,
-            icon_kind: if icon.declared { Some("png") } else { None },
+            icon_kind,
+            rasterization_attempted: icon.rasterization_attempted,
+            rasterization_succeeded: icon.rasterization_succeeded,
             png_validated: icon.png_validated,
             icon_persisted: icon.persisted,
             icon_bytes: icon.bytes.map(|value| value as u64),
             icon_dimensions: icon.dimensions,
+            icon_failure_kind,
             error_kind,
             duration_ms,
         }
@@ -622,11 +650,14 @@ impl CaptureDebugSink for TracingCaptureDebugSink {
             icon_declared = snapshot.icon_declared,
             icon_resolved = snapshot.icon_resolved,
             icon_kind = snapshot.icon_kind.unwrap_or("none"),
+            rasterization_attempted = snapshot.rasterization_attempted,
+            rasterization_succeeded = snapshot.rasterization_succeeded,
             png_validated = snapshot.png_validated,
             icon_persisted = snapshot.icon_persisted,
             icon_bytes = snapshot.icon_bytes.unwrap_or(0),
             icon_width = snapshot.icon_dimensions.map(|(w, _)| w).unwrap_or(0),
             icon_height = snapshot.icon_dimensions.map(|(_, h)| h).unwrap_or(0),
+            icon_failure_kind = snapshot.icon_failure_kind.unwrap_or("none"),
             error_kind = snapshot.error_kind.unwrap_or("none"),
             duration_ms = snapshot.duration_ms,
             "capture debug metadata provider"
@@ -1024,7 +1055,7 @@ pub fn probe_stage_label(stage: ProbeStage) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clipvault_platform::{ActiveAppBackendKind, ProbeStage};
+    use clipvault_platform::{ActiveAppBackendKind, IconSourceKind, ProbeStage};
 
     #[test]
     fn env_predicate_round_trips() {
@@ -1208,11 +1239,15 @@ mod tests {
     fn metadata_snapshot_from_provider_propagates_icon_dimensions() {
         let icon = IconDiagnostics {
             declared: true,
+            kind: IconSourceKind::Png,
             resolved: true,
+            rasterization_attempted: false,
+            rasterization_succeeded: false,
             png_validated: true,
             persisted: true,
             bytes: Some(64),
             dimensions: Some((128, 128)),
+            failure_kind: IconFailureKind::None,
         };
         let snapshot = MetadataSnapshot::from_provider(
             "linux_app_metadata",
@@ -1230,6 +1265,66 @@ mod tests {
         assert_eq!(snapshot.icon_dimensions, Some((128, 128)));
         assert_eq!(snapshot.icon_bytes, Some(64));
         assert_eq!(snapshot.icon_kind, Some("png"));
+        assert!(!snapshot.rasterization_attempted);
+        assert!(snapshot.icon_failure_kind.is_none());
+    }
+
+    #[test]
+    fn metadata_snapshot_propagates_svg_rasterization_diagnostics() {
+        let icon = IconDiagnostics {
+            declared: true,
+            kind: IconSourceKind::Svg,
+            resolved: true,
+            rasterization_attempted: true,
+            rasterization_succeeded: true,
+            png_validated: true,
+            persisted: true,
+            bytes: Some(256),
+            dimensions: Some((64, 64)),
+            failure_kind: IconFailureKind::None,
+        };
+        let snapshot = MetadataSnapshot::from_provider(
+            "linux_app_metadata",
+            true,
+            true,
+            Some("Firefox".to_string()),
+            MatchStrategy::StartupWmClass,
+            icon,
+            None,
+            12,
+        );
+        assert_eq!(snapshot.icon_kind, Some("svg"));
+        assert!(snapshot.rasterization_attempted);
+        assert!(snapshot.rasterization_succeeded);
+        assert!(snapshot.icon_failure_kind.is_none());
+    }
+
+    #[test]
+    fn metadata_snapshot_propagates_typed_icon_failure() {
+        let icon = IconDiagnostics {
+            declared: true,
+            kind: IconSourceKind::Svg,
+            resolved: true,
+            rasterization_attempted: true,
+            rasterization_succeeded: false,
+            png_validated: false,
+            persisted: false,
+            bytes: None,
+            dimensions: None,
+            failure_kind: IconFailureKind::InvalidSvg,
+        };
+        let snapshot = MetadataSnapshot::from_provider(
+            "linux_app_metadata",
+            true,
+            false,
+            Some("Firefox".to_string()),
+            MatchStrategy::StartupWmClass,
+            icon,
+            None,
+            12,
+        );
+        assert_eq!(snapshot.icon_failure_kind, Some("invalid_svg"));
+        assert!(!snapshot.rasterization_succeeded);
     }
 
     fn dummy_environment() -> EnvironmentSnapshot {
@@ -1345,11 +1440,15 @@ mod tests {
             MatchStrategy::StartupWmClass,
             IconDiagnostics {
                 declared: true,
+                kind: IconSourceKind::Png,
                 resolved: true,
+                rasterization_attempted: false,
+                rasterization_succeeded: false,
                 png_validated: true,
                 persisted: true,
                 bytes: Some(64),
                 dimensions: Some((128, 128)),
+                failure_kind: IconFailureKind::None,
             },
             None,
             1,

@@ -21,11 +21,15 @@ use std::sync::Mutex;
 use clipvault_platform::runtime::linux_app_metadata::{
     DesktopEntry, DesktopFilesystem, LinuxApplicationMetadataProvider,
 };
-use clipvault_platform::{ApplicationMetadataError, ApplicationMetadataProvider};
+use clipvault_platform::{
+    ApplicationMetadataError, ApplicationMetadataProvider, IconFailureKind, IconSourceKind,
+};
 
 /// In-memory filesystem the integration suite drives. Mirrors the
-/// production layout (`<home>/applications/<file>.desktop`,
-/// `<home>/icons/<size>x<size>/apps/<icon>.png`) so the matcher walks
+/// production layout (`<home>/.local/share/applications/<file>.desktop`,
+/// `<home>/.local/share/icons/<theme>/<size>x<size>/apps/<icon>.png`,
+/// `<home>/.local/share/icons/<theme>/scalable/apps/<icon>.svg`,
+/// `<home>/.local/share/pixmaps/<icon>.png`) so the matcher walks
 /// the same paths the host adapter walks.
 #[derive(Default)]
 struct MemoryFs {
@@ -64,6 +68,11 @@ impl MemoryFs {
         bytes.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
         bytes.extend_from_slice(b"ICON");
         self.write(path, &bytes);
+    }
+
+    #[cfg(feature = "linux-svg-raster")]
+    fn write_svg(&self, path: &Path, svg: &str) {
+        self.write(path, svg.as_bytes());
     }
 }
 
@@ -113,6 +122,10 @@ impl DesktopFilesystem for MemoryFs {
 
     fn home_dir(&self) -> Option<PathBuf> {
         Some(self.home.clone())
+    }
+
+    fn read(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+        Ok(self.files.lock().unwrap().get(path).cloned())
     }
 }
 
@@ -183,6 +196,9 @@ fn write_desktop(fs: &MemoryFs, apps_dir: &Path, basename: &str, content: &str) 
     );
 }
 
+#[cfg(feature = "linux-svg-raster")]
+const MINIMAL_SVG: &str = "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><rect width=\"32\" height=\"32\" fill=\"#abcdef\"/></svg>";
+
 /// Smoke test: a known X11 application with a matching `StartupWMClass`
 /// resolves to the localized display name and a relative icon
 /// reference.
@@ -190,8 +206,8 @@ fn write_desktop(fs: &MemoryFs, apps_dir: &Path, basename: &str, content: &str) 
 fn resolves_startup_wm_class_to_localized_name_and_icon() {
     let home = PathBuf::from("/home/tester");
     let (fs, assets) = fixture(&home);
-    let apps = home.join("applications");
-    let icons = home.join("icons/128x128/apps");
+    let apps = home.join(".local/share/applications");
+    let icons = home.join(".local/share/icons/128x128/apps");
     fs.mkdir(&apps);
     fs.mkdir(&icons);
     fs.write_png(&icons.join("firefox.png"));
@@ -221,7 +237,7 @@ fn resolves_startup_wm_class_to_localized_name_and_icon() {
 fn resolves_x_gnome_wm_class() {
     let home = PathBuf::from("/home/tester");
     let (fs, assets) = fixture(&home);
-    let apps = home.join("applications");
+    let apps = home.join(".local/share/applications");
     fs.mkdir(&apps);
     write_desktop(
         &fs,
@@ -241,7 +257,7 @@ fn resolves_x_gnome_wm_class() {
 fn hidden_entry_is_skipped() {
     let home = PathBuf::from("/home/tester");
     let (fs, assets) = fixture(&home);
-    let apps = home.join("applications");
+    let apps = home.join(".local/share/applications");
     fs.mkdir(&apps);
     write_desktop(
         &fs,
@@ -260,7 +276,7 @@ fn hidden_entry_is_skipped() {
 fn non_application_entry_is_skipped() {
     let home = PathBuf::from("/home/tester");
     let (fs, assets) = fixture(&home);
-    let apps = home.join("applications");
+    let apps = home.join(".local/share/applications");
     fs.mkdir(&apps);
     write_desktop(
         &fs,
@@ -280,7 +296,7 @@ fn non_application_entry_is_skipped() {
 fn rejects_icon_outside_allowed_roots() {
     let home = PathBuf::from("/home/tester");
     let (fs, assets) = fixture(&home);
-    let apps = home.join("applications");
+    let apps = home.join(".local/share/applications");
     fs.mkdir(&apps);
     let outside = home.join("outside.png");
     fs.write_png(&outside);
@@ -303,14 +319,14 @@ fn rejects_icon_outside_allowed_roots() {
     assert!(metadata.icon_ref.is_none());
 }
 
-/// A non-PNG icon is not persisted; the lookup keeps the display
-/// name.
+/// A non-PNG icon is not persisted when the rasterizer feature is
+/// disabled; the lookup keeps the display name.
 #[test]
-fn rejects_non_png_icon() {
+fn rejects_non_png_icon_when_rasterizer_disabled() {
     let home = PathBuf::from("/home/tester");
     let (fs, assets) = fixture(&home);
-    let apps = home.join("applications");
-    let icons = home.join("icons/128x128/apps");
+    let apps = home.join(".local/share/applications");
+    let icons = home.join(".local/share/icons/128x128/apps");
     fs.mkdir(&apps);
     fs.mkdir(&icons);
     fs.write(&icons.join("firefox.svg"), b"<svg/>");
@@ -379,8 +395,8 @@ fn provider_name_is_stable() {
 fn resolves_icon_from_hicolor_theme_layout() {
     let home = PathBuf::from("/home/tester");
     let (fs, assets) = fixture(&home);
-    let apps = home.join("applications");
-    let icons = home.join("icons/hicolor/128x128/apps");
+    let apps = home.join(".local/share/applications");
+    let icons = home.join(".local/share/icons/hicolor/128x128/apps");
     fs.mkdir(&apps);
     fs.mkdir(&icons);
     fs.write_png(&icons.join("firefox.png"));
@@ -418,8 +434,8 @@ fn resolves_icon_from_hicolor_theme_layout() {
 fn resolves_icon_from_scalable_theme_layout() {
     let home = PathBuf::from("/home/tester");
     let (fs, assets) = fixture(&home);
-    let apps = home.join("applications");
-    let icons = home.join("icons/hicolor/scalable/apps");
+    let apps = home.join(".local/share/applications");
+    let icons = home.join(".local/share/icons/hicolor/scalable/apps");
     fs.mkdir(&apps);
     fs.mkdir(&icons);
     fs.write_png(&icons.join("code.png"));
@@ -443,8 +459,8 @@ fn resolves_icon_from_scalable_theme_layout() {
 fn missing_icon_in_known_theme_is_skipped() {
     let home = PathBuf::from("/home/tester");
     let (fs, assets) = fixture(&home);
-    let apps = home.join("applications");
-    let icons = home.join("icons/hicolor/128x128/apps");
+    let apps = home.join(".local/share/applications");
+    let icons = home.join(".local/share/icons/hicolor/128x128/apps");
     fs.mkdir(&apps);
     fs.mkdir(&icons);
     write_desktop(
@@ -472,11 +488,6 @@ fn missing_icon_in_known_theme_is_skipped() {
 /// branch on the enum.
 #[test]
 fn provider_error_contract_is_typed() {
-    // The variants are observable to the bootstrap's metadata
-    // pipeline. We pin both variants' `Debug` impls here so a
-    // future refactor that drops the actionable context surfaces as
-    // a test failure instead of leaking an empty error to the
-    // shell.
     let unavailable = ApplicationMetadataError::Unavailable;
     assert_eq!(
         unavailable.to_string(),
@@ -484,4 +495,431 @@ fn provider_error_contract_is_typed() {
     );
     let backend = ApplicationMetadataError::backend("test");
     assert!(backend.to_string().contains("test"));
+}
+
+/// Multiple distinct applications resolve independently — the
+/// matcher is not whitelisted for any single bundle (Warp,
+/// Firefox, GNOME Terminal, …).
+#[test]
+fn resolves_multiple_distinct_applications() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    let icons = home.join(".local/share/icons/hicolor/128x128/apps");
+    fs.mkdir(&apps);
+    fs.mkdir(&icons);
+    fs.write_png(&icons.join("firefox.png"));
+    fs.write_png(&icons.join("gnome-terminal.png"));
+    write_desktop(
+        &fs,
+        &apps,
+        "firefox",
+        "[Desktop Entry]\nType=Application\nName=Firefox\nStartupWMClass=firefox\nIcon=firefox\n",
+    );
+    write_desktop(
+        &fs,
+        &apps,
+        "gnome-terminal",
+        "[Desktop Entry]\nType=Application\nName=Terminal\nStartupWMClass=gnome-terminal\nIcon=gnome-terminal\n",
+    );
+    write_desktop(
+        &fs,
+        &apps,
+        "code",
+        "[Desktop Entry]\nType=Application\nName=Code\nStartupWMClass=dev.warp.Warp\nIcon=code\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+    let firefox = provider.lookup("firefox").expect("ok").expect("ok");
+    let terminal = provider.lookup("gnome-terminal").expect("ok").expect("ok");
+    let warp = provider.lookup("dev.warp.Warp").expect("ok").expect("ok");
+    assert_eq!(firefox.display_name, "Firefox");
+    assert_eq!(terminal.display_name, "Terminal");
+    assert_eq!(warp.display_name, "Code");
+}
+
+/// `.desktop` file without an `Icon=` key returns the display name
+/// but no icon ref and no failure is recorded.
+#[test]
+fn desktop_without_icon_keeps_display_name() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    fs.mkdir(&apps);
+    write_desktop(
+        &fs,
+        &apps,
+        "firefox",
+        "[Desktop Entry]\nType=Application\nName=Firefox\nStartupWMClass=firefox\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider
+        .lookup("firefox")
+        .expect("ok")
+        .expect("some metadata");
+    assert_eq!(metadata.display_name, "Firefox");
+    assert!(metadata.icon_ref.is_none());
+    let diagnostics = provider.last_icon_diagnostics();
+    assert!(!diagnostics.declared);
+    assert!(!diagnostics.resolved);
+    assert_eq!(diagnostics.failure_kind, IconFailureKind::None);
+}
+
+/// When the icon resolver cannot find a candidate under any XDG
+/// root the diagnostic records `IconFailureKind::NotFound`.
+#[test]
+fn icon_not_found_failure_is_typed() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    fs.mkdir(&apps);
+    write_desktop(
+        &fs,
+        &apps,
+        "firefox",
+        "[Desktop Entry]\nType=Application\nName=Firefox\nStartupWMClass=firefox\nIcon=missing-icon\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider
+        .lookup("firefox")
+        .expect("ok")
+        .expect("some metadata");
+    assert_eq!(metadata.display_name, "Firefox");
+    assert!(metadata.icon_ref.is_none());
+    let diagnostics = provider.last_icon_diagnostics();
+    assert_eq!(diagnostics.failure_kind, IconFailureKind::NotFound);
+}
+
+/// `Icon=/abs/path` outside the XDG roots is rejected with
+/// `IconFailureKind::NotFound`.
+#[test]
+fn icon_outside_roots_is_rejected() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    fs.mkdir(&apps);
+    let outside = home.join("outside.png");
+    fs.write_png(&outside);
+    write_desktop(
+        &fs,
+        &apps,
+        "firefox",
+        &format!(
+            "[Desktop Entry]\nType=Application\nName=Firefox\nIcon={}\n",
+            outside.display()
+        ),
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider
+        .lookup("firefox")
+        .expect("ok")
+        .expect("some metadata");
+    assert!(metadata.icon_ref.is_none());
+    let diagnostics = provider.last_icon_diagnostics();
+    assert_eq!(diagnostics.failure_kind, IconFailureKind::NotFound);
+}
+
+/// SVG-only icons persist via the rasterizer when the
+/// `linux-svg-raster` feature is enabled.
+#[cfg(feature = "linux-svg-raster")]
+#[test]
+fn svg_only_icon_is_rasterized_and_persisted() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    let scalable = home.join(".local/share/icons/hicolor/scalable/apps");
+    fs.mkdir(&apps);
+    fs.mkdir(&home.join(".local/share/icons"));
+    fs.mkdir(&scalable);
+    fs.write_svg(&scalable.join("code.svg"), MINIMAL_SVG);
+    write_desktop(
+        &fs,
+        &apps,
+        "code",
+        "[Desktop Entry]\nType=Application\nName=Code\nStartupWMClass=code\nIcon=code\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider.lookup("code").expect("ok").expect("some metadata");
+    let icon_ref = metadata.icon_ref.expect("icon ref");
+    assert_eq!(icon_ref, "application-icons/code.png");
+    let target = assets.join(&icon_ref);
+    let bytes = std::fs::read(&target).expect("read");
+    assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]));
+    let diagnostics = provider.last_icon_diagnostics();
+    assert_eq!(diagnostics.kind, IconSourceKind::Svg);
+    assert!(diagnostics.rasterization_attempted);
+    assert!(diagnostics.rasterization_succeeded);
+}
+
+/// Malformed SVG icons surface `IconFailureKind::InvalidSvg`.
+#[cfg(feature = "linux-svg-raster")]
+#[test]
+fn malformed_svg_records_invalid_svg_failure() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    let scalable = home.join(".local/share/icons/hicolor/scalable/apps");
+    fs.mkdir(&apps);
+    fs.mkdir(&home.join(".local/share/icons"));
+    fs.mkdir(&scalable);
+    fs.write(&scalable.join("code.svg"), b"<<not svg>>");
+    write_desktop(
+        &fs,
+        &apps,
+        "code",
+        "[Desktop Entry]\nType=Application\nName=Code\nStartupWMClass=code\nIcon=code\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider.lookup("code").expect("ok").expect("some metadata");
+    assert!(metadata.icon_ref.is_none());
+    let diagnostics = provider.last_icon_diagnostics();
+    assert_eq!(diagnostics.failure_kind, IconFailureKind::InvalidSvg);
+}
+
+/// PNG icons take priority over SVG icons that share the same
+/// icon name.
+#[cfg(feature = "linux-svg-raster")]
+#[test]
+fn png_icon_is_preferred_over_svg() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    let png_apps = home.join(".local/share/icons/hicolor/48x48/apps");
+    let svg_apps = home.join(".local/share/icons/hicolor/scalable/apps");
+    fs.mkdir(&apps);
+    fs.mkdir(&home.join(".local/share/icons"));
+    fs.mkdir(&png_apps);
+    fs.mkdir(&svg_apps);
+    fs.write_png(&png_apps.join("code.png"));
+    fs.write_svg(&svg_apps.join("code.svg"), MINIMAL_SVG);
+    write_desktop(
+        &fs,
+        &apps,
+        "code",
+        "[Desktop Entry]\nType=Application\nName=Code\nStartupWMClass=code\nIcon=code\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider.lookup("code").expect("ok").expect("some metadata");
+    let icon_ref = metadata.icon_ref.expect("icon ref");
+    let diagnostics = provider.last_icon_diagnostics();
+    assert_eq!(diagnostics.kind, IconSourceKind::Png);
+    assert!(!diagnostics.rasterization_attempted);
+    let target = assets.join(&icon_ref);
+    let bytes = std::fs::read(&target).expect("read");
+    assert_eq!(
+        &bytes[..8],
+        &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
+    );
+}
+
+/// Icons living under `<root>/pixmaps/<name>.png` resolve through
+/// the legacy pixmap layout.
+#[test]
+fn pixmaps_layout_is_supported() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    let pixmaps = home.join(".local/share/pixmaps");
+    fs.mkdir(&apps);
+    fs.mkdir(&pixmaps);
+    fs.write_png(&pixmaps.join("firefox.png"));
+    write_desktop(
+        &fs,
+        &apps,
+        "firefox",
+        "[Desktop Entry]\nType=Application\nName=Firefox\nStartupWMClass=firefox\nIcon=firefox\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider
+        .lookup("firefox")
+        .expect("ok")
+        .expect("some metadata");
+    let icon_ref = metadata.icon_ref.expect("icon ref");
+    assert_eq!(icon_ref, "application-icons/firefox.png");
+    let diagnostics = provider.last_icon_diagnostics();
+    assert_eq!(diagnostics.kind, IconSourceKind::Pixmap);
+}
+
+/// Yaru theme layout (Ubuntu's stock theme).
+#[test]
+fn yaru_theme_layout_is_supported() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    let icons = home.join(".local/share/icons/Yaru/48x48/apps");
+    fs.mkdir(&apps);
+    fs.mkdir(&home.join(".local/share/icons"));
+    fs.mkdir(&icons);
+    fs.write_png(&icons.join("firefox.png"));
+    write_desktop(
+        &fs,
+        &apps,
+        "firefox",
+        "[Desktop Entry]\nType=Application\nName=Firefox\nStartupWMClass=firefox\nIcon=firefox\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider
+        .lookup("firefox")
+        .expect("ok")
+        .expect("some metadata");
+    assert!(metadata.icon_ref.is_some());
+}
+
+/// Adwaita theme layout (GNOME's stock theme).
+#[test]
+fn adwaita_theme_layout_is_supported() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    let icons = home.join(".local/share/icons/Adwaita/64x64/apps");
+    fs.mkdir(&apps);
+    fs.mkdir(&home.join(".local/share/icons"));
+    fs.mkdir(&icons);
+    fs.write_png(&icons.join("firefox.png"));
+    write_desktop(
+        &fs,
+        &apps,
+        "firefox",
+        "[Desktop Entry]\nType=Application\nName=Firefox\nStartupWMClass=firefox\nIcon=firefox\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider
+        .lookup("firefox")
+        .expect("ok")
+        .expect("some metadata");
+    assert!(metadata.icon_ref.is_some());
+}
+
+/// Multiple sizes under the same theme all resolve.
+#[test]
+fn multiple_icon_sizes_resolve() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    fs.mkdir(&apps);
+    fs.mkdir(&home.join(".local/share/icons"));
+    fs.mkdir(&home.join(".local/share/icons/hicolor/16x16/apps"));
+    fs.mkdir(&home.join(".local/share/icons/hicolor/22x22/apps"));
+    fs.mkdir(&home.join(".local/share/icons/hicolor/24x24/apps"));
+    fs.mkdir(&home.join(".local/share/icons/hicolor/32x32/apps"));
+    fs.mkdir(&home.join(".local/share/icons/hicolor/48x48/apps"));
+    fs.mkdir(&home.join(".local/share/icons/hicolor/64x64/apps"));
+    fs.mkdir(&home.join(".local/share/icons/hicolor/96x96/apps"));
+    fs.mkdir(&home.join(".local/share/icons/hicolor/128x128/apps"));
+    fs.mkdir(&home.join(".local/share/icons/hicolor/256x256/apps"));
+    fs.write_png(
+        &home
+            .join(".local/share/icons/hicolor/256x256/apps")
+            .join("firefox.png"),
+    );
+    write_desktop(
+        &fs,
+        &apps,
+        "firefox",
+        "[Desktop Entry]\nType=Application\nName=Firefox\nStartupWMClass=firefox\nIcon=firefox\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider
+        .lookup("firefox")
+        .expect("ok")
+        .expect("some metadata");
+    assert!(metadata.icon_ref.is_some());
+}
+
+/// A symlink that escapes the configured icon root is rejected
+/// silently — the lookup keeps the display name.
+#[test]
+fn symlink_outside_root_is_rejected() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    let icons = home.join(".local/share/icons/hicolor/48x48/apps");
+    fs.mkdir(&apps);
+    fs.mkdir(&home.join(".local/share/icons"));
+    fs.mkdir(&icons);
+    let escaped = home.join("escaped.png");
+    fs.write_png(&escaped);
+    // The .desktop references the symlink path. The resolver
+    // canonicalises the candidate path and rejects anything that
+    // escapes the configured icon roots.
+    write_desktop(
+        &fs,
+        &apps,
+        "firefox",
+        &format!(
+            "[Desktop Entry]\nType=Application\nName=Firefox\nIcon={}\n",
+            escaped.display()
+        ),
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider
+        .lookup("firefox")
+        .expect("ok")
+        .expect("some metadata");
+    assert_eq!(metadata.display_name, "Firefox");
+    assert!(metadata.icon_ref.is_none());
+}
+
+/// Existing assets on disk are never overwritten with a PNG the
+/// provider failed to rasterize.
+#[test]
+fn existing_icon_is_preserved_when_lookup_fails() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    fs.mkdir(&apps);
+    let existing = assets.join("application-icons/firefox.png");
+    std::fs::write(&existing, b"PRESERVE_ME").unwrap();
+    write_desktop(
+        &fs,
+        &apps,
+        "firefox",
+        "[Desktop Entry]\nType=Application\nName=Firefox\nStartupWMClass=firefox\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider
+        .lookup("firefox")
+        .expect("ok")
+        .expect("some metadata");
+    assert_eq!(metadata.display_name, "Firefox");
+    assert!(metadata.icon_ref.is_none());
+    let bytes = std::fs::read(&existing).expect("read");
+    assert_eq!(bytes, b"PRESERVE_ME");
+}
+
+/// `application-icons/` is created only when a valid icon was
+/// persisted; empty directories do not leak onto disk.
+#[test]
+fn application_icons_dir_only_created_on_persistence() {
+    let home = PathBuf::from("/home/tester");
+    let (fs, assets) = fixture(&home);
+    let apps = home.join(".local/share/applications");
+    fs.mkdir(&apps);
+    write_desktop(
+        &fs,
+        &apps,
+        "ghost",
+        "[Desktop Entry]\nType=Application\nName=Ghost\nStartupWMClass=ghost\n",
+    );
+    let provider =
+        LinuxApplicationMetadataProvider::with_filesystem(assets.clone(), std::sync::Arc::new(fs));
+    let metadata = provider
+        .lookup("ghost")
+        .expect("ok")
+        .expect("some metadata");
+    assert!(metadata.icon_ref.is_none());
+    let icons_dir = assets.join("application-icons");
+    assert!(std::fs::read_dir(&icons_dir).unwrap().next().is_none());
 }

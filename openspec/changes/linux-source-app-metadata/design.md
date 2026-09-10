@@ -547,3 +547,194 @@ y cubren los escenarios del usuario:
 - No se fabrican identificadores para aplicaciones Wayland nativas.
 - `AboutModal.svelte` sigue leyendo la versión de
   `diagnostics.version` (no se hardcodea el literal `v0.0.5`).
+
+## Parche funcional post‑publicación: iconos de Linux (`v0.0.6 → v0.0.7`)
+
+### Causa raíz
+
+Las capturas Linux persisten correctamente `source_app` y
+`source_app_name` desde los parches anteriores, pero
+`source_app_icon_ref` permanece `NULL` y el directorio
+`~/.clipvault/assets/application-icons/` ni siquiera se crea.
+La inspección de
+`crates/clipvault-platform/src/runtime/linux_app_metadata.rs`
+muestra tres regresiones:
+
+1. `collect_icon_root_layout()` ya devolvía los data roots
+   correctos (`/usr/share/icons`, `/usr/local/share/icons`,
+   `$HOME/.local/share/icons`), pero `collect_icon_dirs()`
+   volvía a concatenar `/icons` y producía rutas inexistentes
+   como `/usr/share/icons/icons/...`, saltándose el layout
+   canónico Ubuntu/Debian/Fedora/Arch/openSUSE
+   (`/usr/share/icons/hicolor/48x48/apps/<icon>.png` /
+   `/usr/share/icons/hicolor/scalable/apps/<icon>.svg`).
+2. Cuando `XDG_DATA_HOME` no estaba definido, el helper
+   buscaba `$HOME/applications` en lugar de
+   `$HOME/.local/share/applications`, así que las
+   instalaciones X11/XWayland del usuario se ignoraban.
+3. El resolver sólo aceptaba PNG. La mayoría de iconos
+   distribuidos por los paquetes oficiales viven como SVG en
+   `scalable/`, así que la cobertura real era muy inferior a
+   la disponible.
+
+### Corrección
+
+1. **Data roots unificados y deduplicados.** Se introduce
+   `data_roots(fs)` en `linux_app_metadata.rs` que devuelve la
+   lista canónica de XDG data roots en orden determinista:
+
+   - `XDG_DATA_HOME` si está definido; en caso contrario
+     `$HOME/.local/share`.
+   - Cada ruta de `XDG_DATA_DIRS`.
+   - Si `XDG_DATA_DIRS` está vacío, `/usr/local/share` y
+     `/usr/share`.
+   - Fallbacks opcionales que se incluyen sólo cuando existen
+     en disco y sin desplazar los XDG_DATA_DIRS:
+     `~/.local/share/flatpak/exports/share`,
+     `/var/lib/flatpak/exports/share`,
+     `/var/lib/snapd/desktop`, `/run/current-system/sw/share`.
+
+   A partir de estos `data_roots` se derivan los directorios
+   `<root>/applications`, `<root>/icons/<theme>/<size>x<size>/apps/`,
+   `<root>/icons/<theme>/scalable/apps/` y
+   `<root>/icons/<size>x<size>/apps/` (layout legacy) y
+   `<root>/pixmaps`. Cada segmento se concatena exactamente
+   una vez: la regresión `<root>/icons/icons/...` deja de ser
+   posible.
+
+2. **Coincidencia `.desktop` genérica.** Sin cambios de
+   contrato: `StartupWMClass` → `X-GNOME-WMClass` → nombre
+   del archivo `.desktop` sin extensión, comparación
+   case-insensitive ASCII y desempate lexicográfico. La
+   batería de tests ya no se limita a Warp: incluye Firefox,
+   GNOME Terminal, Code, una aplicación arbitraria, una
+   aplicación con `WM_CLASS` distinto del nombre visible y una
+   aplicación sin icono.
+
+3. **Resolución de iconos ampliada.** El resolver recorre, en
+   orden determinista, los tamaños `16, 22, 24, 32, 48, 64,
+   96, 128, 256` y los formatos `.png` y `.svg`. PNG tiene
+   prioridad sobre SVG cuando ambos existen. Para
+   `Icon=/ruta/absoluta`, la ruta se canonicaliza, se exige
+   que sea un archivo regular y que viva bajo una raíz
+   permitida; los symlinks que escapan de las raíces se
+   rechazan.
+
+4. **Soporte SVG vía `resvg`.** Cuando sólo existe un SVG, el
+   provider lo rasteriza a PNG mediante `resvg`
+   (`default-features = false`, sin texto, sin fuentes, sin
+   decodificadores externos) detrás de la feature
+   `linux-svg-raster`. El rasterizador:
+
+   - Desactiva todos los resolvedores `ImageHrefResolver`
+     (datos, paths, URLs): ningún recurso externo puede
+     cargarse.
+   - Cap el byte length a `MAX_SVG_BYTES` (4 MB).
+   - Cap las dimensiones de origen a `MAX_SVG_SOURCE_DIM`
+     (1024 × 1024).
+   - Escala el resultado a `MAX_ICON_DIM` × `MAX_ICON_DIM`
+     (256 × 256) preservando proporción y transparencia.
+   - Valida que el PNG producido lleve la firma canónica.
+   - Nunca invoca `convert`, `magick`, `gio` ni ningún proceso
+     externo; nunca abre la red.
+
+   El PNG se persiste en el namespace existente
+   `~/.clipvault/assets/application-icons/<safe-id>.png` y la
+   referencia se conserva relativa
+   (`application-icons/<safe-id>.png`).
+
+5. **`IconDiagnostics` extendido.** Se agregan los campos:
+
+   - `kind: IconSourceKind` — `png`, `svg`, `pixmap`,
+     `unknown`, `none`.
+   - `rasterization_attempted: bool` — true sólo cuando el
+     resolver intentó rasterizar un SVG.
+   - `rasterization_succeeded: bool` — true sólo cuando la
+     rasterización produjo un PNG válido.
+   - `failure_kind: IconFailureKind` — categorías estables
+     (`not_declared`, `not_found`, `out_of_roots`,
+     `invalid_png`, `invalid_svg`, `svg_rejected`,
+     `rasterization_failed`, `write_error`, `none`).
+
+   `MetadataSnapshot` (en
+   `crates/clipvault-core/src/capture_diagnostic.rs`) añade
+   los mismos campos para mantener el contrato
+   metadata-only que el sink `capture_debug` ya consume.
+
+6. **Persistencia atómica.** `write_icon_atomic` continúa
+   creando un temporal en el mismo directorio, validando la
+   firma PNG, haciendo `sync_all`, renombrando atómicamente y
+   eliminando el temporal ante cualquier error. Sólo crea
+   `application-icons/` cuando el icono es válido y nunca
+   reemplaza un icono existente por una respuesta vacía.
+
+7. **Backfill.** Las filas anteriores con `source_app` y
+   `source_app_name` pero `source_app_icon_ref = NULL`
+   vuelven a invocar el provider en el siguiente arranque y
+   persisten el icono cuando ahora puede resolverlo. No se
+   borran ni renombran assets existentes.
+
+### Contratos preservados
+
+- `X11ActiveApplication::name()` sigue devolviendo `x11_ewmh`
+  / `xwayland_ewmh`; el bootstrap sigue eligiendo
+  `ProbeKind::X11` para X11 puro y `ProbeKind::XWayland`
+  para Wayland con `$DISPLAY`. `parse_active_window_id` sigue
+  leyendo los cuatro bytes del reply X11.
+- `ApplicationMetadataProvider::lookup` sigue devolviendo
+  `Ok(Some(...))` con `display_name` no vacío cuando hay
+  coincidencia, incluso si el icono no puede resolverse.
+- El identificador estable sigue siendo el segmento `class`
+  de `WM_CLASS`; nunca `_NET_WM_NAME`. `source_app` no se
+  sustituye por valores inventados en Wayland nativo.
+- `LinuxApplicationMetadataProvider`, el bridge de iconos
+  (`application-icons/`) y el ciclo de captura no cambian su
+  contrato público.
+- macOS, el blacklist, el ciclo de captura, las imágenes,
+  tags, colecciones, favoritos, Quick Paste y drag-and-drop
+  de cards no se tocan.
+- `AboutModal.svelte` sigue leyendo `diagnostics.version` (no
+  se hardcodea la versión en Svelte).
+
+### Privacidad
+
+- El rasterizador SVG no carga archivos locales ni recursos
+  remotos; el `ImageHrefResolver` se cablea con closures que
+  devuelven `None` para datos y paths. `usvg` no ejecuta
+  JavaScript ni scripting alguno.
+- `IconDiagnostics` no expone rutas absolutas, contenido del
+  portapapeles, snippets, hashes, `asset_ref`, títulos de
+  ventana ni secretos. `failure_kind` se reduce a una
+  categoría tipada estable.
+- La superficie JSON del sink `capture_debug metadata_provider`
+  añade `icon_kind`, `rasterization_attempted`,
+  `rasterization_succeeded` y `icon_failure_kind`; ningún
+  campo contiene paths absolutas o contenido sensible.
+
+### Limitaciones que se documentan
+
+- El host actual es macOS, así que la confirmación runtime
+  en una sesión Ubuntu real (X11, GNOME Wayland con app
+  XWayland, GNOME Wayland nativo) queda como tarea del
+  usuario. Las tareas de Ubuntu (10.1–10.6) NO se marcan
+  desde macOS ni desde tests sin display; el guard
+  anti-`<root>/icons/icons/...>` y los tests determinísticos
+  sobre `MemoryFilesystem` validan estructuralmente el
+  refactor.
+- `cargo check -p clipvault-platform --features linux-svg-raster
+  --target x86_64-unknown-linux-gnu --tests` actúa como
+  smoke test de la rama Linux sobre el toolchain del dev host.
+
+### Manuales Ubuntu
+
+- Sesión X11: copiar desde una aplicación con `.desktop`,
+  confirmar nombre e icono en desktop y Quick Paste, reiniciar
+  y verificar persistencia. Confirmar la creación de
+  `~/.clipvault/assets/application-icons/<safe-id>.png`.
+- GNOME Wayland con aplicación X11/XWayland: repetir la
+  prueba y revisar el diagnóstico `xwayland_ewmh`. Confirmar
+  que `source_app_icon_ref` ya no es `NULL` y que
+  `application-icons/` se ha creado.
+- GNOME Wayland nativo: confirmar fallback explícito sin
+  nombre/icono falso y sin romper captura, historial o
+  blacklist.

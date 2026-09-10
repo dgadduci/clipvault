@@ -24,6 +24,15 @@ macos-native = [
 ]
 # Linux X11 active app + synthetic paste via `x11rb`.
 linux-x11 = ["dep:x11rb"]
+# Pure-Rust SVG → PNG rasterizer used by the Linux metadata provider
+# to honour `Icon=<name>` entries that ship as SVG instead of PNG.
+# `default-features = false` keeps the parser/raster stack free of
+# font handling, system font enumeration and external image
+# decoders — every one of those would let a malicious `.desktop`
+# file pull arbitrary bytes from the host filesystem or the
+# network during a metadata lookup. The provider already pins the
+# maximum output dimensions and rejects over-sized SVGs.
+linux-svg-raster = ["dep:resvg"]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -42,6 +51,13 @@ png = { workspace = true }
 arboard = { workspace = true, optional = true }
 global-hotkey = { workspace = true, optional = true }
 x11rb = { workspace = true, optional = true, features = ["allow-unsafe-code", "xtest"] }
+# `resvg` ships `usvg` (SVG parser), `tiny-skia` (rasterizer) and a
+# thin renderer under a single crate. With `default-features = false`
+# we get the no-text / no-fonts / no-raster-images path, which is the
+# minimum needed to honour the SVG icons `.desktop` files ship while
+# never executing scripts, fetching network resources or loading
+# arbitrary font files from the host.
+resvg = { version = "0.45", default-features = false, optional = true }
 objc2 = { workspace = true, optional = true }
 objc2-app-kit = { workspace = true, optional = true }
 objc2-core-graphics = { workspace = true, optional = true }

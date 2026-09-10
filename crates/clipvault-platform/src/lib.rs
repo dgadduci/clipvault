@@ -35,8 +35,8 @@ pub use app_assets::{
 };
 pub use app_metadata::{
     icon_ref_for, path_for_icon_ref, ApplicationMetadata, ApplicationMetadataError,
-    ApplicationMetadataProvider, IconDiagnostics, MatchStrategy, NoopApplicationMetadataProvider,
-    APPLICATION_ICONS_DIR,
+    ApplicationMetadataProvider, IconDiagnostics, IconFailureKind, IconSourceKind, MatchStrategy,
+    NoopApplicationMetadataProvider, APPLICATION_ICONS_DIR,
 };
 pub use app_picker::{ApplicationPicker, ApplicationPickerError, SelectedApplication};
 pub use capabilities::{

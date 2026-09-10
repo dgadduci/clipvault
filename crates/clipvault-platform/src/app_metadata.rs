@@ -107,10 +107,25 @@ pub struct IconDiagnostics {
     /// key the resolver could interpret (either an absolute PNG path
     /// under an allowed root or a theme-name lookup).
     pub declared: bool,
-    /// `true` when the resolver produced a canonical PNG path on
+    /// Source format the resolver identified for the matched icon.
+    /// `Unknown` covers formats the provider refuses to handle (XPM,
+    /// ICO, raw bitmaps). The diagnostic never reports the actual
+    /// path or filename.
+    pub kind: IconSourceKind,
+    /// `true` when the resolver produced a canonical file path on
     /// disk. `false` when the icon was missing, escaped the allowed
     /// roots or failed the format check.
     pub resolved: bool,
+    /// `true` when the resolver attempted to rasterize a SVG source
+    /// into a PNG payload. Always `false` for PNG and pixmap
+    /// sources — the value only flips when the resolver picked an
+    /// `.svg` candidate from the theme or `pixmaps/` namespace.
+    pub rasterization_attempted: bool,
+    /// `true` when the SVG rasterizer produced a valid PNG payload
+    /// the writer accepted. Only meaningful when
+    /// `rasterization_attempted` is `true`; stays `false` for every
+    /// PNG / pixmap source.
+    pub rasterization_succeeded: bool,
     /// `true` when the PNG signature the resolver expected matched
     /// the bytes on disk. Mirrors the
     /// `read_validated_png` validator the Linux provider runs.
@@ -124,6 +139,100 @@ pub struct IconDiagnostics {
     /// IHDR dimensions the validator parsed from the PNG header.
     /// `None` when the payload never reached the validator.
     pub dimensions: Option<(u32, u32)>,
+    /// Stable identifier the resolver associates with the most
+    /// recent failure. The string never carries a path, the icon
+    /// payload or any user-supplied text; the variants the capture
+    /// diagnostic enumerates cover every documented failure mode.
+    pub failure_kind: IconFailureKind,
+}
+
+/// Source format the resolver detected on the last successful icon
+/// lookup. The variants are part of the diagnostic contract
+/// `linux-source-app-metadata` pins: every test reads back the
+/// `as_str` value to confirm the resolver landed on the right
+/// source. Renaming a variant is a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IconSourceKind {
+    /// The resolver has not picked a source yet (default).
+    #[default]
+    None,
+    /// The resolver identified a PNG file (`<theme>/<size>x<size>/apps/<name>.png`
+    /// or a `.png` pixmap).
+    Png,
+    /// The resolver identified an SVG file that the rasterizer
+    /// converted to a PNG payload before validation.
+    Svg,
+    /// The resolver identified a file living under a `pixmaps/`
+    /// namespace (typically a freedesktop legacy layout).
+    Pixmap,
+    /// The resolver encountered an `Icon=` value that does not match
+    /// any supported format. The diagnostic keeps the variant
+    /// generic so a tampered `.desktop` file cannot smuggle a
+    /// filename or extension into the logs.
+    Unknown,
+}
+
+impl IconSourceKind {
+    /// Stable snake_case identifier the capture diagnostic consumes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IconSourceKind::None => "none",
+            IconSourceKind::Png => "png",
+            IconSourceKind::Svg => "svg",
+            IconSourceKind::Pixmap => "pixmap",
+            IconSourceKind::Unknown => "unknown",
+        }
+    }
+}
+
+/// Stable identifier the icon resolver attaches to the most recent
+/// failure. The string never carries a path, an icon payload or any
+/// user-supplied text — every variant is a typed category the
+/// `linux-source-app-metadata` capture diagnostic surfaces verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IconFailureKind {
+    /// The resolver has not surfaced a failure yet (default).
+    #[default]
+    None,
+    /// The `.desktop` file did not declare an `Icon=` key.
+    NotDeclared,
+    /// The resolver could not find any candidate that lived under
+    /// an allowed XDG root.
+    NotFound,
+    /// The candidate path the resolver identified lives outside the
+    /// allowed XDG roots. Symlinks that escape the root land here.
+    OutOfRoots,
+    /// The candidate bytes are not a valid PNG payload.
+    InvalidPng,
+    /// The candidate bytes are not a valid SVG payload.
+    InvalidSvg,
+    /// The SVG was valid but exceeded one of the safety caps
+    /// (`MAX_SVG_BYTES`, source dimensions, target dimensions).
+    SvgRejected,
+    /// The SVG rasterizer could not produce a PNG payload (parse
+    /// failure, rasterizer internal failure or PNG encode failure).
+    RasterizationFailed,
+    /// The PNG writer rejected the payload (invalid signature,
+    /// dimensions above the cap, IO error during the atomic
+    /// rename).
+    WriteError,
+}
+
+impl IconFailureKind {
+    /// Stable snake_case identifier the capture diagnostic consumes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IconFailureKind::None => "none",
+            IconFailureKind::NotDeclared => "not_declared",
+            IconFailureKind::NotFound => "not_found",
+            IconFailureKind::OutOfRoots => "out_of_roots",
+            IconFailureKind::InvalidPng => "invalid_png",
+            IconFailureKind::InvalidSvg => "invalid_svg",
+            IconFailureKind::SvgRejected => "svg_rejected",
+            IconFailureKind::RasterizationFailed => "rasterization_failed",
+            IconFailureKind::WriteError => "write_error",
+        }
+    }
 }
 
 impl ApplicationMetadataError {
@@ -286,5 +395,52 @@ mod tests {
         let result = provider.lookup("anything").expect("ok");
         assert_eq!(result, None);
         assert_eq!(provider.name(), "noop");
+    }
+
+    #[test]
+    fn icon_source_kind_strings_are_stable() {
+        // The capture diagnostic renders the snake_case identifier
+        // verbatim; renaming any string is a breaking change for
+        // `linux-source-app-metadata`.
+        assert_eq!(IconSourceKind::None.as_str(), "none");
+        assert_eq!(IconSourceKind::Png.as_str(), "png");
+        assert_eq!(IconSourceKind::Svg.as_str(), "svg");
+        assert_eq!(IconSourceKind::Pixmap.as_str(), "pixmap");
+        assert_eq!(IconSourceKind::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn icon_failure_kind_strings_are_stable() {
+        assert_eq!(IconFailureKind::None.as_str(), "none");
+        assert_eq!(IconFailureKind::NotDeclared.as_str(), "not_declared");
+        assert_eq!(IconFailureKind::NotFound.as_str(), "not_found");
+        assert_eq!(IconFailureKind::OutOfRoots.as_str(), "out_of_roots");
+        assert_eq!(IconFailureKind::InvalidPng.as_str(), "invalid_png");
+        assert_eq!(IconFailureKind::InvalidSvg.as_str(), "invalid_svg");
+        assert_eq!(IconFailureKind::SvgRejected.as_str(), "svg_rejected");
+        assert_eq!(
+            IconFailureKind::RasterizationFailed.as_str(),
+            "rasterization_failed"
+        );
+        assert_eq!(IconFailureKind::WriteError.as_str(), "write_error");
+    }
+
+    #[test]
+    fn icon_diagnostics_default_is_empty_snapshot() {
+        // The default snapshot the bootstrap installs before any
+        // lookup ran MUST carry every field the diagnostic sinks
+        // read; missing fields break the JSON shape the user
+        // already relies on.
+        let diagnostics = IconDiagnostics::default();
+        assert!(!diagnostics.declared);
+        assert_eq!(diagnostics.kind, IconSourceKind::None);
+        assert!(!diagnostics.resolved);
+        assert!(!diagnostics.rasterization_attempted);
+        assert!(!diagnostics.rasterization_succeeded);
+        assert!(!diagnostics.png_validated);
+        assert!(!diagnostics.persisted);
+        assert!(diagnostics.bytes.is_none());
+        assert!(diagnostics.dimensions.is_none());
+        assert_eq!(diagnostics.failure_kind, IconFailureKind::None);
     }
 }

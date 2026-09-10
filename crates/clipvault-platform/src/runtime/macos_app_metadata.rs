@@ -42,7 +42,7 @@ use tracing::warn;
 use crate::app_assets::{APPLICATION_ICONS_DIR, MAX_ICON_DIM};
 use crate::app_metadata::{
     icon_ref_for, ApplicationMetadata, ApplicationMetadataError, ApplicationMetadataProvider,
-    IconDiagnostics, MatchStrategy,
+    IconDiagnostics, IconFailureKind, IconSourceKind, MatchStrategy,
 };
 use parking_lot::Mutex;
 
@@ -153,11 +153,15 @@ impl MacOsApplicationMetadataProvider {
             None => {
                 *self.last_icon.lock() = IconDiagnostics {
                     declared: true,
+                    kind: IconSourceKind::Png,
                     resolved: false,
+                    rasterization_attempted: false,
+                    rasterization_succeeded: false,
                     png_validated: false,
                     persisted: false,
                     bytes: None,
                     dimensions: None,
+                    failure_kind: IconFailureKind::NotFound,
                 };
                 return None;
             }
@@ -167,11 +171,15 @@ impl MacOsApplicationMetadataProvider {
             warn!(error = %error, "could not create application-icons directory");
             *self.last_icon.lock() = IconDiagnostics {
                 declared: true,
+                kind: IconSourceKind::Png,
                 resolved: true,
+                rasterization_attempted: false,
+                rasterization_succeeded: false,
                 png_validated: true,
                 persisted: false,
                 bytes: Some(png_bytes.len()),
                 dimensions: png_header_dimensions(&png_bytes),
+                failure_kind: IconFailureKind::WriteError,
             };
             return None;
         }
@@ -183,11 +191,15 @@ impl MacOsApplicationMetadataProvider {
                 warn!(error = %error, path = %target.display(), "could not open icon file");
                 *self.last_icon.lock() = IconDiagnostics {
                     declared: true,
+                    kind: IconSourceKind::Png,
                     resolved: true,
+                    rasterization_attempted: false,
+                    rasterization_succeeded: false,
                     png_validated: true,
                     persisted: false,
                     bytes: Some(png_bytes.len()),
                     dimensions: png_header_dimensions(&png_bytes),
+                    failure_kind: IconFailureKind::WriteError,
                 };
                 return None;
             }
@@ -196,21 +208,29 @@ impl MacOsApplicationMetadataProvider {
             warn!(error = %error, "failed to write PNG icon");
             *self.last_icon.lock() = IconDiagnostics {
                 declared: true,
+                kind: IconSourceKind::Png,
                 resolved: true,
+                rasterization_attempted: false,
+                rasterization_succeeded: false,
                 png_validated: true,
                 persisted: false,
                 bytes: Some(png_bytes.len()),
                 dimensions: png_header_dimensions(&png_bytes),
+                failure_kind: IconFailureKind::WriteError,
             };
             return None;
         }
         *self.last_icon.lock() = IconDiagnostics {
             declared: true,
+            kind: IconSourceKind::Png,
             resolved: true,
+            rasterization_attempted: false,
+            rasterization_succeeded: false,
             png_validated: true,
             persisted: true,
             bytes: Some(png_bytes.len()),
             dimensions: png_header_dimensions(&png_bytes),
+            failure_kind: IconFailureKind::None,
         };
         Some(icon_ref_for(identifier))
     }

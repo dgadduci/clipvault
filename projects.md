@@ -47,11 +47,11 @@ canonical value and never fall back to a hard-coded constant.
 
 | Surface | Version |
 | --- | --- |
-| Cargo workspace (`Cargo.toml`) | 0.0.6 |
-| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.6 |
-| Frontend package (`app/tauri/frontend/package.json`) | 0.0.6 |
+| Cargo workspace (`Cargo.toml`) | 0.0.7 |
+| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.7 |
+| Frontend package (`app/tauri/frontend/package.json`) | 0.0.7 |
 
-The canonical public version is intentionally established at **0.0.6**.
+The canonical public version is intentionally established at **0.0.7**.
 The earlier `0.1.x` values were development manifest values and did not
 represent a public product release. The `0.0.1` baseline pinned the
 first visible product version; the `with_kind` → `connect_to_kind`
@@ -73,7 +73,13 @@ was gating the Linux X11 adapter wiring on a feature the
 `NoopActiveApplicationProbe` while `capabilities.active_application`
 stayed `true` and every Ubuntu capture landed with `source_app =
 NULL`) is a functional change, so the patch is incremented to
-**0.0.6**.
+**0.0.6**. The follow-up that corrects the XDG icon root
+collection, adds the `resvg`-backed SVG → PNG rasterizer and
+extends `IconDiagnostics` with the format / rasterization / typed
+failure surface so the resolver no longer duplicates `icons` and
+no longer misses Ubuntu / Debian / Fedora / Arch / openSUSE /
+GNOME / KDE layouts (X11 and XWayland alike) is a functional
+change, so the patch is incremented to **0.0.7**.
 
 ## Bumping the version
 

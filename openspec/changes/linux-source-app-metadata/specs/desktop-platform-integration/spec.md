@@ -190,6 +190,169 @@ frontend attributes.
 - **THEN** the UI describes it as an unsupported/ unavailable capability
 - **AND** it does not present the condition as a user permission problem
 
+### Requirement: Linux XDG data root traversal
+
+The Linux metadata provider SHALL resolve icons and `.desktop` files from a
+single deduped collection of XDG data roots built from `XDG_DATA_HOME` (or
+`$HOME/.local/share` when unset), every entry in `XDG_DATA_DIRS`, the canonical
+`/usr/local/share` and `/usr/share` fallbacks and — only when present on disk —
+the optional Flatpak, Snap and NixOS export namespaces. The provider SHALL
+never build `<root>/icons/icons/...` paths, SHALL canonicalise candidate
+paths and refuse anything that escapes an allowed root, and SHALL honour the
+canonical Ubuntu / Debian / Fedora / Arch / openSUSE / GNOME / KDE layout
+(`<root>/icons/<theme>/<size>x<size>/apps/<name>.{png,svg}` and
+`<root>/icons/<theme>/scalable/apps/<name>.{png,svg}`) alongside the legacy
+`<root>/icons/<size>x<size>/apps/` and `<root>/pixmaps/` layouts.
+
+#### Scenario: XDG_DATA_HOME explicit
+
+- **WHEN** `XDG_DATA_HOME` is set to a custom path
+- **THEN** the provider uses that path as the primary data root
+- **AND** every entry in `XDG_DATA_DIRS` and the optional fallback namespaces
+  are appended in deterministic order
+
+#### Scenario: XDG_DATA_HOME unset
+
+- **WHEN** `XDG_DATA_HOME` is unset
+- **THEN** the provider falls back to `$HOME/.local/share`
+- **AND** `/usr/local/share` and `/usr/share` are appended when
+  `XDG_DATA_DIRS` is empty
+
+#### Scenario: Optional fallback present
+
+- **WHEN** an optional export namespace (Flatpak, Snap, NixOS) exists on disk
+- **THEN** it is included after the standard XDG roots
+- **AND** it never displaces any entry of `XDG_DATA_DIRS`
+
+#### Scenario: No duplicated icons segment
+
+- **WHEN** the provider walks the icon directories
+- **THEN** no candidate path contains the `icons` segment more than once
+- **AND** the resolver reaches the canonical
+  `/usr/share/icons/hicolor/48x48/apps/<name>.png` layout
+
+### Requirement: Linux icon source formats and ordering
+
+The Linux metadata provider SHALL resolve `Icon=<name>` deterministically by
+walking, in order, the PNG candidate, then the SVG candidate of every theme
+directory, then the PNG and SVG candidate of every `pixmaps/` directory. PNG
+SHOULD win over SVG when both exist for the same icon name. The size list
+SHALL be deterministic and SHALL include `16, 22, 24, 32, 48, 64, 96, 128`
+and `256`. Absolute `Icon=/path` values SHALL be canonicalised, validated
+as regular files, required to live under an allowed root and rejected when
+they escape (including symlinks that point outside the allowed roots).
+
+#### Scenario: PNG is preferred over SVG
+
+- **WHEN** both `<theme>/<size>x<size>/apps/<name>.png` and
+  `<theme>/scalable/apps/<name>.svg` exist
+- **THEN** the PNG wins
+- **AND** the diagnostic records `icon_kind = "png"` and
+  `rasterization_attempted = false`
+
+#### Scenario: Absolute path outside allowed roots
+
+- **WHEN** `Icon=/etc/passwd` or any path that escapes the allowed roots
+- **THEN** the resolver rejects the path
+- **AND** the diagnostic records `icon_failure_kind = "not_found"`
+
+#### Scenario: Multiple icon sizes
+
+- **WHEN** the same icon name lives under `16x16`, `22x22`, `24x24`,
+  `32x32`, `48x48`, `64x64`, `96x96`, `128x128` and `256x256`
+- **THEN** the resolver walks every size in the documented order
+- **AND** the first PNG it finds is persisted
+
+### Requirement: Safe Linux SVG rasterization
+
+When only an SVG candidate exists for a Linux application icon, the Linux
+metadata provider MAY rasterize it through a pure-Rust, default-features-off
+`resvg` / `tiny-skia` pipeline. The rasterizer SHALL disable every external
+resource resolver (no file paths, no network, no embedded raster images),
+SHALL cap the byte length, source dimensions and target dimensions, SHALL
+preserve aspect ratio and transparency, SHALL never invoke `convert`,
+`ImageMagick`, `magick`, `gio` or any other helper process and SHALL
+validate the resulting PNG before persistence. The output SHALL be persisted
+under the existing `application-icons/` namespace as PNG; the SVG bytes
+themselves SHALL NEVER be persisted.
+
+#### Scenario: SVG-only icon resolves
+
+- **WHEN** an `.svg` icon is the only candidate under `<theme>/scalable/apps/`
+- **THEN** the provider rasterizes it to PNG and persists it under
+  `application-icons/<safe-id>.png`
+- **AND** the diagnostic records `icon_kind = "svg"`,
+  `rasterization_attempted = true` and `rasterization_succeeded = true`
+
+#### Scenario: Malformed SVG
+
+- **WHEN** the SVG bytes fail to parse
+- **THEN** the provider keeps the display name and skips the icon
+- **AND** the diagnostic records `icon_failure_kind = "invalid_svg"`
+
+#### Scenario: SVG above the size cap
+
+- **WHEN** the SVG payload exceeds `MAX_SVG_BYTES` (4 MiB) or its declared
+  dimensions exceed `MAX_SVG_SOURCE_DIM` (1024 × 1024)
+- **THEN** the provider rejects the file without rasterizing it
+- **AND** the diagnostic records `icon_failure_kind = "svg_rejected"`
+
+#### Scenario: External resources are dropped
+
+- **WHEN** an SVG references a local file via `xlink:href` or embeds a
+  network resource
+- **THEN** the rasterizer silently drops the reference
+- **AND** the resulting PNG is still persisted without leaking the
+  referenced payload
+
+### Requirement: Linux icon diagnostics surface
+
+The Linux metadata provider SHALL publish an `IconDiagnostics` snapshot that
+distinguishes, without exposing paths or asset bytes: whether the `.desktop`
+declared an `Icon=` key, the source format the resolver identified
+(`png`, `svg`, `pixmap`, `unknown`), whether a path was resolved, whether a
+rasterization was attempted and whether it succeeded, whether the PNG was
+validated, whether the asset was persisted, the byte length, the dimensions
+and a typed failure category (`not_declared`, `not_found`, `out_of_roots`,
+`invalid_png`, `invalid_svg`, `svg_rejected`, `rasterization_failed`,
+`write_error`, `none`).
+
+#### Scenario: Successful PNG icon
+
+- **WHEN** a PNG icon resolves and persists
+- **THEN** the snapshot reports `kind = "png"`, `declared = true`,
+  `resolved = true`, `rasterization_attempted = false`,
+  `rasterization_succeeded = false`, `png_validated = true`,
+  `persisted = true`, `bytes > 0`, `dimensions = (w, h)` and
+  `failure_kind = "none"`
+
+#### Scenario: Successful SVG rasterization
+
+- **WHEN** an SVG icon rasterizes and persists
+- **THEN** the snapshot reports `kind = "svg"`,
+  `rasterization_attempted = true`, `rasterization_succeeded = true`,
+  `png_validated = true`, `persisted = true` and
+  `failure_kind = "none"`
+
+#### Scenario: Icon not found
+
+- **WHEN** the `.desktop` declares an icon name with no candidate under any
+  allowed root
+- **THEN** the snapshot reports `declared = true`, `resolved = false`,
+  `persisted = false`, `bytes = None`, `dimensions = None` and
+  `failure_kind = "not_found"`
+
+#### Scenario: No Icon declared
+
+- **WHEN** the `.desktop` does not declare any `Icon=` key
+- **THEN** the snapshot reports `declared = false` and `failure_kind = "none"`
+
+#### Scenario: Path outside allowed roots
+
+- **WHEN** an absolute `Icon=` value escapes the allowed XDG roots
+- **THEN** the snapshot records `failure_kind = "not_found"`
+- **AND** no path or filename is logged
+
 ### Requirement: Capture debug instrumentation
 
 The core SHALL expose an opt-in, metadata-only capture-debug

@@ -1,9 +1,8 @@
 //! Linux-backed [`ApplicationMetadataProvider`].
 //!
 //! Resolves a stable X11 / XWayland `WM_CLASS` identifier against the
-//! freedesktop `.desktop` files installed under
-//! `XDG_DATA_HOME/applications` and the per-entry directories listed
-//! in `XDG_DATA_DIRS`, persists the resolved icon under the existing
+//! freedesktop `.desktop` files installed under the XDG-compliant
+//! data roots, persists the resolved icon under the existing
 //! `<data_dir>/assets/application-icons/` namespace and exposes the
 //! user-visible display name the card rail already renders.
 //!
@@ -19,21 +18,23 @@
 //! ## Design choices
 //!
 //! - The matching priority (`StartupWMClass` → `X-GNOME-WMClass` →
-//!   filename → free-form stable id) is the same priority documented
-//!   in `design.md`. Comparison is case-insensitive ASCII and ties are
-//!   resolved lexicographically so the result stays deterministic
-//!   across runs.
+//!   filename) is the same priority documented in `design.md`.
+//!   Comparison is case-insensitive ASCII and ties are resolved
+//!   lexicographically so the result stays deterministic across
+//!   runs.
 //! - `NoDisplay=true` is **not** treated as a skip; the spec only
 //!   excludes `Hidden=true` and non-`Application` types so the
 //!   provider can answer for installed apps that hide themselves in
 //!   the launcher.
 //! - Icons resolve locally only: absolute paths and theme names are
-//!   walked against an XDG icon root list compiled from
-//!   `XDG_DATA_HOME`, the entries in `XDG_DATA_DIRS`, the canonical
-//!   `/usr/local/share` and `/usr/share` fallbacks and a small set of
-//!   common sizes (`128`, `64`, `48`, `256`). Anything outside the
-//!   allowed roots is silently skipped; the bridge keeps working
-//!   with the existing generic icon fallback.
+//!   walked against an XDG icon root list compiled from a single
+//!   shared `data_roots()` helper so the `.desktop` scanner and the
+//!   icon scanner never disagree on which roots count. Each root
+//!   gives rise to three directories — `applications/`, `icons/` and
+//!   `pixmaps/` — and nothing else. The legacy `<root>/icons/icons/...`
+//!   layout that the previous collector produced when it appended
+//!   `/icons` twice is gone: `data_roots()` returns base roots, every
+//!   helper joins each derivative exactly once.
 //! - The icon writer is atomic: it builds a temporary file inside the
 //!   destination directory, validates the PNG (signature + size +
 //!   dimension) and renames the file over the destination. The
@@ -43,6 +44,12 @@
 //!   returns the display name and leaves the previous reference
 //!   untouched so the card rail keeps rendering the asset the
 //!   previous capture persisted.
+//! - When the resolver finds an SVG icon the provider rasterizes it
+//!   to PNG through the `linux-svg-raster` helper and reuses the
+//!   same atomic write path so the rest of the pipeline stays
+//!   PNG-only. The rasterizer disables every external resource
+//!   resolver, caps the source and target dimensions and never
+//!   invokes a helper process.
 
 use std::env;
 use std::ffi::OsString;
@@ -55,8 +62,11 @@ use parking_lot::Mutex;
 use crate::app_assets::APPLICATION_ICONS_DIR;
 use crate::app_metadata::{
     icon_ref_for, ApplicationMetadata, ApplicationMetadataError, ApplicationMetadataProvider,
-    IconDiagnostics, MatchStrategy,
+    IconDiagnostics, IconFailureKind, IconSourceKind, MatchStrategy,
 };
+
+#[cfg(feature = "linux-svg-raster")]
+use crate::runtime::linux_svg_raster;
 
 /// Linux-backed application-metadata provider. Resolves a stable
 /// `WM_CLASS` identifier against the freedesktop `.desktop` files
@@ -67,22 +77,19 @@ pub struct LinuxApplicationMetadataProvider {
     /// Roots the desktop-entry scanner walks. Cached at construction
     /// time so the lookup hot path never re-reads the environment.
     app_dirs: Vec<PathBuf>,
-    /// Resolved icon directories the resolver probes for theme
-    /// names (`<theme>/<size>x<size>/apps` or the legacy
-    /// `<size>x<size>/apps` layout). Cached for the same reason.
-    icon_dirs: Vec<PathBuf>,
-    /// Canonical parent roots for every entry in `icon_dirs`. The
-    /// resolver refuses to follow any candidate whose canonical
-    /// path escapes one of these roots, which keeps symlink
-    /// traversal honest regardless of which theme the host
-    /// installed the file under.
+    /// Per-theme `apps/` directories the resolver probes for theme
+    /// icons (e.g. `Icon=firefox`). Cached for the same reason.
+    icon_apps_dirs: Vec<PathBuf>,
+    /// `pixmaps/` directories the resolver probes for legacy layout
+    /// icons (e.g. `Icon=firefox` with no theme). Cached alongside
+    /// the theme directories so the lookup stays deterministic.
+    pixmap_dirs: Vec<PathBuf>,
+    /// Canonical parent roots for every entry in `icon_apps_dirs`
+    /// and `pixmap_dirs`. The resolver refuses to follow any
+    /// candidate whose canonical path escapes one of these roots,
+    /// which keeps symlink traversal honest regardless of which
+    /// theme the host installed the file under.
     icon_roots: Vec<PathBuf>,
-    /// Sizes the icon resolver probes when the entry names a theme
-    /// icon (e.g. `Icon=firefox`). The provider walks each size in
-    /// order and returns the first hit that lives under an allowed
-    /// root. Picked sizes cover the dimensions the bridge can serve
-    /// and the dimensions real `.desktop` files actually publish.
-    icon_sizes: &'static [u32],
     /// Filesystem abstraction the provider uses. Tests inject a fake
     /// so the unit suite can drive the parser without standing up a
     /// real `.desktop` installation.
@@ -118,14 +125,15 @@ impl LinuxApplicationMetadataProvider {
         assets_dir: impl Into<PathBuf>,
         fs: std::sync::Arc<dyn DesktopFilesystem>,
     ) -> Self {
-        let icon_dirs = collect_icon_dirs(fs.as_ref());
-        let icon_roots = collect_icon_root_layout(fs.as_ref());
+        let roots = data_roots(fs.as_ref());
+        let (app_dirs, icon_apps_dirs, pixmap_dirs, icon_roots) =
+            collect_directories(fs.as_ref(), &roots);
         Self {
             assets_dir: assets_dir.into(),
-            app_dirs: collect_application_dirs(fs.as_ref()),
-            icon_dirs,
+            app_dirs,
+            icon_apps_dirs,
+            pixmap_dirs,
             icon_roots,
-            icon_sizes: &[128, 64, 256, 48],
             fs,
             last_strategy: Mutex::new(MatchStrategy::None),
             last_icon: Mutex::new(IconDiagnostics::default()),
@@ -140,9 +148,6 @@ impl ApplicationMetadataProvider for LinuxApplicationMetadataProvider {
     ) -> Result<Option<ApplicationMetadata>, ApplicationMetadataError> {
         let trimmed = identifier.trim();
         if trimmed.is_empty() {
-            // Reset the diagnostic slots so a subsequent non-empty
-            // identifier never reads stale strategy/icon state from
-            // a previous lookup.
             self.record_strategy(MatchStrategy::None);
             self.record_icon(IconDiagnostics::default());
             return Ok(None);
@@ -187,24 +192,15 @@ impl ApplicationMetadataProvider for LinuxApplicationMetadataProvider {
 }
 
 impl LinuxApplicationMetadataProvider {
-    /// Update the strategy slot the diagnostic sink reads. Kept
-    /// private so the only writers are the lookup paths above.
     fn record_strategy(&self, strategy: MatchStrategy) {
         *self.last_strategy.lock() = strategy;
     }
 
-    /// Update the icon snapshot the diagnostic sink reads.
     fn record_icon(&self, snapshot: IconDiagnostics) {
         *self.last_icon.lock() = snapshot;
     }
 }
 
-/// Translate the internal [`MatchPriority`] the resolver uses to rank
-/// candidates into the public [`MatchStrategy`] enum the diagnostic
-/// sink consumes. The mapping is part of the contract
-/// `linux-source-app-metadata` pins: every test reads back the
-/// `as_str` value to confirm the resolver landed on the priority
-/// branch the `.desktop` declared.
 fn match_priority_to_strategy(priority: MatchPriority) -> MatchStrategy {
     match priority {
         MatchPriority::StartupWmClass => MatchStrategy::StartupWmClass,
@@ -231,33 +227,42 @@ impl LinuxApplicationMetadataProvider {
     /// the provider's `IconDiagnostics` slot so the
     /// `linux-source-app-metadata` capture diagnostic can confirm
     /// whether a missing icon is a missing entry, a missing file, a
-    /// malformed PNG or a writer failure.
+    /// malformed PNG, a malformed SVG, an oversized SVG or a writer
+    /// failure.
     fn persist_icon(&self, entry: &DesktopEntry, identifier: &str) -> Option<String> {
         let icon_value = entry.icon.as_deref()?;
-        let source = match self.resolve_icon_path(icon_value) {
-            Some(path) => path,
+        let resolved = match self.resolve_icon(icon_value) {
+            Some(resolved) => resolved,
             None => {
                 self.record_icon(IconDiagnostics {
                     declared: true,
+                    kind: classify_icon_value(icon_value),
                     resolved: false,
+                    rasterization_attempted: false,
+                    rasterization_succeeded: false,
                     png_validated: false,
                     persisted: false,
                     bytes: None,
                     dimensions: None,
+                    failure_kind: IconFailureKind::NotFound,
                 });
                 return None;
             }
         };
-        let png_bytes = match read_validated_png(&source) {
-            Some(bytes) => bytes,
-            None => {
+        let png_bytes = match self.png_payload_from_resolved(&resolved) {
+            Ok(payload) => payload,
+            Err(failure) => {
                 self.record_icon(IconDiagnostics {
                     declared: true,
+                    kind: resolved.kind,
                     resolved: true,
+                    rasterization_attempted: resolved.kind == IconSourceKind::Svg,
+                    rasterization_succeeded: false,
                     png_validated: false,
                     persisted: false,
                     bytes: None,
                     dimensions: None,
+                    failure_kind: failure,
                 });
                 return None;
             }
@@ -268,35 +273,82 @@ impl LinuxApplicationMetadataProvider {
             Ok(icon_ref) => {
                 self.record_icon(IconDiagnostics {
                     declared: true,
+                    kind: resolved.kind,
                     resolved: true,
+                    rasterization_attempted: resolved.kind == IconSourceKind::Svg,
+                    rasterization_succeeded: resolved.kind == IconSourceKind::Svg,
                     png_validated: true,
                     persisted: true,
                     bytes: Some(png_bytes.len()),
                     dimensions,
+                    failure_kind: IconFailureKind::None,
                 });
                 Some(icon_ref)
             }
             Err(_) => {
                 self.record_icon(IconDiagnostics {
                     declared: true,
+                    kind: resolved.kind,
                     resolved: true,
+                    rasterization_attempted: resolved.kind == IconSourceKind::Svg,
+                    rasterization_succeeded: resolved.kind == IconSourceKind::Svg,
                     png_validated: true,
                     persisted: false,
                     bytes: Some(png_bytes.len()),
                     dimensions,
+                    failure_kind: IconFailureKind::WriteError,
                 });
                 None
             }
         }
     }
 
+    /// Convert a resolved icon (PNG bytes on disk, SVG bytes on disk
+    /// or a rasterized PNG payload) into the PNG bytes the writer
+    /// persists. Every failure path returns the typed
+    /// [`IconFailureKind`] the diagnostic sink consumes.
+    fn png_payload_from_resolved(
+        &self,
+        resolved: &ResolvedIcon,
+    ) -> Result<Vec<u8>, IconFailureKind> {
+        match resolved.kind {
+            IconSourceKind::Png | IconSourceKind::Pixmap => {
+                let bytes = self.fs.read(&resolved.path).ok().flatten();
+                match bytes {
+                    Some(bytes) if looks_like_png(&bytes) => Ok(bytes),
+                    Some(_) => Err(IconFailureKind::InvalidPng),
+                    None => Err(IconFailureKind::NotFound),
+                }
+            }
+            IconSourceKind::Svg => {
+                #[cfg(feature = "linux-svg-raster")]
+                {
+                    let bytes = match self.fs.read(&resolved.path) {
+                        Ok(Some(bytes)) => bytes,
+                        Ok(None) => return Err(IconFailureKind::NotFound),
+                        Err(_) => return Err(IconFailureKind::NotFound),
+                    };
+                    let rasterized = linux_svg_raster::rasterize_svg_to_png(&bytes);
+                    match rasterized {
+                        Ok(payload) => Ok(payload.png_bytes),
+                        Err(error) => Err(map_svg_error(error)),
+                    }
+                }
+                #[cfg(not(feature = "linux-svg-raster"))]
+                {
+                    let _ = resolved;
+                    Err(IconFailureKind::SvgRejected)
+                }
+            }
+            IconSourceKind::Unknown => Err(IconFailureKind::InvalidSvg),
+            IconSourceKind::None => Err(IconFailureKind::NotFound),
+        }
+    }
+
     /// Walk the configured XDG roots and return the best-matching
     /// `DesktopEntry` for `identifier` together with the
-    /// [`MatchPriority`] of the winning candidate. The priority is
-    /// exposed so the diagnostic sink can confirm whether the
-    /// resolver hit `StartupWMClass`, `X-GNOME-WMClass` or the
-    /// file-name fallback. Returns `None` when no unambiguous
-    /// match is found.
+    /// [`MatchPriority`] of the winning candidate. Returns `None`
+    /// when no unambiguous match is found.
     fn find_entry_with_strategy(&self, identifier: &str) -> Option<(MatchPriority, DesktopEntry)> {
         let needle = identifier.to_ascii_lowercase();
         let mut best: Option<(MatchPriority, DesktopEntry)> = None;
@@ -343,19 +395,18 @@ impl LinuxApplicationMetadataProvider {
     ///
     /// - absolute file paths under one of the allowed roots;
     /// - bare icon names looked up in the cached icon directories
-    ///   (`<theme>/<size>x<size>/apps/`, `<theme>/scalable/apps/` or
-    ///   the legacy `<size>x<size>/apps/` layout). The directories
-    ///   are walked in the order `collect_icon_dirs` produced so the
-    ///   first hit wins;
-    /// - PNG files only. Other formats (SVG, XPM) are silently
-    ///   skipped — the spec only requires PNG compatibility so the
-    ///   existing icon bridge can serve the bytes verbatim.
+    ///   (`<theme>/<size>x<size>/apps/`, `<theme>/scalable/apps/`,
+    ///   `<theme>/<size>x<size>/apps/` legacy layout or
+    ///   `<root>/pixmaps/`). The directories are walked in the
+    ///   order `collect_directories` produced so the first hit
+    ///   wins, with PNG preferred over SVG and absolute paths
+    ///   rejected when they escape the configured icon roots.
     ///
     /// Returns `None` for any input that escapes the allowed roots
     /// or fails the format checks. The validator never logs the
     /// offending path or filename to keep the diagnostic surface
     /// metadata-only.
-    fn resolve_icon_path(&self, raw: &str) -> Option<PathBuf> {
+    fn resolve_icon(&self, raw: &str) -> Option<ResolvedIcon> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return None;
@@ -363,52 +414,120 @@ impl LinuxApplicationMetadataProvider {
         let candidate = Path::new(trimmed);
         if candidate.is_absolute() {
             let path = self.fs.canonicalize_if_safe(candidate).ok()?;
-            if path.extension().and_then(|ext| ext.to_str()) == Some("png")
-                && self.icon_roots.iter().any(|root| path.starts_with(root))
-            {
-                return Some(path);
+            if !self.icon_roots.iter().any(|root| path.starts_with(root)) {
+                return None;
             }
+            if !self.fs.is_file(&path) {
+                return None;
+            }
+            let kind = classify_path_extension(&path);
+            return Some(ResolvedIcon { path, kind });
+        }
+        // Theme-name lookup: walk each cached `apps/` directory in
+        // the deterministic order `collect_directories` produced.
+        let stem = trimmed.trim_end_matches(".png").trim_end_matches(".svg");
+        let png_filename = format!("{stem}.png");
+        let svg_filename = format!("{stem}.svg");
+        for apps_dir in &self.icon_apps_dirs {
+            if let Some(png) = self.find_candidate(apps_dir, &png_filename, IconSourceKind::Png) {
+                return Some(png);
+            }
+        }
+        for apps_dir in &self.icon_apps_dirs {
+            if let Some(svg) = self.find_candidate(apps_dir, &svg_filename, IconSourceKind::Svg) {
+                return Some(svg);
+            }
+        }
+        for pixmap_dir in &self.pixmap_dirs {
+            if let Some(png) =
+                self.find_candidate(pixmap_dir, &png_filename, IconSourceKind::Pixmap)
+            {
+                return Some(png);
+            }
+        }
+        for pixmap_dir in &self.pixmap_dirs {
+            if let Some(svg) = self.find_candidate(pixmap_dir, &svg_filename, IconSourceKind::Svg) {
+                return Some(svg);
+            }
+        }
+        None
+    }
+
+    /// Look up `filename` under `apps_dir` and validate that the
+    /// canonical path lives under one of the configured icon
+    /// roots. Returns the [`ResolvedIcon`] on success, `None`
+    /// otherwise.
+    fn find_candidate(
+        &self,
+        apps_dir: &Path,
+        filename: &str,
+        kind: IconSourceKind,
+    ) -> Option<ResolvedIcon> {
+        let candidate = apps_dir.join(filename);
+        if !self.fs.is_file(&candidate) {
             return None;
         }
-        // Theme-name lookup: each entry in `self.icon_dirs` already
-        // resolves to an `apps/` directory (legacy layout or the
-        // canonical theme-aware layout), so the helper only has to
-        // append `<stem>.png` and validate the canonicalised path
-        // lives under an allowed parent root.
-        let stem = trimmed.trim_end_matches(".png");
-        let filename = format!("{stem}.png");
-        let mut found: Option<PathBuf> = None;
-        'roots: for apps_dir in &self.icon_dirs {
-            let candidate = apps_dir.join(&filename);
-            if !self.fs.is_file(&candidate) {
-                continue;
-            }
-            let canonical = match self.fs.canonicalize_if_safe(&candidate) {
-                Ok(path) => path,
-                Err(_) => continue,
-            };
-            // Refuse symlinks or other escape routes that would let the
-            // file resolve outside the configured icon roots. The
-            // `icon_roots` list carries the canonical parent root for
-            // every theme-aware entry, so a single comparison is
-            // enough.
-            for root in &self.icon_roots {
-                let canonical_root = self
-                    .fs
-                    .canonicalize_if_safe(root)
-                    .unwrap_or_else(|_| root.clone());
-                if canonical.starts_with(&canonical_root) {
-                    found = Some(canonical);
-                    break 'roots;
-                }
-            }
+        let canonical = self.fs.canonicalize_if_safe(&candidate).ok()?;
+        if !self
+            .icon_roots
+            .iter()
+            .any(|root| canonical.starts_with(root))
+        {
+            return None;
         }
-        found
+        Some(ResolvedIcon {
+            path: canonical,
+            kind,
+        })
     }
+}
+
+#[cfg(feature = "linux-svg-raster")]
+fn map_svg_error(error: linux_svg_raster::SvgRasterError) -> IconFailureKind {
+    use linux_svg_raster::SvgRasterError;
+    match error {
+        SvgRasterError::TooLarge
+        | SvgRasterError::SourceTooLarge
+        | SvgRasterError::TargetTooLarge => IconFailureKind::SvgRejected,
+        SvgRasterError::InvalidSvg => IconFailureKind::InvalidSvg,
+        SvgRasterError::EncodeFailed => IconFailureKind::RasterizationFailed,
+    }
+}
+
+/// Icon the resolver found on disk. The `path` is canonical and
+/// has been verified to live under one of the configured icon
+/// roots; the `kind` records the source format so the diagnostic
+/// surface can distinguish PNG, SVG and pixmap-sourced payloads.
+#[derive(Debug, Clone)]
+struct ResolvedIcon {
+    path: PathBuf,
+    kind: IconSourceKind,
 }
 
 fn entry_path_str(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn classify_path_extension(path: &Path) -> IconSourceKind {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("png") => IconSourceKind::Png,
+        Some("svg") => IconSourceKind::Svg,
+        Some("xpm") | Some("ico") => IconSourceKind::Unknown,
+        _ => IconSourceKind::Unknown,
+    }
+}
+
+fn classify_icon_value(value: &str) -> IconSourceKind {
+    let lower = value.to_ascii_lowercase();
+    if lower.ends_with(".svg") {
+        IconSourceKind::Svg
+    } else if lower.ends_with(".png") {
+        IconSourceKind::Png
+    } else if lower.contains("pixmaps/") || lower.starts_with("pixmaps/") {
+        IconSourceKind::Pixmap
+    } else {
+        IconSourceKind::Unknown
+    }
 }
 
 /// Lower-is-better priority the matcher assigns to a candidate
@@ -617,45 +736,122 @@ fn current_locale_candidates() -> Vec<String> {
     out
 }
 
-/// Build the list of `applications/` directories the desktop-entry
-/// scanner walks, in priority order. The list honours `XDG_DATA_HOME`
-/// and `XDG_DATA_DIRS` and falls back to the documented standard
-/// roots when the environment does not set them.
-fn collect_application_dirs(fs: &dyn DesktopFilesystem) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
+/// Build the list of base data roots the XDG spec considers
+/// authoritative. The list is the single source of truth for every
+/// downstream collector (`applications/`, `icons/` and `pixmaps/`):
+/// it honours `XDG_DATA_HOME`, falls back to `$HOME/.local/share`,
+/// then walks `XDG_DATA_DIRS` and finally appends the documented
+/// `/usr/local/share` and `/usr/share` fallbacks when the
+/// environment does not advertise any directories. The result is
+/// deduplicated, sorted lexicographically and stripped of trailing
+/// separators so the same root never appears under two distinct
+/// `PathBuf` representations.
+///
+/// The function never fails when a root is missing on disk — the
+/// downstream collectors call `is_dir` to filter out absent paths,
+/// so a guest account with no `$HOME/.local/share` is fine.
+fn data_roots(fs: &dyn DesktopFilesystem) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+
     let home = env::var_os("HOME")
         .map(PathBuf::from)
         .or_else(|| fs.home_dir());
-    let xdg_data_home = env::var_os("XDG_DATA_HOME").map(PathBuf::from);
-    if let Some(home) = xdg_data_home.or(home) {
-        let dir = home.join("applications");
-        if fs.is_dir(&dir) {
-            dirs.push(dir);
-        }
+
+    let xdg_data_home = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .and_then(|path| normalize_root(&path));
+
+    let primary_root = xdg_data_home
+        .or_else(|| home.as_ref().map(|home| home.join(".local").join("share")))
+        .and_then(|path| normalize_root(&path));
+    if let Some(root) = primary_root {
+        roots.push(root);
     }
+
     let xdg_data_dirs = env::var_os("XDG_DATA_DIRS")
         .map(PathOsStringExt::split_paths)
         .unwrap_or_default();
-    let mut roots: Vec<PathBuf> = xdg_data_dirs
+    let configured: Vec<PathBuf> = xdg_data_dirs
         .into_iter()
         .filter(|path| !path.as_os_str().is_empty())
+        .filter_map(|path| normalize_root(&path))
         .collect();
-    if roots.is_empty() {
-        roots.push(PathBuf::from("/usr/local/share"));
-        roots.push(PathBuf::from("/usr/share"));
-    }
-    for root in roots {
-        let candidate = root.join("applications");
-        if fs.is_dir(&candidate) {
-            dirs.push(candidate);
+    if configured.is_empty() {
+        push_unique(&mut roots, &PathBuf::from("/usr/local/share"));
+        push_unique(&mut roots, &PathBuf::from("/usr/share"));
+    } else {
+        for root in configured {
+            push_unique(&mut roots, &root);
         }
     }
-    dirs
+
+    // Optional fallbacks for hosts that ship applications/icons
+    // outside the XDG data directories (Flatpak, Snap, NixOS).
+    // Each candidate is included only when it exists on disk so
+    // the list never silently drops the documented XDG_DATA_DIRS
+    // entries when an optional namespace is absent.
+    for candidate in optional_export_roots(home.as_ref()) {
+        push_unique(&mut roots, &candidate);
+    }
+
+    roots
+}
+
+/// Optional XDG-export fallbacks that some package managers
+/// (Flatpak, Snap, NixOS) install alongside the standard
+/// `/usr/share` tree. The list intentionally stays small and only
+/// adds roots that already exist on disk so the provider never
+/// fabricates paths the host cannot read.
+fn optional_export_roots(home: Option<&PathBuf>) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(home) = home {
+        candidates.push(
+            home.join(".local")
+                .join("share")
+                .join("flatpak")
+                .join("exports")
+                .join("share"),
+        );
+    }
+    candidates.push(PathBuf::from("/var/lib/flatpak/exports/share"));
+    candidates.push(PathBuf::from("/var/lib/snapd/desktop"));
+    candidates.push(PathBuf::from("/run/current-system/sw/share"));
+    candidates
+        .into_iter()
+        .filter_map(|path| normalize_root(&path))
+        .collect()
+}
+
+/// Normalize a candidate root by stripping trailing separators and
+/// returning `None` when the path is empty after the strip. The
+/// helper keeps `data_roots()` deterministic across hosts that
+/// quote or double-quote the XDG variables.
+fn normalize_root(path: &Path) -> Option<PathBuf> {
+    let trimmed = path.components().collect::<Vec<_>>();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized: PathBuf = trimmed.iter().collect();
+    if normalized.as_os_str().is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn push_unique(roots: &mut Vec<PathBuf>, candidate: &Path) {
+    let normalized = match normalize_root(candidate) {
+        Some(path) => path,
+        None => return,
+    };
+    if !roots.iter().any(|existing| existing == &normalized) {
+        roots.push(normalized);
+    }
 }
 
 /// Helper trait wrapping `OsString::split_paths` so the
-/// `collect_application_dirs` helper can be reused by tests without
-/// reaching for `std::ffi` at every call site.
+/// `data_roots` helper can be reused by tests without reaching for
+/// `std::ffi` at every call site.
 trait PathOsStringExt {
     fn split_paths(self) -> Vec<PathBuf>;
 }
@@ -666,102 +862,91 @@ impl PathOsStringExt for OsString {
     }
 }
 
-/// Build the list of icon roots the resolver walks. The list mirrors
-/// the freedesktop icon-theme spec: every `<root>/icons/<theme>/<size>x<size>/apps`
-/// and every `<root>/icons/<theme>/scalable/apps` pair is included,
-/// plus the legacy `<root>/icons/<size>x<size>/apps` layout that some
-/// distributions still ship. Themes are walked in the order the
-/// environment advertises (the `hicolor` theme is added at the end
-/// as the universal fallback so any well-formed desktop install can
-/// satisfy the lookup).
+/// Build the `.desktop`, icon-theme and pixmap directories the
+/// resolver walks. Every directory is rooted at one of the base
+/// roots [`data_roots`] returns and joined exactly once with the
+/// trailing `applications/`, `icons/<theme>/<size>x<size>/apps/`,
+/// `icons/<theme>/scalable/apps/` or `pixmaps/` segment. The legacy
+/// `<root>/icons/<size>x<size>/apps/` layout that some distributions
+/// still ship is included alongside the theme-aware layout so the
+/// provider finds icons regardless of how the host packaged them.
 ///
-/// Canonical Ubuntu layout (the regression the change fixes) lives
-/// under `/usr/share/icons/hicolor/<size>x<size>/apps/`, with the
-/// theme name introducing a second directory level between the
-/// `<root>/icons` parent and the size directory. The previous
-/// collector only walked the legacy three-level layout
-/// (`<root>/icons/<size>x<size>/apps`) and silently skipped every
-/// theme-installed icon, leaving the cards without an icon even
-/// when the `.desktop` declared `Icon=firefox`.
-fn collect_icon_dirs(fs: &dyn DesktopFilesystem) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    let theme_roots = collect_icon_root_layout(fs);
+/// The function does **not** append `icons` twice: every helper
+/// joins each segment exactly once, which removes the
+/// `<root>/icons/icons/...` regression the previous collector
+/// produced.
+fn collect_directories(
+    fs: &dyn DesktopFilesystem,
+    roots: &[PathBuf],
+) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
+    let mut app_dirs: Vec<PathBuf> = Vec::new();
+    let mut icon_apps_dirs: Vec<PathBuf> = Vec::new();
+    let mut pixmap_dirs: Vec<PathBuf> = Vec::new();
+    let mut icon_roots: Vec<PathBuf> = Vec::new();
 
-    // Walk every base root twice: once for the legacy
-    // `<root>/icons/<size>x<size>/apps` layout that some
-    // distributions still ship, then again for the canonical
-    // freedesktop layout (`<root>/icons/<theme>/<size>x<size>/apps`
-    // and `<root>/icons/<theme>/scalable/apps`).
-    for root in &theme_roots {
-        for size in [128u32, 64, 256, 48] {
-            let apps = root.join(format!("{size}x{size}")).join("apps");
-            if fs.is_dir(&apps) {
-                out.push(apps);
+    for root in roots {
+        let applications = root.join("applications");
+        if fs.is_dir(&applications) {
+            app_dirs.push(applications);
+        }
+
+        let icons = root.join("icons");
+        if fs.is_dir(&icons) {
+            // Canonicalize once so every theme-derived directory
+            // shares the same root comparison; the canonical form
+            // strips trailing-separator ambiguity that some
+            // distributions ship with.
+            let canonical_root = fs
+                .canonicalize_if_safe(&icons)
+                .unwrap_or_else(|_| icons.clone());
+            if !icon_roots
+                .iter()
+                .any(|existing| existing == &canonical_root)
+            {
+                icon_roots.push(canonical_root);
             }
-        }
-    }
-
-    for root in &theme_roots {
-        let icons_root = root.join("icons");
-        if !fs.is_dir(&icons_root) {
-            continue;
-        }
-        let themes = discover_icon_themes(fs, &icons_root);
-        for theme in themes {
-            for size in [128u32, 64, 256, 48] {
-                let apps = icons_root
-                    .join(&theme)
-                    .join(format!("{size}x{size}"))
-                    .join("apps");
-                if fs.is_dir(&apps) {
-                    out.push(apps);
+            let themes = discover_icon_themes(fs, &icons);
+            for theme in themes {
+                for size in ICON_SIZES {
+                    let apps = icons
+                        .join(&theme)
+                        .join(format!("{size}x{size}"))
+                        .join("apps");
+                    if fs.is_dir(&apps) {
+                        icon_apps_dirs.push(apps);
+                    }
+                }
+                let scalable = icons.join(&theme).join("scalable").join("apps");
+                if fs.is_dir(&scalable) {
+                    icon_apps_dirs.push(scalable);
                 }
             }
-            let scalable = icons_root.join(&theme).join("scalable").join("apps");
-            if fs.is_dir(&scalable) {
-                out.push(scalable);
+            // Legacy layout: `<root>/icons/<size>x<size>/apps`. The
+            // walk happens at most once per size, so the resolver
+            // never produces the duplicated `<root>/icons/icons/...`
+            // path that the previous collector emitted.
+            for size in ICON_SIZES {
+                let apps = icons.join(format!("{size}x{size}")).join("apps");
+                if fs.is_dir(&apps) {
+                    icon_apps_dirs.push(apps);
+                }
             }
         }
-    }
 
-    out
-}
-
-/// Walk every XDG icon parent root the host exposes. Returns the
-/// `Vec<PathBuf>` that callers feed to the size / theme scanner.
-/// Mirrors `collect_application_dirs` so the icon and `.desktop`
-/// resolutions agree on what the host considers a valid data root.
-fn collect_icon_root_layout(fs: &dyn DesktopFilesystem) -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = Vec::new();
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| fs.home_dir());
-    let xdg_data_home = env::var_os("XDG_DATA_HOME").map(PathBuf::from);
-    if let Some(home) = xdg_data_home.or(home) {
-        let dir = home.join("icons");
-        if fs.is_dir(&dir) {
-            roots.push(dir);
+        let pixmaps = root.join("pixmaps");
+        if fs.is_dir(&pixmaps) {
+            pixmap_dirs.push(pixmaps);
         }
     }
-    let xdg_data_dirs = env::var_os("XDG_DATA_DIRS")
-        .map(PathOsStringExt::split_paths)
-        .unwrap_or_default();
-    let mut base_roots: Vec<PathBuf> = xdg_data_dirs
-        .into_iter()
-        .filter(|path| !path.as_os_str().is_empty())
-        .collect();
-    if base_roots.is_empty() {
-        base_roots.push(PathBuf::from("/usr/local/share"));
-        base_roots.push(PathBuf::from("/usr/share"));
-    }
-    for root in &base_roots {
-        let candidate = root.join("icons");
-        if fs.is_dir(&candidate) {
-            roots.push(candidate);
-        }
-    }
-    roots
+
+    (app_dirs, icon_apps_dirs, pixmap_dirs, icon_roots)
 }
+
+/// Icon sizes the resolver walks when the entry names a theme
+/// icon. The list covers the dimensions the freedesktop spec and
+/// every documented distribution actually publish; the order is
+/// deterministic so the resolver picks the same file across runs.
+pub(crate) const ICON_SIZES: &[u32] = &[16, 22, 24, 32, 48, 64, 96, 128, 256];
 
 /// Discover the icon themes installed under `<icons_root>`. The
 /// walker is conservative: it inspects every direct child of the
@@ -792,37 +977,9 @@ fn discover_icon_themes(fs: &dyn DesktopFilesystem, icons_root: &Path) -> Vec<St
     if has_hicolor {
         themes.push("hicolor".to_string());
     } else if themes.is_empty() {
-        // No themes at all: keep `hicolor` as the deterministic
-        // fallback so the resolver still has a single, predictable
-        // directory to walk.
         themes.push("hicolor".to_string());
     }
     themes
-}
-
-/// Validate the supplied bytes look like a PNG we can serve through
-/// the existing icon bridge. The helper reuses the magic header the
-/// `app_assets` module already enforces and caps the byte length so
-/// the writer cannot persist a runaway payload.
-fn read_validated_png(path: &Path) -> Option<Vec<u8>> {
-    let bytes = fs::read(path).ok()?;
-    if bytes.len() > crate::app_assets::MAX_ICON_BYTES_LEGACY {
-        return None;
-    }
-    if !looks_like_png(&bytes) {
-        return None;
-    }
-    Some(bytes)
-}
-
-/// Mirrors the magic-header check in `app_assets` so the icon
-/// bridge can serve the bytes without re-validating the file. Kept
-/// local to the provider so a future change to the bridge validator
-/// can evolve independently as long as both sides agree on the
-/// signature.
-fn looks_like_png(bytes: &[u8]) -> bool {
-    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
-    bytes.len() >= SIGNATURE.len() && bytes[..SIGNATURE.len()] == SIGNATURE
 }
 
 /// Decode the IHDR width / height from the bytes the icon writer
@@ -830,8 +987,6 @@ fn looks_like_png(bytes: &[u8]) -> bool {
 /// format and returns `None` when the buffer is too short to
 /// carry the IHDR chunk.
 fn png_header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    // PNG layout: 8-byte signature + 4-byte length + 4-byte
-    // chunk type (`IHDR`) + 4-byte width + 4-byte height.
     const HEADER_OFFSET: usize = 8 + 4 + 4;
     if bytes.len() < HEADER_OFFSET + 8 {
         return None;
@@ -899,6 +1054,16 @@ fn sanitize_identifier(input: &str) -> String {
     out
 }
 
+/// Mirrors the magic-header check in `app_assets` so the icon
+/// bridge can serve the bytes without re-validating the file. Kept
+/// local to the provider so a future change to the bridge validator
+/// can evolve independently as long as both sides agree on the
+/// signature.
+fn looks_like_png(bytes: &[u8]) -> bool {
+    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    bytes.len() >= SIGNATURE.len() && bytes[..SIGNATURE.len()] == SIGNATURE
+}
+
 /// Filesystem abstraction the provider uses. The trait is the seam
 /// tests hook to drive the parser without standing up a host
 /// `.desktop` installation. Exposed as `pub` so the integration
@@ -911,6 +1076,7 @@ pub trait DesktopFilesystem: Send + Sync {
     fn is_file(&self, path: &Path) -> bool;
     fn canonicalize_if_safe(&self, path: &Path) -> std::io::Result<PathBuf>;
     fn home_dir(&self) -> Option<PathBuf>;
+    fn read(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>>;
 }
 
 /// Host-backed filesystem implementation.
@@ -945,6 +1111,14 @@ impl DesktopFilesystem for HostFilesystem {
     fn home_dir(&self) -> Option<PathBuf> {
         dirs::home_dir()
     }
+
+    fn read(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+        match fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -955,8 +1129,10 @@ mod tests {
 
     /// In-memory filesystem the unit tests drive. The structure
     /// mirrors the host layout (`<root>/applications/<file>.desktop`,
-    /// `<root>/icons/<size>x<size>/apps/<icon>.png`) so the test
-    /// paths read the same way the production paths do.
+    /// `<root>/icons/<theme>/<size>x<size>/apps/<icon>.png`,
+    /// `<root>/icons/<theme>/scalable/apps/<icon>.svg`,
+    /// `<root>/pixmaps/<icon>.png`) so the test paths read the
+    /// same way the production paths do.
     #[derive(Default)]
     struct MemoryFilesystem {
         home: PathBuf,
@@ -995,6 +1171,10 @@ mod tests {
             bytes.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
             bytes.extend_from_slice(b"\x00\x00\x00\x00ICONHRDR");
             self.write(path, &bytes);
+        }
+
+        fn write_svg(&self, path: &Path, svg: &str) {
+            self.write(path, svg.as_bytes());
         }
 
         fn canonical(&self, path: &Path) -> PathBuf {
@@ -1050,6 +1230,10 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             Some(self.home.clone())
         }
+
+        fn read(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(self.files.lock().unwrap().get(path).cloned())
+        }
     }
 
     fn harness(home: &Path) -> (MemoryFilesystem, PathBuf) {
@@ -1082,9 +1266,6 @@ mod tests {
 
     #[test]
     fn keeps_nodisplay_entries() {
-        // NoDisplay=true must not turn the entry into an
-        // "is_application() == false" candidate; the spec keeps the
-        // metadata available so the card rail can still render it.
         let raw = "[Desktop Entry]\nType=Application\nNoDisplay=true\nName=Terminal\n";
         let entry = parse_desktop_entry(raw, Path::new("/usr/share/applications/terminal.desktop"));
         assert!(entry.is_application());
@@ -1113,9 +1294,6 @@ mod tests {
         let raw = "[Desktop Action new-window]\nName=New Window\n[Desktop Entry]\nType=Application\nName=Firefox\nIcon=firefox\n";
         let entry = parse_desktop_entry(raw, Path::new("/usr/share/applications/firefox.desktop"));
         assert!(entry.is_application());
-        // Only the `[Desktop Entry]` `Icon=` survives; the Action
-        // group's `Name=New Window` is not promoted to the entry's
-        // canonical name.
         assert_eq!(entry.name.as_deref(), Some("Firefox"));
         assert_eq!(entry.icon.as_deref(), Some("firefox"));
     }
@@ -1125,10 +1303,6 @@ mod tests {
         let raw = "# leading comment\n[Desktop Entry]\n\n# inline comment\nType=Application\nName=Terminal # trailing\n";
         let entry = parse_desktop_entry(raw, Path::new("/usr/share/applications/terminal.desktop"));
         assert!(entry.is_application());
-        // Trailing comment is part of the value because the parser
-        // only strips the leading `#`. The contract is documented;
-        // real `.desktop` files keep the value on a single line
-        // without inline comments.
         assert!(entry.name.unwrap().starts_with("Terminal"));
     }
 
@@ -1153,8 +1327,6 @@ mod tests {
         assert_eq!(classify(&entry, "code"), Some(MatchPriority::GnomeWmClass));
         let raw = "[Desktop Entry]\nType=Application\nName=Code\nStartupWMClass=Code\nX-GNOME-WMClass=code-oss\n";
         let entry = parse_desktop_entry(raw, Path::new("/usr/share/applications/code.desktop"));
-        // StartupWMClass still wins because it has the lower
-        // priority value.
         assert_eq!(
             classify(&entry, "code"),
             Some(MatchPriority::StartupWmClass)
@@ -1171,12 +1343,9 @@ mod tests {
 
     #[test]
     fn tie_break_is_lexicographic_on_path() {
-        // Two `.desktop` files both match by filename (no
-        // StartupWMClass / X-GNOME-WMClass). The earlier alphabetic
-        // path wins so the result is deterministic across runs.
         let home = Path::new("/home/tester");
         let (fs, assets) = harness(home);
-        let apps = home.join("applications");
+        let apps = home.join(".local/share/applications");
         fs.mkdir(&apps);
         fs.write(
             &apps.join("firefox.desktop"),
@@ -1188,9 +1357,6 @@ mod tests {
         );
         let provider =
             LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
-        // Lookups for the basename `firefox` find both files; the
-        // lexicographic tie break selects the `firefox.desktop`
-        // entry.
         let entry = provider
             .find_entry_with_strategy("firefox")
             .expect("match")
@@ -1202,7 +1368,7 @@ mod tests {
     fn unknown_identifier_returns_no_match() {
         let home = Path::new("/home/tester");
         let (fs, assets) = harness(home);
-        let apps = home.join("applications");
+        let apps = home.join(".local/share/applications");
         fs.mkdir(&apps);
         fs.write(
             &apps.join("firefox.desktop"),
@@ -1217,7 +1383,7 @@ mod tests {
     fn lookup_returns_display_name_without_icon_when_icon_unavailable() {
         let home = Path::new("/home/tester");
         let (fs, assets) = harness(home);
-        let apps = home.join("applications");
+        let apps = home.join(".local/share/applications");
         fs.mkdir(&apps);
         fs.write(
             &apps.join("firefox.desktop"),
@@ -1236,7 +1402,6 @@ mod tests {
             metadata.icon_ref.is_none(),
             "missing icon must not produce an icon reference"
         );
-        // Nothing was written under the assets directory.
         let icons_dir = assets.join("application-icons");
         assert!(std::fs::read_dir(&icons_dir).unwrap().next().is_none());
     }
@@ -1245,8 +1410,8 @@ mod tests {
     fn lookup_persists_absolute_icon_when_path_is_within_allowed_roots() {
         let home = Path::new("/home/tester");
         let (fs, assets) = harness(home);
-        let apps = home.join("applications");
-        let icons = home.join("icons/128x128/apps");
+        let apps = home.join(".local/share/applications");
+        let icons = home.join(".local/share/icons/128x128/apps");
         fs.mkdir(&apps);
         fs.mkdir(&icons);
         let icon_path = icons.join("firefox.png");
@@ -1278,8 +1443,8 @@ mod tests {
     fn lookup_resolves_theme_name_through_xdg_icon_roots() {
         let home = Path::new("/home/tester");
         let (fs, assets) = harness(home);
-        let apps = home.join("applications");
-        let icons = home.join("icons/64x64/apps");
+        let apps = home.join(".local/share/applications");
+        let icons = home.join(".local/share/icons/64x64/apps");
         fs.mkdir(&apps);
         fs.mkdir(&icons);
         fs.write_png(&icons.join("firefox.png"));
@@ -1303,11 +1468,8 @@ mod tests {
     fn lookup_rejects_absolute_icon_outside_allowed_roots() {
         let home = Path::new("/home/tester");
         let (fs, assets) = harness(home);
-        let apps = home.join("applications");
+        let apps = home.join(".local/share/applications");
         fs.mkdir(&apps);
-        // The icon path lives outside every icon root the provider
-        // walked; the helper refuses to copy it even though the
-        // bytes are reachable.
         let outside = home.join("outside.png");
         fs.write_png(&outside);
         fs.write(
@@ -1335,25 +1497,18 @@ mod tests {
     }
 
     #[test]
-    fn lookup_rejects_non_png_icon() {
+    #[cfg(not(feature = "linux-svg-raster"))]
+    fn lookup_rejects_svg_icon_when_rasterizer_feature_disabled() {
         let home = Path::new("/home/tester");
         let (fs, assets) = harness(home);
-        let apps = home.join("applications");
-        let icons = home.join("icons/128x128/apps");
+        let apps = home.join(".local/share/applications");
+        let icons = home.join(".local/share/icons/hicolor/scalable/apps");
         fs.mkdir(&apps);
         fs.mkdir(&icons);
-        let icon_path = icons.join("firefox.svg");
-        fs.write(
-            &icon_path,
-            b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
-        );
+        fs.write(&icons.join("firefox.svg"), b"<svg/>");
         fs.write(
             &apps.join("firefox.desktop"),
-            format!(
-                "[Desktop Entry]\nType=Application\nName=Firefox\nIcon={}\n",
-                icon_path.display()
-            )
-            .as_bytes(),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\nIcon=firefox\n",
         );
         let provider = LinuxApplicationMetadataProvider::with_filesystem(
             assets.clone(),
@@ -1365,60 +1520,23 @@ mod tests {
             .expect("some metadata");
         assert!(
             metadata.icon_ref.is_none(),
-            "non-PNG icons must not be persisted"
-        );
-    }
-
-    #[test]
-    fn lookup_writes_icon_atomically_and_cleans_temporary_on_failure() {
-        let home = Path::new("/home/tester");
-        let (fs, assets) = harness(home);
-        let apps = home.join("applications");
-        let icons = home.join("icons/128x128/apps");
-        fs.mkdir(&apps);
-        fs.mkdir(&icons);
-        let icon_path = icons.join("firefox.png");
-        fs.write(&icon_path, b"definitely-not-a-png");
-        fs.write(
-            &apps.join("firefox.desktop"),
-            format!(
-                "[Desktop Entry]\nType=Application\nName=Firefox\nIcon={}\n",
-                icon_path.display()
-            )
-            .as_bytes(),
-        );
-        let provider = LinuxApplicationMetadataProvider::with_filesystem(
-            assets.clone(),
-            std::sync::Arc::new(fs),
-        );
-        let metadata = provider
-            .lookup("firefox")
-            .expect("ok")
-            .expect("some metadata");
-        assert!(
-            metadata.icon_ref.is_none(),
-            "invalid PNG must not be persisted"
+            "svg icon must not be persisted without the rasterizer feature"
         );
         let icons_dir = assets.join("application-icons");
-        let mut remaining = std::fs::read_dir(&icons_dir).unwrap();
-        assert!(remaining.next().is_none(), "no leftover asset files");
+        assert!(std::fs::read_dir(&icons_dir).unwrap().next().is_none());
     }
 
     #[test]
     fn lookup_replaces_existing_icon_only_with_a_new_valid_one() {
         let home = Path::new("/home/tester");
         let (fs, assets) = harness(home);
-        let apps = home.join("applications");
-        let icons = home.join("icons/128x128/apps");
+        let apps = home.join(".local/share/applications");
+        let icons = home.join(".local/share/icons/128x128/apps");
         fs.mkdir(&apps);
         fs.mkdir(&icons);
         let icon_path = icons.join("firefox.png");
         fs.write_png(&icon_path);
         let existing_target = assets.join("application-icons/firefox.png");
-        // Pre-populate the destination with a marker payload that
-        // would fail the PNG signature check; the next lookup with a
-        // missing icon must leave the file intact instead of
-        // rewriting it with an empty body.
         std::fs::write(&existing_target, b"PRESERVE_ME").unwrap();
         fs.write(
             &apps.join("firefox.desktop"),
@@ -1441,7 +1559,7 @@ mod tests {
     fn lookup_uses_localized_name_when_locale_matches() {
         let home = Path::new("/home/tester");
         let (fs, assets) = harness(home);
-        let apps = home.join("applications");
+        let apps = home.join(".local/share/applications");
         fs.mkdir(&apps);
         fs.write(
             &apps.join("firefox.desktop"),
@@ -1449,7 +1567,6 @@ mod tests {
         );
         let provider =
             LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
-        // Force the locale walker to prefer Spanish.
         std::env::set_var("LANG", "es_ES.UTF-8");
         std::env::set_var("LC_MESSAGES", "es_ES.UTF-8");
         let metadata = provider
@@ -1465,7 +1582,7 @@ mod tests {
     fn lookup_falls_back_to_generic_name_when_no_locale_matches() {
         let home = Path::new("/home/tester");
         let (fs, assets) = harness(home);
-        let apps = home.join("applications");
+        let apps = home.join(".local/share/applications");
         fs.mkdir(&apps);
         fs.write(
             &apps.join("firefox.desktop"),
@@ -1496,7 +1613,7 @@ mod tests {
     fn lookup_returns_none_when_entry_has_no_display_name() {
         let home = Path::new("/home/tester");
         let (fs, assets) = harness(home);
-        let apps = home.join("applications");
+        let apps = home.join(".local/share/applications");
         fs.mkdir(&apps);
         fs.write(
             &apps.join("firefox.desktop"),
@@ -1510,10 +1627,6 @@ mod tests {
 
     #[test]
     fn provider_is_send_and_sync() {
-        // The bootstrap stores the provider behind
-        // `Arc<dyn ApplicationMetadataProvider>`, which requires
-        // `Send + Sync`. We exercise the requirement at compile
-        // time by checking the auto traits of the concrete type.
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<LinuxApplicationMetadataProvider>();
     }
@@ -1532,8 +1645,6 @@ mod tests {
         assert_eq!(unescape_desktop_value("a\\sb"), "a b");
         assert_eq!(unescape_desktop_value("a\\nb"), "a\nb");
         assert_eq!(unescape_desktop_value("a\\\\b"), "a\\b");
-        // Unknown escapes pass through verbatim so a malformed
-        // value cannot silently truncate.
         assert_eq!(unescape_desktop_value("a\\xb"), "a\\xb");
     }
 
@@ -1545,7 +1656,6 @@ mod tests {
         assert_eq!(icon_ref, "application-icons/firefox.png");
         let target = dir.path().join("firefox.png");
         assert_eq!(std::fs::read(&target).expect("read"), bytes);
-        // No leftover temporary file.
         let mut remaining = std::fs::read_dir(dir.path()).unwrap();
         let leftover = remaining.find(|entry| {
             entry
@@ -1581,5 +1691,451 @@ mod tests {
         assert_eq!(sanitize_identifier("firefox"), "firefox");
         assert_eq!(sanitize_identifier("a/b c"), "a_b_c");
         assert_eq!(sanitize_identifier(""), "app");
+    }
+
+    #[test]
+    fn data_roots_falls_back_to_local_share_when_xdg_data_home_is_unset() {
+        let fs = MemoryFilesystem::new(PathBuf::from("/home/tester"));
+        let roots = data_roots(&fs);
+        assert!(
+            roots
+                .iter()
+                .any(|root| root == &PathBuf::from("/home/tester/.local/share")),
+            "missing $HOME/.local/share fallback: {roots:?}"
+        );
+    }
+
+    #[test]
+    fn data_roots_respects_xdg_data_home_when_set() {
+        let fs = MemoryFilesystem::new(PathBuf::from("/home/tester"));
+        // SAFETY: tests are single-threaded for env mutations and
+        // restore the previous value before returning.
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", "/custom/share");
+        }
+        let roots = data_roots(&fs);
+        unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        assert!(roots
+            .iter()
+            .any(|root| root == &PathBuf::from("/custom/share")));
+    }
+
+    #[test]
+    fn data_roots_deduplicates_entries() {
+        let fs = MemoryFilesystem::new(PathBuf::from("/home/tester"));
+        unsafe {
+            std::env::set_var("XDG_DATA_DIRS", "/usr/share:/usr/share:/usr/local/share");
+        }
+        let roots = data_roots(&fs);
+        unsafe {
+            std::env::remove_var("XDG_DATA_DIRS");
+        }
+        let deduped: Vec<_> = roots
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(roots, deduped, "data_roots must deduplicate entries");
+    }
+
+    #[test]
+    fn data_roots_appends_usr_share_fallback_when_xdg_data_dirs_empty() {
+        let fs = MemoryFilesystem::new(PathBuf::from("/home/tester"));
+        unsafe {
+            std::env::set_var("XDG_DATA_DIRS", "");
+        }
+        let roots = data_roots(&fs);
+        unsafe {
+            std::env::remove_var("XDG_DATA_DIRS");
+        }
+        assert!(roots
+            .iter()
+            .any(|root| root == &PathBuf::from("/usr/local/share")));
+        assert!(roots
+            .iter()
+            .any(|root| root == &PathBuf::from("/usr/share")));
+    }
+
+    #[test]
+    fn collect_icon_apps_dirs_never_produces_duplicated_icons_segment() {
+        // Pin the regression the previous collector emitted
+        // (`<root>/icons/icons/...`). With the refactor every
+        // directory in the cached list must contain at most one
+        // `icons` segment.
+        let home = PathBuf::from("/home/tester");
+        let fs = MemoryFilesystem::new(home.clone());
+        let icons = home.join(".local/share/icons/hicolor/48x48/apps");
+        fs.mkdir(&home.join(".local/share/icons"));
+        fs.mkdir(&icons);
+        let assets = home.join("assets");
+        fs.mkdir(&assets);
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        for dir in &provider.icon_apps_dirs {
+            let segments: Vec<_> = dir
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(os) => Some(os.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .collect();
+            let occurrences = segments
+                .iter()
+                .filter(|segment| *segment == "icons")
+                .count();
+            assert!(
+                occurrences <= 1,
+                "path {dir:?} contains {occurrences} `icons` segments"
+            );
+        }
+    }
+
+    #[test]
+    fn collect_icon_apps_dirs_walks_hicolor_theme() {
+        let home = PathBuf::from("/home/tester");
+        let fs = MemoryFilesystem::new(home.clone());
+        let icons = home.join(".local/share/icons/hicolor/128x128/apps");
+        fs.mkdir(&home.join(".local/share/icons"));
+        fs.mkdir(&icons);
+        fs.write_png(&icons.join("firefox.png"));
+        let assets = home.join("assets");
+        fs.mkdir(&assets);
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        assert!(
+            provider
+                .icon_apps_dirs
+                .iter()
+                .any(|dir| dir.ends_with("hicolor/128x128/apps")),
+            "missing hicolor theme path: {:?}",
+            provider.icon_apps_dirs
+        );
+    }
+
+    #[test]
+    fn collect_icon_apps_dirs_walks_scalable_theme_layout() {
+        let home = PathBuf::from("/home/tester");
+        let fs = MemoryFilesystem::new(home.clone());
+        let scalable = home.join(".local/share/icons/hicolor/scalable/apps");
+        fs.mkdir(&home.join(".local/share/icons"));
+        fs.mkdir(&scalable);
+        fs.write_png(&scalable.join("firefox.png"));
+        let assets = home.join("assets");
+        fs.mkdir(&assets);
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        assert!(
+            provider
+                .icon_apps_dirs
+                .iter()
+                .any(|dir| dir.ends_with("hicolor/scalable/apps")),
+            "missing scalable theme path: {:?}",
+            provider.icon_apps_dirs
+        );
+    }
+
+    #[test]
+    fn collect_icon_apps_dirs_walks_pixmaps_namespace() {
+        let home = PathBuf::from("/home/tester");
+        let fs = MemoryFilesystem::new(home.clone());
+        let pixmaps = home.join(".local/share/pixmaps");
+        fs.mkdir(&pixmaps);
+        fs.write_png(&pixmaps.join("firefox.png"));
+        let assets = home.join("assets");
+        fs.mkdir(&assets);
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        assert!(
+            provider
+                .pixmap_dirs
+                .iter()
+                .any(|dir| dir.ends_with("pixmaps")),
+            "missing pixmaps namespace: {:?}",
+            provider.pixmap_dirs
+        );
+    }
+
+    #[test]
+    fn resolve_icon_prefers_png_over_svg_for_the_same_icon() {
+        let home = PathBuf::from("/home/tester");
+        let (fs, assets) = harness(&home);
+        let apps = home.join(".local/share/applications");
+        let png_apps = home.join(".local/share/icons/hicolor/48x48/apps");
+        let svg_apps = home.join(".local/share/icons/hicolor/scalable/apps");
+        fs.mkdir(&apps);
+        fs.mkdir(&home.join(".local/share/icons"));
+        fs.mkdir(&png_apps);
+        fs.mkdir(&svg_apps);
+        fs.write_png(&png_apps.join("firefox.png"));
+        fs.write_svg(
+            &svg_apps.join("firefox.svg"),
+            "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\"><rect width=\"16\" height=\"16\" fill=\"#abcdef\"/></svg>",
+        );
+        fs.write(
+            &apps.join("firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\nIcon=firefox\n",
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("firefox")
+            .expect("ok")
+            .expect("some metadata");
+        let icon_ref = metadata.icon_ref.expect("icon");
+        assert_eq!(icon_ref, "application-icons/firefox.png");
+        let diagnostics = provider.last_icon_diagnostics();
+        assert_eq!(diagnostics.kind, IconSourceKind::Png);
+        assert!(!diagnostics.rasterization_attempted);
+    }
+
+    #[test]
+    #[cfg(feature = "linux-svg-raster")]
+    fn resolve_icon_falls_back_to_svg_when_only_svg_is_present() {
+        let home = PathBuf::from("/home/tester");
+        let (fs, assets) = harness(&home);
+        let apps = home.join(".local/share/applications");
+        let scalable = home.join(".local/share/icons/hicolor/scalable/apps");
+        fs.mkdir(&apps);
+        fs.mkdir(&home.join(".local/share/icons"));
+        fs.mkdir(&scalable);
+        fs.write_svg(
+            &scalable.join("firefox.svg"),
+            "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><rect width=\"32\" height=\"32\" fill=\"#abcdef\"/></svg>",
+        );
+        fs.write(
+            &apps.join("firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\nIcon=firefox\n",
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("firefox")
+            .expect("ok")
+            .expect("some metadata");
+        let icon_ref = metadata.icon_ref.expect("icon");
+        assert_eq!(icon_ref, "application-icons/firefox.png");
+        let target = assets.join(&icon_ref);
+        let bytes = std::fs::read(&target).expect("read");
+        assert!(looks_like_png(&bytes));
+        let diagnostics = provider.last_icon_diagnostics();
+        assert_eq!(diagnostics.kind, IconSourceKind::Svg);
+        assert!(diagnostics.rasterization_attempted);
+        assert!(diagnostics.rasterization_succeeded);
+    }
+
+    #[test]
+    #[cfg(feature = "linux-svg-raster")]
+    fn resolve_icon_reports_invalid_svg_failure() {
+        let home = PathBuf::from("/home/tester");
+        let (fs, assets) = harness(&home);
+        let apps = home.join(".local/share/applications");
+        let scalable = home.join(".local/share/icons/hicolor/scalable/apps");
+        fs.mkdir(&apps);
+        fs.mkdir(&home.join(".local/share/icons"));
+        fs.mkdir(&scalable);
+        fs.write(&scalable.join("firefox.svg"), b"<<not svg>>");
+        fs.write(
+            &apps.join("firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\nIcon=firefox\n",
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("firefox")
+            .expect("ok")
+            .expect("some metadata");
+        assert!(metadata.icon_ref.is_none());
+        let diagnostics = provider.last_icon_diagnostics();
+        assert_eq!(diagnostics.failure_kind, IconFailureKind::InvalidSvg);
+    }
+
+    #[test]
+    fn lookup_falls_back_to_pixmaps_layout() {
+        let home = PathBuf::from("/home/tester");
+        let (fs, assets) = harness(&home);
+        let apps = home.join(".local/share/applications");
+        let pixmaps = home.join(".local/share/pixmaps");
+        fs.mkdir(&apps);
+        fs.mkdir(&pixmaps);
+        fs.write_png(&pixmaps.join("firefox.png"));
+        fs.write(
+            &apps.join("firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\nIcon=firefox\n",
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("firefox")
+            .expect("ok")
+            .expect("some metadata");
+        let icon_ref = metadata.icon_ref.expect("icon");
+        assert_eq!(icon_ref, "application-icons/firefox.png");
+        let diagnostics = provider.last_icon_diagnostics();
+        assert_eq!(diagnostics.kind, IconSourceKind::Pixmap);
+    }
+
+    #[test]
+    fn lookup_with_no_icon_declared_keeps_display_name() {
+        let home = PathBuf::from("/home/tester");
+        let (fs, assets) = harness(&home);
+        let apps = home.join(".local/share/applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("ghost.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Ghost\nStartupWMClass=ghost\n",
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("ghost")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Ghost");
+        assert!(metadata.icon_ref.is_none());
+        let diagnostics = provider.last_icon_diagnostics();
+        assert!(!diagnostics.declared);
+        assert!(!diagnostics.resolved);
+    }
+
+    #[test]
+    fn lookup_with_wm_class_distinct_from_display_name_matches_via_startup_wm_class() {
+        let home = PathBuf::from("/home/tester");
+        let (fs, assets) = harness(&home);
+        let apps = home.join(".local/share/applications");
+        fs.mkdir(&apps);
+        // `dev.warp.Warp` is the identifier the active-app probe
+        // exposes for Warp; the visible name is "Warp Terminal".
+        fs.write(
+            &apps.join("warp.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Warp Terminal\nStartupWMClass=dev.warp.Warp\nIcon=warp\n",
+        );
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let metadata = provider
+            .lookup("dev.warp.Warp")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Warp Terminal");
+        assert_eq!(
+            provider.last_match_strategy(),
+            MatchStrategy::StartupWmClass
+        );
+    }
+
+    #[test]
+    fn lookup_with_source_app_distinct_from_visible_name_resolves_metadata() {
+        // Same as the test above but using `X-GNOME-WMClass` to
+        // confirm the second-priority branch also resolves the
+        // metadata.
+        let home = PathBuf::from("/home/tester");
+        let (fs, assets) = harness(&home);
+        let apps = home.join(".local/share/applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("gnome-terminal.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Terminal\nX-GNOME-WMClass=gnome-terminal\n",
+        );
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let metadata = provider
+            .lookup("gnome-terminal")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Terminal");
+        assert_eq!(provider.last_match_strategy(), MatchStrategy::XGnomeWmClass);
+    }
+
+    #[test]
+    fn lookup_with_arbitrary_application_resolves_name() {
+        // Pin the "multiple distinct apps" scenario: the provider
+        // does not whitelist any single application; the matcher
+        // accepts every `.desktop` it walks.
+        let home = PathBuf::from("/home/tester");
+        let (fs, assets) = harness(&home);
+        let apps = home.join(".local/share/applications");
+        fs.mkdir(&apps);
+        for (basename, name, wm_class) in [
+            ("firefox", "Firefox", "firefox"),
+            ("gnome-terminal", "Terminal", "gnome-terminal"),
+            ("code", "Code", "code"),
+            ("warp", "Warp Terminal", "dev.warp.Warp"),
+        ] {
+            let desktop = format!(
+                "[Desktop Entry]\nType=Application\nName={name}\nStartupWMClass={wm_class}\nIcon={basename}\n"
+            );
+            fs.write(
+                &apps.join(format!("{basename}.desktop")),
+                desktop.as_bytes(),
+            );
+        }
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        for identifier in ["firefox", "gnome-terminal", "code", "dev.warp.Warp"] {
+            let result = provider.lookup(identifier).expect("ok");
+            assert!(result.is_some(), "identifier {identifier} must resolve");
+        }
+    }
+
+    #[test]
+    fn lookup_creates_application_icons_only_on_success() {
+        let home = PathBuf::from("/home/tester");
+        let (fs, assets) = harness(&home);
+        let apps = home.join(".local/share/applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("ghost.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Ghost\nStartupWMClass=ghost\n",
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let _ = provider.lookup("ghost").expect("ok");
+        let icons_dir = assets.join("application-icons");
+        assert!(std::fs::read_dir(&icons_dir).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn lookup_reports_out_of_roots_failure_for_absolute_paths() {
+        let home = PathBuf::from("/home/tester");
+        let (fs, assets) = harness(&home);
+        let apps = home.join(".local/share/applications");
+        fs.mkdir(&apps);
+        let outside = home.join("outside.png");
+        fs.write_png(&outside);
+        fs.write(
+            &apps.join("firefox.desktop"),
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Firefox\nIcon={}\n",
+                outside.display()
+            )
+            .as_bytes(),
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("firefox")
+            .expect("ok")
+            .expect("some metadata");
+        assert!(metadata.icon_ref.is_none());
+        let diagnostics = provider.last_icon_diagnostics();
+        assert_eq!(diagnostics.failure_kind, IconFailureKind::NotFound);
     }
 }

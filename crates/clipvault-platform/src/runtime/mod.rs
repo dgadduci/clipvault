@@ -45,6 +45,8 @@ pub mod linux_app_metadata;
 pub mod linux_app_picker;
 #[cfg(target_os = "linux")]
 pub mod linux_settings;
+#[cfg(all(target_os = "linux", feature = "linux-svg-raster"))]
+pub mod linux_svg_raster;
 #[cfg(all(target_os = "linux", feature = "linux-x11"))]
 pub mod linux_x11_active_app;
 #[cfg(all(target_os = "linux", feature = "linux-x11"))]
