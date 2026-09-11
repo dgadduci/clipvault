@@ -93,39 +93,6 @@ MiniMax implementa este cambio. Codex mantiene la arquitectura y revisa el resul
 - [ ] 9.1 Revisar diff y confirmar que no se modificaron assets ni configuraciones ajenas del usuario.
 - [ ] 9.2 No archivar, sincronizar, commitear ni hacer push automáticamente.
 
-## 10. Causa raíz adicional corregida en este pase
-
-> La opción **"Integración GNOME Wayland"** aparecía deshabilitada con `feature_disabled` aunque la feature estaba declarada en el bloque target-specific de Linux del `Cargo.toml` de la shell.
-
-### Causa raíz
-
-1. **Feature del paquete ausente en `default`.** En `app/tauri/src-tauri/Cargo.toml`, la feature `linux-gnome-shell-integration` se declaraba en `[features]` pero la lista `default = [...]` sólo contenía `custom-protocol`, `clipboard-arboard` y `hotkey-global`. La feature del paquete quedaba apagada en una compilación Linux normal.
-2. **Confusión entre feature del paquete y feature de la dependencia.** El bloque `[target.'cfg(all(target_os = "linux", not(target_os = "macos")))'.dependencies]` sí reenviaba `linux-gnome-shell-integration` a `clipvault-platform`, pero habilitar la feature **en la dependencia** no enciende la feature **del propio paquete `clipvault-app`**. Las dos viven en espacios de `cfg` independientes.
-3. **Consecuencia observable.** Todas las guardas `cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))` en `main.rs`, `lib.rs`, `commands.rs` y `bootstrap.rs` se evaluaban a `false` durante `cargo tauri dev` en Ubuntu. Se compilaba el módulo stub de `commands.rs`, que devolvía `CommandError::new("feature_disabled", ...)` para `clipvault_gnome_integration_status`, `install`, `uninstall`, `retry` y `set_consent`. La UI recibía `reason: "feature_disabled"` y la opción quedaba gris / no clickeable.
-
-### Corrección
-
-1. **Promover `linux-gnome-shell-integration` (junto con `linux-x11` y `linux-wayland-active-app`) a la lista `default` del paquete `clipvault-app`** en `app/tauri/src-tauri/Cargo.toml`. La feature del bloque `[features]` permanece declarada para mantener la posibilidad de builds selectivos.
-2. **Conservar la feature en la dependencia target-specific** de `clipvault-platform` — ambos espacios de `cfg` deben coincidir en Linux, pero siguen siendo espacios independientes.
-3. **No eliminar los cfg existentes.** La protección `cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))` se mantiene. macOS y Windows siguen sin incluir el código GNOME Linux: `target_os = "linux"` es `false` en esos hosts aunque la feature esté en `default`. La shell se compila limpiamente en macOS sin arrastrar el path GNOME.
-4. **No cambiar el contrato funcional.** El primer arranque en GNOME Wayland sigue reportando `applicable = true` con consentimiento `unknown`; macOS, X11 y Wayland no GNOME permanecen no aplicables; no se instala ni activa nada sin consentimiento explícito; el handshake `hello` precede al primer `app_id`; el payload sigue sin rutas absolutas, `socket_path`, `target_dir`, `metadata_json`, contenido, hashes ni secretos; se conserva la precedencia GNOME Wayland → Wayland nativo → XWayland/X11; imágenes, assets, tags, colecciones, favoritos, Quick Paste y drag-and-drop no se tocan.
-
-### Regresión automatizada
-
-- Test añadido en `app/tauri/src-tauri/src/bootstrap.rs::tests::shell_linux_gnome_shell_integration_feature_is_in_default` que parsea `app/tauri/src-tauri/Cargo.toml` y verifica que la lista `default = [...]` del paquete `clipvault-app` contiene `linux-gnome-shell-integration`. Falla con un mensaje explícito si la feature vuelve a desaparecer del `default`.
-- El test usa el mismo walker TOML minimalista (función `shell_default_features`) que las regresiones `shell_linux_svg_raster_feature_is_enabled_for_linux_target` y `shell_linux_wayland_active_app_feature_is_enabled_for_linux_target`, así que se ejecuta en cada `cargo test --workspace` desde macOS sin depender de Ubuntu ni de una sesión GNOME real.
-- Cobertura equivalente en el bloque target-specific ya está cubierta por los tests estructurales previos (`shell_linux_svg_raster_feature_is_enabled_for_linux_target`, `shell_linux_wayland_active_app_feature_is_enabled_for_linux_target`); este pase no introduce regresiones en esos caminos.
-
-### Bump de versión
-
-- `0.0.12 → 0.0.13` en `Cargo.toml` (workspace), `Cargo.lock` (los 5 crates `clipvault-*`), `app/tauri/src-tauri/tauri.conf.json`, `app/tauri/frontend/package.json`, `app/tauri/frontend/package-lock.json` y `projects.md`.
-- AboutModal sigue leyendo `diagnostics.version` (verificado: `app/tauri/frontend/src/AboutModal.svelte:36-40`).
-
-### Verificación real en Ubuntu — pendiente
-
-- Las tareas de la sección 8 siguen pendientes: el binario Tauri Linux y la prueba real de Ubuntu GNOME Wayland requieren la máquina Ubuntu del usuario. MiniMax no marca las tareas manuales Ubuntu.
-- Las validaciones posibles desde macOS (fmt, clippy con `-D warnings`, `cargo check`, `cargo test --workspace`, `npm ci`, `npm run check`, `npm run build`, `npm test`, `openspec validate`) se ejecutan a continuación.
-
 ---
 
 ## Causa raíz corregida en este pase

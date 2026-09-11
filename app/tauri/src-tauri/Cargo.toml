@@ -16,14 +16,7 @@ name = "clipvault_app"
 path = "src/lib.rs"
 
 [features]
-default = [
-    "custom-protocol",
-    "clipboard-arboard",
-    "hotkey-global",
-    "linux-x11",
-    "linux-wayland-active-app",
-    "linux-gnome-shell-integration",
-]
+default = ["custom-protocol", "clipboard-arboard", "hotkey-global"]
 custom-protocol = ["tauri/custom-protocol"]
 clipboard-arboard = []
 hotkey-global = []
@@ -34,13 +27,8 @@ linux-x11 = []
 # code path. The shell enables it from the target-specific dependency
 # block below.
 linux-wayland-active-app = []
-# Optional GNOME Shell extension integration on Linux Wayland. Listed
-# in `default` so a plain `cargo tauri dev` on Ubuntu GNOME Wayland
-# actually compiles `src/gnome_integration.rs` and the real Tauri
-# commands instead of the `feature_disabled` stubs in `commands.rs`.
-# The cfg gates (`cfg(all(target_os = "linux", feature = "..."))`)
-# still keep macOS / Windows builds from linking the GNOME code path
-# even with the feature on.
+# Optional GNOME Shell extension integration on Linux Wayland. The
+# shell enables it from the target-specific dependency block below.
 linux-gnome-shell-integration = []
 
 [build-dependencies]
