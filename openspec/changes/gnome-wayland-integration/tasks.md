@@ -543,3 +543,303 @@ y la sección 8 (verificación manual GNOME Wayland) puede
 reanudar el flujo. MiniMax no marca esa tarea como completada hasta
 que el usuario ejecute realmente los comandos y reporte el
 resultado.
+
+---
+
+## Causa raíz: errores de compilación Linux en `gnome_integration.rs`
+
+Este pase cierra dos errores de compilación que el shell
+`app/tauri/src-tauri/src/gnome_integration.rs` sólo expone cuando la
+feature `linux-gnome-shell-integration` se activa explícitamente
+sobre un target Linux. Las verificaciones macOS nunca compilaron
+el bloque `#[cfg(all(target_os = "linux", feature =
+"linux-gnome-shell-integration"))]` que contiene las funciones
+afectadas, así que la regresión pasó inadvertida hasta que el
+usuario ejecutó `cargo tauri dev --features ...linux-gnome-shell-integration`
+en su máquina Ubuntu. Los dos defectos están en funciones que ya
+existen y conservan su contrato: ni el protocolo GNOME, ni los
+estados `Connected` / `Identified` / `Disconnected` /
+`CommunicationError`, ni el consentimiento, ni el intercambio de
+`app_id`, ni la privacidad, ni la detección X11/XWayland, ni el
+fallback Wayland, ni `~/.clipvault` se ven alterados.
+
+### Error 1 — `ensure_platform_service()`: snapshot prestado en lugar de clonado
+
+**Síntoma exacto.** El método declaraba
+
+```rust
+let snapshot = service.snapshot();          // &SharedGnomeSnapshot
+let probe = Arc::new(clipvault_platform::GnomeShellActiveApplication::new(
+    snapshot.clone(),                       // SharedGnomeSnapshot (clon correcto para el probe)
+));
+*self.live.lock() = Some(LiveGnomeHandle {
+    platform_service: service.clone(),
+    snapshot,                                // <-- BUG: &SharedGnomeSnapshot, no SharedGnomeSnapshot
+    probe,
+    listener: None,
+    socket_path: service.socket_path(),
+});
+```
+
+`service.snapshot()` (en `clipvault_platform::linux_gnome_integration`)
+devuelve `&SharedGnomeSnapshot`. El campo `LiveGnomeHandle::snapshot`
+espera un valor `SharedGnomeSnapshot` (no una referencia) porque
+`SharedGnomeSnapshot: Clone` pero **no** `Copy`. Construir el
+`LiveGnomeHandle` con `snapshot` movido intentaba meter un
+`&SharedGnomeSnapshot` en un slot `SharedGnomeSnapshot` y el
+compilador abortaba con un error de tipo:
+
+```
+error[E0308]: mismatched types
+   --> app/tauri/src-tauri/src/gnome_integration.rs:136:13
+    |
+136 |             snapshot,
+    |             ^^^^^^^ expected struct `SharedGnomeSnapshot`, found `&SharedGnomeSnapshot`
+```
+
+**Por qué se introdujo.** En una iteración anterior del shell la
+función envolvía el servicio en un `Ref`/`Mutex` y la snapshot se
+movía como referencia prestada para evitar un clon extra. Cuando
+la función se simplificó para devolver un `Arc<GnomeIntegrationService>`
+y construir `LiveGnomeHandle` por valor, la firma quedó
+inconsistente con el campo.
+
+**Por qué la prueba era silenciosa en macOS.** Todo el archivo
+lleva `#![cfg(all(target_os = "linux", feature =
+"linux-gnome-shell-integration"))]`. En macOS el archivo se
+compila vacío, así que ningún `cargo check` / `cargo clippy` /
+`cargo test` del workspace veía el cuerpo de la función. El
+defecto sólo aparece cuando el bloque cfg-gate se evalúa como
+verdadero, es decir, en el binario Ubuntu.
+
+**Corrección.** Se clona explícitamente la snapshot prestada para
+que el valor owned alimente tanto el probe como el handle, y la
+referencia original del servicio quede intacta:
+
+```rust
+let snapshot = service.snapshot().clone();
+let probe = Arc::new(clipvault_platform::GnomeShellActiveApplication::new(
+    snapshot.clone(),
+));
+*self.live.lock() = Some(LiveGnomeHandle {
+    platform_service: service.clone(),
+    snapshot,        // ahora SharedGnomeSnapshot (owned)
+    probe,
+    listener: None,
+    socket_path: service.socket_path(),
+});
+```
+
+`SharedGnomeSnapshot` envuelve dos `Arc` (`inner: Arc<RwLock<GnomeSnapshot>>`
+y `stage: Arc<Mutex<ProbeStage>>`); el `.clone()` incrementa el
+refcount sin duplicar el estado. El servicio conserva su
+referencia interna, el probe y el handle reciben cada uno su
+propia copia del handle de tres campos, y los tres apuntan al
+mismo `Arc` subyacente: una mutación realizada por cualquiera de
+los tres se observa en los otros dos.
+
+### Error 2 — `start_listener()`: `Arc<AtomicBool>` movido al closure y reutilizado
+
+**Síntoma exacto.** El método declaraba
+
+```rust
+let listener = GnomeShellListener::new(handle.snapshot.clone(), transport);
+let alive = listener.alive_flag();
+let socket_path_for_handle = socket_path.clone();
+let join = std::thread::Builder::new()
+    .name("clipvault-gnome-listener".into())
+    .spawn(move || {                       // <-- captura `alive` por move
+        while alive.load(std::sync::atomic::Ordering::Acquire) {
+            if let Err(_error) = listener.handle_one() {
+                if !alive.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    })
+    .ok();
+handle.listener = Some(ListenerHandle::from_thread_with_socket(
+    alive,                                  // <-- BUG: `alive` ya se movió al closure
+    join,
+    socket_path_for_handle,
+));
+```
+
+`alive: Arc<AtomicBool>` se mueve al closure del hilo (porque la
+captura por defecto de `move` toma ownership de las variables
+externas). Al construir el `ListenerHandle::from_thread_with_socket`
+después del `spawn`, el compilador reporta que `alive` ya no
+existe en este frame:
+
+```
+error[E0382]: use of moved value: `alive`
+   --> app/tauri/src-tauri/src/gnome_integration.rs:239:13
+    |
+223 |         let alive = listener.alive_flag();
+    |             ----- move occurs because `alive` has type `Arc<AtomicBool>`...
+...
+228 |             .spawn(move || {
+    |                   ------- value moved into closure here
+...
+239 |             alive,
+    |             ^^^^^ value used here after move
+```
+
+**Por qué la prueba era silenciosa en macOS.** Mismo motivo que el
+error 1: el archivo entero está cfg-gated al binario Linux.
+
+**Corrección.** Se clona `Arc<AtomicBool>` una vez para el hilo y
+se conserva el original para el `ListenerHandle`. Como
+`Arc::clone` sólo incrementa el refcount del `AtomicBool`
+subyacente, ambos extremos siguen viendo el mismo flag: el
+`shutdown` del handle (que recibe el original) lo baja, y el
+closure del hilo (que tiene la copia) lo observa inmediatamente.
+
+```rust
+let listener = GnomeShellListener::new(handle.snapshot.clone(), transport);
+let alive = listener.alive_flag();
+let alive_for_thread = alive.clone();
+let socket_path_for_handle = socket_path.clone();
+let join = std::thread::Builder::new()
+    .name("clipvault-gnome-listener".into())
+    .spawn(move || {
+        while alive_for_thread.load(std::sync::atomic::Ordering::Acquire) {
+            if let Err(_error) = listener.handle_one() {
+                if !alive_for_thread.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    })
+    .ok();
+handle.listener = Some(ListenerHandle::from_thread_with_socket(
+    alive,                                // original, no la copia del hilo
+    join,
+    socket_path_for_handle,
+));
+```
+
+Este patrón coincide con el que ya usa `spawn_listener_thread` en
+`crates/clipvault-platform/src/runtime/linux_gnome_shell_integration.rs:538-547`,
+así que la corrección no introduce una nueva convención: alinea
+el shell con el helper del runtime.
+
+## Regresiones añadidas (mínimas)
+
+Cuatro asserts viven ahora dentro del módulo `tests` del shell
+(cfg-gated por Linux + `linux-gnome-shell-integration`, igual que
+el resto del archivo), y cubren los cuatro contratos que el pase
+promete:
+
+1. **`ensure_platform_service_shares_snapshot_with_probe_and_handle`**.
+   Construye un `GnomeIntegrationState` real, llama
+   `ensure_platform_service(Accepted)`, muta el snapshot vía
+   `service.snapshot().set_state(...)` y verifica que tanto
+   `handle.probe.snapshot().state()` como `handle.snapshot.state()`
+   observan el nuevo estado. Esto sólo es cierto si las tres
+   referencias comparten el mismo `Arc<RwLock<GnomeSnapshot>>`;
+   con la versión bugueada del código el archivo ni siquiera
+   compila.
+
+2. **`start_listener_keeps_handle_alive_flag_after_thread_creation`**.
+   Configura `XDG_RUNTIME_DIR` en un `tempfile::TempDir`, levanta
+   el servicio, llama `start_listener`, lee
+   `handle.listener.as_ref().unwrap().alive_flag().load(Acquire)`
+   y exige que el flag siga siendo `true` después del `spawn`.
+   Con la versión bugueada el archivo no compila; con la versión
+   correcta el flag queda accesible y se restaura el env var al
+   terminar (sea `set_var` con el valor previo o `remove_var`).
+
+3. **`stop_listener_removes_socket_file_after_start`**.
+   Mismo escenario que (2) pero, en vez de leer el flag,
+   verifica que `socket_path.exists()` es `true` tras el
+   `start_listener` y `false` tras `stop_listener`. Pinnea el
+   contrato de cleanup que el `shutdown` del `ListenerHandle`
+   ya probaba para `from_thread_with_socket`.
+
+4. **`gnome_state_chain_is_send_and_sync`** (pre-existente del
+   pase `1720411`). Cubre el cuarto punto que el usuario
+   solicita: `ListenerHandle → LiveGnomeHandle →
+   GnomeIntegrationState → SharedState → AppState`. Si cualquier
+   eslabón pierde `Send + Sync` el binario Linux falla al
+   compilar.
+
+Las pruebas usan `clipvault_core::SystemClock` como `Arc<dyn
+Clock>` para construir el `GnomeIntegrationService` core, el
+mismo reloj que usa `clipvault_core::bootstrap::AppBootstrap` en
+arranque. Ningún test introduce dependencias nuevas en
+`Cargo.toml` (`tempfile` ya estaba declarado en
+`app/tauri/src-tauri/Cargo.toml:78`).
+
+## Limitación de la verificación desde macOS
+
+Este pase se ejecuta desde macOS. El archivo `gnome_integration.rs`
+no compila en macOS porque `#![cfg(all(target_os = "linux",
+feature = "linux-gnome-shell-integration"))]` lo vacía, así que
+los cuatro asserts cfg-gated, las dos correcciones y la
+`Send + Sync` de la cadena no se pueden ejercitar localmente. Lo
+que sí se pudo verificar en macOS:
+
+| Check | Resultado |
+|-------|-----------|
+| `cargo fmt --all -- --check` | OK (sin diffs pendientes) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | OK (0 warnings) |
+| `cargo test --workspace` | OK (1329 tests passing, 0 failed) |
+| `cargo check -p clipvault-platform --target x86_64-unknown-linux-gnu --no-default-features --features linux-x11,linux-wayland-active-app,linux-gnome-shell-integration --tests` | OK (el runtime Linux del cambio compila) |
+| `cargo clippy -p clipvault-platform --target x86_64-unknown-linux-gnu --no-default-features --features linux-x11,linux-wayland-active-app,linux-gnome-shell-integration --all-targets -- -D warnings` | OK |
+| `npm run check` (Node 26.8.1) | OK (0 errores, 15 warnings preexistentes) |
+| `npm run build` (Node 26.8.1) | OK |
+| Frontend tests con `node --test $(pwd)/node_modules/.cache/clipvault-test-build/tests/` | 1197 passed, 0 failed |
+| `openspec validate gnome-wayland-integration --strict --type change` | OK |
+
+Nota ambiental sobre `npm test`: el script del paquete usa el
+path relativo `node_modules/.cache/clipvault-test-build/tests/`,
+que Node 26.8.1 (instalado en este equipo vía Homebrew) no
+resuelve de forma fiable — el runner reporta `tests 0`. El
+mismo comando con path absoluto (`$(pwd)/node_modules/...`)
+encuentra los 71 archivos `.test.js` y los 1197 tests pasan. El
+pase anterior documenta que esa suite se ejecutó con Node
+20.20.2; el comportamiento que cambió no es del código
+producido, sino del binario `node` disponible. No se modifica
+`package.json` porque la corrección de esa regresión queda fuera
+del alcance de este pase.
+
+Lo que **no** se pudo verificar desde macOS y queda pendiente:
+
+- `cargo check -p clipvault-app --target x86_64-unknown-linux-gnu
+  --no-default-features --features
+  custom-protocol,clipboard-arboard,hotkey-global,linux-x11,linux-wayland-active-app,linux-gnome-shell-integration`:
+  los build scripts de `glib-sys`, `gdk-sys`, `gdk-pixbuf-sys`,
+  `cairo-sys-rs`, `atk-sys`, `pango-sys`, `gobject-sys`, `gio-sys`
+  requieren un sysroot Linux con `pkg-config` configurado. macOS
+  no lo tiene, por lo que la cross-compilación del binario final
+  no es viable desde este equipo. Sin esa verificación no se
+  puede afirmar que el binario Ubuntu compila, ni que los 4 tests
+  nuevos del módulo `gnome_integration` (más los 4 existentes del
+  pase anterior) corren en la máquina del usuario.
+- La sección 8 (verificación manual GNOME Wayland) sigue
+  pendiente del usuario.
+
+La matriz de verificación para Ubuntu real que el usuario debe
+ejecutar queda intacta respecto al pase anterior (mismo
+`cargo check`, mismo `cargo test --workspace`). La línea de
+resultado sigue siendo `1333 tests passing, 0 failed` (1329
+existentes + 4 tests nuevos del módulo `linux_gnome_shell_integration`
+del pase anterior; los 3 nuevos tests del módulo
+`gnome_integration` del shell sólo se compilan cuando se activa
+la feature `linux-gnome-shell-integration`, así que también
+contribuyen al conteo una vez que el binario Ubuntu los compile).
+
+## Versión canónica
+
+Este pase no incrementa la versión. `projects.md` fija la
+canónica en `0.0.12` y el contrato "Resuming an interrupted
+implementation does not re-bump the version" bloquea re-bumps al
+reanudar. `Cargo.toml`, `app/tauri/src-tauri/tauri.conf.json` y
+`app/tauri/frontend/package.json` quedan en `0.0.12` y el
+`AboutModal.svelte:36-40` sigue leyendo `diagnostics?.version`
+sin hardcodear. La corrección es estructural (cambio de tipos y
+clon de un `Arc`), no funcional, así que la regla se respeta
+también por el lado de producto.

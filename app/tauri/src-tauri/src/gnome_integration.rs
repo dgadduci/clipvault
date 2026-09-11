@@ -127,7 +127,7 @@ impl GnomeIntegrationState {
         }
         let service = Arc::new(PlatformIntegrationService::new(convert_consent(consent)));
         service.refresh_session_state();
-        let snapshot = service.snapshot();
+        let snapshot = service.snapshot().clone();
         let probe = Arc::new(clipvault_platform::GnomeShellActiveApplication::new(
             snapshot.clone(),
         ));
@@ -221,13 +221,14 @@ impl GnomeIntegrationState {
         };
         let listener = GnomeShellListener::new(handle.snapshot.clone(), transport);
         let alive = listener.alive_flag();
+        let alive_for_thread = alive.clone();
         let socket_path_for_handle = socket_path.clone();
         let join = std::thread::Builder::new()
             .name("clipvault-gnome-listener".into())
             .spawn(move || {
-                while alive.load(std::sync::atomic::Ordering::Acquire) {
+                while alive_for_thread.load(std::sync::atomic::Ordering::Acquire) {
                     if let Err(_error) = listener.handle_one() {
-                        if !alive.load(std::sync::atomic::Ordering::Acquire) {
+                        if !alive_for_thread.load(std::sync::atomic::Ordering::Acquire) {
                             break;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -713,5 +714,120 @@ mod tests {
             socket_path: None,
         };
         assert!(handle.listener.is_none());
+    }
+
+    /// Regression for the Linux-only compile error reported when the
+    /// `linux-gnome-shell-integration` feature is active: the snapshot
+    /// held by the platform service, the probe and the
+    /// `LiveGnomeHandle` must be the SAME `SharedGnomeSnapshot`. The
+    /// previous bug stored `&SharedGnomeSnapshot` (the borrow returned
+    /// by `service.snapshot()`) inside the handle, so the listener
+    /// could never share state with the probe. Mutating the snapshot
+    /// through the service reference must reach both the probe and
+    /// the handle. macOS never compiles this test (the whole file is
+    /// cfg-gated).
+    #[test]
+    fn ensure_platform_service_shares_snapshot_with_probe_and_handle() {
+        use clipvault_core::SystemClock as CoreSystemClock;
+        let clock: Arc<dyn clipvault_core::Clock> = Arc::new(CoreSystemClock);
+        let core_service = Arc::new(CoreIntegrationService::new(clock));
+        let state = GnomeIntegrationState::new(core_service);
+        let service = state.ensure_platform_service(GnomeConsentDecision::Accepted);
+        let guard = state.live.lock();
+        let handle = guard
+            .as_ref()
+            .expect("live handle populated by ensure_platform_service");
+        // The probe and the handle must read through the same Arc as
+        // the service. A write through the service's reference must
+        // surface in both downstream observers.
+        service
+            .snapshot()
+            .set_state(clipvault_platform::GnomeIntegrationState::Identified);
+        assert_eq!(
+            handle.probe.snapshot().state(),
+            clipvault_platform::GnomeIntegrationState::Identified,
+            "probe snapshot must be the same Arc as the service snapshot",
+        );
+        assert_eq!(
+            handle.snapshot.state(),
+            clipvault_platform::GnomeIntegrationState::Identified,
+            "LiveGnomeHandle snapshot must be the same Arc as the service snapshot",
+        );
+    }
+
+    /// Regression for the Linux-only compile error in `start_listener`:
+    /// after spawning the listener thread, the `ListenerHandle`'s
+    /// `alive_flag` MUST remain reachable. The previous bug moved the
+    /// `Arc<AtomicBool>` into the thread closure and tried to use it
+    /// again when building the handle. The fix keeps a separate clone
+    /// for the thread and returns the original to the caller. The test
+    /// binds a real Unix socket in a tempdir and reads the flag after
+    /// `start_listener` returns.
+    #[test]
+    fn start_listener_keeps_handle_alive_flag_after_thread_creation() {
+        use clipvault_core::SystemClock as CoreSystemClock;
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let previous = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", temp.path());
+        let clock: Arc<dyn clipvault_core::Clock> = Arc::new(CoreSystemClock);
+        let core_service = Arc::new(CoreIntegrationService::new(clock));
+        let state = GnomeIntegrationState::new(core_service);
+        state.ensure_platform_service(GnomeConsentDecision::Accepted);
+        state.start_listener().expect("listener must start");
+        let guard = state.live.lock();
+        let handle = guard.as_ref().expect("live handle populated");
+        let listener = handle
+            .listener
+            .as_ref()
+            .expect("ListenerHandle must be populated after start_listener");
+        assert!(
+            listener
+                .alive_flag()
+                .load(std::sync::atomic::Ordering::Acquire),
+            "ListenerHandle alive flag must remain loadable after spawn",
+        );
+        drop(guard);
+        state.stop_listener();
+        match previous {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+
+    /// Regression for `shutdown`: the shell's `stop_listener` (which
+    /// delegates to `ListenerHandle::shutdown`) must remove the socket
+    /// file the listener bound to. The previous bug masked this path
+    /// behind a compile error, so the test pins the cleanup contract
+    /// for the Linux build.
+    #[test]
+    fn stop_listener_removes_socket_file_after_start() {
+        use clipvault_core::SystemClock as CoreSystemClock;
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let previous = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", temp.path());
+        let clock: Arc<dyn clipvault_core::Clock> = Arc::new(CoreSystemClock);
+        let core_service = Arc::new(CoreIntegrationService::new(clock));
+        let state = GnomeIntegrationState::new(core_service);
+        state.ensure_platform_service(GnomeConsentDecision::Accepted);
+        state.start_listener().expect("listener must start");
+        let socket_path = state
+            .live
+            .lock()
+            .as_ref()
+            .and_then(|handle| handle.socket_path.clone())
+            .expect("socket path must be set after ensure_platform_service");
+        assert!(
+            socket_path.exists(),
+            "socket file must exist while the listener is alive",
+        );
+        state.stop_listener();
+        assert!(
+            !socket_path.exists(),
+            "stop_listener must remove the socket file",
+        );
+        match previous {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
     }
 }
