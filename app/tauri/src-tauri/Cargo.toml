@@ -27,6 +27,9 @@ linux-x11 = []
 # code path. The shell enables it from the target-specific dependency
 # block below.
 linux-wayland-active-app = []
+# Optional GNOME Shell extension integration on Linux Wayland. The
+# shell enables it from the target-specific dependency block below.
+linux-gnome-shell-integration = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -68,6 +71,7 @@ clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
     "linux-x11",
     "linux-svg-raster",
     "linux-wayland-active-app",
+    "linux-gnome-shell-integration",
 ] }
 
 [dev-dependencies]

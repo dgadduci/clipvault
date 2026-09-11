@@ -25,6 +25,7 @@ use crate::clipboard::{Clipboard, FakeClipboard};
 use crate::clipboard_assets::ClipboardAssetStore;
 use crate::clock::{Clock, SystemClock};
 use crate::code_language_service::CodeLanguageService;
+use crate::gnome_integration::GnomeIntegrationService;
 use crate::history::TextHistoryService;
 use crate::ignored_apps_service::IgnoredAppsService;
 use crate::management::{HistoryManagementService, DEFAULT_RETENTION, RETENTION_SETTING_KEY};
@@ -132,6 +133,7 @@ pub struct AppContext {
     search: SearchService,
     settings: SettingsService,
     ignored_apps: IgnoredAppsService,
+    gnome_integration: GnomeIntegrationService,
     started_at: OffsetDateTime,
     version: &'static str,
     /// Cached probe that the background watcher consults. The shell
@@ -239,6 +241,10 @@ impl AppContext {
         &self.ignored_apps
     }
 
+    pub fn gnome_integration(&self) -> &GnomeIntegrationService {
+        &self.gnome_integration
+    }
+
     pub fn started_at(&self) -> OffsetDateTime {
         self.started_at
     }
@@ -300,6 +306,18 @@ impl AppContext {
     /// watcher to read the latest identifier on every tick.
     pub fn cached_active_app_probe(&self) -> CachedActiveApplication {
         self.cached_active_app.clone()
+    }
+
+    /// Atomically swap the wrapped probe. The GNOME Shell
+    /// integration uses the helper to wire the GNOME-connected
+    /// probe ahead of the X11 / Wayland chain once the user accepts
+    /// the consent prompt. The capture loop observes the new
+    /// probe on the very next tick.
+    pub fn swap_active_app_probe(
+        &self,
+        new_probe: Arc<dyn clipvault_platform::ActiveApplicationProbe>,
+    ) {
+        self.cached_active_app.swap_probe(new_probe);
     }
 
     /// Shared diagnostics state. Used by the shell to record the
@@ -560,6 +578,13 @@ impl AppBootstrap {
         let settings_service = SettingsService::new(Arc::clone(&self.options.clock), gate.clone());
         let ignored_apps_service =
             IgnoredAppsService::new(Arc::clone(&self.options.clock), gate.clone());
+        let gnome_integration_service =
+            GnomeIntegrationService::new(Arc::clone(&self.options.clock));
+        // Wrap the database once so the GNOME integration service can
+        // prime its in-memory cache without touching `AppContext` and
+        // every later consumer sees the same `Arc<Mutex<Database>>`.
+        let database_handle = Arc::new(Mutex::new(database));
+        let _ = gnome_integration_service.prime_from_database(&database_handle);
         let active_app_diagnostics = ActiveAppDiagnosticsState::new(
             capabilities.active_application,
             active_app_backend_kind(&platform, capabilities.active_application),
@@ -606,7 +631,7 @@ impl AppBootstrap {
         let search = SearchService::new();
 
         Ok(AppContext {
-            database: Arc::new(Mutex::new(database)),
+            database: database_handle,
             platform,
             capabilities: Arc::new(Mutex::new(capabilities)),
             clock: self.options.clock,
@@ -619,6 +644,7 @@ impl AppBootstrap {
             search,
             settings: settings_service,
             ignored_apps: ignored_apps_service,
+            gnome_integration: gnome_integration_service,
             started_at,
             version: env!("CARGO_PKG_VERSION"),
             cached_active_app: cached_probe,

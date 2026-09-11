@@ -15,6 +15,10 @@ import type {
   DeleteResponse,
   Diagnostics,
   EntryRecord,
+  GnomeConsentDecision,
+  GnomeIntegrationInstallResult,
+  GnomeIntegrationPayload,
+  GnomeIntegrationStatusResponse,
   IgnoredAppEntry,
   MigrationsApplied,
   OrganizationSnapshot,
@@ -548,6 +552,30 @@ export const codeLanguageSetCommand: ClipvaultCommandArg<
     codeLanguage: args.codeLanguage,
   });
 
+// ---------------------------------------------------------------------------
+// `gnome-wayland-integration` command surface.
+// ---------------------------------------------------------------------------
+
+export const gnomeIntegrationStatusCommand: ClipvaultCommand<GnomeIntegrationStatusResponse> =
+  () => invoke<GnomeIntegrationStatusResponse>("clipvault_gnome_integration_status");
+
+export const gnomeIntegrationSetConsentCommand: ClipvaultCommandArg<
+  GnomeIntegrationPayload,
+  { decision: GnomeConsentDecision }
+> = (args) =>
+  invoke<GnomeIntegrationPayload>("clipvault_gnome_integration_set_consent", {
+    update: { decision: args.decision },
+  });
+
+export const gnomeIntegrationInstallCommand: ClipvaultCommand<GnomeIntegrationInstallResult> =
+  () => invoke<GnomeIntegrationInstallResult>("clipvault_gnome_integration_install");
+
+export const gnomeIntegrationUninstallCommand: ClipvaultCommand<GnomeIntegrationPayload> =
+  () => invoke<GnomeIntegrationPayload>("clipvault_gnome_integration_uninstall");
+
+export const gnomeIntegrationRetryCommand: ClipvaultCommand<GnomeIntegrationPayload> =
+  () => invoke<GnomeIntegrationPayload>("clipvault_gnome_integration_retry");
+
 // Re-export the types so consumers don't need a second import.
 export type {
   ActiveAppDiagnostics,
@@ -561,6 +589,11 @@ export type {
   DeleteResponse,
   Diagnostics,
   EntryRecord,
+  GnomeConsentDecision,
+  GnomeIntegrationInstallResult,
+  GnomeIntegrationPayload,
+  GnomeIntegrationStatusResponse,
+  GnomeTechnicalState,
   IgnoredAppEntry,
   OrganizationSnapshot,
   PasteResponse,

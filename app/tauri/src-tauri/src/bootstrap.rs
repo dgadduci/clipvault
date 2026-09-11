@@ -65,6 +65,13 @@ pub struct AppState {
     /// scheduler cancels the in-flight set and lets Tauri drop
     /// the queued closures when the `AppHandle` is dropped.
     pub metadata_scheduler: Arc<MetadataEnrichmentScheduler>,
+    /// Optional GNOME Shell integration state. Populated only when
+    /// the runtime feature is enabled AND the host is Linux. On
+    /// every other host the slot stays `None` so the macOS / Windows
+    /// builds keep building without the new dependency graph.
+    #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+    #[allow(dead_code)]
+    pub gnome_integration: Option<Arc<crate::gnome_integration::GnomeIntegrationState>>,
 }
 
 /// How often the background capture loop polls the clipboard.
@@ -125,6 +132,31 @@ pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
     // `None` until the very end of `build_state`; populating it
     // before returning would require moving `state` around twice.
     let metadata_scheduler = Arc::new(MetadataEnrichmentScheduler::new());
+    #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+    let gnome_integration_state = build_gnome_integration_state(&context);
+    // Once the AppContext exists we can read the persisted consent
+    // decision and the install state. The helper below swaps the
+    // GNOME probe into the cached active-app probe ahead of the
+    // native Wayland / XWayland chain so a relaunched ClipVault
+    // resumes the integration without re-running the install
+    // flow.
+    #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+    if let Some(state) = gnome_integration_state.clone() {
+        if let Err(error) = state.reactivate_if_consented(&context) {
+            warn!(error = %error, "failed to reactivate gnome integration");
+        }
+    }
+    #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+    let provisional_state = AppState {
+        context: context.clone(),
+        watcher: Arc::clone(&watcher),
+        adapters: adapters.clone(),
+        cancel_capture: Arc::new(AtomicBool::new(false)),
+        active_app_refresher: None,
+        metadata_scheduler: Arc::clone(&metadata_scheduler),
+        gnome_integration: gnome_integration_state.clone(),
+    };
+    #[cfg(not(all(target_os = "linux", feature = "linux-gnome-shell-integration")))]
     let provisional_state = AppState {
         context: context.clone(),
         watcher: Arc::clone(&watcher),
@@ -135,15 +167,21 @@ pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
     };
     let (_refresher_outcome, active_app_refresher) =
         install_active_app_main_queue_refresher(&provisional_state);
+    #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+    let _ = gnome_integration_state;
 
-    Ok(AppState {
+    let app_state = AppState {
         context,
         watcher,
         adapters,
         cancel_capture: Arc::new(AtomicBool::new(false)),
         active_app_refresher,
         metadata_scheduler,
-    })
+        #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+        gnome_integration: provisional_state.gnome_integration,
+    };
+
+    Ok(app_state)
 }
 
 /// Synchronously run `f` on the Tauri main thread. Blocks the calling
@@ -1192,6 +1230,28 @@ fn build_active_application(
     if !capabilities.active_application {
         return Arc::new(clipvault_platform::NoopActiveApplicationProbe);
     }
+    // On Linux Wayland, the GNOME Shell extension is the
+    // authoritative source when the user has accepted the
+    // integration. The precedence chain documented in `design.md` is:
+    //
+    // 1. GNOME Shell Extension when connected.
+    // 2. Native Wayland public protocol.
+    // 3. XWayland / EWMH fallback.
+    // 4. Noop.
+    //
+    // When the consent decision is `accepted` AND the extension is
+    // installed and connected, return the GNOME probe ahead of the
+    // native Wayland adapter so a stale native identifier never
+    // overrides the most recent GNOME focus.
+    #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+    if matches!(
+        info.display_server,
+        clipvault_platform::DisplayServer::Wayland
+    ) {
+        if let Some(probe) = try_build_gnome_probe(info) {
+            return probe;
+        }
+    }
     match info.os_family {
         #[cfg(target_os = "macos")]
         OsFamily::Macos => {
@@ -1311,6 +1371,19 @@ fn build_active_application(
     Arc::new(clipvault_platform::NoopActiveApplicationProbe)
 }
 
+/// Best-effort probe construction for the GNOME Shell integration.
+/// The actual swap happens after `AppContext` exists — see
+/// `build_gnome_integration_state` and
+/// [`crate::gnome_integration::GnomeIntegrationState::reactivate_if_consented`] —
+/// so this helper returns `None` and lets the Wayland branch fall
+/// through to the native or XWayland probe. Returning `Some(...)`
+/// here would race with the persisted consent lookup the swap
+/// performs, so the placeholder stays deliberately empty.
+#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+fn try_build_gnome_probe(_info: &PlatformInfo) -> Option<Arc<dyn ActiveApplicationProbe>> {
+    None
+}
+
 /// Build the application-metadata provider used by the
 /// `history-card-layout` capability. macOS uses the bundle metadata
 /// helper (see [`clipvault_platform::runtime::macos_app_metadata`]
@@ -1408,6 +1481,25 @@ fn build_settings_navigator(info: &PlatformInfo) -> Arc<dyn SettingsNavigator> {
 #[allow(dead_code)]
 pub fn poll_interval() -> Duration {
     CaptureWatcher::default_interval()
+}
+
+/// Construct the GNOME Shell integration state when the runtime
+/// feature is enabled and the host is Linux. Every other host
+/// (macOS, Windows, unsupported) returns `None` so the rest of the
+/// bootstrap keeps the same shape.
+#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+fn build_gnome_integration_state(
+    context: &AppContext,
+) -> Option<Arc<crate::gnome_integration::GnomeIntegrationState>> {
+    use crate::gnome_integration::GnomeIntegrationState;
+    let service = Arc::new(context.gnome_integration().clone());
+    let state = GnomeIntegrationState::new(service);
+    // Re-hydrate the persisted decision so a launch with an
+    // accepted integration rebuilds the live platform service on
+    // the first install call (or starts with `NotInstalled` on a
+    // fresh install).
+    let _ = state.load_consent(context);
+    Some(Arc::new(state))
 }
 
 #[cfg(test)]

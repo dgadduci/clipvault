@@ -1701,3 +1701,214 @@ mod tests {
         assert!(matches!(missing, SetCodeLanguageResponse::NotFound));
     }
 }
+
+// ---------------------------------------------------------------------------
+// `gnome-wayland-integration` capability commands.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+mod gnome_commands {
+    use super::*;
+
+    /// Status snapshot of the optional GNOME Shell integration. The
+    /// payload is metadata-only: the fields never carry clipboard
+    /// content, source-app identifiers or environment variables.
+    #[derive(Debug, Serialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    pub enum GnomeIntegrationStatusResponse {
+        NotApplicable {
+            session: String,
+            desktop: String,
+        },
+        Ready {
+            payload: crate::gnome_integration::GnomeIntegrationPayload,
+        },
+        NotConfigured {
+            reason: String,
+        },
+    }
+
+    /// Convert the shell payload into the discriminated union the
+    /// frontend uses. Keeps the per-variant fields stable so the UI
+    /// can branch on `kind`.
+    pub fn gnome_status_response(
+        state_opt: Option<&Arc<crate::gnome_integration::GnomeIntegrationState>>,
+    ) -> GnomeIntegrationStatusResponse {
+        let Some(state) = state_opt else {
+            return GnomeIntegrationStatusResponse::NotConfigured {
+                reason: "feature_disabled".to_string(),
+            };
+        };
+        let payload = state.payload();
+        if !payload.applicable {
+            GnomeIntegrationStatusResponse::NotApplicable {
+                session: payload.session,
+                desktop: payload.desktop,
+            }
+        } else {
+            GnomeIntegrationStatusResponse::Ready { payload }
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct GnomeConsentUpdate {
+        pub decision: String,
+    }
+
+    /// Persist the user's consent decision. Recording `declined` or
+    /// `disabled` keeps the prompt from reappearing on the next
+    /// launch; recording `accepted` allows the next `install` call
+    /// to run.
+    #[tauri::command]
+    pub fn clipvault_gnome_integration_status(
+        state: State<'_, SharedState>,
+    ) -> Result<GnomeIntegrationStatusResponse, CommandError> {
+        Ok(gnome_status_response(
+            state.app_state().gnome_integration.as_ref(),
+        ))
+    }
+
+    #[tauri::command]
+    pub fn clipvault_gnome_integration_set_consent(
+        state: State<'_, SharedState>,
+        update: GnomeConsentUpdate,
+    ) -> Result<crate::gnome_integration::GnomeIntegrationPayload, CommandError> {
+        let gnome_state = state
+            .app_state()
+            .gnome_integration
+            .as_ref()
+            .ok_or_else(|| CommandError::new("feature_disabled", "feature disabled"))?;
+        let decision = match update.decision.as_str() {
+            "accepted" => clipvault_core::GnomeConsentDecision::Accepted,
+            "declined" => clipvault_core::GnomeConsentDecision::Declined,
+            "disabled" => clipvault_core::GnomeConsentDecision::Disabled,
+            "unknown" => clipvault_core::GnomeConsentDecision::Unknown,
+            _ => return Err(CommandError::new("invalid_consent", "unknown decision")),
+        };
+        gnome_state
+            .record_consent(state.context(), decision)
+            .map_err(|error| CommandError::new("consent_error", error.to_string()))?;
+        Ok(gnome_state.payload())
+    }
+
+    #[tauri::command]
+    pub fn clipvault_gnome_integration_install(
+        state: State<'_, SharedState>,
+        handle: tauri::AppHandle<tauri::Wry>,
+    ) -> Result<crate::gnome_integration::InstallResult, CommandError> {
+        let gnome_state = state
+            .app_state()
+            .gnome_integration
+            .as_ref()
+            .ok_or_else(|| CommandError::new("feature_disabled", "feature disabled"))?
+            .clone();
+        let bundled = crate::gnome_integration::read_bundled_extension(&handle)
+            .map_err(|error| CommandError::new("bundled_missing", error.to_string()))?;
+        let result = gnome_state
+            .install(state.context(), &bundled)
+            .map_err(|error| CommandError::new("install_error", error.to_string()))?;
+        if let Err(error) = gnome_state.start_listener() {
+            let _ = gnome_state.uninstall(state.context());
+            return Err(CommandError::new("listener_error", error));
+        }
+        Ok(result)
+    }
+
+    #[tauri::command]
+    pub fn clipvault_gnome_integration_uninstall(
+        state: State<'_, SharedState>,
+    ) -> Result<crate::gnome_integration::GnomeIntegrationPayload, CommandError> {
+        let gnome_state = state
+            .app_state()
+            .gnome_integration
+            .as_ref()
+            .ok_or_else(|| CommandError::new("feature_disabled", "feature disabled"))?
+            .clone();
+        let installation = gnome_state
+            .uninstall(state.context())
+            .map_err(|error| CommandError::new("uninstall_error", error.to_string()))?;
+        gnome_state.stop_listener();
+        let _ = installation;
+        Ok(gnome_state.payload())
+    }
+
+    #[tauri::command]
+    pub fn clipvault_gnome_integration_retry(
+        state: State<'_, SharedState>,
+    ) -> Result<crate::gnome_integration::GnomeIntegrationPayload, CommandError> {
+        let gnome_state = state
+            .app_state()
+            .gnome_integration
+            .as_ref()
+            .ok_or_else(|| CommandError::new("feature_disabled", "feature disabled"))?
+            .clone();
+        gnome_state
+            .start_listener()
+            .map_err(|error| CommandError::new("listener_error", error))?;
+        Ok(gnome_state.payload())
+    }
+}
+
+#[cfg(not(all(target_os = "linux", feature = "linux-gnome-shell-integration")))]
+mod gnome_commands {
+    use super::*;
+
+    /// Stub status response used on hosts where the integration is
+    /// not compiled in. The frontend treats every variant of the
+    /// discriminated union identically so the absence stays
+    /// invisible to the consumer.
+    #[derive(Debug, Serialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    #[allow(dead_code)]
+    pub enum GnomeIntegrationStatusResponse {
+        NotApplicable { session: String, desktop: String },
+        NotConfigured { reason: String },
+    }
+
+    #[tauri::command]
+    pub fn clipvault_gnome_integration_status(
+        _state: State<'_, SharedState>,
+    ) -> Result<GnomeIntegrationStatusResponse, CommandError> {
+        Ok(GnomeIntegrationStatusResponse::NotConfigured {
+            reason: "feature_disabled".to_string(),
+        })
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[allow(dead_code)]
+    pub struct GnomeConsentUpdate {
+        pub decision: String,
+    }
+
+    #[tauri::command]
+    pub fn clipvault_gnome_integration_set_consent(
+        _state: State<'_, SharedState>,
+        _update: GnomeConsentUpdate,
+    ) -> Result<(), CommandError> {
+        Err(CommandError::new("feature_disabled", "feature disabled"))
+    }
+
+    #[tauri::command]
+    pub fn clipvault_gnome_integration_install(
+        _state: State<'_, SharedState>,
+        _handle: tauri::AppHandle<tauri::Wry>,
+    ) -> Result<(), CommandError> {
+        Err(CommandError::new("feature_disabled", "feature disabled"))
+    }
+
+    #[tauri::command]
+    pub fn clipvault_gnome_integration_uninstall(
+        _state: State<'_, SharedState>,
+    ) -> Result<(), CommandError> {
+        Err(CommandError::new("feature_disabled", "feature disabled"))
+    }
+
+    #[tauri::command]
+    pub fn clipvault_gnome_integration_retry(
+        _state: State<'_, SharedState>,
+    ) -> Result<(), CommandError> {
+        Err(CommandError::new("feature_disabled", "feature disabled"))
+    }
+}
+
+pub use gnome_commands::*;

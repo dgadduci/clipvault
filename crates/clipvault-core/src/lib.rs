@@ -17,6 +17,7 @@ pub mod code_language_service;
 pub mod content_type;
 pub mod diagnostics;
 pub mod fakes;
+pub mod gnome_integration;
 pub mod history;
 pub mod ignored_apps;
 pub mod ignored_apps_service;
@@ -97,6 +98,10 @@ pub use fakes::{
     FakeActiveApplication, FakeApplicationMetadataProvider, FakeClipboardBackend,
     FakeHotkeyManager, FakePasteController, FakeSettingsNavigator, FakeTrayController,
     FakeTrayHandle,
+};
+pub use gnome_integration::{
+    GnomeConsentDecision, GnomeIntegrationError, GnomeIntegrationService, GnomeIntegrationSnapshot,
+    GnomeTechnicalState, GNOME_CONSENT_STORAGE_KEY, GNOME_STATE_STORAGE_KEY,
 };
 pub use history::{
     hash_content, HistoryOutcome, HistoryServiceError, SetTitleOutcome, TextHistoryService,

@@ -16,6 +16,7 @@
     activeApplicationCommand,
     captureTickCommand,
     diagnosticsCommand,
+    gnomeIntegrationStatusCommand,
     pasteEntryCommand,
     platformCapabilitiesCommand,
     recentEntriesCommand,
@@ -28,6 +29,7 @@
     Capabilities,
     Diagnostics,
     EntryRecord,
+    GnomeIntegrationStatusResponse,
     PasteResponse,
   } from "./types";
 
@@ -41,12 +43,16 @@
   let tickResult: string | null = null;
   let capRefreshBusy = false;
   let refreshError: string | null = null;
+  let gnomeStatus: GnomeIntegrationStatusResponse | null = null;
+  let gnomeBusy = false;
+  let gnomeError: string | null = null;
 
   const dispatch = createEventDispatcher<{
     refresh: void;
     capabilitiesChanged: Capabilities;
     entriesChanged: EntryRecord[];
     pasteFailed: PasteResponse;
+    gnomeStatusChanged: GnomeIntegrationStatusResponse;
   }>();
 
   async function refreshDiagnostics(): Promise<void> {
@@ -63,6 +69,19 @@
       dispatch("refresh");
     } catch (err) {
       refreshError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function refreshGnomeStatus(): Promise<void> {
+    gnomeError = null;
+    gnomeBusy = true;
+    try {
+      gnomeStatus = await gnomeIntegrationStatusCommand();
+      dispatch("gnomeStatusChanged", gnomeStatus);
+    } catch (err) {
+      gnomeError = err instanceof Error ? err.message : String(err);
+    } finally {
+      gnomeBusy = false;
     }
   }
 
@@ -233,6 +252,54 @@
       {#if tickResult}
         <span class="muted" data-testid="tick-result">{tickResult}</span>
       {/if}
+    </div>
+  </article>
+
+  <article class="card-block" data-testid="gnome-integration-card">
+    <h3 class="block-title">Integración GNOME Wayland</h3>
+    <p class="muted">
+      Estado de la integración opcional con GNOME Shell. Sólo se
+      aplica a sesiones GNOME Wayland y sólo transporta el
+      identificador de la aplicación enfocada.
+    </p>
+    {#if gnomeStatus === null}
+      <p class="muted">Recuperar estado bajo demanda.</p>
+    {:else if gnomeStatus.kind === "not_applicable"}
+      <p><strong>No aplicable</strong> ({gnomeStatus.session}, {gnomeStatus.desktop}).</p>
+    {:else if gnomeStatus.kind === "not_configured"}
+      <p class="muted">Integración no disponible ({gnomeStatus.reason}).</p>
+    {:else if gnomeStatus.kind === "ready"}
+      <dl class="diag-list">
+        <dt>Sesión</dt>
+        <dd><code>{gnomeStatus.payload.session}</code></dd>
+        <dt>Consentimiento</dt>
+        <dd><code>{gnomeStatus.payload.consent}</code></dd>
+        <dt>Estado técnico</dt>
+        <dd><code>{gnomeStatus.payload.technical_state}</code></dd>
+        <dt>Identificador publicado</dt>
+        <dd>
+          <code>{gnomeStatus.payload.identifier ?? "(none)"}</code>
+        </dd>
+        {#if gnomeStatus.payload.detail}
+          <dt>Detalle</dt>
+          <dd><code>{gnomeStatus.payload.detail}</code></dd>
+        {/if}
+      </dl>
+    {/if}
+    {#if gnomeError}
+      <p class="status error" role="alert" data-testid="gnome-debug-error">
+        {gnomeError}
+      </p>
+    {/if}
+    <div class="row">
+      <button
+        type="button"
+        on:click={refreshGnomeStatus}
+        disabled={gnomeBusy}
+        data-testid="gnome-debug-refresh"
+      >
+        {gnomeBusy ? "Actualizando…" : "Refrescar integración"}
+      </button>
     </div>
   </article>
 </section>

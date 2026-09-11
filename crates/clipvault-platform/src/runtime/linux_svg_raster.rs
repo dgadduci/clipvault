@@ -124,16 +124,18 @@ pub fn rasterize_svg_to_png(svg_bytes: &[u8]) -> Result<RasterizedSvg, SvgRaster
         return Err(SvgRasterError::TooLarge);
     }
 
-    let mut options = resvg::usvg::Options::default();
-    // Disable every external resource resolver so a tampered SVG
-    // cannot read files from the host filesystem, embed network
-    // resources or trigger any decoder besides the one the
-    // rasterizer uses internally. `usvg` does not run JavaScript
-    // or honour any scripting element, so the parser itself stays
-    // inert.
-    options.image_href_resolver = resvg::usvg::ImageHrefResolver {
-        resolve_data: Box::new(|_mime, _data, _opts| None),
-        resolve_string: Box::new(|_href, _opts| None),
+    let options = resvg::usvg::Options {
+        // Disable every external resource resolver so a tampered SVG
+        // cannot read files from the host filesystem, embed network
+        // resources or trigger any decoder besides the one the
+        // rasterizer uses internally. `usvg` does not run JavaScript
+        // or honour any scripting element, so the parser itself stays
+        // inert.
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_mime, _data, _opts| None),
+            resolve_string: Box::new(|_href, _opts| None),
+        },
+        ..resvg::usvg::Options::default()
     };
 
     let tree = resvg::usvg::Tree::from_data(svg_bytes, &options)

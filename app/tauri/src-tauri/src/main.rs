@@ -6,6 +6,8 @@
 
 mod bootstrap;
 mod commands;
+#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+mod gnome_integration;
 mod main_window_layout;
 mod metadata_scheduler;
 mod state;
@@ -174,6 +176,11 @@ fn main() {
             commands::clipvault_history_collection_id,
             commands::clipvault_source_applications,
             commands::clipvault_code_language_set,
+            commands::clipvault_gnome_integration_status,
+            commands::clipvault_gnome_integration_set_consent,
+            commands::clipvault_gnome_integration_install,
+            commands::clipvault_gnome_integration_uninstall,
+            commands::clipvault_gnome_integration_retry,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ClipVault")

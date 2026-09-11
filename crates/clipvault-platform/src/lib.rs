@@ -71,6 +71,23 @@ pub use noop::{
     NoopSettingsNavigator, NoopTrayController, NoopTrayHandle,
 };
 pub use paste::{PasteBackendKind, PasteController, PasteError};
+#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+pub use runtime::linux_gnome_extension_installer::{
+    BundledExtension, ExtensionInstaller, InstallOutcome, Installation, InstallerError,
+    SystemHostEnvironment,
+};
+#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+pub use runtime::linux_gnome_integration::{
+    detect_session as gnome_detect_session, DesktopEnvironment as GnomeDesktopEnvironment,
+    GnomeConsentDecision, GnomeIntegrationHandle, GnomeIntegrationService, GnomeIntegrationStatus,
+    SessionKind as GnomeSessionKind, SharedGnomeSnapshot as GnomeIntegrationSnapshot,
+    BACKEND_NAME as GNOME_BACKEND_NAME, EXTENSION_UUID as GNOME_EXTENSION_UUID,
+};
+#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+pub use runtime::linux_gnome_shell_integration::{
+    GnomeDiagnostics, GnomeIntegrationState, GnomeShellActiveApplication, UnixListenerTransport,
+    MAX_FRAME_BYTES as GNOME_MAX_FRAME_BYTES, PROTOCOL_VERSION as GNOME_PROTOCOL_VERSION,
+};
 pub use stub::{data_dir, DefaultPlatform, PlatformError};
 pub use tiff_metadata::{parse_tiff_metadata, TiffMetadata, TiffResolutionUnit};
 pub use tray::{

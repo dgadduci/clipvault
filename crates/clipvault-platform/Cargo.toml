@@ -38,6 +38,14 @@ linux-x11 = ["dep:x11rb"]
 # compositor publishes and the only on-disk artefact the build
 # needs is the protocol XML, which is bundled with the source tree.
 linux-wayland-active-app = []
+# Optional GNOME Shell integration on Linux Wayland. Bundles the
+# `GnomeShellActiveApplication` probe (the per-session Unix socket
+# listener), the bundled-extension installer and the extension
+# service that combines consent + install + listener lifecycle.
+# Enabling the feature activates the integration in the shell
+# bootstrap but the user must explicitly accept the consent
+# prompt before anything is written to disk.
+linux-gnome-shell-integration = []
 # Pure-Rust SVG → PNG rasterizer used by the Linux metadata provider
 # to honour `Icon=<name>` entries that ship as SVG instead of PNG.
 # `default-features = false` keeps the parser/raster stack free of
@@ -65,6 +73,12 @@ png = { workspace = true }
 arboard = { workspace = true, optional = true }
 global-hotkey = { workspace = true, optional = true }
 x11rb = { workspace = true, optional = true, features = ["allow-unsafe-code", "xtest"] }
+# JSON serialisation for the GNOME integration wire envelopes and
+# the consent/installation surfaces. Already in the workspace graph
+# through `clipvault-core`; surfaced here so the platform layer can
+# own the wire contract without `clipvault-core` having to depend on
+# runtime-only Linux code.
+serde_json = { workspace = true }
 # `resvg` ships `usvg` (SVG parser), `tiny-skia` (rasterizer) and a
 # thin renderer under a single crate. With `default-features = false`
 # we get the no-text / no-fonts / no-raster-images path, which is the

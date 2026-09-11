@@ -9,7 +9,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -190,7 +190,7 @@ pub trait ActiveApplicationProbe: Send + Sync {
 /// useful for tests.
 #[derive(Clone)]
 pub struct CachedActiveApplication {
-    inner: Arc<dyn ActiveApplicationProbe>,
+    inner: Arc<RwLock<Arc<dyn ActiveApplicationProbe>>>,
     cache: Arc<Mutex<Option<ActiveApplication>>>,
 }
 
@@ -198,15 +198,36 @@ impl CachedActiveApplication {
     /// Build a wrapper around `inner`. The cache starts empty.
     pub fn new(inner: Arc<dyn ActiveApplicationProbe>) -> Self {
         Self {
-            inner,
+            inner: Arc::new(RwLock::new(inner)),
             cache: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Borrow the wrapped probe (used by the bootstrap to refresh the
-    /// cache from the platform thread).
-    pub fn inner(&self) -> &Arc<dyn ActiveApplicationProbe> {
-        &self.inner
+    /// Borrow the currently wrapped probe (used by the bootstrap to
+    /// refresh the cache from the platform thread).
+    pub fn inner(&self) -> Arc<dyn ActiveApplicationProbe> {
+        self.inner.read().clone()
+    }
+
+    /// Atomically swap the wrapped probe. Used by the GNOME Shell
+    /// integration when the user accepts the consent and installs
+    /// the bundled extension: the bootstrap keeps the original
+    /// (X11 / Wayland / noop) probe chain alive, the integration
+    /// swaps the GNOME probe in once the listener has accepted a
+    /// peer, and the capture loop picks up the new probe
+    /// immediately.
+    ///
+    /// The cache is intentionally NOT cleared by the swap. A freshly
+    /// activated GNOME listener publishes `app_id` over the wire
+    /// immediately on focus, so the swap writes the same identifier
+    /// the watcher was about to consume from the previous probe.
+    /// Clearing the cache would re-introduce a window where the
+    /// watcher reads `None` and the PrivacyGate treats the entry as
+    /// "unknown source", giving the user a transient loss of
+    /// attribution exactly when the integration is supposed to
+    /// improve it.
+    pub fn swap_probe(&self, new_probe: Arc<dyn ActiveApplicationProbe>) {
+        *self.inner.write() = new_probe;
     }
 
     /// Replace the cached value. Returns the previous value so the
@@ -219,7 +240,8 @@ impl CachedActiveApplication {
     /// Ask the inner probe and update the cache with the answer.
     /// Returns the same value the cache stores after the call.
     pub fn refresh(&self) -> Result<Option<ActiveApplication>, ActiveAppError> {
-        let answer = self.inner.active_application()?;
+        let probe = self.inner();
+        let answer = probe.active_application()?;
         self.refresh_with(answer.clone());
         Ok(answer)
     }
@@ -236,7 +258,7 @@ impl CachedActiveApplication {
     /// stages documented by the design. Returns the snapshot value
     /// without re-invoking the inner probe.
     pub fn last_probe_stage(&self) -> ProbeStage {
-        self.inner.last_probe_stage()
+        self.inner().last_probe_stage()
     }
 }
 
@@ -252,11 +274,11 @@ impl ActiveApplicationProbe for CachedActiveApplication {
     }
 
     fn name(&self) -> &'static str {
-        self.inner.name()
+        self.inner().name()
     }
 
     fn last_probe_stage(&self) -> ProbeStage {
-        self.inner.last_probe_stage()
+        self.inner().last_probe_stage()
     }
 }
 
@@ -382,6 +404,35 @@ mod tests {
         let previous = cached.refresh_with(Some(ActiveApplication::new("Safari", "safari")));
         assert_eq!(previous.unwrap().identifier, "firefox");
         assert_eq!(cached.cached().unwrap().identifier, "safari");
+    }
+
+    /// Hot-swap the wrapped probe. Used by the GNOME Shell
+    /// integration once the user accepts the consent prompt and the
+    /// listener has accepted a peer. The cache survives the swap so
+    /// the watcher still observes the most recent answer.
+    #[test]
+    fn swap_probe_replaces_inner_probe_and_preserves_cache() {
+        let initial = Arc::new(ScriptedProbe::new(vec![]));
+        let cached = CachedActiveApplication::new(initial);
+        cached.refresh_with(Some(ActiveApplication::new("Firefox", "firefox")));
+        struct GnomeBackedProbe;
+        impl ActiveApplicationProbe for GnomeBackedProbe {
+            fn active_application(&self) -> Result<Option<ActiveApplication>, ActiveAppError> {
+                Ok(Some(ActiveApplication::new(
+                    "Terminal",
+                    "org.gnome.Terminal",
+                )))
+            }
+            fn name(&self) -> &'static str {
+                "gnome_shell_extension"
+            }
+        }
+        cached.swap_probe(Arc::new(GnomeBackedProbe));
+        assert_eq!(cached.name(), "gnome_shell_extension");
+        let cached_app = cached.cached();
+        assert_eq!(cached_app.unwrap().identifier, "firefox");
+        let refreshed = cached.refresh().expect("ok");
+        assert_eq!(refreshed.unwrap().identifier, "org.gnome.Terminal");
     }
 
     /// Reusable scripted probe that exposes a programmatic

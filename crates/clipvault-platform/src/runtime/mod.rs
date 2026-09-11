@@ -43,6 +43,12 @@ pub mod macos_settings;
 pub mod linux_app_metadata;
 #[cfg(target_os = "linux")]
 pub mod linux_app_picker;
+#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+pub mod linux_gnome_extension_installer;
+#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+pub mod linux_gnome_integration;
+#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+pub mod linux_gnome_shell_integration;
 #[cfg(target_os = "linux")]
 pub mod linux_settings;
 #[cfg(all(target_os = "linux", feature = "linux-svg-raster"))]

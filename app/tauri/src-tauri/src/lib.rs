@@ -12,6 +12,8 @@
 
 pub mod bootstrap;
 pub mod commands;
+#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+pub mod gnome_integration;
 pub mod main_window_layout;
 pub mod metadata_scheduler;
 pub mod quick_paste_window_layout;

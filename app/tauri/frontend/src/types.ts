@@ -425,6 +425,104 @@ export interface CommandError {
 // `tags-and-collections` capability.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// `gnome-wayland-integration` capability.
+// ---------------------------------------------------------------------------
+
+/**
+ * Tauri command name the frontend uses to read the GNOME Shell
+ * integration status.
+ */
+export const GNOME_INTEGRATION_STATUS_COMMAND =
+  "clipvault_gnome_integration_status";
+
+/**
+ * User-facing GNOME integration consent + technical state. Carries
+ * only metadata — never clipboard content, source-app identifiers or
+ * environment variables.
+ */
+export type GnomeConsentDecision =
+  | "unknown"
+  | "accepted"
+  | "declined"
+  | "disabled";
+
+/**
+ * Stable lifecycle states the GNOME integration publishes through the
+ * diagnostics endpoint. The strings mirror
+ * [`clipvault_core::GnomeTechnicalState::as_str`] byte-for-byte.
+ */
+export type GnomeTechnicalState =
+  | "not_installed"
+  | "disabled"
+  | "incompatible"
+  | "activation_pending"
+  | "connected"
+  | "identified"
+  | "no_active_application"
+  | "disconnected"
+  | "communication_error"
+  | "unavailable";
+
+/**
+ * Outcome of the GNOME integration status command. The
+ * discriminated union keeps the per-variant fields stable so the
+ * UI can branch on `kind` and follow every transition without
+ * having to inspect a free-form message.
+ */
+export type GnomeIntegrationStatusResponse =
+  | { kind: "not_applicable"; session: string; desktop: string }
+  | { kind: "ready"; payload: GnomeIntegrationPayload }
+  | { kind: "not_configured"; reason: string };
+
+/**
+ * Metadata-only payload emitted by the GNOME integration status
+ * endpoint. Every field is optional; absent values render the
+ * fallback copy the design documents.
+ */
+/**
+ * Metadata-only payload emitted by the GNOME integration status
+ * endpoint. Every field is metadata; absolute filesystem paths,
+ * socket paths, clipboard content and environment variables never
+ * leave the Rust process.
+ */
+export interface GnomeIntegrationPayload {
+  applicable: boolean;
+  session: string;
+  desktop: string;
+  consent: GnomeConsentDecision;
+  technical_state: GnomeTechnicalState;
+  installed: boolean;
+  identifier: string | null;
+  detail: string | null;
+  uuid: string;
+  backend: string;
+  protocol_version: number;
+}
+
+/**
+ * Result of `clipvault_gnome_integration_install`. Mirrors the typed
+ * Rust `InstallResult`. The payload only carries metadata: no
+ * clipboard content, no source-app identifiers, no environment
+ * variables.
+ */
+export interface GnomeIntegrationInstallResult {
+  installation: {
+    installed: boolean;
+    enabled: boolean;
+    uuid: string;
+    version: number;
+  };
+  status: GnomeIntegrationPayload;
+  diagnostics: {
+    state: string;
+    backend: string;
+    identifier: string | null;
+    detail: string | null;
+    last_probe_stage: string;
+  };
+}
+
 export type CollectionKind = "system" | "user";
 
 export interface Collection {
