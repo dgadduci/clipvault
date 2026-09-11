@@ -82,7 +82,6 @@
     previewShortcutPlatform,
   } from "./lib/clipboardPreview";
   import { visualTokenCss } from "./lib/visualTokens";
-  import { requestMountedMainWindowVisibility } from "./lib/mainWindowVisibility";
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
   import HistoryCardRail from "./HistoryCardRail.svelte";
   import OrganizationSidebar from "./OrganizationSidebar.svelte";
@@ -1487,9 +1486,6 @@
   }
 
   onMount(() => {
-    // On GTK/Wayland this runs after the desktop WebKit surface exists,
-    // giving the compositor a final, idempotent visibility request.
-    requestMountedMainWindowVisibility();
     void refresh();
     registerQuickSearch(handleQuickSearchActivation)
       .then((unlisten) => {

@@ -162,39 +162,25 @@ Se deben verificar en una sesión real:
 
 ## Corrección de visibilidad de la ventana principal en Wayland
 
-La disponibilidad de un monitor no debe condicionar la visibilidad de
-ClipVault. En algunos compositores Wayland `primary_monitor()` puede
-devolver ausencia durante `setup`, aunque exista una sesión gráfica
-válida. El layout inicial es una mejora opcional; la ventana principal
-debe seguir apareciendo con el tamaño y posición configurados.
+La prueba Ubuntu mostró que los cuatro intentos de “forzar” la presentación
+no mejoraron el resultado: la aplicación seguía viva en la bandeja, pero no
+existía una superficie visible. Esos intentos introducían llamadas de ventana
+durante el período en que Mutter todavía no informa un monitor primario:
 
-El shell selecciona un monitor para el layout en este orden:
+1. elegir `current_monitor()` o un monitor disponible y redimensionar;
+2. declarar explícitamente `visible: true` y llamar `show`/`unminimize`;
+3. repetir la operación al recibir `RunEvent::Ready`;
+4. repetir `show()` al montar Svelte.
 
-1. monitor actual de la ventana;
-2. monitor primario;
-3. primer monitor disponible;
-4. valores declarados en `tauri.conf.json` cuando ninguno está
-   disponible.
+El baseline que sí fue validado en GNOME Wayland no realiza ninguna de esas
+operaciones cuando `primary_monitor()` devuelve ausencia: retorna del layout
+opcional y deja a Tauri crear el toplevel con la geometría y visibilidad por
+defecto de `tauri.conf.json`. Por lo tanto, el diseño definitivo restablece
+ese ciclo de vida exacto. La entrada `main` no declara una visibilidad
+explícita —el valor por defecto de Tauri es visible— y el tray conserva su
+comportamiento normal de `show` + foco sólo para una ventana que el usuario
+ya había ocultado.
 
-Independientemente de esa selección, el arranque y la acción **Open
-ClipVault** del tray comparten una única operación que intenta
-desminimizar, mostrar y enfocar la ventana `main`. Un rechazo de foco
-por política Wayland se registra como diagnóstico no fatal. Quick Paste
-permanece oculta hasta que su hotkey la solicita.
-
-En GNOME Wayland una solicitud de mostrar emitida durante `setup` puede
-ser aceptada antes de que el loop nativo haya publicado una superficie
-mapeable. Por ello el shell invoca el mismo helper idempotente también al
-recibir `RunEvent::Ready`, la primera etapa donde el runtime confirma que
-el loop gráfico está listo. Esto no altera Quick Paste.
-
-La selección de monitor puede seguir calcular el tamaño inicial, pero el
-shell no envía una posición absoluta cuando `GDK_BACKEND` o
-`XDG_SESSION_TYPE` indican Wayland. GNOME gestiona la posición de toplevels;
-forzar `set_position` antes del mapeo puede impedir que la superficie se
-vuelva visible. En X11 y macOS se conserva la posición inicial existente.
-
-Como última garantía, `App.svelte` solicita `show()` sobre la ventana `main`
-una vez montado el WebView. Esa invocación ocurre después de que GTK/WebKit
-crea la superficie y no desplaza, redimensiona, enfoca ni oculta ninguna
-ventana. El bridge es inerte fuera de Tauri y en Quick Paste.
+Esta reversión está acotada al arranque de la ventana: no modifica la
+integración GNOME, el listener, la detección de aplicación activa, el
+portapapeles, los assets, las imágenes ni las superficies Quick Paste.

@@ -27,7 +27,7 @@ use crate::bootstrap::{
 };
 use crate::commands::run_retention;
 use crate::state::SharedState;
-use crate::tray::{menu_event_to_action, present_main_window, TauriTrayController};
+use crate::tray::{menu_event_to_action, TauriTrayController};
 
 fn main() {
     init_tracing();
@@ -111,12 +111,6 @@ fn main() {
             } else {
                 warn!("shared state not available; capture loop not installed");
             }
-
-            // `primary_monitor()` may legitimately be absent on a
-            // Wayland compositor.  Layout is optional, but presenting
-            // the configured main window is not: the desktop must not
-            // degrade into a tray-only process on first launch.
-            present_main_window(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -194,23 +188,10 @@ fn main() {
 }
 
 fn handle_run_event<R: tauri::Runtime>(app: &AppHandle<R>, event: RunEvent) {
-    // On GNOME Wayland a `show()` issued during `setup` can be accepted
-    // before the native event loop has reached its ready state, without
-    // producing a mapped surface. Repeat the idempotent presentation once
-    // the runtime reports `Ready`; the tray action shares that same helper.
-    if should_present_main_window(&event) {
-        present_main_window(app);
-        info!("main window presentation requested after runtime ready");
-    }
-
     if let RunEvent::ExitRequested { .. } = event {
         cleanup(app);
         info!("ClipVault exiting cleanly");
     }
-}
-
-const fn should_present_main_window(event: &RunEvent) -> bool {
-    matches!(event, RunEvent::Ready)
 }
 
 fn cleanup<R: tauri::Runtime>(app: &AppHandle<R>) {
@@ -290,9 +271,7 @@ fn _ensure_arc(_: &Arc<()>) {}
 /// The math lives in [`crate::main_window_layout`] so the centring
 /// logic is unit tested without a Tauri runtime.
 fn resize_main_window_to_monitor(app: &mut tauri::App) {
-    use crate::main_window_layout::{
-        compute_main_window_layout, select_main_monitor, should_request_initial_position,
-    };
+    use crate::main_window_layout::compute_main_window_layout;
     use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 
     let Some(window) = app.get_webview_window("main") else {
@@ -300,31 +279,16 @@ fn resize_main_window_to_monitor(app: &mut tauri::App) {
         return;
     };
 
-    let current = match window.current_monitor() {
-        Ok(monitor) => monitor,
-        Err(error) => {
-            warn!(error = %error, "current monitor query failed; trying fallback");
-            None
+    let monitor = match window.primary_monitor() {
+        Ok(Some(monitor)) => monitor,
+        Ok(None) => {
+            warn!("no primary monitor reported; keeping conf defaults");
+            return;
         }
-    };
-    let primary = match window.primary_monitor() {
-        Ok(monitor) => monitor,
         Err(error) => {
-            warn!(error = %error, "primary monitor query failed; trying fallback");
-            None
+            warn!(error = %error, "primary monitor query failed; keeping conf defaults");
+            return;
         }
-    };
-    let available = match window.available_monitors() {
-        Ok(monitors) => monitors,
-        Err(error) => {
-            warn!(error = %error, "available monitor query failed; keeping conf defaults");
-            Vec::new()
-        }
-    };
-    let (monitor, source) = select_main_monitor(current, primary, available);
-    let Some(monitor) = monitor else {
-        warn!("no monitor reported; keeping conf defaults");
-        return;
     };
 
     let scale = monitor.scale_factor();
@@ -347,24 +311,16 @@ fn resize_main_window_to_monitor(app: &mut tauri::App) {
         }
     }
 
-    let gdk_backend = std::env::var("GDK_BACKEND").ok();
-    let session_type = std::env::var("XDG_SESSION_TYPE").ok();
-    if should_request_initial_position(gdk_backend.as_deref(), session_type.as_deref()) {
-        let logical_position =
-            LogicalPosition::new(layout.logical_position.0, layout.logical_position.1);
-        let physical_position =
-            PhysicalPosition::new(layout.physical_position.0, layout.physical_position.1);
+    let logical_position =
+        LogicalPosition::new(layout.logical_position.0, layout.logical_position.1);
+    let physical_position =
+        PhysicalPosition::new(layout.physical_position.0, layout.physical_position.1);
 
-        if let Err(error) = window.set_position(logical_position) {
-            warn!(error = %error, "logical position failed; falling back to physical");
-            if let Err(physical_error) = window.set_position(physical_position) {
-                warn!(error = %physical_error, "physical position failed; keeping conf defaults");
-            }
+    if let Err(error) = window.set_position(logical_position) {
+        warn!(error = %error, "logical position failed; falling back to physical");
+        if let Err(physical_error) = window.set_position(physical_position) {
+            warn!(error = %physical_error, "physical position failed; keeping conf defaults");
         }
-    } else {
-        // GNOME Wayland owns toplevel placement. Keep the requested size,
-        // but never send an absolute position before the surface is mapped.
-        info!("main window position left to the Wayland compositor");
     }
 
     info!(
@@ -373,37 +329,6 @@ fn resize_main_window_to_monitor(app: &mut tauri::App) {
         logical_x = layout.logical_position.0,
         logical_y = layout.logical_position.1,
         scale = layout.scale_factor,
-        monitor_source = source.as_str(),
-        "main window positioned at top center"
+        "main window positioned at top center of the primary monitor"
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use tauri::RunEvent;
-
-    use super::should_present_main_window;
-
-    #[test]
-    fn main_window_is_presented_once_the_runtime_is_ready() {
-        assert!(should_present_main_window(&RunEvent::Ready));
-    }
-
-    #[test]
-    fn main_window_is_explicitly_visible_while_quick_paste_stays_hidden() {
-        let config: serde_json::Value =
-            serde_json::from_str(include_str!("../tauri.conf.json")).expect("valid tauri config");
-        let windows = config["app"]["windows"].as_array().expect("windows array");
-        let main = windows
-            .iter()
-            .find(|window| window["label"] == "main")
-            .expect("main window");
-        let quick_paste = windows
-            .iter()
-            .find(|window| window["label"] == "quick-paste")
-            .expect("quick paste window");
-
-        assert_eq!(main["visible"].as_bool(), Some(true));
-        assert_eq!(quick_paste["visible"].as_bool(), Some(false));
-    }
 }

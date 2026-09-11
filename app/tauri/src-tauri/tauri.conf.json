@@ -14,7 +14,6 @@
       {
         "label": "main",
         "title": "ClipVault",
-        "visible": true,
         "width": 1080,
         "height": 460,
         "minWidth": 720,

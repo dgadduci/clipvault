@@ -903,3 +903,25 @@ posición, tamaño, Quick Paste ni datos de usuario.
 - [x] Cubrir que sólo la ventana `main` recibe la solicitud de visibilidad.
 - [ ] Verificar manualmente en Ubuntu GNOME Wayland que el desktop aparece
   después de que el WebView principal se monta.
+
+**Reversión basada en la prueba Ubuntu.** Las cuatro medidas anteriores no
+produjeron una ventana visible en la misma sesión GNOME Wayland: el log sólo
+alcanzó el ajuste de layout y nunca confirmó `RunEvent::Ready` ni el montaje
+del WebView. En cambio, el baseline `b93718b` fue el último estado validado
+que dejaba a Tauri administrar la creación de la ventana. Se revierten de
+forma conjunta los cambios de presentación agregados en `8ceaaa5`, `ddb4f50`,
+`a16738c` y `6e1f542`:
+
+- [x] Restaurar el retorno temprano de `resize_main_window_to_monitor` cuando
+  falta `primary_monitor()`, sin consultar otro monitor ni solicitar tamaño o
+  posición en Wayland.
+- [x] Eliminar la visibilidad explícita de `main`, el helper de presentación
+  de arranque, la repetición por `RunEvent::Ready` y el bridge Svelte de
+  `show()` posterior al montaje.
+- [x] Mantener el comportamiento existente del menú de bandeja para restaurar
+  una ventana que el usuario ya ocultó.
+- [x] Actualizar diseño y delta spec para que el contrato prohíba mutaciones
+  de la ventana antes del mapeo cuando GNOME no informa monitor primario.
+- [ ] Verificar en Ubuntu GNOME Wayland que el baseline restaurado vuelve a
+  mostrar la ventana principal; sólo entonces retomar la prueba de la
+  integración GNOME nativa.

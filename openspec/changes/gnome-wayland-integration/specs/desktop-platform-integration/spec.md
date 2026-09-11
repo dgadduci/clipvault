@@ -119,47 +119,33 @@ El identificador GNOME SHALL enter PrivacyGate before persistence or application
 - AND no se crea un asset de icono por ese intento
 - AND los logs siguen siendo metadata-only
 
-### Requirement: Ventana principal visible en sesiones Wayland
+### Requirement: Arranque no intrusivo de la ventana principal en Wayland
 
-ClipVault MUST attempt to unminimize and show its `main` window at
-startup and when the tray action opens it. A missing primary monitor
-SHALL affect only optional startup layout, never window visibility.
+ClipVault MUST let Tauri create the configured `main` toplevel using its
+native default visibility. Mientras la ventana inicial de GNOME Wayland aún
+no tiene monitor primario, el shell MUST NOT emitir solicitudes adicionales
+de `show`, `unminimize`, foco, tamaño o posición: esas solicitudes previas al
+mapeo pueden dejar el proceso vivo sólo en la bandeja.
 
 #### Scenario: Wayland sin monitor primario informado
 
 - GIVEN una sesión gráfica Wayland donde `primary_monitor()` devuelve ausencia
 - WHEN ClipVault inicia
-- THEN conserva el tamaño y posición declarados en la configuración si no hay otro monitor disponible
-- AND intenta mostrar la ventana principal
-- AND no queda reducido a un proceso sólo de bandeja
+- THEN conserva la creación y geometría declaradas en `tauri.conf.json`
+- AND no consulta monitores alternativos ni muta la ventana antes del mapeo
+- AND Tauri presenta la ventana principal con su comportamiento configurado
 
 #### Scenario: Abrir desde la bandeja
 
 - GIVEN que la ventana principal fue ocultada previamente
 - WHEN el usuario selecciona `Open ClipVault` desde la bandeja
 - THEN ClipVault intenta desminimizar, mostrar y enfocar la misma ventana principal
-- AND registra errores de plataforma sin fallar el proceso
+- AND no altera el ciclo de arranque de la ventana inicial
 
-#### Scenario: El loop Wayland todavía no estaba listo durante setup
+#### Scenario: Solicitudes previas al mapeo
 
-- GIVEN que una solicitud de mostrar ocurre antes de que el runtime gráfico esté listo
-- WHEN el runtime emite `RunEvent::Ready`
-- THEN ClipVault repite la presentación de la ventana principal
-- AND utiliza el mismo flujo idempotente que la bandeja
-
-#### Scenario: Wayland gestiona la posición de la ventana
-
-- GIVEN una sesión donde `GDK_BACKEND` o `XDG_SESSION_TYPE` indican Wayland
-- WHEN ClipVault calcula el layout inicial desde un monitor disponible
-- THEN puede solicitar el tamaño inicial
-- BUT no DEBE solicitar una posición absoluta de la ventana principal
-- AND deja el mapeo y la posición a cargo del compositor
-
-#### Scenario: WebView principal montado después del arranque nativo
-
-- GIVEN que el shell ya solicitó la visibilidad pero GTK/WebKit aún no había
-  mapeado la superficie durante el arranque
-- WHEN el frontend de la ventana `main` completa su montaje
-- THEN solicita una vez `show()` para esa misma ventana
-- AND no debe enfocar, ocultar, redimensionar ni mover la ventana
-- AND no debe afectar la ventana Quick Paste
+- GIVEN una ventana `main` recién creada en GNOME Wayland
+- WHEN `primary_monitor()` devuelve ausencia durante `setup`
+- THEN el shell retorna del ajuste opcional de layout sin llamar a `show`,
+  `unminimize`, `set_focus`, `set_size` ni `set_position`
+- AND no usa `RunEvent::Ready` ni un montaje Svelte para repetir esas solicitudes

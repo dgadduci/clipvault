@@ -47,66 +47,6 @@ pub const MAIN_TARGET_HEIGHT: f64 = 460.0;
 /// collapsing the toolbar and the rail.
 pub const MAIN_MIN_WIDTH: f64 = 720.0;
 
-/// Source selected for the initial monitor-dependent layout.  Wayland
-/// compositors are allowed to omit a primary monitor, so startup must
-/// distinguish that ordinary condition from an unusable window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MainMonitorSource {
-    Current,
-    Primary,
-    Available,
-    ConfigurationDefaults,
-}
-
-impl MainMonitorSource {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Current => "current",
-            Self::Primary => "primary",
-            Self::Available => "available",
-            Self::ConfigurationDefaults => "configuration_defaults",
-        }
-    }
-}
-
-/// Select a monitor for the one-shot startup layout without treating a
-/// missing primary monitor as a fatal condition.  This is deliberately
-/// generic so the fallback policy is testable without a Tauri runtime.
-pub fn select_main_monitor<T>(
-    current: Option<T>,
-    primary: Option<T>,
-    available: impl IntoIterator<Item = T>,
-) -> (Option<T>, MainMonitorSource) {
-    if let Some(monitor) = current {
-        return (Some(monitor), MainMonitorSource::Current);
-    }
-    if let Some(monitor) = primary {
-        return (Some(monitor), MainMonitorSource::Primary);
-    }
-    if let Some(monitor) = available.into_iter().next() {
-        return (Some(monitor), MainMonitorSource::Available);
-    }
-    (None, MainMonitorSource::ConfigurationDefaults)
-}
-
-/// Whether the shell may request an absolute initial position. Wayland
-/// compositors own toplevel placement; sending a `set_position` request
-/// before the surface is mapped can leave GTK/Wry with no visible surface.
-/// Window sizing remains safe and is handled independently.
-pub fn should_request_initial_position(
-    gdk_backend: Option<&str>,
-    session_type: Option<&str>,
-) -> bool {
-    let gdk_uses_wayland = gdk_backend.is_some_and(|value| {
-        value
-            .split(',')
-            .any(|backend| backend.trim().eq_ignore_ascii_case("wayland"))
-    });
-    let session_is_wayland =
-        session_type.is_some_and(|value| value.trim().eq_ignore_ascii_case("wayland"));
-    !gdk_uses_wayland && !session_is_wayland
-}
-
 /// Compute the documented startup layout: the main window fills the
 /// work-area width (clamped to the minimum), uses the bounded
 /// height, is centered horizontally inside the work area and is
@@ -222,40 +162,5 @@ mod tests {
         assert_eq!(layout.scale_factor, 1.0);
         assert_eq!(layout.logical_size.0, 1920.0);
         assert_eq!(layout.physical_size.0, 1920);
-    }
-
-    #[test]
-    fn monitor_selection_prefers_current_then_primary_then_available() {
-        assert_eq!(
-            select_main_monitor(Some("current"), Some("primary"), ["available"]),
-            (Some("current"), MainMonitorSource::Current)
-        );
-        assert_eq!(
-            select_main_monitor::<&str>(None, Some("primary"), ["available"]),
-            (Some("primary"), MainMonitorSource::Primary)
-        );
-        assert_eq!(
-            select_main_monitor::<&str>(None, None, ["available"]),
-            (Some("available"), MainMonitorSource::Available)
-        );
-    }
-
-    #[test]
-    fn monitor_selection_keeps_configuration_defaults_without_any_monitor() {
-        assert_eq!(
-            select_main_monitor::<&str>(None, None, []),
-            (None, MainMonitorSource::ConfigurationDefaults)
-        );
-    }
-
-    #[test]
-    fn wayland_session_leaves_initial_position_to_the_compositor() {
-        assert!(!should_request_initial_position(
-            Some("wayland"),
-            Some("wayland")
-        ));
-        assert!(!should_request_initial_position(None, Some("wayland")));
-        assert!(!should_request_initial_position(Some("wayland,x11"), None));
-        assert!(should_request_initial_position(Some("x11"), Some("x11")));
     }
 }
