@@ -864,3 +864,16 @@ resultado podía ser un proceso visible sólo en la bandeja.
 - [x] Documentar el contrato en `design.md` y en la delta spec `desktop-platform-integration`.
 - [x] Incrementar versión canónica de `0.0.12` a `0.0.13` en manifests, lockfiles y `projects.md`, conforme a la regla de cambio funcional.
 - [ ] Verificar manualmente en Ubuntu GNOME Wayland que el primer inicio abre el desktop aun si no existe monitor primario y que el tray lo restaura tras ocultarlo.
+
+**Seguimiento de la prueba Ubuntu.** La inspección inicial con `wmctrl`
+devolvió una ventana con `WM_CLASS = dev.warp.Warp`; ese resultado corresponde
+al terminal Warp, no a la ventana Tauri de ClipVault. En Wayland `show()` puede
+ejecutarse durante `setup` antes de que la superficie sea mapeable, por lo que
+el shell también presenta la ventana al recibir `RunEvent::Ready`.
+
+- [x] Reutilizar `present_main_window` en `RunEvent::Ready`, sin crear una
+  segunda ruta de visibilidad ni alterar Quick Paste.
+- [x] Cubrir que el evento `Ready` activa esta presentación y documentar el
+  contrato de timing Wayland en el diseño y la delta spec.
+- [ ] Verificar manualmente en Ubuntu GNOME Wayland el arranque posterior al
+  evento `Ready`.

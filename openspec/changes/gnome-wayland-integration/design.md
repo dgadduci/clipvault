@@ -181,3 +181,9 @@ ClipVault** del tray comparten una única operación que intenta
 desminimizar, mostrar y enfocar la ventana `main`. Un rechazo de foco
 por política Wayland se registra como diagnóstico no fatal. Quick Paste
 permanece oculta hasta que su hotkey la solicita.
+
+En GNOME Wayland una solicitud de mostrar emitida durante `setup` puede
+ser aceptada antes de que el loop nativo haya publicado una superficie
+mapeable. Por ello el shell invoca el mismo helper idempotente también al
+recibir `RunEvent::Ready`, la primera etapa donde el runtime confirma que
+el loop gráfico está listo. Esto no altera Quick Paste.

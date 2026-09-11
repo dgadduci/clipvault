@@ -194,10 +194,23 @@ fn main() {
 }
 
 fn handle_run_event<R: tauri::Runtime>(app: &AppHandle<R>, event: RunEvent) {
+    // On GNOME Wayland a `show()` issued during `setup` can be accepted
+    // before the native event loop has reached its ready state, without
+    // producing a mapped surface. Repeat the idempotent presentation once
+    // the runtime reports `Ready`; the tray action shares that same helper.
+    if should_present_main_window(&event) {
+        present_main_window(app);
+        info!("main window presentation requested after runtime ready");
+    }
+
     if let RunEvent::ExitRequested { .. } = event {
         cleanup(app);
         info!("ClipVault exiting cleanly");
     }
+}
+
+const fn should_present_main_window(event: &RunEvent) -> bool {
+    matches!(event, RunEvent::Ready)
 }
 
 fn cleanup<R: tauri::Runtime>(app: &AppHandle<R>) {
@@ -357,6 +370,15 @@ fn resize_main_window_to_monitor(app: &mut tauri::App) {
 
 #[cfg(test)]
 mod tests {
+    use tauri::RunEvent;
+
+    use super::should_present_main_window;
+
+    #[test]
+    fn main_window_is_presented_once_the_runtime_is_ready() {
+        assert!(should_present_main_window(&RunEvent::Ready));
+    }
+
     #[test]
     fn main_window_is_explicitly_visible_while_quick_paste_stays_hidden() {
         let config: serde_json::Value =

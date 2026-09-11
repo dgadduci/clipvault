@@ -139,3 +139,10 @@ SHALL affect only optional startup layout, never window visibility.
 - WHEN el usuario selecciona `Open ClipVault` desde la bandeja
 - THEN ClipVault intenta desminimizar, mostrar y enfocar la misma ventana principal
 - AND registra errores de plataforma sin fallar el proceso
+
+#### Scenario: El loop Wayland todavía no estaba listo durante setup
+
+- GIVEN que una solicitud de mostrar ocurre antes de que el runtime gráfico esté listo
+- WHEN el runtime emite `RunEvent::Ready`
+- THEN ClipVault repite la presentación de la ventana principal
+- AND utiliza el mismo flujo idempotente que la bandeja
