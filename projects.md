@@ -46,11 +46,11 @@ canonical value and never fall back to a hard-coded constant.
 
 | Surface | Version |
 | --- | --- |
-| Cargo workspace (`Cargo.toml`) | 0.0.12 |
-| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.12 |
-| Frontend package (`app/tauri/frontend/package.json`) | 0.0.12 |
+| Cargo workspace (`Cargo.toml`) | 0.0.13 |
+| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.13 |
+| Frontend package (`app/tauri/frontend/package.json`) | 0.0.13 |
 
-The canonical public version is intentionally established at **0.0.12**.
+The canonical public version is intentionally established at **0.0.13**.
 The earlier `0.1.x` values were development manifest values and did not
 represent a public product release. The `0.0.1` baseline pinned the
 first visible product version; the `with_kind` → `connect_to_kind`
@@ -149,7 +149,19 @@ refuses to publish until the handshake write resolves), drops
 serialised form so the public surface never carries absolute paths
 or extension internals, and aligns the frontend TypeScript types
 with the metadata-only Rust struct is a functional change, so the
-patch is incremented to **0.0.12**.
+patch is incremented to **0.0.12**. The follow-up that promotes
+`linux-gnome-shell-integration` (together with `linux-x11` and
+`linux-wayland-active-app`) to the package-level `default`
+features in `app/tauri/src-tauri/Cargo.toml` — the target-specific
+Linux dependency block already forwarded the feature to
+`clipvault-platform` but the package itself never enabled it, so
+the `cfg(all(target_os = "linux", feature =
+"linux-gnome-shell-integration"))` arms in `main.rs`, `lib.rs`,
+`commands.rs` and `bootstrap.rs` resolved to `false` during a
+plain `cargo tauri dev` on Ubuntu, the stub `feature_disabled`
+commands reached the frontend, and the "Integración GNOME
+Wayland" toggle stayed greyed out — is a functional change, so the
+patch is incremented to **0.0.13**.
 
 ## Bumping the version
 
