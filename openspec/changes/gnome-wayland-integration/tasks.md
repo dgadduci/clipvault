@@ -843,3 +843,24 @@ reanudar. `Cargo.toml`, `app/tauri/src-tauri/tauri.conf.json` y
 sin hardcodear. La corrección es estructural (cambio de tipos y
 clon de un `Arc`), no funcional, así que la regla se respeta
 también por el lado de producto.
+
+---
+
+## Corrección: ventana principal invisible en Ubuntu Wayland
+
+**Causa raíz.** En una sesión Ubuntu GNOME Wayland el proceso iniciaba,
+Vite quedaba disponible y el tray se instalaba, pero
+`WebviewWindow::primary_monitor()` devolvía `Ok(None)`. El layout
+retornaba a los valores de configuración, pero el arranque no ejecutaba
+una presentación explícita de la ventana principal y la acción del tray
+descartaba silenciosamente los errores de `show()` y `set_focus()`. El
+resultado podía ser un proceso visible sólo en la bandeja.
+
+- [x] Añadir selección de monitor `current → primary → available → defaults` en `main_window_layout`, con tests puros de precedencia y fallback.
+- [x] Declarar `visible: true` para `main`, preservando `visible: false` para `quick-paste`.
+- [x] Centralizar desminimizar, mostrar y enfocar la ventana principal en `tray::present_main_window`, reutilizada por el arranque y por `Open ClipVault`, con logs de errores de plataforma.
+- [x] Mantener la visibilidad independiente del resultado de cualquier consulta de monitor; no se toca Quick Paste, capturas, assets, clipboard, tags, colecciones ni drag-and-drop.
+- [x] Añadir la regresión de configuración que fija `main.visible = true` y `quick-paste.visible = false`.
+- [x] Documentar el contrato en `design.md` y en la delta spec `desktop-platform-integration`.
+- [x] Incrementar versión canónica de `0.0.12` a `0.0.13` en manifests, lockfiles y `projects.md`, conforme a la regla de cambio funcional.
+- [ ] Verificar manualmente en Ubuntu GNOME Wayland que el primer inicio abre el desktop aun si no existe monitor primario y que el tray lo restaura tras ocultarlo.

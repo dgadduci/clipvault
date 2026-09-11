@@ -27,7 +27,7 @@ use crate::bootstrap::{
 };
 use crate::commands::run_retention;
 use crate::state::SharedState;
-use crate::tray::{menu_event_to_action, TauriTrayController};
+use crate::tray::{menu_event_to_action, present_main_window, TauriTrayController};
 
 fn main() {
     init_tracing();
@@ -111,6 +111,12 @@ fn main() {
             } else {
                 warn!("shared state not available; capture loop not installed");
             }
+
+            // `primary_monitor()` may legitimately be absent on a
+            // Wayland compositor.  Layout is optional, but presenting
+            // the configured main window is not: the desktop must not
+            // degrade into a tray-only process on first launch.
+            present_main_window(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -271,7 +277,7 @@ fn _ensure_arc(_: &Arc<()>) {}
 /// The math lives in [`crate::main_window_layout`] so the centring
 /// logic is unit tested without a Tauri runtime.
 fn resize_main_window_to_monitor(app: &mut tauri::App) {
-    use crate::main_window_layout::compute_main_window_layout;
+    use crate::main_window_layout::{compute_main_window_layout, select_main_monitor};
     use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 
     let Some(window) = app.get_webview_window("main") else {
@@ -279,16 +285,31 @@ fn resize_main_window_to_monitor(app: &mut tauri::App) {
         return;
     };
 
-    let monitor = match window.primary_monitor() {
-        Ok(Some(monitor)) => monitor,
-        Ok(None) => {
-            warn!("no primary monitor reported; keeping conf defaults");
-            return;
-        }
+    let current = match window.current_monitor() {
+        Ok(monitor) => monitor,
         Err(error) => {
-            warn!(error = %error, "primary monitor query failed; keeping conf defaults");
-            return;
+            warn!(error = %error, "current monitor query failed; trying fallback");
+            None
         }
+    };
+    let primary = match window.primary_monitor() {
+        Ok(monitor) => monitor,
+        Err(error) => {
+            warn!(error = %error, "primary monitor query failed; trying fallback");
+            None
+        }
+    };
+    let available = match window.available_monitors() {
+        Ok(monitors) => monitors,
+        Err(error) => {
+            warn!(error = %error, "available monitor query failed; keeping conf defaults");
+            Vec::new()
+        }
+    };
+    let (monitor, source) = select_main_monitor(current, primary, available);
+    let Some(monitor) = monitor else {
+        warn!("no monitor reported; keeping conf defaults");
+        return;
     };
 
     let scale = monitor.scale_factor();
@@ -329,6 +350,28 @@ fn resize_main_window_to_monitor(app: &mut tauri::App) {
         logical_x = layout.logical_position.0,
         logical_y = layout.logical_position.1,
         scale = layout.scale_factor,
-        "main window positioned at top center of the primary monitor"
+        monitor_source = source.as_str(),
+        "main window positioned at top center"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn main_window_is_explicitly_visible_while_quick_paste_stays_hidden() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("valid tauri config");
+        let windows = config["app"]["windows"].as_array().expect("windows array");
+        let main = windows
+            .iter()
+            .find(|window| window["label"] == "main")
+            .expect("main window");
+        let quick_paste = windows
+            .iter()
+            .find(|window| window["label"] == "quick-paste")
+            .expect("quick paste window");
+
+        assert_eq!(main["visible"].as_bool(), Some(true));
+        assert_eq!(quick_paste["visible"].as_bool(), Some(false));
+    }
 }

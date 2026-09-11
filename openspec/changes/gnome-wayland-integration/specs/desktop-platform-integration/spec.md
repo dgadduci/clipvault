@@ -118,3 +118,24 @@ El identificador GNOME SHALL enter PrivacyGate before persistence or application
 - THEN no se persiste la entrada
 - AND no se crea un asset de icono por ese intento
 - AND los logs siguen siendo metadata-only
+
+### Requirement: Ventana principal visible en sesiones Wayland
+
+ClipVault MUST attempt to unminimize and show its `main` window at
+startup and when the tray action opens it. A missing primary monitor
+SHALL affect only optional startup layout, never window visibility.
+
+#### Scenario: Wayland sin monitor primario informado
+
+- GIVEN una sesión gráfica Wayland donde `primary_monitor()` devuelve ausencia
+- WHEN ClipVault inicia
+- THEN conserva el tamaño y posición declarados en la configuración si no hay otro monitor disponible
+- AND intenta mostrar la ventana principal
+- AND no queda reducido a un proceso sólo de bandeja
+
+#### Scenario: Abrir desde la bandeja
+
+- GIVEN que la ventana principal fue ocultada previamente
+- WHEN el usuario selecciona `Open ClipVault` desde la bandeja
+- THEN ClipVault intenta desminimizar, mostrar y enfocar la misma ventana principal
+- AND registra errores de plataforma sin fallar el proceso

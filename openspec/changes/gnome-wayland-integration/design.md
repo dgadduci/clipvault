@@ -159,3 +159,25 @@ Se deben verificar en una sesión real:
 8. cerrar sesión o reiniciar GNOME no deja la aplicación bloqueada;
 9. rechazo persistente no genera prompts repetitivos;
 10. un GNOME no compatible informa la limitación claramente.
+
+## Corrección de visibilidad de la ventana principal en Wayland
+
+La disponibilidad de un monitor no debe condicionar la visibilidad de
+ClipVault. En algunos compositores Wayland `primary_monitor()` puede
+devolver ausencia durante `setup`, aunque exista una sesión gráfica
+válida. El layout inicial es una mejora opcional; la ventana principal
+debe seguir apareciendo con el tamaño y posición configurados.
+
+El shell selecciona un monitor para el layout en este orden:
+
+1. monitor actual de la ventana;
+2. monitor primario;
+3. primer monitor disponible;
+4. valores declarados en `tauri.conf.json` cuando ninguno está
+   disponible.
+
+Independientemente de esa selección, el arranque y la acción **Open
+ClipVault** del tray comparten una única operación que intenta
+desminimizar, mostrar y enfocar la ventana `main`. Un rechazo de foco
+por política Wayland se registra como diagnóstico no fatal. Quick Paste
+permanece oculta hasta que su hotkey la solicita.

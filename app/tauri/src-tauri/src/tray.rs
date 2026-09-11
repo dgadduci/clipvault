@@ -42,6 +42,28 @@ impl TauriTrayHandle {
     }
 }
 
+/// Restore the main window from either startup or the tray menu.
+/// Failure to focus is non-fatal (Wayland compositors may deny focus
+/// stealing), but every platform error is logged rather than silently
+/// leaving ClipVault tray-only.
+pub fn present_main_window<R: Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window("main") else {
+        warn!("main window not present; cannot show desktop");
+        return;
+    };
+
+    if let Err(error) = window.unminimize() {
+        warn!(error = %error, "main window unminimize failed");
+    }
+    if let Err(error) = window.show() {
+        warn!(error = %error, "main window show failed");
+        return;
+    }
+    if let Err(error) = window.set_focus() {
+        warn!(error = %error, "main window focus request failed");
+    }
+}
+
 impl TrayHandle for TauriTrayHandle {
     fn set_menu(
         &self,
@@ -66,10 +88,7 @@ impl TrayHandle for TauriTrayHandle {
         }
         match action {
             TrayAction::OpenMainWindow => {
-                if let Some(window) = self.app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                present_main_window(&self.app);
             }
             TrayAction::OpenQuickSearch => {
                 let _ = self.app.emit("clipvault://quick-search", ());
