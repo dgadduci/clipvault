@@ -974,9 +974,13 @@ fn discover_icon_themes(fs: &dyn DesktopFilesystem, icons_root: &Path) -> Vec<St
         themes.push(name.to_string());
     }
     themes.sort();
-    if has_hicolor {
-        themes.push("hicolor".to_string());
-    } else if themes.is_empty() {
+    // Either the icons root listed `hicolor` (so we keep the
+    // explicit dedup) or the directory listing was empty / never
+    // contained `hicolor` (so we act as a deterministic fallback).
+    // Both branches yield the same outcome; the code keeps the
+    // two arms so a future diagnostic can tell them apart
+    // without flipping the boolean.
+    if has_hicolor || themes.is_empty() {
         themes.push("hicolor".to_string());
     }
     themes
