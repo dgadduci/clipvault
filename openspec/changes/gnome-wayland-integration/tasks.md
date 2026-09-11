@@ -877,3 +877,17 @@ el shell también presenta la ventana al recibir `RunEvent::Ready`.
   contrato de timing Wayland en el diseño y la delta spec.
 - [ ] Verificar manualmente en Ubuntu GNOME Wayland el arranque posterior al
   evento `Ready`.
+
+**Causa adicional identificada.** Al seleccionar `current_monitor()` en
+Wayland, el shell pasó a llamar `set_position(0, 0)` durante `setup`. GNOME
+es el propietario de la posición de una ventana toplevel y esa solicitud
+previa al mapeo puede dejar la superficie invisible. La corrección conserva
+el tamaño inicial, pero omite toda posición absoluta cuando `GDK_BACKEND` o
+`XDG_SESSION_TYPE` indican Wayland.
+
+- [x] Extraer y cubrir con tests la política pura que delega la posición al
+  compositor Wayland y conserva el comportamiento para X11.
+- [x] Evitar `set_position` en Wayland sin modificar el tamaño solicitado,
+  Quick Paste, la integración GNOME, captura ni los datos persistidos.
+- [ ] Verificar manualmente en Ubuntu GNOME Wayland que la ventana principal
+  aparece tras omitir el posicionamiento absoluto.

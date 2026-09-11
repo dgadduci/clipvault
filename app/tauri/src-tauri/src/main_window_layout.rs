@@ -89,6 +89,24 @@ pub fn select_main_monitor<T>(
     (None, MainMonitorSource::ConfigurationDefaults)
 }
 
+/// Whether the shell may request an absolute initial position. Wayland
+/// compositors own toplevel placement; sending a `set_position` request
+/// before the surface is mapped can leave GTK/Wry with no visible surface.
+/// Window sizing remains safe and is handled independently.
+pub fn should_request_initial_position(
+    gdk_backend: Option<&str>,
+    session_type: Option<&str>,
+) -> bool {
+    let gdk_uses_wayland = gdk_backend.is_some_and(|value| {
+        value
+            .split(',')
+            .any(|backend| backend.trim().eq_ignore_ascii_case("wayland"))
+    });
+    let session_is_wayland =
+        session_type.is_some_and(|value| value.trim().eq_ignore_ascii_case("wayland"));
+    !gdk_uses_wayland && !session_is_wayland
+}
+
 /// Compute the documented startup layout: the main window fills the
 /// work-area width (clamped to the minimum), uses the bounded
 /// height, is centered horizontally inside the work area and is
@@ -228,5 +246,16 @@ mod tests {
             select_main_monitor::<&str>(None, None, []),
             (None, MainMonitorSource::ConfigurationDefaults)
         );
+    }
+
+    #[test]
+    fn wayland_session_leaves_initial_position_to_the_compositor() {
+        assert!(!should_request_initial_position(
+            Some("wayland"),
+            Some("wayland")
+        ));
+        assert!(!should_request_initial_position(None, Some("wayland")));
+        assert!(!should_request_initial_position(Some("wayland,x11"), None));
+        assert!(should_request_initial_position(Some("x11"), Some("x11")));
     }
 }

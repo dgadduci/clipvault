@@ -187,3 +187,9 @@ ser aceptada antes de que el loop nativo haya publicado una superficie
 mapeable. Por ello el shell invoca el mismo helper idempotente también al
 recibir `RunEvent::Ready`, la primera etapa donde el runtime confirma que
 el loop gráfico está listo. Esto no altera Quick Paste.
+
+La selección de monitor puede seguir calcular el tamaño inicial, pero el
+shell no envía una posición absoluta cuando `GDK_BACKEND` o
+`XDG_SESSION_TYPE` indican Wayland. GNOME gestiona la posición de toplevels;
+forzar `set_position` antes del mapeo puede impedir que la superficie se
+vuelva visible. En X11 y macOS se conserva la posición inicial existente.

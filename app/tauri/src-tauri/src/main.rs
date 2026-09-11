@@ -290,7 +290,9 @@ fn _ensure_arc(_: &Arc<()>) {}
 /// The math lives in [`crate::main_window_layout`] so the centring
 /// logic is unit tested without a Tauri runtime.
 fn resize_main_window_to_monitor(app: &mut tauri::App) {
-    use crate::main_window_layout::{compute_main_window_layout, select_main_monitor};
+    use crate::main_window_layout::{
+        compute_main_window_layout, select_main_monitor, should_request_initial_position,
+    };
     use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 
     let Some(window) = app.get_webview_window("main") else {
@@ -345,16 +347,24 @@ fn resize_main_window_to_monitor(app: &mut tauri::App) {
         }
     }
 
-    let logical_position =
-        LogicalPosition::new(layout.logical_position.0, layout.logical_position.1);
-    let physical_position =
-        PhysicalPosition::new(layout.physical_position.0, layout.physical_position.1);
+    let gdk_backend = std::env::var("GDK_BACKEND").ok();
+    let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+    if should_request_initial_position(gdk_backend.as_deref(), session_type.as_deref()) {
+        let logical_position =
+            LogicalPosition::new(layout.logical_position.0, layout.logical_position.1);
+        let physical_position =
+            PhysicalPosition::new(layout.physical_position.0, layout.physical_position.1);
 
-    if let Err(error) = window.set_position(logical_position) {
-        warn!(error = %error, "logical position failed; falling back to physical");
-        if let Err(physical_error) = window.set_position(physical_position) {
-            warn!(error = %physical_error, "physical position failed; keeping conf defaults");
+        if let Err(error) = window.set_position(logical_position) {
+            warn!(error = %error, "logical position failed; falling back to physical");
+            if let Err(physical_error) = window.set_position(physical_position) {
+                warn!(error = %physical_error, "physical position failed; keeping conf defaults");
+            }
         }
+    } else {
+        // GNOME Wayland owns toplevel placement. Keep the requested size,
+        // but never send an absolute position before the surface is mapped.
+        info!("main window position left to the Wayland compositor");
     }
 
     info!(

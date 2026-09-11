@@ -146,3 +146,11 @@ SHALL affect only optional startup layout, never window visibility.
 - WHEN el runtime emite `RunEvent::Ready`
 - THEN ClipVault repite la presentación de la ventana principal
 - AND utiliza el mismo flujo idempotente que la bandeja
+
+#### Scenario: Wayland gestiona la posición de la ventana
+
+- GIVEN una sesión donde `GDK_BACKEND` o `XDG_SESSION_TYPE` indican Wayland
+- WHEN ClipVault calcula el layout inicial desde un monitor disponible
+- THEN puede solicitar el tamaño inicial
+- BUT no DEBE solicitar una posición absoluta de la ventana principal
+- AND deja el mapeo y la posición a cargo del compositor
