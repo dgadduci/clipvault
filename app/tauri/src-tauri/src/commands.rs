@@ -1709,6 +1709,7 @@ mod tests {
 #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
 mod gnome_commands {
     use super::*;
+    use serde::Deserialize;
 
     /// Status snapshot of the optional GNOME Shell integration. The
     /// payload is metadata-only: the fields never carry clipboard

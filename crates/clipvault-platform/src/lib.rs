@@ -80,12 +80,13 @@ pub use runtime::linux_gnome_extension_installer::{
 pub use runtime::linux_gnome_integration::{
     detect_session as gnome_detect_session, DesktopEnvironment as GnomeDesktopEnvironment,
     GnomeConsentDecision, GnomeIntegrationHandle, GnomeIntegrationService, GnomeIntegrationStatus,
-    SessionKind as GnomeSessionKind, SharedGnomeSnapshot as GnomeIntegrationSnapshot,
-    BACKEND_NAME as GNOME_BACKEND_NAME, EXTENSION_UUID as GNOME_EXTENSION_UUID,
+    SessionKind as GnomeSessionKind, BACKEND_NAME as GNOME_BACKEND_NAME,
+    EXTENSION_UUID as GNOME_EXTENSION_UUID,
 };
 #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
 pub use runtime::linux_gnome_shell_integration::{
-    GnomeDiagnostics, GnomeIntegrationState, GnomeShellActiveApplication, UnixListenerTransport,
+    GnomeDiagnostics, GnomeIntegrationState, GnomeShellActiveApplication, GnomeShellListener,
+    ListenerHandle, SharedGnomeSnapshot, UnixListenerTransport,
     MAX_FRAME_BYTES as GNOME_MAX_FRAME_BYTES, PROTOCOL_VERSION as GNOME_PROTOCOL_VERSION,
 };
 pub use stub::{data_dir, DefaultPlatform, PlatformError};

@@ -1330,10 +1330,10 @@ fn build_active_application(
                     #[cfg(feature = "linux-wayland-active-app")]
                     {
                         match clipvault_platform::runtime::linux_wayland_active_app::try_build() {
-                            clipvault_platform::runtime::linux_wayland_active_app::ConnectionOutcome::Operational(probe) => {
+                            clipvault_platform::runtime::linux_wayland_active_app::ConnectionOutcome::Operational { probe, backend: _ } => {
                                 return Arc::new(probe);
                             }
-                            clipvault_platform::runtime::linux_wayland_active_app::ConnectionOutcome::Unavailable => {
+                            clipvault_platform::runtime::linux_wayland_active_app::ConnectionOutcome::Unavailable { cause: _ } => {
                                 // No native protocol on this session
                                 // — fall through to the XWayland
                                 // fallback when `$DISPLAY` is set.

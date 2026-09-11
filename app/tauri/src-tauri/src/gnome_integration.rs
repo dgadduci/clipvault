@@ -16,7 +16,7 @@ use clipvault_core::{
     GnomeIntegrationSnapshot, GnomeTechnicalState,
 };
 use clipvault_platform::{
-    gnome_detect_session, GnomeConsentDecision as PlatformConsentDecision,
+    GnomeConsentDecision as PlatformConsentDecision,
     GnomeIntegrationService as PlatformIntegrationService, GnomeShellListener, ListenerHandle,
     SharedGnomeSnapshot, UnixListenerTransport, GNOME_BACKEND_NAME, GNOME_EXTENSION_UUID,
     GNOME_PROTOCOL_VERSION,
@@ -287,14 +287,8 @@ impl GnomeIntegrationState {
         // "connected" status. The live handle is created on demand
         // the first time the user accepts the integration; the
         // listener and socket stay unbound until then.
-        let stored_consent = self
-            .core_service
-            .load_consent_from_cache()
-            .unwrap_or(GnomeConsentDecision::Unknown);
-        let technical_state = self
-            .core_service
-            .load_technical_state_from_cache()
-            .unwrap_or(GnomeTechnicalState::NotInstalled);
+        let stored_consent = self.core_service.load_consent_from_cache();
+        let technical_state = self.core_service.load_technical_state_from_cache();
         GnomeIntegrationPayload::from_parts(
             session,
             desktop,

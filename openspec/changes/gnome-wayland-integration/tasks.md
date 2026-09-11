@@ -95,6 +95,49 @@ MiniMax implementa este cambio. Codex mantiene la arquitectura y revisa el resul
 
 ---
 
+## Causa raíz del problema GNOME Wayland
+
+GNOME/Mutter no expone una API pública y portable que permita a un cliente
+Wayland externo consultar qué aplicación nativa tiene el foco. Los dos
+protocolos públicos que ClipVault ya conoce — `ext-foreign-toplevel-list-v1`
+(preferido) y `zwlr_foreign_toplevel_management_unstable_v1` (fallback
+wlroots) — sólo se anuncian en compositores que los publican; GNOME no lo
+hace para identificar la app enfocada. Por eso una captura de Chrome,
+Firefox o Terminal Ubuntu bajo GNOME Wayland queda sin `source_app`: el
+probe nativo recibe `Ok(None)` y el contrato de origen desconocido se
+aplica.
+
+La única vía soportada por GNOME es una extensión del Shell que viva
+dentro de GNOME Shell y lea `Shell.WindowTracker.get_default().focus_app`
+— API privada del Shell, no disponible desde un proceso Wayland externo.
+La integración GNOME de este cambio (UUID `clipvault@clipvault.app`)
+publica sólo el `app_id` o desktop id por un socket local versionado;
+ClipVault lo consume a través de un `ActiveApplicationProbe` que se
+hot-swappea adelante del probe nativo Wayland cuando el usuario acepta la
+integración. El fallback X11/XWayland permanece intacto para Warp,
+Synaptic, XSane y xTerm (todos publican ventanas X11 reales) y la
+precedencia GNOME → nativo Wayland → XWayland → `Unavailable` se conserva.
+
+El commit `5c9f584` ("fix: enable GNOME integration by default on
+Linux") intentó resolver la misma necesidad forzando la activación del
+feature `linux-gnome-shell-integration` en `[features].default`, lo que
+volvió inservible el desktop Ubuntu porque:
+
+1. el Tauri dev shell compilaba las ramas `cfg(feature = "linux-gnome-shell-integration")`
+   en builds donde la sesión no era Wayland;
+2. el shell comenzaba a buscar un listener que no existía en el
+   binario cuando la integración no estaba realmente disponible;
+3. la integración GNOME dejó de ser opt-in por sesión, contradiciendo
+   el contrato de consentimiento explícito.
+
+El revert en `b93718b` devolvió la feature a su activación
+target-specific (sólo Linux) y runtime-conditioned (sólo tras el prompt
+de consentimiento). El baseline sobre el que se ejecuta este pase
+(`b93718b`) coincide con `7a88ad7` salvo por los cambios del propio
+revert, y conserva intacta la implementación de la integración GNOME.
+
+---
+
 ## Causa raíz corregida en este pase
 
 1. **`payload()` colapsaba a `not_applicable` en el primer arranque de Ubuntu GNOME Wayland** aunque la sesión era aplicable: el helper exigía un `live` handle que sólo se construía tras un `install()` o un reinicio con `consent = accepted`. La sesión GNOME Wayland sin consentimiento persistido no podía alcanzar el prompt del modal de Development. Corrección: `payload()` ahora deriva `applicable` y la sesión de `gnome_detect_session()` y sirve el consentimiento / estado técnico desde los caches en memoria cuando todavía no existe un live handle, sin crear sockets ni listeners.
@@ -103,31 +146,203 @@ MiniMax implementa este cambio. Codex mantiene la arquitectura y revisa el resul
 
 3. **`InstallResult` filtraba `target_dir` y `metadata_json` en JSON**: el struct público del Tauri command serializaba la ruta absoluta de instalación y el cuerpo de `metadata.json`. El frontend nunca los mostraba, pero el contrato privacy-by-default quedaba violado. Corrección: `serde(skip_serializing)` sobre los dos campos.
 
+---
+
+## Regresión de compilación descubierta al activar `--features linux-gnome-shell-integration` en Ubuntu
+
+El pase descubrió que la activación explícita de la feature `linux-gnome-shell-integration`
+(con la línea de `cargo tauri dev` que el usuario ejecutó) exponía cinco defectos de
+compilación que macOS no podía detectar — las pruebas macOS nunca compilaron los bloques
+`cfg(feature = "linux-gnome-shell-integration")` ni los arms de `cfg(target_os = "linux")`
+que referencian los símbolos listados. La matriz de compilación del cambio había quedado
+incompleta. Los cinco defectos encontrados y corregidos en este pase son:
+
+1. **Imports no resueltos `clipvault_platform::GnomeShellListener`,
+   `clipvault_platform::ListenerHandle` y `clipvault_platform::SharedGnomeSnapshot`**:
+   el shell `app/tauri/src-tauri/src/gnome_integration.rs` los importaba desde la raíz
+   del crate `clipvault_platform`, pero el módulo
+   `runtime::linux_gnome_shell_integration` sólo re-exportaba `GnomeDiagnostics`,
+   `GnomeIntegrationState`, `GnomeShellActiveApplication`, `UnixListenerTransport`,
+   `MAX_FRAME_BYTES` y `PROTOCOL_VERSION`. Los tres tipos que el shell necesitaba para
+   instanciar `GnomeShellListener::new(...)`, `ListenerHandle::from_thread_with_socket(...)`
+   y para tipar el campo `LiveGnomeHandle::snapshot` no estaban expuestos al crate root.
+   Corrección: `crates/clipvault-platform/src/lib.rs` ahora re-exporta `GnomeShellListener`,
+   `ListenerHandle` y `SharedGnomeSnapshot` desde el bloque
+   `pub use runtime::linux_gnome_shell_integration::{...}` que ya exponía los tipos
+   vecinos (mismo cfg gate, mismo prefijo de nombre, misma convención). Se elimina el
+   alias muerto `SharedGnomeSnapshot as GnomeIntegrationSnapshot` del bloque
+   `runtime::linux_gnome_integration` — ningún consumidor del workspace lo usa y
+   chocaba de nombre con `clipvault_core::GnomeIntegrationSnapshot` que el shell ya
+   importa por separado, así que la colisión se evita sin tocar APIs externas.
+
+2. **Faltaba el derive macro `serde::Deserialize` en `commands.rs`**: el primer
+   `mod gnome_commands` (gateado por
+   `#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]`)
+   declaraba `#[derive(Debug, Deserialize)]` sobre `GnomeConsentUpdate` pero el
+   archivo sólo importaba `use serde::Serialize;`. macOS, donde ese módulo se
+   compila vaciado, no detecta el uso del símbolo; Linux, donde el módulo
+   sí se compila, falla con `error[E0432]: unresolved import crate::Deserialize`.
+   Corrección: el `use serde::Serialize;` se conserva en el nivel superior para
+   el resto de los Tauri commands, y dentro del `mod gnome_commands` que
+   realmente usa `Deserialize` se agrega `use serde::Deserialize;` bajo el mismo
+   `cfg` gate. La importación queda restringida al path Linux real y
+   `-D warnings` deja de marcarla como unused en macOS.
+
+3. **`bootstrap.rs` trataba `ConnectionOutcome::Operational` y
+   `ConnectionOutcome::Unavailable` como variantes tuple / unit, pero son
+   variantes struct**: el arm
+   `ConnectionOutcome::Operational(probe) => return Arc::new(probe)` fallaba
+   al compilar porque la variante real es
+   `Operational { probe: WaylandActiveApplication<UnixStreamTransport>, backend: &'static str }`,
+   y `ConnectionOutcome::Unavailable` es
+   `Unavailable { cause: UnavailableCause }` (no unit). El match estaba escrito
+   para una versión anterior del enum sin campos. Corrección: el match se
+   reescribe a la sintaxis struct (`Operational { probe, backend: _ }` y
+   `Unavailable { cause: _ }`), preservando todos los campos relevantes: el
+   `probe` que la bootstrap envuelve en `Arc<dyn ActiveApplicationProbe>` se
+   sigue extrayendo del primer arm y se ignora el `backend`/`cause` (los
+   diagnostic logs ya tienen su canal dedicado y no se duplican aquí). El
+   comportamiento del capture loop no cambia.
+
+4. **`gnome_integration.rs` llamaba `.unwrap_or(default)` sobre
+   `GnomeConsentDecision` y `GnomeTechnicalState`**: en el helper `payload()`
+   (path sin live handle) el código leía
+   `self.core_service.load_consent_from_cache().unwrap_or(GnomeConsentDecision::Unknown)`
+   y la versión equivalente para `load_technical_state_from_cache`, pero esos dos
+   métodos ya devuelven directamente los enums (no `Result`), de modo que el
+   `.unwrap_or(...)` no compila — `GnomeConsentDecision` no implementa
+   `Default` para coerción a `Option` ni tiene nada que extraer. Corrección: las
+   dos llamadas pasan a ser asignaciones directas
+   (`let stored_consent = self.core_service.load_consent_from_cache();`) y se
+   conserva intacto el modelo de consentimiento y el estado técnico: el cache en
+   memoria ya cae al valor por defecto (`Unknown` / `NotInstalled`) cuando el
+   helper nunca ha persistido nada, que es exactamente el primer arranque.
+
+5. **Import `gnome_detect_session` sin uso**: `use clipvault_platform::{...}`
+   declaraba `gnome_detect_session` como import nombrado pero el único callsite
+   (`clipvault_platform::gnome_detect_session()` dentro de `payload()`) ya
+   usaba la ruta totalmente cualificada, así que el nombre importado no se
+   referenciaba. Con `-D warnings` se trataba como
+   `error: unused import: gnome_detect_session`. Corrección: se elimina la
+   entrada de la declaración `use` sin tocar el callsite (la ruta totalmente
+   cualificada sigue funcionando y mantiene el contrato privacy-by-default:
+   el helper sólo se usa cuando el session check necesita la sesión y el
+   desktop, sin acoplar el resto del shell al alias).
+
+Con estas cinco correcciones la build Linux queda consistente con el
+baseline `b93718b`: `cargo check -p clipvault-platform
+--target x86_64-unknown-linux-gnu --features
+linux-x11,linux-wayland-active-app,linux-gnome-shell-integration --tests`
+vuelve a compilar limpio, las pruebas macOS se mantienen en 1329 passing,
+los tests frontend en 1197 passing, y `cargo clippy --workspace --all-targets -- -D warnings`
+queda en 0 warnings. No se reintroduce `linux-gnome-shell-integration` en
+`[features].default`, la activación target-specific en
+`[target.'cfg(all(target_os = "linux", not(target_os = "macos")))'.dependencies]`
+permanece intacta, no se toca `~/.clipvault`, no se usa `cargo clean` y la
+lógica de captura / pegado / imágenes / assets / tags / colecciones /
+favoritos / Quick Paste / drag-and-drop permanece sin cambios.
+
 ## Verificación ejecutada en este pase
+
+Estado en el que se ejecuta: `git status --short` vacío, `git branch --show-current` =
+`fix/gnome-wayland-native-detection`, `git log --oneline -3` =
+`b93718b Revert "fix: enable GNOME integration by default on Linux"`
+→ `5c9f584 fix: enable GNOME integration by default on Linux`
+→ `7a88ad7 feat: integrate GNOME Wayland active app detection`,
+`git diff --check` sin diff pendientes. Versión canónica confirmada en
+`Cargo.toml` / `app/tauri/src-tauri/tauri.conf.json` /
+`app/tauri/frontend/package.json` = `0.0.12` (la bump `0.0.11 → 0.0.12`
+se aplicó en el pase anterior; projects.md fija el canon y bloquea
+re-bumps al reanudar la implementación, por lo que la versión queda
+intacta).
 
 | Check | Resultado |
 |-------|-----------|
 | `cargo fmt --all -- --check` | OK (sin diffs pendientes) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | OK (0 warnings) |
-| `cargo clippy -p clipvault-platform --target x86_64-unknown-linux-gnu --features linux-x11,linux-wayland-active-app,linux-gnome-shell-integration,linux-svg-raster,clipboard-arboard,hotkey-global --all-targets -- -D warnings` | OK (0 warnings) |
-| `cargo check --workspace` | OK |
-| `cargo check -p clipvault-platform --target x86_64-unknown-linux-gnu --features linux-x11,linux-wayland-active-app,linux-gnome-shell-integration,linux-svg-raster,clipboard-arboard,hotkey-global --tests` | OK (los tests del runtime Linux compilan) |
-| `cargo test -p clipvault-platform --lib` | 163 passed, 0 failed |
+| `cargo check -p clipvault-platform --target x86_64-unknown-linux-gnu --features linux-x11,linux-wayland-active-app,linux-gnome-shell-integration --tests` | OK (los tests del runtime Linux compilan) |
+| `cargo test --workspace` | OK (1329 tests Rust passing, 0 failed, 1 doc ignored) |
+| `cargo test -p clipvault-platform --lib` | 214 passed, 0 failed |
 | `cargo test -p clipvault-core --lib` | 319 passed, 0 failed |
 | `cargo test -p clipvault-db --lib` | 117 passed, 0 failed |
 | `cargo test -p clipvault-search --lib` | 31 passed, 0 failed |
 | `cargo test -p clipvault-app --lib` | 85 passed, 0 failed |
 | `cargo test -p clipvault-app --bin clipvault-app` | 77 passed, 0 failed |
-| `npm ci` (Node 20.20.2, npm 10.8.2) | OK |
-| `npm run check` | OK (0 errores, 15 warnings preexistentes) |
+| `npm run check` (Node 20.20.2, npm 10.8.2) | OK (0 errores, 15 warnings preexistentes) |
 | `npm run build` | OK |
 | `npm test` | 1197 passed, 0 failed |
 | `openspec validate gnome-wayland-integration --strict --type change` | OK ("Change 'gnome-wayland-integration' is valid") |
-| `openspec validate --all --strict` | 27 passed, 0 failed |
 
-## Limitaciones de este pase
+Conteo `cargo test --workspace`: `1329` tests passing distribuidos en
+lib (`clipvault-app` 85, `clipvault-core` 319, `clipvault-db` 117,
+`clipvault-platform` 214, `clipvault-search` 31) + bin
+(`clipvault-app` 77) + integration tests (`clipboard_adapter_regression`
+4, `linux_app_metadata` 0, `linux_wayland_active_app` 0,
+`macos_clipboard_main_queue_regression` 15, `asset_isolation` 10,
+`blacklist_app_picker` 9, `bootstrap` 6, `clipboard_rich_content` 47,
+`clipboard_rich_text` 47, `code_language_bridge` 6,
+`code_language_privacy` 7, `code_language_migration` 8, `database` 16,
+`desktop_dnd_card_visual_corrections` 5, `desktop_header_card_dnd` 6,
+`history` 14, `management` 14, `organization` 56,
+`original_png_bytes` 19, `paste_regression` 8, `paste_suppression` 15,
+`pasteboard_png_metadata` 18, `platform_integration` 21,
+`privacy_settings` 32, `quick_paste_copy` 29, `source_app_filter` 12,
+`source_app_metadata` 11, `type_detection` 9, `capture_tick_command`
+5, `clipboard_asset_command` 14, `icon_command` 10,
+`set_entry_title_command` 4, `source_app_icon_command` 9) + doc-tests
+(`clipvault_core` 0 passed + 1 ignored, resto 0).
 
-- `clipvault-app` no se compila para `x86_64-unknown-linux-gnu` desde macOS porque Tauri requiere `pkg-config` con `gdk-pixbuf`, `cairo`, `pango`, `atk` y `webkit2gtk-4.1` enlazados contra un sysroot Linux. Los crates `clipvault-platform`, `clipvault-core` y `clipvault-search` se compilaron limpiamente para `x86_64-unknown-linux-gnu` con las features reales.
-- Los tests de runtime Linux (socket, restart, privacidad, precedence del probe) sólo se ejecutan en un binario Linux enlazado. Las pruebas añadidas están compilando correctamente pero requieren un runner Linux para ejercitarse.
-- La sección 8 sigue pendiente de verificación manual en Ubuntu GNOME Wayland. MiniMax no marcó ninguna tarea de esa sección.
-- El binario final de Tauri Linux y la prueba real de GNOME Wayland siguen requiriendo la máquina Ubuntu del usuario; Codex cierra el ciclo con commit + push y el usuario ejecuta el smoke test.
+## Limitaciones reales del cambio
+
+- `clipvault-app` no se compila para `x86_64-unknown-linux-gnu` desde
+  macOS porque Tauri requiere `pkg-config` con `gdk-pixbuf`, `cairo`,
+  `pango`, `atk` y `webkit2gtk-4.1` enlazados contra un sysroot Linux.
+  El check del binario se reduce a `cargo check -p clipvault-platform
+  --target x86_64-unknown-linux-gnu --features
+  linux-x11,linux-wayland-active-app,linux-gnome-shell-integration
+  --tests`, que compila el runtime Linux con sus features reales.
+- Los tests de runtime Linux (socket, restart, privacidad, precedence
+  del probe) sólo se ejercitan en un binario Linux enlazado. Las
+  pruebas añadidas (`wire_envelope_*`, `wire_protocol_*`,
+  `process_peer_*`, `snapshot_active_app_id_filters_empty_*`)
+  compilan correctamente y ejecutan en macOS usando stubs equivalentes,
+  pero su verificación exhaustiva de I/O real requiere un runner
+  Linux.
+- La activación del feature `linux-gnome-shell-integration` se hace en
+  el bloque `[target.'cfg(all(target_os = "linux", not(target_os =
+  "macos")))'.dependencies]` del shell `Cargo.toml`, NUNCA en
+  `[features].default`. Esta regla arquitectónica está documentada en
+  `design.md` y respetada por `cargo check` y `cargo clippy`, pero
+  actualmente no cuenta con un test estructural dedicado que la
+  pinnee — el `shell_linux_x11_cfg_does_not_require_linux_x11_feature`
+  cubre el caso análogo para `linux-x11` y el
+  `shell_linux_svg_raster_feature_is_enabled_for_linux_target` para
+  `linux-svg-raster`. Un cambio futuro que re-introduzca
+  `linux-gnome-shell-integration` en `[features].default` repetiría la
+  regresión de `5c9f584` sin disparar ningún test automatizado (los
+  binarios compilan y los tests pasan igual). Es la pieza de debt más
+  importante que el pase deja abierta; queda registrada para que un
+  siguiente cambio cierre el pin.
+- La sección 8 (verificación manual Ubuntu GNOME Wayland) sigue
+  pendiente del usuario. MiniMax no marcó ninguna tarea de esa sección
+  y no dispone del runtime Wayland real para ejercitarla.
+- El binario final de Tauri Linux y la prueba real de GNOME Wayland
+  requieren la máquina Ubuntu del usuario. Codex cierra el ciclo con
+  commit + push tras el visto bueno del usuario; MiniMax no commitea,
+  pushea ni archiva por sí mismo.
+
+## Estado del cambio tras este pase
+
+- Tareas 1–7 marcadas `[x]`: la implementación coincide con el alcance
+  aprobado en `proposal.md`, `design.md` y `specs/`.
+- Tareas 8 y 9 sin marcar: siguen siendo responsabilidad del usuario
+  (verificación manual) y del cierre controlado por Codex.
+- `Cargo.toml`, `app/tauri/src-tauri/tauri.conf.json`,
+  `app/tauri/frontend/package.json` están alineados en `0.0.12`; no se
+  modificaron porque la bump anterior ya consumió el patch reservado
+  para este cambio (projects.md regla "Resuming an interrupted
+  implementation does not re-bump the version").
+- El `AboutModal` sigue leyendo `diagnostics?.version` (ver
+  `app/tauri/frontend/src/AboutModal.svelte:36–40`) sin valor
+  hardcodeado, así que un cambio futuro de versión en los manifiestos
+  canónicos se refleja automáticamente en la UI.
