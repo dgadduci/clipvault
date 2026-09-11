@@ -154,3 +154,12 @@ SHALL affect only optional startup layout, never window visibility.
 - THEN puede solicitar el tamaño inicial
 - BUT no DEBE solicitar una posición absoluta de la ventana principal
 - AND deja el mapeo y la posición a cargo del compositor
+
+#### Scenario: WebView principal montado después del arranque nativo
+
+- GIVEN que el shell ya solicitó la visibilidad pero GTK/WebKit aún no había
+  mapeado la superficie durante el arranque
+- WHEN el frontend de la ventana `main` completa su montaje
+- THEN solicita una vez `show()` para esa misma ventana
+- AND no debe enfocar, ocultar, redimensionar ni mover la ventana
+- AND no debe afectar la ventana Quick Paste

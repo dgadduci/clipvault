@@ -891,3 +891,15 @@ el tamaño inicial, pero omite toda posición absoluta cuando `GDK_BACKEND` o
   Quick Paste, la integración GNOME, captura ni los datos persistidos.
 - [ ] Verificar manualmente en Ubuntu GNOME Wayland que la ventana principal
   aparece tras omitir el posicionamiento absoluto.
+
+**Garantía posterior al mapeo.** La ausencia de la ventana persiste aun sin
+la feature de integración GNOME, por lo que se añade un último `show()` desde
+el frontend principal al terminar `onMount`. La llamada sólo aplica a la
+ventana con etiqueta `main`, es inerte fuera de Tauri y no modifica foco,
+posición, tamaño, Quick Paste ni datos de usuario.
+
+- [x] Añadir el bridge `mainWindowVisibility` y llamarlo una vez desde el
+  montaje de `App.svelte`.
+- [x] Cubrir que sólo la ventana `main` recibe la solicitud de visibilidad.
+- [ ] Verificar manualmente en Ubuntu GNOME Wayland que el desktop aparece
+  después de que el WebView principal se monta.

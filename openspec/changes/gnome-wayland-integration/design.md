@@ -193,3 +193,8 @@ shell no envía una posición absoluta cuando `GDK_BACKEND` o
 `XDG_SESSION_TYPE` indican Wayland. GNOME gestiona la posición de toplevels;
 forzar `set_position` antes del mapeo puede impedir que la superficie se
 vuelva visible. En X11 y macOS se conserva la posición inicial existente.
+
+Como última garantía, `App.svelte` solicita `show()` sobre la ventana `main`
+una vez montado el WebView. Esa invocación ocurre después de que GTK/WebKit
+crea la superficie y no desplaza, redimensiona, enfoca ni oculta ninguna
+ventana. El bridge es inerte fuera de Tauri y en Quick Paste.
