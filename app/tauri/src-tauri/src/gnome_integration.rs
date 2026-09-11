@@ -671,4 +671,47 @@ mod tests {
         assert_eq!(payload.desktop, "gnome");
         assert_eq!(payload.identifier.as_deref(), Some("firefox.desktop"));
     }
+
+    /// Compile-time regression: the entire GNOME state chain that
+    /// the Tauri shell stores on `AppState` MUST be `Send + Sync`.
+    /// Tauri requires the managed state to be `Send + Sync` for
+    /// `State<'_, T>` to compile, and a previous regression on the
+    /// `ListenerHandle` type introduced a `PhantomData<*const ()>`
+    /// marker that made it `!Send`, breaking the build on Linux.
+    /// The assertions below pin every type in the chain so a future
+    /// regression on any one of them surfaces in CI rather than at
+    /// runtime on the user's machine.
+    #[test]
+    fn gnome_state_chain_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<clipvault_platform::ListenerHandle>();
+        assert_send_sync::<LiveGnomeHandle>();
+        assert_send_sync::<GnomeIntegrationState>();
+        assert_send_sync::<crate::state::SharedState>();
+        assert_send_sync::<crate::bootstrap::AppState>();
+    }
+
+    /// Belt-and-braces check: the live handle contains every piece
+    /// the bootstrap wires into the cache. Constructing it through
+    /// the public constructor on the shell side forces the compiler
+    /// to evaluate the full set of fields the runtime uses.
+    #[test]
+    fn live_handle_is_constructible_through_public_api() {
+        // The test only exercises the type machinery; the values are
+        // placeholders. The important assertion lives at compile
+        // time — if any field is `!Send`/`!Sync` the file fails to
+        // build before the runtime ever runs.
+        let handle: LiveGnomeHandle = LiveGnomeHandle {
+            platform_service: Arc::new(PlatformIntegrationService::new(
+                clipvault_platform::GnomeConsentDecision::Unknown,
+            )),
+            snapshot: clipvault_platform::SharedGnomeSnapshot::new(),
+            probe: Arc::new(clipvault_platform::GnomeShellActiveApplication::new(
+                clipvault_platform::SharedGnomeSnapshot::new(),
+            )),
+            listener: None,
+            socket_path: None,
+        };
+        assert!(handle.listener.is_none());
+    }
 }

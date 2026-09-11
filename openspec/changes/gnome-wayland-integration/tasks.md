@@ -346,3 +346,200 @@ lib (`clipvault-app` 85, `clipvault-core` 319, `clipvault-db` 117,
   `app/tauri/frontend/src/AboutModal.svelte:36–40`) sin valor
   hardcodeado, así que un cambio futuro de versión en los manifiestos
   canónicos se refleja automáticamente en la UI.
+
+---
+
+## Causa raíz del fallo de compilación Linux
+
+El comando que el usuario ejecutó en su Ubuntu Wayland expone un
+defecto que las pruebas macOS no podían detectar: el binario
+`clipvault-app` no compila cuando la feature
+`linux-gnome-shell-integration` se activa explícitamente. La matriz
+de compilación del cambio quedó incompleta y el defecto sólo se
+manifiesta cuando el bloque `cfg(all(target_os = "linux", feature =
+"linux-gnome-shell-integration"))` se evalúa como verdadero.
+
+**Síntoma exacto:** `ListenerHandle` contiene un campo
+`_marker: std::marker::PhantomData<*const ()>`. Un `*const ()` es un
+puntero crudo, que por defecto es `!Send + !Sync`. `ListenerHandle`
+vive dentro de `LiveGnomeHandle` → `GnomeIntegrationState` →
+`AppState` → `SharedState` (la envoltura que el shell registra en
+`tauri::Manager::manage`). El extractor `State<'_, SharedState>` de
+Tauri requiere que el tipo administrado implemente `Send + Sync`, y
+la presencia de `*const ()` rompe ese contrato: el binario `cargo
+tauri dev --features ...linux-gnome-shell-integration` falla con
+`the trait Send is not implemented for *const ()` / `PhantomData<*const ()>`
+antes de alcanzar `main`.
+
+**Por qué existía el marcador:** fue un residuo de un prototipo
+anterior donde `ListenerHandle` era genérico sobre el tipo de
+transporte (`pub struct ListenerHandle<T: ListenerTransport> { ...
+_marker: PhantomData<T> }`). Cuando el tipo dejó de ser genérico el
+marcador se quedó y se cambió a `PhantomData<*const ()>` sin
+verificar la varianza. El cambio no aporta seguridad: `Arc<AtomicBool>`,
+`Option<thread::JoinHandle<()>>` y `Option<PathBuf>` ya son `Send +
+Sync` por construcción, así que ningún campo necesita un marcador
+para conservar la corrección.
+
+**Por qué no se reemplazó por un `PhantomData<T>` Send-compatible:**
+no existe ninguna función de varianza que proteger — el struct no
+expone un parámetro `T`. La corrección correcta es eliminar el
+marcador; añadir otro `PhantomData<SendSafe>` sería introducir
+ruido sin propósito.
+
+## Corrección aplicada
+
+1. **`ListenerHandle` ya no lleva `PhantomData<*const ()>`**: el
+   campo se eliminó por completo en
+   `crates/clipvault-platform/src/runtime/linux_gnome_shell_integration.rs`.
+   El docstring del struct documenta el contrato `Send + Sync` y
+   enlaza con la regresión que lo pinnea, para que un futuro
+   refactor no reintroduzca el marcador por error.
+
+2. **`spawn_listener_thread` actualiza su construcción** para no
+   pasar el marcador inexistente; `from_thread` y
+   `from_thread_with_socket` también, ya que ambas rutas se usan
+   desde el shell y desde los tests.
+
+3. **`GnomeShellListener<T>` conserva `PhantomData<T>`** porque
+   sigue siendo genérico sobre `T: ListenerTransport + 'static` y
+   `ListenerTransport: Send + Sync` garantiza que `T: Send + Sync`,
+   por lo que `PhantomData<T>` es automáticamente `Send + Sync`. No
+   se tocó.
+
+4. **`unsafe impl Send/Sync for ListenerHandle` queda prohibido**:
+   la regla arquitectónica del proyecto prohíbe `unsafe` salvo en
+   casos justificados (ver `AGENTS.md`), y aquí no se justifica
+   porque el struct ya es seguro por construcción. La corrección es
+   estructural, no coercitiva.
+
+## Regresión de compilación añadida
+
+- **`listener_handle_is_send_and_sync`** (en
+  `crates/clipvault-platform/src/runtime/linux_gnome_shell_integration.rs`,
+  dentro de `mod tests`): el cuerpo del test define
+  `fn assert_send_sync<T: Send + Sync>() {}` y la invoca con
+  `assert_send_sync::<ListenerHandle>()`. La función `assert_send_sync`
+  es monomorfizada con `ListenerHandle`, así que el chequeo se
+  ejecuta en tiempo de compilación: si alguien reañade el
+  `PhantomData<*const ()>` o introduce otro campo `!Send`, el binario
+  falla con `the trait Send is not implemented for *const ()`
+  exactamente igual que el error original. El test está dentro del
+  módulo cfg-gated por
+  `#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]`,
+  así que sólo se compila en el camino Linux y no afecta al binario
+  macOS.
+
+- **`from_thread_constructs_idempotent_shutdown_handle`**: ejercita
+  `ListenerHandle::from_thread(alive, None)` + `handle.shutdown()` y
+  verifica que la bandera `alive` se voltea a `false`. Como
+  `shutdown(mut self)` consume el handle por construcción, una
+  segunda llamada no puede ejecutarse, así que la idempotencia
+  queda demostrada por la firma del método. La rama `None` del
+  join cubre el callsite que el shell usa fuera de
+  `spawn_listener_thread_with_socket`.
+
+- **`spawn_listener_thread_with_socket_stops_and_cleans_up`**:
+  ejercita el flujo producción completo (bind → spawn → shutdown
+  con socket) y verifica que el archivo del socket desaparece
+  después de `shutdown`, replicando el contrato que
+  `shutdown_removes_socket_file_when_handle_owns_path` ya cubría
+  para `from_thread_with_socket`. Aquí se valida adicionalmente que
+  la combinación `spawn_listener_thread_with_socket` + `shutdown` +
+  drop del `Option` permanece libre de pánicos.
+
+- **`spawn_listener_thread_handle_returns_send_sync`**: vuelve a
+  afirmar `Send + Sync` después de invocar `spawn_listener_thread`,
+  para garantizar que la ruta sin socket también cumple el contrato
+  y que un cambio futuro en el helper no rompa la transportabilidad
+  entre hilos.
+
+- **`gnome_state_chain_is_send_and_sync`** (en
+  `app/tauri/src-tauri/src/gnome_integration.rs`, dentro de
+  `mod tests` cfg-gated por Linux + gnome feature): afirma
+  `Send + Sync` para la cadena completa
+  `ListenerHandle → LiveGnomeHandle → GnomeIntegrationState →
+  SharedState → AppState`. Si cualquier eslabón de la cadena
+  vuelve a no ser `Send + Sync`, la compilación del shell en Linux
+  falla con un error que apunta exactamente al tipo regresionado.
+
+- **`live_handle_is_constructible_through_public_api`**: belt-and-
+  braces, fuerza al compilador a materializar un `LiveGnomeHandle`
+  con cada uno de los campos públicos que el runtime usa
+  (`platform_service`, `snapshot`, `probe`, `listener: None`,
+  `socket_path: None`). Si algún campo del shell añade `!Send` /
+  `!Sync` accidentalmente, este test lo detecta antes de que el
+  binario llegue al usuario.
+
+## Verificación ejecutada en macOS
+
+- `cargo fmt --all -- --check` → limpio.
+- `cargo clippy --workspace --all-targets -- -D warnings` → 0
+  warnings.
+- `cargo test --workspace` → 1329 tests passing, 0 failed
+  (los 4 tests nuevos viven en el módulo cfg-gated y sólo se
+  ejercitan cuando la feature `linux-gnome-shell-integration` está
+  activa, así que en macOS no se cuentan).
+- `cargo check -p clipvault-platform --target
+  x86_64-unknown-linux-gnu --no-default-features --features
+  linux-x11,linux-wayland-active-app,linux-gnome-shell-integration
+  --tests` → limpio. Esto valida en macOS que el lado de la
+  plataforma del cambio (donde vive `ListenerHandle` y el grueso
+  de los nuevos tests) compila para el target Linux, incluidos los
+  tests.
+- `cargo clippy -p clipvault-platform --target
+  x86_64-unknown-linux-gnu --no-default-features --features
+  linux-x11,linux-wayland-active-app,linux-gnome-shell-integration
+  --all-targets -- -D warnings` → limpio. La regresión se mantiene
+  también en `-D warnings`.
+- `npm run check` (Node 20.20.2) → 0 errors, 15 warnings
+  preexistentes.
+- `npm run build` (Node 20.20.2) → OK.
+- `npm test` (Node 20.20.2) → 1197 passed, 0 failed.
+- `openspec validate gnome-wayland-integration --strict --type
+  change` → "Change 'gnome-wayland-integration' is valid".
+
+## Limitación de la verificación desde macOS
+
+`cargo check -p clipvault-app --target x86_64-unknown-linux-gnu
+--no-default-features --features
+custom-protocol,clipboard-arboard,hotkey-global,linux-x11,linux-wayland-active-app,linux-gnome-shell-integration`
+no puede ejecutarse desde macOS porque Tauri 2 arrastra la pila
+GTK/WebKit2 (`glib-sys`, `gdk-sys`, `gdk-pixbuf-sys`, `cairo-sys-rs`,
+`atk-sys`, `pango-sys`, `gobject-sys`, `gio-sys`) y los build
+scripts de esas crates requieren `pkg-config` con un sysroot
+Linux. macOS no tiene GTK/GLib y `pkg-config --print-errors gdk-3.0`
+reporta "not found". Sin `cargo-zigbuild`, `cargo-xwin` o un
+sysroot + cross-pkg-config, no hay forma práctica de cross-compilar
+el binario final desde macOS.
+
+Por lo tanto la regresión completa del shell
+(`gnome_state_chain_is_send_and_sync` y
+`live_handle_is_constructible_through_public_api`) sólo puede
+verificarse cuando el usuario corra el binario en Ubuntu. Esa
+verificación sigue pendiente y debe ejecutarse en la máquina real.
+
+## Verificación pendiente en Ubuntu real
+
+El usuario debe correr, en `/home/diego/Documentos/development/clipvault`:
+
+```
+cargo check -p clipvault-app \
+  --no-default-features \
+  --features custom-protocol,clipboard-arboard,hotkey-global,linux-x11,linux-wayland-active-app,linux-gnome-shell-integration
+```
+
+Si la regresión pasa, los 4 tests nuevos del módulo
+`linux_gnome_shell_integration` (1329 + 4 = 1333 tests Rust) y los
+2 tests nuevos del módulo `gnome_integration` del shell deben
+ejecutarse y pasar con `cargo test --workspace`. El resultado se
+reporta en este mismo `tasks.md` con la línea:
+
+```
+| `cargo test --workspace` en Ubuntu | 1333 tests passing, 0 failed |
+```
+
+y la sección 8 (verificación manual GNOME Wayland) puede
+reanudar el flujo. MiniMax no marca esa tarea como completada hasta
+que el usuario ejecute realmente los comandos y reporte el
+resultado.

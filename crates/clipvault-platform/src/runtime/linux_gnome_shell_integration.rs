@@ -549,7 +549,6 @@ pub fn spawn_listener_thread<T: ListenerTransport + 'static>(
         alive,
         join,
         socket_path: None,
-        _marker: std::marker::PhantomData,
     }
 }
 
@@ -622,11 +621,25 @@ fn stable_error_label(error: &ListenerError) -> &'static str {
 
 /// Public handle the bootstrap stores on `AppState` so the listener
 /// can be stopped deterministically at shutdown.
+///
+/// The handle MUST be `Send + Sync`: Tauri stores the
+/// [`GnomeIntegrationState`] (which owns the listener) through
+/// `app.manage`, and Tauri's `State<'_, T>` extractor requires the
+/// managed type to be `Send + Sync`. Every field of this struct is
+/// already `Send + Sync` (`Arc<AtomicBool>`, `JoinHandle<()>`,
+/// `PathBuf`), so the type stays thread-safe without a marker. A
+/// vestigial `PhantomData<*const ()>` previously sat in this struct
+/// as a leftover from an earlier generic prototype; the raw pointer
+/// inside it forced `!Send + !Sync` and broke Tauri's state plumbing
+/// on Linux. The marker has been removed and the regression is
+/// pinned by a compile-time assertion (see
+/// `listener_handle_is_send_and_sync` and the alias assertions on
+/// `LiveGnomeHandle` / `GnomeIntegrationState` / `SharedState` in the
+/// shell).
 pub struct ListenerHandle {
     alive: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
     socket_path: Option<PathBuf>,
-    _marker: std::marker::PhantomData<*const ()>,
 }
 
 impl ListenerHandle {
@@ -638,7 +651,6 @@ impl ListenerHandle {
             alive,
             join,
             socket_path: None,
-            _marker: std::marker::PhantomData,
         }
     }
 
@@ -655,7 +667,6 @@ impl ListenerHandle {
             alive,
             join,
             socket_path: Some(socket_path),
-            _marker: std::marker::PhantomData,
         }
     }
 
@@ -1304,5 +1315,106 @@ mod tests {
             "empty app_id must drop the snapshot"
         );
         assert_eq!(snapshot.state(), GnomeIntegrationState::Identified);
+    }
+
+    /// Compile-time regression: `ListenerHandle` MUST implement
+    /// `Send + Sync`. Tauri stores the GNOME integration state
+    /// (which owns the listener) through `app.manage`, and
+    /// `State<'_, T>` only compiles when `T: Send + Sync`.
+    ///
+    /// A previous version of this struct carried a
+    /// `PhantomData<*const ()>` marker that made it `!Send + !Sync`,
+    /// breaking the Tauri state plumbing on Linux Wayland when the
+    /// user opted into the GNOME integration. The assertion below
+    /// fails to compile the moment the marker reappears, so any
+    /// future refactor that reintroduces the `!Send` regression
+    /// surfaces immediately in CI rather than at runtime on the
+    /// user's machine.
+    #[test]
+    fn listener_handle_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ListenerHandle>();
+    }
+
+    /// `from_thread` MUST build a usable handle that owns no socket
+    /// file. Calling `shutdown` on it must join the (optional) thread
+    /// and stay idempotent: `shutdown(self)` consumes the handle so a
+    /// second call cannot run by construction — the contract is
+    /// verified by the helper returning cleanly with the alive flag
+    /// flipped to `false`.
+    #[test]
+    fn from_thread_constructs_idempotent_shutdown_handle() {
+        let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let handle = ListenerHandle::from_thread(alive.clone(), None);
+        assert!(
+            handle
+                .alive_flag()
+                .load(std::sync::atomic::Ordering::Acquire),
+            "from_thread must keep the supplied alive flag"
+        );
+        // `shutdown(self)` consumes the handle; the test exercises
+        // the `None` join path that production callers reach when
+        // they thread-spawn the helper off-band.
+        handle.shutdown();
+        assert!(
+            !alive.load(std::sync::atomic::Ordering::Acquire),
+            "shutdown must flip the alive flag to false so the listener thread observes the stop"
+        );
+    }
+
+    /// `spawn_listener_thread_with_socket` MUST return a
+    /// `ListenerHandle` that owns the join of a real thread AND the
+    /// bound socket path. The `shutdown` helper must terminate the
+    /// loop, join the thread and remove the socket file. The
+    /// double-shutdown case — taking the handle out of the `Option`
+    /// and dropping the `Option` afterwards — must stay a no-op.
+    #[test]
+    fn spawn_listener_thread_with_socket_stops_and_cleans_up() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let parent = temp.path().join("clipvault");
+        std::fs::create_dir_all(&parent).expect("mkdir");
+        let socket = parent.join("clipvault-focus.sock");
+        let transport = std::sync::Arc::new(UnixListenerTransport::bind(&socket).expect("bind"));
+        let snapshot = SharedGnomeSnapshot::new();
+        let handle = spawn_listener_thread_with_socket(snapshot, transport, socket.clone());
+        assert!(
+            handle
+                .alive_flag()
+                .load(std::sync::atomic::Ordering::Acquire),
+            "spawn_listener_thread_with_socket must initialise the alive flag"
+        );
+        // Allow the listener thread to enter its accept loop before
+        // we ask it to stop.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Mirror the shell's `handle.listener.take()` + drop pattern.
+        let mut slot: Option<ListenerHandle> = Some(handle);
+        if let Some(inner) = slot.take() {
+            inner.shutdown();
+        }
+        drop(slot);
+        assert!(
+            !socket.exists(),
+            "spawn_listener_thread_with_socket + shutdown must remove the socket"
+        );
+    }
+
+    /// `spawn_listener_thread` (no socket) MUST return a
+    /// `ListenerHandle` that owns the join of a real thread and is
+    /// `Send + Sync`. The helper must not panic even when the
+    /// listener thread runs in isolation without a Unix socket
+    /// underneath it.
+    #[test]
+    fn spawn_listener_thread_handle_returns_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ListenerHandle>();
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let parent = temp.path().join("clipvault");
+        std::fs::create_dir_all(&parent).expect("mkdir");
+        let socket = parent.join("clipvault-focus.sock");
+        let transport = std::sync::Arc::new(UnixListenerTransport::bind(&socket).expect("bind"));
+        let snapshot = SharedGnomeSnapshot::new();
+        let handle = spawn_listener_thread(snapshot, transport);
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        handle.shutdown();
     }
 }
