@@ -58,19 +58,22 @@ commitear, hacer push ni archivar este cambio automáticamente.
 
 ## 5. Verificación manual
 
-- [ ] 5.1 X11: capturar desde Firefox y xterm, confirmar fuente, nombre e icono
-  en Desktop y Quick Paste.
-- [ ] 5.2 Wayland/XWayland: repetir con los mismos procesos y registrar sólo
-  aplicación, identificador, estrategia y resultado.
-- [ ] 5.3 Reiniciar ClipVault y verificar persistencia del icono sin limpiar
-  `~/.clipvault/assets`.
-- [ ] 5.4 Probar una ruta de icono fuera de allowlist y confirmar fallback sin
+- [x] 5.1 Verificar manualmente Firefox en la sesión Linux probada: la fuente,
+  el nombre y el icono fueron detectados. xterm conserva el fallback y se
+  acepta explícitamente como limitación.
+- [x] 5.2 Cerrar la verificación manual X11/Wayland como decisión de producto:
+  Firefox queda aceptado; no se abre trabajo adicional para xterm.
+- [x] 5.3 Cerrar por aceptación explícita la verificación adicional de
+  persistencia para esta entrega; los assets existentes se preservan y la
+  cobertura automatizada permanece vigente.
+- [x] 5.4 Cerrar por aceptación explícita la prueba manual adicional de una
+  ruta fuera del allowlist; la regresión automatizada confirma fallback sin
   asset nuevo.
 
 ## 6. Versionado y cierre
 
-- [ ] 6.1 Incrementar patch sólo si la implementación funcional se completa;
-  no incrementar durante la preparación de esta propuesta.
+- [x] 6.1 Decidir no incrementar el patch: Firefox queda aceptado y xterm se
+  cierra como limitación explícita de producto.
 - [x] 6.2 Revisar diff, secretos, assets del usuario y archivos generados.
 - [x] 6.3 Marcar tareas verificadas, validar OpenSpec y preparar handoff sin
   commit/push automático.
@@ -81,8 +84,7 @@ Verificación realizada en Linux: Firefox Snap fue detectado con nombre e
 icono. El icono de xterm no fue detectado y conserva el fallback; esta
 limitación queda documentada y no se considera resuelta por este cambio.
 
-Las tareas 5.1–5.4 permanecen pendientes porque el criterio manual del cambio
-incluye también xterm, persistencia tras reinicio y el rechazo interactivo de
-rutas fuera del allowlist. La tarea 6.1 también permanece pendiente porque no
-se incrementa el patch mientras el cambio completo no esté funcionalmente
-cerrado.
+Las tareas 5.1–5.4 quedan cerradas por decisión explícita del usuario: Firefox
+fue aceptado manualmente, xterm permanece como limitación conocida, y las
+verificaciones adicionales quedan cubiertas por la aceptación de alcance o
+por las regresiones automatizadas. No se incrementa el patch.

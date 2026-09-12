@@ -135,3 +135,10 @@ Fixtures mínimos representativos:
 
 La regresión frontend de drag-and-drop se ejecuta porque el pipeline de
 metadata y el bootstrap participan del cambio, aunque no se modifiquen cards.
+
+## Decisión de cierre
+
+La entrega se cierra explícitamente con Firefox Snap como caso funcional
+aceptado. La sesión manual detectó su nombre e icono. xterm mantiene el
+fallback sin icono; se registra como limitación conocida aceptada y no se
+abre otro ciclo de implementación para este cambio.

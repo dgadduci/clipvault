@@ -72,10 +72,18 @@ o xterm.
 
 En los fixtures equivalentes a Firefox Snap, el provider conserva
 `firefox_firefox.desktop`, resuelve `Name=Firefox` y persiste un PNG desde la
-raíz de paquete permitida. En los fixtures equivalentes a xterm, `xterm`
-resuelve la entrada mediante el alias exacto del ejecutable y persiste
-`mini.xterm` desde las raíces XDG normales. Una ruta absoluta fuera de las
-raíces permitidas sigue produciendo fallback sin crear asset.
+raíz de paquete permitida. Una ruta absoluta fuera de las raíces permitidas
+sigue produciendo fallback sin crear asset.
+
+## Decisión de cierre
+
+La aceptación manual de esta entrega se limita explícitamente a Firefox Snap:
+en la sesión Linux probada se detectaron su nombre e icono. xterm no mostró
+icono y conserva el fallback; esta limitación se acepta como decisión de
+producto y no se continuará trabajando en ella dentro de este cambio. La
+cobertura automatizada de `ExecBasename` se conserva como regresión del
+provider, pero no constituye un criterio de aceptación manual de esta
+entrega.
 
 Referencias: [Desktop Entry Specification](https://specifications.freedesktop.org/desktop-entry/latest-single/),
 [Shell.App.get_id](https://gnome.pages.gitlab.gnome.org/gnome-shell/shell/method.App.get_id.html)

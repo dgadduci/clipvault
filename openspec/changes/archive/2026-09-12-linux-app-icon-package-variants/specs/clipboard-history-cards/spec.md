@@ -9,13 +9,25 @@ Desktop y Quick Paste SHALL reutilizar `source_app_name`,
 raíz de paquete resolvieron metadata. MUST NOT añadir rutas absolutas, bytes,
 `Exec=`, estrategias internas ni datos de empaquetado al DTO de las cards.
 
-#### Scenario: Firefox y xterm muestran el asset controlado
+#### Scenario: Firefox Snap muestra el asset controlado
 
-- GIVEN una captura permitida con nombre y referencia PNG relativa resuelta
+- GIVEN una captura permitida de Firefox Snap con nombre y referencia PNG
+  relativa resuelta
 - WHEN se renderiza en Desktop o Quick Paste
 - THEN se muestra el PNG mediante el bridge actual
 - AND no se modifica el layout, las acciones, el contenido ni los atributos
   protegidos de las cards
+
+#### Scenario: xterm conserva la limitación aceptada
+
+- GIVEN una captura permitida de xterm sin referencia PNG resoluble en la
+  sesión Linux validada
+- WHEN se renderiza en Desktop o Quick Paste
+- THEN conserva el nombre disponible y el fallback accesible actual
+- AND no se modifica el layout, las acciones, el contenido ni los atributos
+  protegidos de las cards
+- AND esta ausencia de icono se considera una limitación aceptada de esta
+  entrega
 
 #### Scenario: Alias sin icono resoluble
 

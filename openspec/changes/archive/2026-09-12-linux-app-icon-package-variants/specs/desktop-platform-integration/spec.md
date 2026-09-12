@@ -11,7 +11,7 @@ entrada `.desktop`. MUST NOT ejecutar `Exec=`, expandir shell, consultar PID o
 aceptar prefijos, substrings o similitudes. `source_app` SHALL permanecer
 intacto.
 
-#### Scenario: xterm con entrada prefijada por la distribución
+#### Scenario: xterm con entrada prefijada por la distribución (cobertura del provider)
 
 - GIVEN una entrada `debian-xterm.desktop` con `Type=Application`,
   `Exec=xterm` e `Icon=mini.xterm`
@@ -22,6 +22,8 @@ intacto.
 - AND selecciona `MatchStrategy::ExecBasename`
 - AND persiste el nombre y un PNG en `application-icons/`
 - AND no ejecuta ni transporta el valor de `Exec=`
+- AND si la sesión gráfica no entrega una referencia resoluble, la UI puede
+  conservar el fallback aceptado documentado en la spec de cards
 
 #### Scenario: alias no parcial
 
