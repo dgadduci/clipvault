@@ -145,6 +145,7 @@ fn parse(raw: &str, path: &Path) -> DesktopEntry {
         icon: None,
         startup_wm_class: None,
         x_gnome_wm_class: None,
+        exec_basename: None,
     };
     let mut in_target_group = false;
     for line in raw.lines() {
@@ -593,7 +594,8 @@ fn icon_not_found_failure_is_typed() {
 }
 
 /// `Icon=/abs/path` outside the XDG roots is rejected with
-/// `IconFailureKind::NotFound`.
+/// `IconFailureKind::OutOfRoots`. The diagnostic never carries the
+/// absolute path the matcher refused.
 #[test]
 fn icon_outside_roots_is_rejected() {
     let home = PathBuf::from("/home/tester");
@@ -619,7 +621,7 @@ fn icon_outside_roots_is_rejected() {
         .expect("some metadata");
     assert!(metadata.icon_ref.is_none());
     let diagnostics = provider.last_icon_diagnostics();
-    assert_eq!(diagnostics.failure_kind, IconFailureKind::NotFound);
+    assert_eq!(diagnostics.failure_kind, IconFailureKind::OutOfRoots);
 }
 
 /// SVG-only icons persist via the rasterizer when the

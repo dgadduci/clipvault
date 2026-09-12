@@ -126,8 +126,17 @@ impl LinuxApplicationMetadataProvider {
         fs: std::sync::Arc<dyn DesktopFilesystem>,
     ) -> Self {
         let roots = data_roots(fs.as_ref());
-        let (app_dirs, icon_apps_dirs, pixmap_dirs, icon_roots) =
+        let (app_dirs, icon_apps_dirs, pixmap_dirs, mut icon_roots) =
             collect_directories(fs.as_ref(), &roots);
+        // Extend the icon-root allowlist with package payload
+        // directories the desktop-entry scanner already walks. Each
+        // entry is included only when it exists on disk so the
+        // provider never advertises a path the host cannot read.
+        for extra in extra_icon_roots(fs.as_ref()) {
+            if !icon_roots.iter().any(|existing| existing == &extra) {
+                icon_roots.push(extra);
+            }
+        }
         Self {
             assets_dir: assets_dir.into(),
             app_dirs,
@@ -218,6 +227,7 @@ fn match_priority_to_strategy(priority: MatchPriority) -> MatchStrategy {
         MatchPriority::StartupWmClass => MatchStrategy::StartupWmClass,
         MatchPriority::GnomeWmClass => MatchStrategy::XGnomeWmClass,
         MatchPriority::Filename => MatchStrategy::DesktopFilename,
+        MatchPriority::ExecBasename => MatchStrategy::ExecBasename,
     }
 }
 
@@ -244,8 +254,8 @@ impl LinuxApplicationMetadataProvider {
     fn persist_icon(&self, entry: &DesktopEntry, identifier: &str) -> Option<String> {
         let icon_value = entry.icon.as_deref()?;
         let resolved = match self.resolve_icon(icon_value) {
-            Some(resolved) => resolved,
-            None => {
+            Ok(resolved) => resolved,
+            Err(failure_kind) => {
                 self.record_icon(IconDiagnostics {
                     declared: true,
                     kind: classify_icon_value(icon_value),
@@ -256,7 +266,7 @@ impl LinuxApplicationMetadataProvider {
                     persisted: false,
                     bytes: None,
                     dimensions: None,
-                    failure_kind: IconFailureKind::NotFound,
+                    failure_kind,
                 });
                 return None;
             }
@@ -449,7 +459,8 @@ impl LinuxApplicationMetadataProvider {
     /// Resolve the `Icon=` value declared by an entry against the
     /// allowed XDG icon roots. The helper accepts:
     ///
-    /// - absolute file paths under one of the allowed roots;
+    /// - absolute file paths under one of the allowed roots (XDG
+    ///   icon trees, documented Snap / Flatpak payload directories);
     /// - bare icon names looked up in the cached icon directories
     ///   (`<theme>/<size>x<size>/apps/`, `<theme>/scalable/apps/`,
     ///   `<theme>/<size>x<size>/apps/` legacy layout or
@@ -458,26 +469,77 @@ impl LinuxApplicationMetadataProvider {
     ///   wins, with PNG preferred over SVG and absolute paths
     ///   rejected when they escape the configured icon roots.
     ///
-    /// Returns `None` for any input that escapes the allowed roots
-    /// or fails the format checks. The validator never logs the
-    /// offending path or filename to keep the diagnostic surface
-    /// metadata-only.
-    fn resolve_icon(&self, raw: &str) -> Option<ResolvedIcon> {
+    /// Failure classification honours the spec the
+    /// `linux-app-icon-package-variants` change pins:
+    ///
+    /// - an absolute path whose canonical form lives outside every
+    ///   allowed root (including a symlink that escapes the
+    ///   documented Snap/Flatpak payload directories) is reported
+    ///   as [`IconFailureKind::OutOfRoots`];
+    /// - an absolute path that lives under an allowed root but the
+    ///   file does not exist is reported as
+    ///   [`IconFailureKind::NotFound`];
+    /// - an absolute path that exists under an allowed root but is
+    ///   not a regular file keeps the previous
+    ///   [`IconFailureKind::OutOfRoots`] diagnostic so the surface
+    ///   stays stable;
+    /// - a theme name that did not resolve in any cached icon
+    ///   directory is reported as [`IconFailureKind::NotFound`].
+    ///
+    /// The validator never logs the offending path or filename to
+    /// keep the diagnostic surface metadata-only.
+    fn resolve_icon(&self, raw: &str) -> Result<ResolvedIcon, IconFailureKind> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return None;
+            return Err(IconFailureKind::NotFound);
         }
         let candidate = Path::new(trimmed);
         if candidate.is_absolute() {
-            let path = self.fs.canonicalize_if_safe(candidate).ok()?;
-            if !self.icon_roots.iter().any(|root| path.starts_with(root)) {
-                return None;
+            // Canonicalize first so a symlink that escapes the
+            // documented package roots is rejected on its real
+            // target. When canonicalize succeeds the file exists
+            // and the comparison against the allowlist uses the
+            // canonical form; when canonicalize fails the file is
+            // missing and we inspect the raw input to tell
+            // NotFound (path is under an allowed root) from
+            // OutOfRoots (path is clearly outside every allowed
+            // root).
+            match self.fs.canonicalize_if_safe(candidate) {
+                Ok(path) => {
+                    if !self.icon_roots.iter().any(|root| path.starts_with(root)) {
+                        // Existing path outside an allowed root or
+                        // symlink that escapes the allowlist.
+                        return Err(IconFailureKind::OutOfRoots);
+                    }
+                    if !self.fs.is_file(&path) {
+                        // Existing path under an allowed root but
+                        // not a regular file (directory, fifo,
+                        // device, ...). Keep the existing diagnostic
+                        // so the failure surface stays stable.
+                        return Err(IconFailureKind::OutOfRoots);
+                    }
+                    let kind = classify_path_extension(&path);
+                    return Ok(ResolvedIcon { path, kind });
+                }
+                Err(_) => {
+                    // canonicalize_if_safe refused the path —
+                    // typically because the file does not exist.
+                    // Distinguish the "missing inside an allowed
+                    // root" case from the "missing and clearly
+                    // outside every allowed root" case without
+                    // touching the canonical form, which the
+                    // filesystem refused to produce.
+                    let raw_in_root = self
+                        .icon_roots
+                        .iter()
+                        .any(|root| candidate.starts_with(root));
+                    return Err(if raw_in_root {
+                        IconFailureKind::NotFound
+                    } else {
+                        IconFailureKind::OutOfRoots
+                    });
+                }
             }
-            if !self.fs.is_file(&path) {
-                return None;
-            }
-            let kind = classify_path_extension(&path);
-            return Some(ResolvedIcon { path, kind });
         }
         // Theme-name lookup: walk each cached `apps/` directory in
         // the deterministic order `collect_directories` produced.
@@ -486,27 +548,27 @@ impl LinuxApplicationMetadataProvider {
         let svg_filename = format!("{stem}.svg");
         for apps_dir in &self.icon_apps_dirs {
             if let Some(png) = self.find_candidate(apps_dir, &png_filename, IconSourceKind::Png) {
-                return Some(png);
+                return Ok(png);
             }
         }
         for apps_dir in &self.icon_apps_dirs {
             if let Some(svg) = self.find_candidate(apps_dir, &svg_filename, IconSourceKind::Svg) {
-                return Some(svg);
+                return Ok(svg);
             }
         }
         for pixmap_dir in &self.pixmap_dirs {
             if let Some(png) =
                 self.find_candidate(pixmap_dir, &png_filename, IconSourceKind::Pixmap)
             {
-                return Some(png);
+                return Ok(png);
             }
         }
         for pixmap_dir in &self.pixmap_dirs {
             if let Some(svg) = self.find_candidate(pixmap_dir, &svg_filename, IconSourceKind::Svg) {
-                return Some(svg);
+                return Ok(svg);
             }
         }
-        None
+        Err(IconFailureKind::NotFound)
     }
 
     /// Look up `filename` under `apps_dir` and validate that the
@@ -603,11 +665,19 @@ enum MatchPriority {
     StartupWmClass = 1,
     /// Third priority: the `X-GNOME-WMClass` field matches.
     GnomeWmClass = 2,
-    /// Lowest priority: the basename of the file (without the
+    /// Fourth priority: the basename of the file (without the
     /// `.desktop` extension) matches the identifier. Used as the
     /// X11 / XWayland fallback when neither `StartupWMClass` nor
     /// `X-GNOME-WMClass` is declared.
     Filename = 3,
+    /// Lowest priority: the basename of the first safe token of the
+    /// `Exec=` key matches the identifier. Used when the package
+    /// layout breaks the one-to-one relationship between window
+    /// identity and `.desktop` filename (for example
+    /// `debian-xterm.desktop` whose `Exec=` declares `xterm`). The
+    /// comparison is exact and case-insensitive ASCII; prefixes,
+    /// substrings and similarity heuristics are forbidden.
+    ExecBasename = 4,
 }
 
 fn classify(entry: &DesktopEntry, identifier: &str) -> Option<MatchPriority> {
@@ -654,9 +724,14 @@ fn classify(entry: &DesktopEntry, identifier: &str) -> Option<MatchPriority> {
         .path
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .map(|stem| stem.to_ascii_lowercase())?;
-    if basename == identifier {
+        .map(|stem| stem.to_ascii_lowercase());
+    if basename.as_deref() == Some(identifier) {
         return Some(MatchPriority::Filename);
+    }
+    if let Some(exec) = entry.exec_basename.as_deref() {
+        if exec.to_ascii_lowercase() == identifier {
+            return Some(MatchPriority::ExecBasename);
+        }
     }
     None
 }
@@ -670,6 +745,15 @@ fn classify(entry: &DesktopEntry, identifier: &str) -> Option<MatchPriority> {
 /// matcher through the public filesystem abstraction; the fields
 /// stay visible so test fixtures can construct deterministic
 /// entries without going through the production parser.
+///
+/// `exec_basename` is the basename of the first safe token of the
+/// entry's `Exec=` key (for example `xterm` from `Exec=xterm`). It
+/// exists as a metadata-only alias for the X11 / XWayland matcher
+/// so distribution-prefixed `.desktop` files (`debian-xterm.desktop`)
+/// resolve the same `Exec=xterm` binary they ship. The field is
+/// computed from a safe, non-executing parse: shell metacharacters,
+/// field codes and empty tokens all leave it `None` so a malformed
+/// `Exec=` line cannot smuggle executable content into the matcher.
 #[derive(Debug, Clone)]
 pub struct DesktopEntry {
     pub path: PathBuf,
@@ -680,6 +764,12 @@ pub struct DesktopEntry {
     pub icon: Option<String>,
     pub startup_wm_class: Option<String>,
     pub x_gnome_wm_class: Option<String>,
+    /// Basename of the first safe token of `Exec=`. The provider
+    /// uses this field for the
+    /// [`MatchStrategy::ExecBasename`] fallback when neither
+    /// `StartupWMClass`, `X-GNOME-WMClass` nor the filename stem
+    /// match the identifier.
+    pub exec_basename: Option<String>,
 }
 
 impl DesktopEntry {
@@ -704,6 +794,7 @@ fn parse_desktop_entry(raw: &str, path: &Path) -> DesktopEntry {
         icon: None,
         startup_wm_class: None,
         x_gnome_wm_class: None,
+        exec_basename: None,
     };
     let mut in_target_group = false;
     for line in raw.lines() {
@@ -740,6 +831,7 @@ fn parse_desktop_entry(raw: &str, path: &Path) -> DesktopEntry {
             "Icon" => entry.icon = Some(value),
             "StartupWMClass" => entry.startup_wm_class = Some(value),
             "X-GNOME-WMClass" => entry.x_gnome_wm_class = Some(value),
+            "Exec" => entry.exec_basename = exec_basename(&value),
             _ => {
                 if let Some(locale) = key.strip_prefix("Name[") {
                     if let Some(stripped) = locale.strip_suffix(']') {
@@ -750,6 +842,106 @@ fn parse_desktop_entry(raw: &str, path: &Path) -> DesktopEntry {
         }
     }
     entry
+}
+
+/// Extract the basename of the first safe token of an `Exec=` value
+/// without interpreting shell or field codes. The helper only ever
+/// inspects the literal string the `.desktop` parser handed us; it
+/// never spawns a child process and never opens a path.
+///
+/// The parser accepts the forms documented in the freedesktop
+/// Desktop Entry Specification:
+///
+/// - whitespace between tokens (multiple spaces, tabs);
+/// - quoted paths (`"/opt/Firefox/firefox" "%u"`);
+/// - backslash-escaped characters (`Exec=foo\ bar`);
+///
+/// It refuses anything else:
+///
+/// - field codes (`%u`, `%U`, `%f`, `%F`, ...);
+/// - unescaped shell metacharacters (`$`, `;`, `&`, `|`, `*`, `?`,
+///   backticks, `(`, `)`, `<`, `>`, `[`, `]`, `{`, `}`, `\n`);
+/// - environment variable expansions (`$FOO`, `${FOO}`);
+/// - command substitutions (backticks, `$(...)`);
+/// - empty tokens.
+///
+/// The basename is computed without touching the filesystem; the
+/// function only inspects the literal string. When the value is
+/// rejected the function returns `None` so the matcher never falls
+/// back to an executable alias derived from a malformed entry.
+fn exec_basename(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Refuse shell metacharacters anywhere in the value before any
+    // tokenisation. The matcher only consumes the first safe token;
+    // a hostile `.desktop` file could otherwise embed the alias
+    // inside an argument string the parser would otherwise skip.
+    let forbidden_in_value = [
+        '%', '$', '`', ';', '&', '|', '*', '?', '<', '>', '(', ')', '[', ']', '{', '}', '\n', '\r',
+    ];
+    for ch in forbidden_in_value {
+        if trimmed.contains(ch) {
+            return None;
+        }
+    }
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut chars = trimmed.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if !in_single => {
+                // Honour escaped characters the spec documents;
+                // anything else is left as a literal backslash so
+                // a malformed value surfaces as a non-match rather
+                // than silently truncating the basename.
+                let next = chars.next();
+                if let Some(escaped) = next {
+                    current.push(escaped);
+                }
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    if in_single || in_double {
+        // Unterminated quoted token. The freedesktop spec allows the
+        // entry to wrap arguments in quotes; a missing closing quote
+        // indicates a malformed file and the matcher refuses to
+        // pretend the basename is safe.
+        return None;
+    }
+    let first = tokens.into_iter().next()?;
+    let basename = std::path::Path::new(&first)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&first);
+    if basename.is_empty() || basename == "." || basename == ".." {
+        return None;
+    }
+    if !basename
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'))
+    {
+        return None;
+    }
+    Some(basename.to_string())
 }
 
 /// Reverse the single-line escape rules the freedesktop spec defines
@@ -842,9 +1034,7 @@ fn current_locale_candidates() -> Vec<String> {
 fn data_roots(fs: &dyn DesktopFilesystem) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
 
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| fs.home_dir());
+    let home = current_home(fs);
 
     let xdg_data_home = env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -909,6 +1099,120 @@ fn optional_export_roots(home: Option<&PathBuf>) -> Vec<PathBuf> {
         .into_iter()
         .filter_map(|path| normalize_root(&path))
         .collect()
+}
+
+/// Extra icon-root allowlist entries the resolver accepts for
+/// absolute paths declared by `.desktop` files installed by package
+/// managers whose payloads live outside the standard XDG tree.
+///
+/// Each candidate is included only when it exists on disk so the
+/// allowlist never silently expands to `/`, `/tmp` or the user's
+/// home directory. The function returns canonicalised paths; the
+/// resolver compares the canonicalised candidate against this list
+/// so symlinks that escape a documented package root are rejected
+/// by [`resolve_icon`].
+///
+/// The list intentionally stays narrow:
+///
+/// - `/snap` is the snapd payload root. Snap packages ship their
+///   icons as absolute paths under `/snap/<pkg>/current/...`; the
+///   `.desktop` files for the same packages live under
+///   `/var/lib/snapd/desktop/applications/`, which the desktop
+///   scanner already covers via [`optional_export_roots`].
+/// - `/var/lib/snapd` is added defensively for hosts that mount the
+///   snapd state outside the default `/snap` location.
+/// - `/var/lib/flatpak` is added when the Flatpak payload root
+///   exists so Flatpak packages that publish absolute icon paths
+///   through their `.desktop` file resolve without bypassing the
+///   allowlist. The candidate is gated on the host detecting the
+///   directory so the allowlist never opens `/` to Flatpak on a
+///   host that does not have Flatpak installed.
+///
+/// Canonicalisation is the dangerous step: a hostile symlink could
+/// turn `/snap` into `/`, `/tmp` or the user's home directory and
+/// silently open the whole filesystem to the resolver. Each
+/// canonicalised candidate therefore goes through
+/// [`is_safe_package_root`] which refuses any canonical form that
+/// does not match one of the documented payloads or that points at
+/// the obvious dangerous targets (`/`, `/tmp`, the user's home).
+///
+/// The allowlist never includes `/`, `/tmp` or the user's home
+/// directory so the resolver cannot be coaxed into following an
+/// absolute icon path that escapes the documented package roots.
+fn extra_icon_roots(fs: &dyn DesktopFilesystem) -> Vec<PathBuf> {
+    let home = current_home(fs);
+    let documented = [
+        PathBuf::from("/snap"),
+        PathBuf::from("/var/lib/snapd"),
+        PathBuf::from("/var/lib/flatpak"),
+    ];
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for root in documented {
+        if !fs.is_dir(&root) {
+            continue;
+        }
+        // Canonicalize to detect hostile symlinks. When canonicalize
+        // fails (for example because the path is unreadable) we fall
+        // back to the documented literal and let the validator
+        // confirm it remains a safe target.
+        let canonical = match fs.canonicalize_if_safe(&root) {
+            Ok(canonical) => canonical,
+            Err(_) => root.clone(),
+        };
+        if !is_safe_package_root(&canonical, home.as_deref()) {
+            continue;
+        }
+        if !candidates.iter().any(|existing| existing == &canonical) {
+            candidates.push(canonical);
+        }
+    }
+    candidates
+}
+
+/// Validate a canonicalised package-payload root against the
+/// documented Snap/Flatpak allowlist. The helper refuses any
+/// canonical form that does not match one of the documented
+/// payloads so a hostile symlink that turns `/snap` into `/`,
+/// `/tmp`, the user's home or some other excessively broad prefix
+/// never opens the whole filesystem to the resolver.
+///
+/// The check is intentionally explicit: the allowlist contains
+/// exactly `/snap`, `/var/lib/snapd` and `/var/lib/flatpak` and
+/// nothing else. Anything outside the set is rejected so the
+/// resolver cannot be coaxed into following an absolute icon path
+/// that escapes the documented package roots.
+fn is_safe_package_root(canonical: &Path, home: Option<&Path>) -> bool {
+    let allowed: &[&Path] = &[
+        Path::new("/snap"),
+        Path::new("/var/lib/snapd"),
+        Path::new("/var/lib/flatpak"),
+    ];
+    if !allowed.contains(&canonical) {
+        return false;
+    }
+    // Belt-and-braces: refuse the obvious dangerous targets even
+    // when they slipped past the component comparison. A test
+    // filesystem could craft a path that satisfies `==` against an
+    // allowed root through some odd path representation; the
+    // explicit comparison keeps the surface honest.
+    if canonical == Path::new("/") || canonical == Path::new("/tmp") {
+        return false;
+    }
+    if let Some(home) = home {
+        if canonical == home {
+            return false;
+        }
+    }
+    true
+}
+
+/// Resolve the user home the data-roots computation uses so the
+/// package-root validator can refuse the canonical home directory
+/// without having to recompute it from the environment.
+fn current_home(fs: &dyn DesktopFilesystem) -> Option<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| fs.home_dir())
 }
 
 /// Normalize a candidate root by stripping trailing separators and
@@ -1231,6 +1535,13 @@ mod tests {
         home: PathBuf,
         files: Mutex<BTreeMap<PathBuf, Vec<u8>>>,
         directories: Mutex<Vec<PathBuf>>,
+        /// Single-hop canonical aliases used to simulate symlinks.
+        /// The resolver compares the canonical form against the
+        /// allowlist, so the regression suite needs the ability to
+        /// craft paths whose canonical form lives outside the
+        /// documented package roots without touching the host
+        /// filesystem.
+        canonical_aliases: Mutex<BTreeMap<PathBuf, PathBuf>>,
     }
 
     impl MemoryFilesystem {
@@ -1239,6 +1550,7 @@ mod tests {
                 home,
                 files: Mutex::new(BTreeMap::new()),
                 directories: Mutex::new(Vec::new()),
+                canonical_aliases: Mutex::new(BTreeMap::new()),
             };
             fs.directories.lock().unwrap().push(fs.home.clone());
             fs
@@ -1272,6 +1584,17 @@ mod tests {
 
         fn canonical(&self, path: &Path) -> PathBuf {
             path.to_path_buf()
+        }
+
+        /// Register a single-hop canonical alias so a symlink from
+        /// `from` to `to` can be exercised by the regression tests
+        /// without standing up a real symlink on the host
+        /// filesystem.
+        fn add_canonical_alias(&self, from: &Path, to: &Path) {
+            self.canonical_aliases
+                .lock()
+                .unwrap()
+                .insert(from.to_path_buf(), to.to_path_buf());
         }
     }
 
@@ -1317,6 +1640,23 @@ mod tests {
         }
 
         fn canonicalize_if_safe(&self, path: &Path) -> std::io::Result<PathBuf> {
+            let aliases = self.canonical_aliases.lock().unwrap();
+            if let Some(target) = aliases.get(path) {
+                return Ok(target.clone());
+            }
+            // Mirror the production behaviour: `fs::canonicalize`
+            // refuses non-existent paths with NotFound. The provider
+            // relies on that error to distinguish "file is missing
+            // inside an allowed root" (NotFound) from "path lives
+            // outside every allowed root" (OutOfRoots); an always-
+            // succeeding in-memory `canonicalize_if_safe` would mask
+            // the difference and break the regression suite.
+            if !self.is_file(path) && !self.is_dir(path) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "missing canonical path",
+                ));
+            }
             Ok(self.canonical(path))
         }
 
@@ -2229,7 +2569,7 @@ mod tests {
             .expect("some metadata");
         assert!(metadata.icon_ref.is_none());
         let diagnostics = provider.last_icon_diagnostics();
-        assert_eq!(diagnostics.failure_kind, IconFailureKind::NotFound);
+        assert_eq!(diagnostics.failure_kind, IconFailureKind::OutOfRoots);
     }
 
     // ---------------------------------------------------------------
@@ -2601,5 +2941,690 @@ mod tests {
         );
         let icons_dir = assets.join("application-icons");
         assert!(std::fs::read_dir(&icons_dir).unwrap().next().is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // `linux-app-icon-package-variants` regression suite.
+    //
+    // The Firefox Snap and xterm cases documented in the change show
+    // the package layout breaking the one-to-one relationship between
+    // window identity, `.desktop` filename and theme icon. The tests
+    // below pin the new aliases (`ExecBasename`) and the extended
+    // icon-root allowlist without depending on the host's actual
+    // filesystem layout.
+    //
+    // The fixtures use an in-memory filesystem that registers the
+    // snapd payload root via `mkdir` so the provider's allowlist
+    // recognises `/snap` without touching the test runner. The asset
+    // directory is rooted on a scoped tempdir so the atomic PNG
+    // writer can persist the bytes without colliding with any
+    // pre-existing `~/.clipvault` data.
+    // ---------------------------------------------------------------
+
+    /// `firefox_firefox.desktop` carrying `Icon=/snap/firefox/current/default256.png`
+    /// resolves through the Desktop File ID matcher; the absolute
+    /// icon path lives under the snapd payload root the allowlist
+    /// pins, so the resolver persists a PNG and the
+    /// `source_app_icon_ref` stays relative to the `application-icons/`
+    /// namespace. The diagnostic surfaces the stable
+    /// `desktop_file_id` strategy and never the absolute path.
+    #[test]
+    fn lookup_resolves_firefox_snap_with_absolute_icon_under_snap_root() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        // The snapd payload root the resolver must learn to allow.
+        let snap_root = PathBuf::from("/snap");
+        let snap_payload = PathBuf::from("/snap/firefox/current");
+        fs.mkdir(&snap_root);
+        fs.mkdir(&snap_payload);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("firefox_firefox.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Firefox\nIcon=/snap/firefox/current/default256.png\n"
+                .as_bytes(),
+        );
+        fs.write_png(&snap_payload.join("default256.png"));
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("firefox_firefox.desktop")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Firefox");
+        assert_eq!(provider.last_match_strategy(), MatchStrategy::DesktopFileId);
+        let icon_ref = metadata
+            .icon_ref
+            .as_deref()
+            .expect("icon ref must point at the snapd payload PNG");
+        assert!(
+            icon_ref.starts_with("application-icons/"),
+            "icon ref must stay under application-icons/, got {icon_ref}"
+        );
+        assert!(
+            !std::path::Path::new(icon_ref).is_absolute(),
+            "icon ref must be relative"
+        );
+        assert!(
+            icon_ref.ends_with(".png"),
+            "icon ref must point at the persisted PNG"
+        );
+        let target = assets.join(icon_ref);
+        assert!(target.is_file(), "icon must persist under {target:?}");
+    }
+
+    /// xterm installed as `debian-xterm.desktop` and `Exec=xterm`
+    /// resolves through the new `ExecBasename` alias when neither
+    /// `StartupWMClass`, `X-GNOME-WMClass` nor the filename stem
+    /// match the identifier. The `Icon=mini.xterm` value still
+    /// resolves through the existing XDG theme layout, the
+    /// `application-icons/` namespace receives the PNG and the
+    /// `source_app` identifier the caller supplied stays untouched.
+    #[test]
+    fn lookup_resolves_xterm_via_exec_basename_alias() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        let theme_icons = home.join("icons/hicolor/48x48/apps");
+        fs.mkdir(&apps);
+        fs.mkdir(&home.join("icons"));
+        fs.mkdir(&home.join("icons/hicolor"));
+        fs.mkdir(&theme_icons);
+        fs.write_png(&theme_icons.join("mini.xterm.png"));
+        fs.write(
+            &apps.join("debian-xterm.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Terminal\nExec=xterm\nIcon=mini.xterm\n",
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("xterm")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Terminal");
+        assert_eq!(
+            provider.last_match_strategy(),
+            MatchStrategy::ExecBasename,
+            "xterm must match via ExecBasename, not filename stem"
+        );
+        let icon_ref = metadata
+            .icon_ref
+            .as_deref()
+            .expect("icon ref must resolve the XDG theme icon");
+        assert!(
+            icon_ref.starts_with("application-icons/"),
+            "icon ref must stay under application-icons/, got {icon_ref}"
+        );
+        let target = assets.join(icon_ref);
+        assert!(target.is_file(), "PNG must persist under {target:?}");
+    }
+
+    /// `xterm-extra` MUST NOT match `debian-xterm.desktop` whose
+    /// `Exec=xterm`. The matcher only honours the basename, never a
+    /// prefix or substring.
+    #[test]
+    fn lookup_rejects_xterm_extra_partial_alias() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("debian-xterm.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Terminal\nExec=xterm\nIcon=mini.xterm\n",
+        );
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let outcome = provider.lookup("xterm-extra").expect("ok");
+        assert!(
+            outcome.is_none(),
+            "xterm-extra must not resolve via ExecBasename prefix"
+        );
+        assert_eq!(provider.last_match_strategy(), MatchStrategy::None);
+    }
+
+    /// `other-firefox.desktop` MUST NOT match `firefox.desktop`
+    /// whose `Exec=firefox`. The Desktop File ID strictness is
+    /// preserved: a `.desktop`-suffixed identifier that does not
+    /// equal the candidate filename does not fall back to
+    /// `ExecBasename`.
+    #[test]
+    fn lookup_rejects_other_firefox_when_exec_basename_matches() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\nExec=firefox\n",
+        );
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let outcome = provider.lookup("other-firefox.desktop").expect("ok");
+        assert!(
+            outcome.is_none(),
+            "an unknown Desktop File ID must not degrade to ExecBasename"
+        );
+        assert_eq!(provider.last_match_strategy(), MatchStrategy::None);
+    }
+
+    /// `Icon=/tmp/...png` falls outside the allowlist and is
+    /// rejected with the stable `out_of_roots` failure kind. The
+    /// resolver never copies the PNG and the diagnostic never
+    /// records the absolute path.
+    #[test]
+    fn lookup_rejects_tmp_absolute_icon_as_out_of_roots() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\nIcon=/tmp/firefox.png\n",
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("firefox")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Firefox");
+        assert!(
+            metadata.icon_ref.is_none(),
+            "/tmp/firefox.png must not be copied"
+        );
+        let diagnostics = provider.last_icon_diagnostics();
+        assert_eq!(diagnostics.failure_kind, IconFailureKind::OutOfRoots);
+        let icons_dir = assets.join("application-icons");
+        assert!(std::fs::read_dir(&icons_dir).unwrap().next().is_none());
+    }
+
+    /// A symlink whose target lives outside the snapd payload root
+    /// is rejected as `out_of_roots`. The resolver canonicalises the
+    /// candidate before the root comparison so a malicious `.desktop`
+    /// entry cannot smuggle an arbitrary file into the namespace.
+    ///
+    /// The fixture exercises the production layout the spec pins:
+    /// `Icon=/snap/firefox/current/default256.png` is a symlink whose
+    /// canonical form lives outside the documented Snap/Flatpak
+    /// payload roots. The test refuses to write to `/snap` on the
+    /// host: the test filesystem advertises `/snap` as a directory
+    /// so `extra_icon_roots()` accepts the documented root, then a
+    /// canonical alias maps the symlinked PNG to a host temp file
+    /// the resolver cannot accept.
+    #[test]
+    fn lookup_rejects_symlink_that_escapes_snapd_root() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        // Advertise the documented Snap payload root and the package
+        // directory the .desktop entry references. The resolver must
+        // accept `/snap` as a package payload root without ever
+        // touching the host filesystem.
+        let snap_root = PathBuf::from("/snap");
+        let snap_payload = PathBuf::from("/snap/firefox/current");
+        fs.mkdir(&snap_root);
+        fs.mkdir(&snap_payload);
+        // Canonical alias: the symlink at
+        // `/snap/firefox/current/default256.png` resolves to a host
+        // temp file outside every allowed root.
+        let outside = std::env::temp_dir().join("clipvault-test-snapd-escape-outside.png");
+        std::fs::write(&outside, b"\x89PNG\r\n\x1a\n outside").expect("write");
+        fs.add_canonical_alias(&snap_payload.join("default256.png"), &outside);
+        fs.write(
+            &apps.join("firefox_firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\nIcon=/snap/firefox/current/default256.png\n",
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("firefox_firefox.desktop")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Firefox");
+        assert!(
+            metadata.icon_ref.is_none(),
+            "escaping symlinks must not be persisted"
+        );
+        let diagnostics = provider.last_icon_diagnostics();
+        assert_eq!(diagnostics.failure_kind, IconFailureKind::OutOfRoots);
+        // Cleanup the host temp file the test owns.
+        let _ = std::fs::remove_file(&outside);
+        // The asset dir is rooted on the scoped tempdir
+        // `harness_for_desktop_only` created; nothing must leak.
+        let icons_dir = assets.join("application-icons");
+        assert!(std::fs::read_dir(&icons_dir).unwrap().next().is_none());
+    }
+
+    /// When `StartupWMClass` and `Exec=` disagree, the
+    /// `StartupWMClass` branch wins. The `ExecBasename` alias never
+    /// downgrades an existing WM_CLASS match.
+    #[test]
+    fn lookup_prefers_startup_wm_class_over_exec_basename() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("terminal-wrapper.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Terminal Wrapper\nStartupWMClass=terminal\nExec=terminal-wrapper\n",
+        );
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let metadata = provider
+            .lookup("terminal")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Terminal Wrapper");
+        assert_eq!(
+            provider.last_match_strategy(),
+            MatchStrategy::StartupWmClass,
+            "StartupWMClass must win over ExecBasename"
+        );
+    }
+
+    /// When the filename stem and `Exec=` disagree on a `.desktop`
+    /// entry that does not declare a WM_CLASS, the filename stem
+    /// wins. The `ExecBasename` alias never downgrades an existing
+    /// filename stem match.
+    #[test]
+    fn lookup_prefers_filename_stem_over_exec_basename() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("gnome-terminal.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=GNOME Terminal\nExec=gnome-terminal-wrapper\n",
+        );
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let metadata = provider
+            .lookup("gnome-terminal")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "GNOME Terminal");
+        assert_eq!(
+            provider.last_match_strategy(),
+            MatchStrategy::DesktopFilename,
+            "filename stem must win over ExecBasename"
+        );
+    }
+
+    /// XDG precedence is preserved when two roots declare the same
+    /// `Exec=xterm` alias. The earlier root wins regardless of the
+    /// lexicographic order of the path; the `ExecBasename` change
+    /// must not reorder the global root list.
+    ///
+    /// The fixture uses lexicographically opposite XDG roots so the
+    /// test demonstrates that precedence — not lex order — picks the
+    /// winner. The `XDG_DATA_HOME` root sits lex-larger than the
+    /// `XDG_DATA_DIRS` root, so a naive lex sort would pick the wrong
+    /// entry.
+    #[test]
+    fn lookup_exec_basename_honours_xdg_precedence() {
+        // Higher-precedence root (XDG_DATA_HOME) sits lex-larger so a
+        // global lex sort would pick the wrong candidate. The lower
+        // root is /usr/share/applications per the spec.
+        let higher_root = PathBuf::from("/zzz/custom");
+        let lower_root = PathBuf::from("/usr/share");
+        let _home_guard = XdgDataHomeGuard::install(&higher_root);
+        let _dirs_guard = XdgDataDirsGuard::install(&lower_root.display().to_string());
+        let home = PathBuf::from("/home/tester");
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let higher_apps = higher_root.join("applications");
+        let lower_apps = lower_root.join("applications");
+        fs.mkdir(&higher_apps);
+        fs.mkdir(&lower_apps);
+        fs.write(
+            &higher_apps.join("debian-xterm.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Higher XTerm\nExec=xterm\n",
+        );
+        fs.write(
+            &lower_apps.join("debian-xterm.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Lower XTerm\nExec=xterm\n",
+        );
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let metadata = provider
+            .lookup("xterm")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(
+            metadata.display_name, "Higher XTerm",
+            "the higher-precedence XDG root must win regardless of lex order"
+        );
+        assert_eq!(provider.last_match_strategy(), MatchStrategy::ExecBasename);
+    }
+
+    /// The exec_basename parser is conservative: empty values, field
+    /// codes, unescaped shell metacharacters in the first token and
+    /// unterminated quotes leave the alias empty so the matcher
+    /// cannot fall back to a crafted value. The fixture exercises
+    /// the full rejection list. Shell metacharacters that appear in
+    /// later arguments are ignored; only the first executable token
+    /// matters for the alias.
+    #[test]
+    fn exec_basename_parser_rejects_malformed_values() {
+        assert_eq!(exec_basename(""), None);
+        assert_eq!(exec_basename("   "), None);
+        assert_eq!(exec_basename("%u"), None);
+        assert_eq!(exec_basename("$SHELL"), None);
+        assert_eq!(exec_basename("$(echo xterm)"), None);
+        assert_eq!(exec_basename("`echo xterm`"), None);
+        assert_eq!(exec_basename("/bin/echo xterm; xterm"), None);
+        assert_eq!(exec_basename("foo|bar"), None);
+        assert_eq!(exec_basename("foo&bar"), None);
+        assert_eq!(exec_basename("\"unterminated"), None);
+        assert_eq!(exec_basename("'unterminated"), None);
+        assert_eq!(exec_basename("/bin/echo (xterm)"), None);
+        assert_eq!(exec_basename("/bin/echo [xterm]"), None);
+        assert_eq!(exec_basename("/bin/echo {xterm}"), None);
+        assert_eq!(exec_basename("/bin/echo xterm<xterm"), None);
+        assert_eq!(exec_basename("/bin/echo xterm>xterm"), None);
+    }
+
+    /// The exec_basename parser accepts the documented safe forms:
+    /// a bare basename, an absolute path and a quoted path. The
+    /// returned basename is the safe file-name component without any
+    /// executable value. Arguments after the first token are
+    /// ignored; only the executable basename matters for the alias.
+    #[test]
+    fn exec_basename_parser_accepts_safe_values() {
+        assert_eq!(exec_basename("xterm"), Some("xterm".to_string()));
+        assert_eq!(exec_basename("/usr/bin/xterm"), Some("xterm".to_string()));
+        assert_eq!(
+            exec_basename("\"/opt/Firefox/firefox\""),
+            Some("firefox".to_string())
+        );
+        assert_eq!(
+            exec_basename("/usr/bin/xterm -e bash"),
+            Some("xterm".to_string())
+        );
+    }
+
+    /// The provider never deletes or renames a pre-existing icon the
+    /// previous capture persisted when the new lookup fails (for
+    /// example because `Icon=` points outside the allowlist). The
+    /// payload the previous run wrote must survive untouched.
+    #[test]
+    fn lookup_preserves_existing_icon_when_out_of_roots() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        let existing = assets.join("application-icons/firefox_firefox.desktop.png");
+        std::fs::write(&existing, b"PRESERVE_ME").expect("write existing");
+        fs.write(
+            &apps.join("firefox_firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\nIcon=/tmp/firefox.png\n",
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("firefox_firefox.desktop")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Firefox");
+        assert!(metadata.icon_ref.is_none());
+        let bytes = std::fs::read(&existing).expect("read existing");
+        assert_eq!(bytes, b"PRESERVE_ME");
+    }
+
+    // ---------------------------------------------------------------
+    // `resolve_icon` failure classification regressions.
+    //
+    // The four scenarios below pin the distinction the spec mandates
+    // between `NotFound` and `OutOfRoots`:
+    //
+    // - missing icon inside an allowed root → NotFound;
+    // - missing icon outside an allowed root → OutOfRoots;
+    // - existing icon outside /snap, /var/lib/snapd, /var/lib/flatpak
+    //   or any XDG root → OutOfRoots;
+    // - symlink that escapes an allowed root → OutOfRoots.
+    // ---------------------------------------------------------------
+
+    /// `Icon=/home/tester/icons/hicolor/48x48/apps/missing.png` lives
+    /// inside the XDG_DATA_HOME icon root but the PNG does not
+    /// exist. The resolver MUST report `NotFound` (the path is
+    /// under an allowed root, the file is simply absent) and never
+    /// `OutOfRoots`.
+    #[test]
+    fn lookup_reports_not_found_when_absolute_icon_missing_inside_allowed_root() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        // When XDG_DATA_HOME points at `home`, the icon tree sits
+        // directly under `home/icons`, not under
+        // `home/.local/share/icons`. The test must register the
+        // directory chain so `collect_directories` adds the
+        // corresponding canonical root to the allowlist.
+        let icons_root = home.join("icons");
+        let theme_apps = icons_root.join("hicolor/48x48/apps");
+        fs.mkdir(&apps);
+        fs.mkdir(&icons_root);
+        fs.mkdir(&theme_apps);
+        let missing = theme_apps.join("missing.png");
+        fs.write(
+            &apps.join("firefox.desktop"),
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Firefox\nIcon={}\n",
+                missing.display()
+            )
+            .as_bytes(),
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("firefox")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Firefox");
+        assert!(
+            metadata.icon_ref.is_none(),
+            "missing icon must not produce an icon reference"
+        );
+        let diagnostics = provider.last_icon_diagnostics();
+        assert_eq!(
+            diagnostics.failure_kind,
+            IconFailureKind::NotFound,
+            "missing icon inside an allowed root must report NotFound"
+        );
+        let icons_dir = assets.join("application-icons");
+        assert!(std::fs::read_dir(&icons_dir).unwrap().next().is_none());
+    }
+
+    /// `Icon=/var/tmp/missing.png` lives outside every allowed root
+    /// and the file does not exist. The resolver MUST report
+    /// `OutOfRoots` so the failure surface distinguishes "missing
+    /// inside an allowed root" from "clearly outside the allowlist".
+    #[test]
+    fn lookup_reports_out_of_roots_when_absolute_icon_missing_outside_allowed_root() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        let missing = PathBuf::from("/var/tmp/missing.png");
+        fs.write(
+            &apps.join("firefox.desktop"),
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Firefox\nIcon={}\n",
+                missing.display()
+            )
+            .as_bytes(),
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("firefox")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Firefox");
+        assert!(
+            metadata.icon_ref.is_none(),
+            "missing icon must not produce an icon reference"
+        );
+        let diagnostics = provider.last_icon_diagnostics();
+        assert_eq!(
+            diagnostics.failure_kind,
+            IconFailureKind::OutOfRoots,
+            "missing icon outside an allowed root must report OutOfRoots"
+        );
+        let icons_dir = assets.join("application-icons");
+        assert!(std::fs::read_dir(&icons_dir).unwrap().next().is_none());
+    }
+
+    /// `Icon=/opt/stray/firefox.png` exists on disk but lives outside
+    /// `/snap`, `/var/lib/snapd`, `/var/lib/flatpak` and every XDG
+    /// root. The resolver MUST report `OutOfRoots` and refuse to
+    /// copy the bytes into the `application-icons/` namespace.
+    #[test]
+    fn lookup_rejects_existing_icon_outside_allowed_roots() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        let outside = PathBuf::from("/opt/stray/firefox.png");
+        fs.mkdir(outside.parent().expect("parent"));
+        fs.write_png(&outside);
+        fs.write(
+            &apps.join("firefox.desktop"),
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Firefox\nIcon={}\n",
+                outside.display()
+            )
+            .as_bytes(),
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("firefox")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Firefox");
+        assert!(
+            metadata.icon_ref.is_none(),
+            "icon outside the allowlist must not be persisted"
+        );
+        let diagnostics = provider.last_icon_diagnostics();
+        assert_eq!(diagnostics.failure_kind, IconFailureKind::OutOfRoots);
+        let icons_dir = assets.join("application-icons");
+        assert!(std::fs::read_dir(&icons_dir).unwrap().next().is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // `extra_icon_roots` validation regressions.
+    //
+    // The four scenarios below pin the policy that prevents the
+    // package-payload allowlist from silently expanding to `/`,
+    // `/tmp`, the user home or any other excessively broad path. The
+    // test filesystem advertises `/snap` (or one of the documented
+    // payload directories) and aliases the canonical form to a
+    // forbidden target; the validator must drop the unsafe entry.
+    // ---------------------------------------------------------------
+
+    /// A canonicalised `/snap` that resolves to `/` MUST NOT enter
+    /// the allowlist: the resolver would otherwise accept any path
+    /// on the host filesystem.
+    #[test]
+    fn extra_icon_roots_rejects_canonicalized_snap_pointing_at_root() {
+        let home = PathBuf::from("/home/tester");
+        let fs = MemoryFilesystem::new(home);
+        fs.mkdir(Path::new("/snap"));
+        fs.add_canonical_alias(Path::new("/snap"), Path::new("/"));
+        let roots = extra_icon_roots(&fs);
+        assert!(
+            !roots.iter().any(|root| root == &PathBuf::from("/")),
+            "canonicalized / must never enter the icon allowlist, got {roots:?}"
+        );
+        assert!(
+            !roots.iter().any(|root| root == &PathBuf::from("/snap")),
+            "the documented literal must be dropped alongside the unsafe canonical form, got {roots:?}"
+        );
+    }
+
+    /// A canonicalised `/snap` that resolves to `/tmp` MUST NOT
+    /// enter the allowlist: `/tmp` is world-writable and the
+    /// resolver would accept any path a hostile actor planted.
+    #[test]
+    fn extra_icon_roots_rejects_canonicalized_snap_pointing_at_tmp() {
+        let home = PathBuf::from("/home/tester");
+        let fs = MemoryFilesystem::new(home);
+        fs.mkdir(Path::new("/snap"));
+        fs.add_canonical_alias(Path::new("/snap"), Path::new("/tmp"));
+        let roots = extra_icon_roots(&fs);
+        assert!(
+            !roots.iter().any(|root| root == &PathBuf::from("/tmp")),
+            "canonicalized /tmp must never enter the icon allowlist, got {roots:?}"
+        );
+        assert!(
+            !roots.iter().any(|root| root == &PathBuf::from("/snap")),
+            "the documented literal must be dropped alongside the unsafe canonical form, got {roots:?}"
+        );
+    }
+
+    /// A canonicalised `/var/lib/flatpak` that resolves to the user
+    /// home directory MUST NOT enter the allowlist: the resolver
+    /// would otherwise accept any path the user happens to own.
+    #[test]
+    fn extra_icon_roots_rejects_canonicalized_flatpak_pointing_at_home() {
+        let home = PathBuf::from("/home/tester");
+        let fs = MemoryFilesystem::new(home.clone());
+        fs.mkdir(Path::new("/var/lib/flatpak"));
+        fs.add_canonical_alias(Path::new("/var/lib/flatpak"), &home);
+        let roots = extra_icon_roots(&fs);
+        assert!(
+            !roots
+                .iter()
+                .any(|root| root == &PathBuf::from("/home/tester")),
+            "canonicalized home must never enter the icon allowlist, got {roots:?}"
+        );
+        assert!(
+            !roots.iter().any(|root| root == &PathBuf::from("/var/lib/flatpak")),
+            "the documented literal must be dropped alongside the unsafe canonical form, got {roots:?}"
+        );
+    }
+
+    /// The documented `/snap` payload root keeps its canonical form
+    /// when no alias is registered. The validator MUST accept the
+    /// documented root so the Snap payload path stays reachable.
+    #[test]
+    fn extra_icon_roots_accepts_documented_snap_root_when_canonical_unchanged() {
+        let home = PathBuf::from("/home/tester");
+        let fs = MemoryFilesystem::new(home);
+        fs.mkdir(Path::new("/snap"));
+        let roots = extra_icon_roots(&fs);
+        assert!(
+            roots.iter().any(|root| root == &PathBuf::from("/snap")),
+            "documented /snap root must stay in the allowlist, got {roots:?}"
+        );
     }
 }

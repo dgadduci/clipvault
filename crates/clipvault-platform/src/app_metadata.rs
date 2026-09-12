@@ -92,6 +92,15 @@ pub enum MatchStrategy {
     /// installer-reported id such as `org.mozilla.firefox.desktop`
     /// resolves the same way it does on X11.
     DesktopFileId,
+    /// The entry matched because the identifier equalled the
+    /// basename of the first safe token of the entry's `Exec=` key.
+    /// The Linux provider uses this branch when the package layout
+    /// breaks the one-to-one relationship between window identity,
+    /// `.desktop` filename and theme icon (for example `debian-xterm`
+    /// entries that only declare `Exec=xterm`). The comparison is
+    /// exact, case-insensitive ASCII and never accepts prefixes,
+    /// substrings or similarity heuristics.
+    ExecBasename,
 }
 
 impl MatchStrategy {
@@ -104,6 +113,7 @@ impl MatchStrategy {
             MatchStrategy::XGnomeWmClass => "x_gnome_wm_class",
             MatchStrategy::DesktopFilename => "desktop_filename",
             MatchStrategy::DesktopFileId => "desktop_file_id",
+            MatchStrategy::ExecBasename => "exec_basename",
         }
     }
 }
@@ -432,6 +442,7 @@ mod tests {
         assert_eq!(MatchStrategy::XGnomeWmClass.as_str(), "x_gnome_wm_class");
         assert_eq!(MatchStrategy::DesktopFilename.as_str(), "desktop_filename");
         assert_eq!(MatchStrategy::DesktopFileId.as_str(), "desktop_file_id");
+        assert_eq!(MatchStrategy::ExecBasename.as_str(), "exec_basename");
     }
 
     #[test]
