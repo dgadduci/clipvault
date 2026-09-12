@@ -75,4 +75,5 @@ clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
 ] }
 
 [dev-dependencies]
+tauri = { version = "2", features = ["test"] }
 tempfile = "3"

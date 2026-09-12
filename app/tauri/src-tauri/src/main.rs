@@ -52,9 +52,9 @@ fn main() {
                 }
             };
 
-            // Install the Tauri-backed tray. The tray controller takes
-            // ownership of the menu wiring; the rest of the app reads
-            // it through `state.adapters.tray()`.
+            // Install and retain the Tauri-backed tray. Its managed state owns
+            // the native icon and is the sole dispatcher for native menu
+            // actions; the core retains no window-specific behavior.
             let menu_handler = move |handle: &AppHandle<tauri::Wry>, event: MenuEvent| {
                 on_menu_event(handle.clone(), event);
             };
@@ -63,8 +63,8 @@ fn main() {
             };
             match TauriTrayController::install(app.handle(), menu_handler, tray_handler) {
                 Ok(controller) => {
+                    app.manage(controller);
                     info!("tray installed");
-                    let _ = controller;
                 }
                 Err(error) => {
                     warn!(error = %error, "tray installation failed; running without tray");
@@ -216,10 +216,12 @@ fn on_menu_event(handle: AppHandle<tauri::Wry>, event: MenuEvent) {
         warn!("unknown tray menu id: {}", event.id().as_ref());
         return;
     };
-    if let Some(shared) = handle.try_state::<SharedState>() {
-        if let Ok(handle) = shared.app_state().adapters.tray().install() {
-            let _ = handle.invoke(action);
-        }
+    let Some(controller) = handle.try_state::<Arc<TauriTrayController>>() else {
+        warn!("tauri tray controller unavailable");
+        return;
+    };
+    if let Err(error) = controller.invoke(action) {
+        warn!(error = %error, "tray action failed");
     }
 }
 

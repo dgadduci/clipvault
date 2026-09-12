@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tauri::menu::{MenuBuilder, MenuEvent};
-use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tracing::warn;
 
@@ -28,13 +28,13 @@ const ID_QUIT: &str = "clipvault://quit";
 /// [`TrayHandle`] trait so the rest of the application can keep using
 /// the same interface it uses for the [`crate::bootstrap::build_state`]
 /// adapters.
-pub struct TauriTrayHandle {
-    app: AppHandle<tauri::Wry>,
+pub struct TauriTrayHandle<R: Runtime = tauri::Wry> {
+    app: AppHandle<R>,
     menu: Mutex<Vec<TrayAction>>,
 }
 
-impl TauriTrayHandle {
-    fn new(app: AppHandle<tauri::Wry>, actions: Vec<TrayAction>) -> Self {
+impl<R: Runtime> TauriTrayHandle<R> {
+    fn new(app: AppHandle<R>, actions: Vec<TrayAction>) -> Self {
         Self {
             app,
             menu: Mutex::new(actions),
@@ -42,7 +42,7 @@ impl TauriTrayHandle {
     }
 }
 
-impl TrayHandle for TauriTrayHandle {
+impl<R: Runtime> TrayHandle for TauriTrayHandle<R> {
     fn set_menu(
         &self,
         entries: &[clipvault_platform::TrayEntry],
@@ -182,6 +182,10 @@ fn menu_separator<R: Runtime>(app: &AppHandle<R>) -> tauri::menu::PredefinedMenu
 /// without changes to the rest of the shell.
 pub struct TauriTrayController {
     handle: Arc<TauriTrayHandle>,
+    // Tauri removes the native icon when the last `TrayIcon` instance drops.
+    // The controller is managed by the app for its lifetime, so retaining it
+    // here keeps the tray available after the main window is hidden.
+    _icon: TrayIcon<tauri::Wry>,
 }
 
 impl TauriTrayController {
@@ -213,7 +217,7 @@ impl TauriTrayController {
             ])
             .build()?;
 
-        TrayIconBuilder::with_id("clipvault-tray")
+        let icon = TrayIconBuilder::with_id("clipvault-tray")
             .icon(
                 app.default_window_icon()
                     .cloned()
@@ -226,7 +230,17 @@ impl TauriTrayController {
 
         Ok(Arc::new(Self {
             handle: Arc::new(TauriTrayHandle::new(app.clone(), actions)),
+            _icon: icon,
         }))
+    }
+
+    /// Dispatch a menu action through the same Tauri adapter that owns the
+    /// native icon and main window handle.
+    pub fn invoke(
+        &self,
+        action: TrayAction,
+    ) -> Result<clipvault_platform::TrayOutcome, clipvault_platform::TrayError> {
+        self.handle.invoke(action)
     }
 }
 
@@ -240,6 +254,30 @@ impl TrayController for TauriTrayController {
 
     fn name(&self) -> &'static str {
         clipvault_platform::TrayBackendKind::Tauri.as_str()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri::{
+        test::{mock_app, MockRuntime},
+        WebviewUrl, WebviewWindowBuilder,
+    };
+
+    #[test]
+    fn open_main_window_action_is_delivered_to_a_registered_main_window() {
+        let app = mock_app();
+        WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .build()
+            .expect("mock main window");
+        let tray = TauriTrayHandle::<MockRuntime>::new(app.handle().clone(), Vec::new());
+
+        assert_eq!(
+            tray.invoke(TrayAction::OpenMainWindow)
+                .expect("open main window action"),
+            clipvault_platform::TrayOutcome::Delivered
+        );
     }
 }
 

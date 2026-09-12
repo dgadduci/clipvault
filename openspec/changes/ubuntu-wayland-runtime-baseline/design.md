@@ -45,6 +45,30 @@ La restauración desde el tray queda separada del arranque inicial. El cambio
 preserva macOS, X11, Quick Paste, captura, assets, imágenes, tags, colecciones,
 favoritos, búsqueda y drag and drop.
 
+### Causa observada en Ubuntu
+
+La ventana inicial sí se muestra. Al recibir `CloseRequested`, el shell la
+oculta y cancela el cierre, por lo que el proceso debe permanecer activo para
+el tray. Sin embargo, Tauri 2.11.5 elimina el icono cuando se descarta la última
+instancia de `TrayIcon`. El shell construía ese valor como temporal y también
+descartaba su `TauriTrayController` al terminar `setup`; después de ocultar la
+ventana no quedaba una superficie para restaurarla ni una acción de tray para
+salir.
+
+La corrección conserva el `TrayIcon` dentro de `TauriTrayController` y mantiene
+el controlador gestionado por la aplicación durante toda su vida. No cambia el
+orden de creación, la visibilidad inicial, foco, tamaño ni posición de la
+ventana; la restauración existente desde `Open ClipVault` sigue siendo el único
+punto que llama a `show` y `set_focus`.
+
+La comprobación posterior confirmó que GNOME conserva el indicador registrado
+y activo después de ocultar la ventana. La acción `Open ClipVault` seguía sin
+restaurarla porque `on_menu_event` la enviaba al adaptador de tray del core,
+que se construye como stub y no es el controlador Tauri que posee la ventana.
+El handler debe delegar en el `TauriTrayController` gestionado por la
+aplicación. De este modo la acción de menú usa el mismo adaptador Tauri que
+implementa `show`/`set_focus`, sin introducir lógica de ventana en el core.
+
 ## Validación
 
 La validación manual ocurre en Ubuntu: primer inicio visible, ocultar,
