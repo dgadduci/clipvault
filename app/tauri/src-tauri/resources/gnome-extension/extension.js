@@ -163,9 +163,29 @@ function _resolveFocusedAppId() {
         const focusApp = tracker.focus_app;
         if (!focusApp) return '';
         if (typeof focusApp.get_id !== 'function') return '';
+        // A `Shell.App` may have no associated `.desktop` file when it
+        // is window-backed. `is_window_backed()` reports that case
+        // explicitly so we MUST publish absence instead of an
+        // ephemeral identifier the resolver cannot honour. Guarding
+        // here keeps the IPC contract metadata-only: the extension
+        // never sends the window index, the title, the PID or any
+        // other identifying artefact as a fallback.
+        if (typeof focusApp.is_window_backed === 'function'
+            && focusApp.is_window_backed()) {
+            return '';
+        }
         const appId = focusApp.get_id();
         if (typeof appId !== 'string') return '';
-        return appId.trim();
+        const trimmed = appId.trim();
+        // Defensive guard for older GNOME Shell runtimes where
+        // `is_window_backed()` may be absent or throw. A leading
+        // `window:` prefix is the documented shape GNOME uses for an
+        // app that is not associated with a `.desktop` file, so
+        // treating it as absence keeps the channel metadata-only.
+        if (trimmed.indexOf('window:') === 0) {
+            return '';
+        }
+        return trimmed;
     } catch (e) {
         return '';
     }

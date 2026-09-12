@@ -742,7 +742,11 @@ const BACKFILL_SCAN: usize = 96;
 /// - the entry is considered pending when either `source_app_name`
 ///   OR `source_app_icon_ref` is missing or whitespace-only.
 ///
-/// Rows that already carry both columns are skipped.
+/// Rows that already carry both columns are skipped. The
+/// `window:*` ids the GNOME extension refuses to publish for
+/// window-backed apps are also skipped: the Linux provider cannot
+/// resolve them and the contract forbids spending I/O on a
+/// lookup the spec declares impossible.
 pub(crate) fn pending_metadata_entries(context: &AppContext) -> Vec<(i64, String)> {
     let Ok(records) = context.history().recent_entries(context, BACKFILL_SCAN) else {
         return Vec::new();
@@ -756,6 +760,9 @@ pub(crate) fn pending_metadata_entries(context: &AppContext) -> Vec<(i64, String
             Some(value) if !value.trim().is_empty() => value.trim().to_string(),
             _ => continue,
         };
+        if identifier.starts_with("window:") {
+            continue;
+        }
         let has_name = record
             .source_app_name
             .as_deref()
@@ -823,6 +830,9 @@ fn metadata_enrichment_target(
         _ => return None,
     };
     let identifier = resolved_source_identifier(context)?;
+    if identifier.starts_with("window:") {
+        return None;
+    }
     if entry_already_enriched(context, id) {
         return None;
     }
@@ -2478,6 +2488,93 @@ mod tests {
             "backfill must cap at BACKFILL_BATCH, got {}",
             pending.len()
         );
+    }
+
+    /// `pending_metadata_entries` debe omitir filas cuyo `source_app`
+    /// empieza con `window:`: el contrato del proveedor Linux
+    /// declara imposible la metadata para esos ids y reintentar el
+    /// lookup gastaría I/O sin posibilidad de éxito. La fila se
+    /// inserta directamente con un `source_app` `window:*` para
+    /// evitar depender del camino del `capture_loop_tick`, que en
+    /// hosts Linux reescribe la cache activa por el contrato del
+    /// probe (ver `gnome-wayland-integration`).
+    #[test]
+    fn pending_metadata_entries_skips_window_identifier_rows() {
+        use ::time::OffsetDateTime;
+        use clipvault_db::{ContentType, EntryRepository, NewEntry};
+        let (_dir, context, _fake_clipboard) = harness_for_shared_watcher();
+        let now = OffsetDateTime::now_utc();
+        let new_entry = NewEntry::text(
+            "cv-window-backed-row".to_string(),
+            ContentType::Text,
+            "cv-window-backed-row".len() as i64,
+            "h-window".to_string(),
+            Some("window:6".to_string()),
+            now,
+            now,
+        );
+        let inserted_id = {
+            let mut db = context.database().lock();
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_entry)
+                .expect("insert window:* row")
+                .record()
+                .id
+        };
+        let pending = pending_metadata_entries(&context);
+        assert!(
+            !pending.iter().any(|(id, _)| *id == inserted_id),
+            "rows with window:* source_app must never be a backfill candidate"
+        );
+    }
+
+    /// `metadata_enrichment_target` debe omitir filas para
+    /// identificadores `window:*`: el inline enrichment no debe
+    /// programar una llamada al provider que la extensión GNOME ya
+    /// rechazó como window-backed.
+    #[test]
+    fn metadata_enrichment_target_skips_window_identifier() {
+        use clipvault_core::{HistoryOutcome, WatchTickOutcome};
+        let (_dir, context, _fake_clipboard) = harness_for_shared_watcher();
+        let outcome = WatchTickOutcome::Captured(HistoryOutcome::Stored { id: 1 });
+        assert_eq!(
+            metadata_enrichment_target_for_identifier(&context, &outcome, Some("window:6"),),
+            None,
+            "window:* source_app must skip the metadata enrichment target"
+        );
+        // Sanity check: a non-window identifier still surfaces.
+        assert!(
+            metadata_enrichment_target_for_identifier(&context, &outcome, Some("firefox.desktop"),)
+                .is_some(),
+            "Desktop File IDs must still surface as enrichment candidates"
+        );
+    }
+
+    /// Local helper that mirrors [`metadata_enrichment_target`] but
+    /// takes the source identifier as an explicit argument. The
+    /// production helper reads it from the cached probe; this
+    /// overload exists so the regression suite can drive `window:*`
+    /// paths without depending on the cache refresh loop, which on
+    /// Linux hosts overwrites the cache the loop tick consults.
+    fn metadata_enrichment_target_for_identifier(
+        context: &AppContext,
+        outcome: &clipvault_core::WatchTickOutcome,
+        identifier: Option<&str>,
+    ) -> Option<(i64, String)> {
+        use clipvault_core::{HistoryOutcome, WatchTickOutcome};
+        let id = match outcome {
+            WatchTickOutcome::Captured(HistoryOutcome::Stored { id })
+            | WatchTickOutcome::Captured(HistoryOutcome::Duplicate { id }) => *id,
+            _ => return None,
+        };
+        let identifier = identifier?;
+        if identifier.starts_with("window:") {
+            return None;
+        }
+        if entry_already_enriched(context, id) {
+            return None;
+        }
+        Some((id, identifier.to_string()))
     }
 
     /// Las entradas antiguas con `source_app` poblado pero sin

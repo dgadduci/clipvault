@@ -80,8 +80,18 @@ pub enum MatchStrategy {
     /// identifier.
     XGnomeWmClass,
     /// The entry matched because the `.desktop` file basename (without
-    /// the extension) equals the identifier.
+    /// the extension) equals the identifier. The Linux provider uses
+    /// this branch for X11 / XWayland identifiers that never carry the
+    /// `.desktop` suffix.
     DesktopFilename,
+    /// The entry matched because the identifier was a Desktop File ID
+    /// published by GNOME Wayland (the basename of the `.desktop`
+    /// file **including** the `.desktop` extension). The Linux
+    /// provider compares the id verbatim against the candidate
+    /// filenames of the cached `applications/` directories so an
+    /// installer-reported id such as `org.mozilla.firefox.desktop`
+    /// resolves the same way it does on X11.
+    DesktopFileId,
 }
 
 impl MatchStrategy {
@@ -93,6 +103,7 @@ impl MatchStrategy {
             MatchStrategy::StartupWmClass => "startup_wm_class",
             MatchStrategy::XGnomeWmClass => "x_gnome_wm_class",
             MatchStrategy::DesktopFilename => "desktop_filename",
+            MatchStrategy::DesktopFileId => "desktop_file_id",
         }
     }
 }
@@ -407,6 +418,20 @@ mod tests {
         assert_eq!(IconSourceKind::Svg.as_str(), "svg");
         assert_eq!(IconSourceKind::Pixmap.as_str(), "pixmap");
         assert_eq!(IconSourceKind::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn match_strategy_strings_are_stable() {
+        // The capture diagnostic renders the snake_case identifier
+        // verbatim; renaming any string is a breaking change for
+        // `linux-source-app-metadata`. The `DesktopFileId` string is
+        // the GNOME Wayland match path added by the
+        // `linux-wayland-desktop-file-icons` change.
+        assert_eq!(MatchStrategy::None.as_str(), "none");
+        assert_eq!(MatchStrategy::StartupWmClass.as_str(), "startup_wm_class");
+        assert_eq!(MatchStrategy::XGnomeWmClass.as_str(), "x_gnome_wm_class");
+        assert_eq!(MatchStrategy::DesktopFilename.as_str(), "desktop_filename");
+        assert_eq!(MatchStrategy::DesktopFileId.as_str(), "desktop_file_id");
     }
 
     #[test]

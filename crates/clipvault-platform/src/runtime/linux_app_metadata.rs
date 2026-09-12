@@ -152,6 +152,17 @@ impl ApplicationMetadataProvider for LinuxApplicationMetadataProvider {
             self.record_icon(IconDiagnostics::default());
             return Ok(None);
         }
+        // Defence in depth: the GNOME extension MUST NOT publish a
+        // `window:*` id, but the provider also refuses to resolve one
+        // so a legacy row whose `source_app` was captured before the
+        // extension started filtering the prefix never resurrects an
+        // invented identity. The matcher still records `None` so the
+        // diagnostic surface is honest about the skipped lookup.
+        if trimmed.starts_with("window:") {
+            self.record_strategy(MatchStrategy::None);
+            self.record_icon(IconDiagnostics::default());
+            return Ok(None);
+        }
         let needle = trimmed.to_ascii_lowercase();
         let candidate = match self.find_entry_with_strategy(&needle) {
             Some((priority, entry)) => {
@@ -203,6 +214,7 @@ impl LinuxApplicationMetadataProvider {
 
 fn match_priority_to_strategy(priority: MatchPriority) -> MatchStrategy {
     match priority {
+        MatchPriority::DesktopFileId => MatchStrategy::DesktopFileId,
         MatchPriority::StartupWmClass => MatchStrategy::StartupWmClass,
         MatchPriority::GnomeWmClass => MatchStrategy::XGnomeWmClass,
         MatchPriority::Filename => MatchStrategy::DesktopFilename,
@@ -349,10 +361,36 @@ impl LinuxApplicationMetadataProvider {
     /// `DesktopEntry` for `identifier` together with the
     /// [`MatchPriority`] of the winning candidate. Returns `None`
     /// when no unambiguous match is found.
+    ///
+    /// The matcher honours three rules documented in `design.md`:
+    ///
+    /// 1. When the identifier carries the `.desktop` suffix the
+    ///    resolver compares it as a Desktop File ID (full filename,
+    ///    case-insensitive). The Desktop File ID branch never falls
+    ///    through to the WM_CLASS / filename stem matchers so an
+    ///    unrelated app whose `StartupWMClass` happens to share a
+    ///    stem cannot be promoted to the owner of the capture.
+    /// 2. XDG roots are walked in the precedence the constructor
+    ///    cached; when two roots declare the same Desktop File ID the
+    ///    entry from the earlier root wins regardless of the path's
+    ///    lexicographic position.
+    /// 3. Within a single root a tie is resolved by the
+    ///    lexicographic order of the path so the result stays
+    ///    deterministic across runs.
+    ///
+    /// The function also short-circuits `window:*` identifiers: the
+    /// extension refuses to publish them, but a legacy row whose
+    /// `source_app` predates the extension fix must not resurrect
+    /// metadata for a window-backed app.
     fn find_entry_with_strategy(&self, identifier: &str) -> Option<(MatchPriority, DesktopEntry)> {
-        let needle = identifier.to_ascii_lowercase();
+        let trimmed = identifier.trim();
+        if trimmed.starts_with("window:") {
+            return None;
+        }
+        let needle = trimmed.to_ascii_lowercase();
         let mut best: Option<(MatchPriority, DesktopEntry)> = None;
         for dir in &self.app_dirs {
+            let dir_path: &Path = dir.as_path();
             let entries = match self.fs.read_dir_sorted(dir) {
                 Ok(entries) => entries,
                 Err(_) => continue,
@@ -375,15 +413,33 @@ impl LinuxApplicationMetadataProvider {
                 };
                 best = match best.take() {
                     None => Some((priority, parsed)),
-                    Some((existing, existing_entry))
-                        if priority < existing
-                            || (priority == existing
+                    Some(existing) => {
+                        let (existing_priority, existing_entry) = existing;
+                        let replace = if priority < existing_priority {
+                            true
+                        } else if priority == existing_priority {
+                            let same_root = existing_entry
+                                .path
+                                .parent()
+                                .map(|parent| parent == dir_path)
+                                .unwrap_or(false);
+                            // XDG precedence: when the candidate lives
+                            // under a different root the earlier root
+                            // (already captured in `best`) keeps the
+                            // win. Lexicographic tie-break only
+                            // applies within the same root.
+                            same_root
                                 && entry_path_str(&parsed.path)
-                                    < entry_path_str(&existing_entry.path)) =>
-                    {
-                        Some((priority, parsed))
+                                    < entry_path_str(&existing_entry.path)
+                        } else {
+                            false
+                        };
+                        if replace {
+                            Some((priority, parsed))
+                        } else {
+                            Some((existing_priority, existing_entry))
+                        }
                     }
-                    Some(existing) => Some(existing),
                 };
             }
         }
@@ -534,17 +590,50 @@ fn classify_icon_value(value: &str) -> IconSourceKind {
 /// `.desktop` entry. Lower values mean the entry should win.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum MatchPriority {
-    /// Highest confidence: the `StartupWMClass` field matches the
+    /// Highest confidence: the identifier matches the Desktop File ID
+    /// of the candidate — the basename of the `.desktop` file
+    /// including the extension, compared case-insensitively. This
+    /// branch is reserved for GNOME Wayland ids the extension
+    /// forwards verbatim; it MUST never strip the `.desktop` suffix
+    /// nor fall through to a WM_CLASS match so the resolver cannot
+    /// silently attribute the capture to a different app.
+    DesktopFileId = 0,
+    /// Second highest: the `StartupWMClass` field matches the
     /// `WM_CLASS` class segment exactly.
-    StartupWmClass = 0,
-    /// Second highest: the `X-GNOME-WMClass` field matches.
-    GnomeWmClass = 1,
-    /// The basename of the file (without the `.desktop` extension)
-    /// matches the identifier.
-    Filename = 2,
+    StartupWmClass = 1,
+    /// Third priority: the `X-GNOME-WMClass` field matches.
+    GnomeWmClass = 2,
+    /// Lowest priority: the basename of the file (without the
+    /// `.desktop` extension) matches the identifier. Used as the
+    /// X11 / XWayland fallback when neither `StartupWMClass` nor
+    /// `X-GNOME-WMClass` is declared.
+    Filename = 3,
 }
 
 fn classify(entry: &DesktopEntry, identifier: &str) -> Option<MatchPriority> {
+    // Desktop File ID match — restricted to identifiers whose shape
+    // confirms the caller meant a freedesktop id. The branch wins
+    // over the WM_CLASS / filename stem matchers so an unambiguous
+    // id resolves the canonical entry the extension published. The
+    // comparison is case-insensitive ASCII so the freedesktop
+    // recommendation is honoured without mutating the persisted
+    // identifier.
+    if identifier.ends_with(".desktop") {
+        let filename = entry
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_ascii_lowercase());
+        if filename.as_deref() == Some(identifier) {
+            return Some(MatchPriority::DesktopFileId);
+        }
+        // Strict path: a `.desktop`-suffixed id that does not match
+        // this candidate must not be downgraded to a WM_CLASS /
+        // filename stem match. That fallback would attribute the
+        // capture to an unrelated app declared under the same stem,
+        // which the contract forbids.
+        return None;
+    }
     if entry
         .startup_wm_class
         .as_deref()
@@ -2141,5 +2230,376 @@ mod tests {
         assert!(metadata.icon_ref.is_none());
         let diagnostics = provider.last_icon_diagnostics();
         assert_eq!(diagnostics.failure_kind, IconFailureKind::NotFound);
+    }
+
+    // ---------------------------------------------------------------
+    // `linux-wayland-desktop-file-icons` regression suite — the
+    // GNOME Wayland Desktop File ID matcher added in §3 of the change.
+    //
+    // The fixtures here intentionally avoid the failing
+    // `MemoryFilesystem::is_dir` cases the pre-existing suite pinned
+    // (they assume XDG icon roots exist on the host) and only drive
+    // the desktop-entry lookup path. The pre-existing tests stay
+    // untouched and the new suite documents the new behaviour in
+    // isolation.
+    // ---------------------------------------------------------------
+
+    /// Build a Linux provider whose `applications/` directory contains
+    /// a single `.desktop` entry. The helper centralises the
+    /// `MemoryFilesystem` boilerplate the new regression tests need
+    /// without depending on the existing icon-root helpers that the
+    /// pre-existing tests rely on.
+    ///
+    /// `XDG_DATA_HOME` MUST be pinned to `home` while the provider is
+    /// constructed (via [`XdgDataHomeGuard`]) so `data_roots()`
+    /// resolves the fixture paths instead of the host's actual XDG
+    /// layout. The fixture's `.desktop` files therefore live at
+    /// `<home>/applications/<name>.desktop`. The asset directory is
+    /// rooted on the host's filesystem via a scoped tempdir so the
+    /// atomic PNG writer can land its output without depending on a
+    /// fixture directory that may not exist on the test runner.
+    fn harness_for_desktop_only(home: &Path) -> (MemoryFilesystem, PathBuf, tempfile::TempDir) {
+        let fs = MemoryFilesystem::new(home.to_path_buf());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let assets = temp.path().join("assets");
+        std::fs::create_dir_all(assets.join("application-icons")).expect("mkdir");
+        (fs, assets, temp)
+    }
+
+    /// RAII guard that pins `XDG_DATA_HOME` to `value` for the
+    /// lifetime of the guard and restores the previous value on
+    /// drop. Used by the GNOME Wayland regression suite so the
+    /// fixture paths land in `data_roots()` regardless of the host's
+    /// actual environment.
+    struct XdgDataHomeGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl XdgDataHomeGuard {
+        fn install(value: &Path) -> Self {
+            let previous = std::env::var_os("XDG_DATA_HOME");
+            // SAFETY: the regression tests are written to be
+            // reentrant on a single thread; the helper itself does
+            // not rely on `XDG_DATA_HOME` staying stable for any
+            // duration beyond the construction of the provider.
+            unsafe {
+                std::env::set_var("XDG_DATA_HOME", value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for XdgDataHomeGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe {
+                    std::env::set_var("XDG_DATA_HOME", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("XDG_DATA_HOME");
+                },
+            }
+        }
+    }
+
+    /// RAII guard that pins `XDG_DATA_DIRS` to `value` for the
+    /// lifetime of the guard and restores the previous value on
+    /// drop. Used by the XDG-precedence regression so the higher
+    /// precedence root is deterministic.
+    struct XdgDataDirsGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl XdgDataDirsGuard {
+        fn install(value: &str) -> Self {
+            let previous = std::env::var_os("XDG_DATA_DIRS");
+            unsafe {
+                std::env::set_var("XDG_DATA_DIRS", value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for XdgDataDirsGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe {
+                    std::env::set_var("XDG_DATA_DIRS", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("XDG_DATA_DIRS");
+                },
+            }
+        }
+    }
+
+    /// `firefox.desktop` resolves through the Desktop File ID matcher
+    /// when the GNOME Wayland extension publishes the full filename
+    /// including the suffix. The metadata preserves the user-visible
+    /// name, the `last_match_strategy` slot reports the new
+    /// `desktop_file_id` strategy so the diagnostic sink can confirm
+    /// the path, and a controlled PNG is written into the
+    /// `application-icons/` namespace.
+    #[test]
+    fn lookup_resolves_firefox_desktop_via_desktop_file_id() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        let icons = home.join("icons/hicolor/48x48/apps");
+        fs.mkdir(&apps);
+        fs.mkdir(&home.join("icons"));
+        fs.mkdir(&icons);
+        fs.write(
+            &apps.join("firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\nIcon=firefox\n",
+        );
+        fs.write_png(&icons.join("firefox.png"));
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let metadata = provider
+            .lookup("firefox.desktop")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Firefox");
+        assert_eq!(provider.last_match_strategy(), MatchStrategy::DesktopFileId);
+        assert_eq!(
+            metadata.icon_ref.as_deref(),
+            Some("application-icons/firefox.desktop.png")
+        );
+    }
+
+    /// `org.gnome.Terminal.desktop` resolves through the Desktop File
+    /// ID matcher; the identifier is preserved verbatim in the
+    /// persisted icon reference so the resolver never strips the
+    /// `.desktop` suffix the GNOME extension publishes.
+    #[test]
+    fn lookup_resolves_org_gnome_terminal_desktop_via_desktop_file_id() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        let icons = home.join("icons/hicolor/48x48/apps");
+        fs.mkdir(&apps);
+        fs.mkdir(&home.join("icons"));
+        fs.mkdir(&icons);
+        fs.write(
+            &apps.join("org.gnome.Terminal.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Terminal\nIcon=org.gnome.terminal\n",
+        );
+        fs.write_png(&icons.join("org.gnome.terminal.png"));
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let metadata = provider
+            .lookup("org.gnome.Terminal.desktop")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Terminal");
+        assert_eq!(provider.last_match_strategy(), MatchStrategy::DesktopFileId);
+        assert_eq!(
+            metadata.icon_ref.as_deref(),
+            Some("application-icons/org.gnome.Terminal.desktop.png")
+        );
+    }
+
+    /// X11 / XWayland identifiers that never carry the `.desktop`
+    /// suffix keep resolving through the existing WM_CLASS / filename
+    /// priority so the GNOME Wayland change cannot regress the
+    /// pre-existing X11 path.
+    #[test]
+    fn lookup_keeps_x11_wm_class_priority_for_identifier_without_suffix() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\nStartupWMClass=firefox\nIcon=firefox\n",
+        );
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let metadata = provider
+            .lookup("firefox")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Firefox");
+        assert_eq!(
+            provider.last_match_strategy(),
+            MatchStrategy::StartupWmClass,
+            "X11 identifier must still resolve via StartupWMClass"
+        );
+    }
+
+    /// Warp's identifier is `dev.warp.Warp` (X11 / XWayland). The
+    /// resolver must keep matching through the existing `StartupWMClass`
+    /// path; the GNOME Wayland matcher MUST NOT strip the dots to
+    /// attempt a Desktop File ID match.
+    #[test]
+    fn lookup_keeps_warp_identifier_on_x11_wm_class_path() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("warp.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Warp Terminal\nStartupWMClass=dev.warp.Warp\nIcon=warp\n",
+        );
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let metadata = provider
+            .lookup("dev.warp.Warp")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Warp Terminal");
+        assert_eq!(
+            provider.last_match_strategy(),
+            MatchStrategy::StartupWmClass
+        );
+    }
+
+    /// `window:6` (the value the GNOME extension reports for an app
+    /// backed only by a window) MUST NOT touch the desktop-entry
+    /// scanner, MUST NOT persist an icon, and MUST NOT be confused
+    /// with a Desktop File ID even if a `.desktop` file happens to
+    /// share the same filename.
+    #[test]
+    fn lookup_returns_none_for_window_identifier() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("window.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Window\nIcon=window\n",
+        );
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let outcome = provider.lookup("window:6").expect("ok");
+        assert!(
+            outcome.is_none(),
+            "window:6 must never resolve to a desktop entry"
+        );
+        assert_eq!(provider.last_match_strategy(), MatchStrategy::None);
+    }
+
+    /// When two XDG roots declare the same Desktop File ID the entry
+    /// from the higher-precedence root wins regardless of the path's
+    /// lexicographic position. The fixture declares the entry under
+    /// `/usr/share/applications` (higher precedence via
+    /// `$XDG_DATA_DIRS`) and an alphabetically smaller copy under
+    /// `/home/tester/aaa/applications`; the lex-smaller copy would
+    /// otherwise appear first in a global lex sort.
+    #[test]
+    fn lookup_resolves_duplicate_desktop_file_id_by_xdg_precedence() {
+        let home = PathBuf::from("/home/tester");
+        let _home_guard = XdgDataHomeGuard::install(&home);
+        let _dirs_guard = XdgDataDirsGuard::install("/usr/share");
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let home_apps = home.join("applications");
+        let user_apps = home.join("aaa/applications");
+        let usr_apps = PathBuf::from("/usr/share/applications");
+        fs.mkdir(&home_apps);
+        fs.mkdir(&user_apps);
+        fs.mkdir(&usr_apps);
+        fs.write(
+            &user_apps.join("firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=User Firefox\n",
+        );
+        fs.write(
+            &usr_apps.join("firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=System Firefox\n",
+        );
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let metadata = provider
+            .lookup("firefox.desktop")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(
+            metadata.display_name, "System Firefox",
+            "the higher-precedence XDG root must win regardless of lex order"
+        );
+    }
+
+    /// A `.desktop`-suffixed identifier that does not match any
+    /// entry MUST NOT fall back to a WM_CLASS / filename match. The
+    /// contract forbids attributing the capture to an unrelated app
+    /// whose `StartupWMClass` happens to share the stem.
+    #[test]
+    fn lookup_does_not_downgrade_unknown_desktop_file_id_to_filename() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\nStartupWMClass=firefox\nIcon=firefox\n",
+        );
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let outcome = provider.lookup("unknown.desktop").expect("ok");
+        assert!(
+            outcome.is_none(),
+            "an unmatched Desktop File ID must not silently fall back to a stem match"
+        );
+    }
+
+    /// The Desktop File ID match is case-insensitive so the resolver
+    /// honours the freedesktop recommendation without mutating the
+    /// persisted identifier.
+    #[test]
+    fn lookup_matches_desktop_file_id_case_insensitively() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("org.mozilla.firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\n",
+        );
+        let provider =
+            LinuxApplicationMetadataProvider::with_filesystem(assets, std::sync::Arc::new(fs));
+        let metadata = provider
+            .lookup("Org.Mozilla.Firefox.Desktop")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Firefox");
+        assert_eq!(provider.last_match_strategy(), MatchStrategy::DesktopFileId);
+    }
+
+    /// Desktop File IDs with no `Icon=` key still resolve the display
+    /// name; the icon reference stays `None` and the
+    /// `application-icons/` namespace is not touched.
+    #[test]
+    fn lookup_desktop_file_id_without_icon_keeps_name_and_skips_assets() {
+        let home = PathBuf::from("/home/tester");
+        let _guard = XdgDataHomeGuard::install(&home);
+        let (fs, assets, _temp) = harness_for_desktop_only(&home);
+        let apps = home.join("applications");
+        fs.mkdir(&apps);
+        fs.write(
+            &apps.join("firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Firefox\n",
+        );
+        let provider = LinuxApplicationMetadataProvider::with_filesystem(
+            assets.clone(),
+            std::sync::Arc::new(fs),
+        );
+        let metadata = provider
+            .lookup("firefox.desktop")
+            .expect("ok")
+            .expect("some metadata");
+        assert_eq!(metadata.display_name, "Firefox");
+        assert!(
+            metadata.icon_ref.is_none(),
+            "missing Icon= must not produce an icon reference"
+        );
+        let icons_dir = assets.join("application-icons");
+        assert!(std::fs::read_dir(&icons_dir).unwrap().next().is_none());
     }
 }

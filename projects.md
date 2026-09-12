@@ -46,11 +46,11 @@ canonical value and never fall back to a hard-coded constant.
 
 | Surface | Version |
 | --- | --- |
-| Cargo workspace (`Cargo.toml`) | 0.0.13 |
-| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.13 |
-| Frontend package (`app/tauri/frontend/package.json`) | 0.0.13 |
+| Cargo workspace (`Cargo.toml`) | 0.0.14 |
+| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.14 |
+| Frontend package (`app/tauri/frontend/package.json`) | 0.0.14 |
 
-The canonical public version is **0.0.13**. The 0.0.12 version was
+The canonical public version is **0.0.14**. The 0.0.13 version was
 intentionally established as the prior baseline.
 The earlier `0.1.x` values were development manifest values and did not
 represent a public product release. The `0.0.1` baseline pinned the
@@ -154,7 +154,17 @@ patch is incremented to **0.0.12**. The Ubuntu GNOME Wayland runtime baseline
 follow-up retains the Tauri `TrayIcon`, dispatches native tray menu actions to
 the Tauri controller instead of the core stub, and restores the main window
 through `Open ClipVault`; it is a functional change, so the patch is incremented
-to **0.0.13**.
+to **0.0.13**. The follow-up that adds the Linux GNOME Wayland Desktop File ID
+matcher — the extension refuses to publish `window:*` ids (the documented
+shape for a `Shell.App` not associated with a `.desktop` file) and refuses
+to send any new IPC field beyond the metadata-only envelope, the
+`LinuxApplicationMetadataProvider` gains a new top-priority
+`MatchStrategy::DesktopFileId` branch that compares the candidate filename
+including the `.desktop` suffix (case-insensitive) without falling through
+to the WM_CLASS / filename stem matchers, XDG precedence wins over a
+lexicographic tie-break when two roots declare the same id, the backfill
+loop skips `window:*` rows and a legacy `window:6` row is never rewritten —
+is a functional change, so the patch is incremented to **0.0.14**.
 
 ## Bumping the version
 
