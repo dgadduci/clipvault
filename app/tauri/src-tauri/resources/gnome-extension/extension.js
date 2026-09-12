@@ -190,13 +190,11 @@ function _connect() {
     let socket;
     try {
         socket = new Gio.SocketClient({
-            socket_type: Gio.SocketType.STREAM,
+            type: Gio.SocketType.STREAM,
         });
         const addr = new Gio.UnixSocketAddress({ path: AppState.socket_path });
         socket.connect_async(
             addr,
-            null,
-            GLib.PRIORITY_DEFAULT,
             null,
             function (client, result) {
                 let conn = null;

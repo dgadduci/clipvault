@@ -10,6 +10,7 @@
     Collection,
     Diagnostics,
     EntryRecord,
+    GnomeIntegrationStatusResponse,
     OrganizationSnapshot,
     PasteResponse,
     PlatformGuidance,
@@ -88,6 +89,7 @@
   import DesktopToolbar from "./DesktopToolbar.svelte";
   import Modal from "./Modal.svelte";
   import DevelopmentModal from "./DevelopmentModal.svelte";
+  import GnomeIntegrationModal from "./GnomeIntegrationModal.svelte";
   import PrivacyModal from "./PrivacyModal.svelte";
   import RetentionModal from "./RetentionModal.svelte";
   import QuickPasteShortcutModal from "./QuickPasteShortcutModal.svelte";
@@ -111,6 +113,7 @@
   type ModalId =
     | null
     | "development"
+    | "gnome_integration"
     | "privacy"
     | "retention"
     | "quick_paste_shortcut"
@@ -119,6 +122,7 @@
   let diagnostics: Diagnostics | null = null;
   let capabilities: Capabilities | null = null;
   let activeApp: ActiveApplicationResponse | null = null;
+  let gnomeIntegrationStatus: GnomeIntegrationStatusResponse | null = null;
   let entries: EntryRecord[] = [];
   let error: string | null = null;
   let loading = true;
@@ -1330,6 +1334,23 @@
     openModalWith("development", event.currentTarget as HTMLElement | null);
   }
 
+  function onConfigureGnome(
+    event: CustomEvent<GnomeIntegrationStatusResponse>,
+  ): void {
+    const status = event.detail;
+    if (status.kind !== "ready" || !status.payload.applicable) return;
+    gnomeIntegrationStatus = status;
+    // The Development modal is replaced, so retain the toolbar trigger
+    // already captured for it as the focus-return destination.
+    openModalWith("gnome_integration", modalReturnFocus);
+  }
+
+  function onGnomeStatusChanged(
+    event: CustomEvent<GnomeIntegrationStatusResponse>,
+  ): void {
+    gnomeIntegrationStatus = event.detail;
+  }
+
   function onOpenPrivacy(event: MouseEvent): void {
     openModalWith("privacy", event.currentTarget as HTMLElement | null);
   }
@@ -1747,6 +1768,20 @@
     on:capabilitiesChanged={(e) => onModalCapabilitiesChanged(e)}
     on:entriesChanged={(e) => onModalEntriesChanged(e)}
     on:pasteFailed={(e) => onPasteFailed(e)}
+    on:configureGnome={onConfigureGnome}
+  />
+</Modal>
+
+<Modal
+  open={openModal === "gnome_integration"}
+  titleId="gnome-integration-title"
+  title="Integración GNOME Wayland"
+  returnFocusTo={modalReturnFocus}
+  onClose={closeModal}
+>
+  <GnomeIntegrationModal
+    initial={gnomeIntegrationStatus}
+    on:statusChanged={onGnomeStatusChanged}
   />
 </Modal>
 

@@ -549,7 +549,6 @@ pub fn spawn_listener_thread<T: ListenerTransport + 'static>(
         alive,
         join,
         socket_path: None,
-        _marker: std::marker::PhantomData,
     }
 }
 
@@ -626,7 +625,6 @@ pub struct ListenerHandle {
     alive: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
     socket_path: Option<PathBuf>,
-    _marker: std::marker::PhantomData<*const ()>,
 }
 
 impl ListenerHandle {
@@ -638,7 +636,6 @@ impl ListenerHandle {
             alive,
             join,
             socket_path: None,
-            _marker: std::marker::PhantomData,
         }
     }
 
@@ -655,7 +652,6 @@ impl ListenerHandle {
             alive,
             join,
             socket_path: Some(socket_path),
-            _marker: std::marker::PhantomData,
         }
     }
 
@@ -1169,15 +1165,22 @@ mod tests {
         let parent = temp.path().join("clipvault");
         std::fs::create_dir_all(&parent).expect("mkdir");
         let socket = parent.join("clipvault-focus.sock");
-        let _transport = UnixListenerTransport::bind(&socket).expect("bind");
-        let handle = ListenerHandle::from_thread_with_socket(
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            None,
+        let transport = std::sync::Arc::new(UnixListenerTransport::bind(&socket).expect("bind"));
+        let handle = spawn_listener_thread_with_socket(
+            SharedGnomeSnapshot::new(),
+            transport,
             socket.clone(),
         );
         assert!(socket.exists());
         handle.shutdown();
         assert!(!socket.exists(), "shutdown must clean up the socket");
+    }
+
+    #[test]
+    fn listener_handle_is_send_for_tauri_managed_state() {
+        fn assert_send<T: Send>() {}
+
+        assert_send::<ListenerHandle>();
     }
 
     #[test]
@@ -1217,57 +1220,18 @@ mod tests {
     /// handshake is hostile — the listener closes the connection.
     #[test]
     fn process_peer_refuses_app_id_before_hello() {
-        let temp = tempfile::TempDir::new().expect("tempdir");
-        let socket = temp.path().join("clipvault-focus.sock");
-        let listener = StdUnixListener::bind(&socket).expect("bind");
-        let stream = std::os::unix::net::UnixStream::connect(&socket).expect("connect");
-        // Send `app_id` without `hello`. The listener must reject the
-        // frame with a `Frame` error so the I/O loop transitions to
-        // the `CommunicationError` state on the snapshot.
-        stream
-            .set_write_timeout(Some(std::time::Duration::from_millis(500)))
-            .ok();
+        let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("pair");
         let payload =
             format!(r#"{{"v":{PROTOCOL_VERSION},"kind":"app_id","app_id":"firefox.desktop"}}"#);
-        std::io::Write::write_all(&mut &stream, payload.as_bytes()).expect("write payload");
-        std::io::Write::write_all(&mut &stream, b"\n").expect("write newline");
-        drop(listener);
-        drop(stream);
+        std::io::Write::write_all(&mut client, payload.as_bytes()).expect("write payload");
+        std::io::Write::write_all(&mut client, b"\n").expect("write newline");
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("close writer");
         let snapshot = SharedGnomeSnapshot::new();
-        // Direct unit test on the wire envelope: `validate` only
-        // covers protocol/version/kind checks, but the actual
-        // handshake ordering lives inside `process_peer` which is
-        // not exposed (private). The dedicated assertion below
-        // mirrors what `process_peer` returns when the frames are
-        // out of order — the test renders an equivalent envelope
-        // through the public validator and the dispatcher shape so
-        // future refactors do not silently remove the ordering
-        // guard.
-        let raw =
-            format!(r#"{{"v":{PROTOCOL_VERSION},"kind":"app_id","app_id":"firefox.desktop"}}"#);
-        let envelope: WireEnvelope = serde_json::from_str(&raw).expect("parse");
-        envelope.validate().expect("validate");
-        // The dispatch decision lives in `process_peer`; we assert
-        // its source-level invariant by re-evaluating the same
-        // ordering rule from outside.
-        let mut handshake_seen = false;
-        let mut app_id_seen_before_hello = false;
-        for line in raw.lines() {
-            let envelope: WireEnvelope = serde_json::from_str(line).expect("parse");
-            if envelope.kind == "hello" {
-                handshake_seen = true;
-            }
-            if envelope.kind == "app_id" && !handshake_seen {
-                app_id_seen_before_hello = true;
-            }
-        }
-        assert!(
-            app_id_seen_before_hello,
-            "test fixture must reproduce the race condition"
-        );
-        // Suppress the snapshot unused-warning without an effectful
-        // assignment.
-        let _ = snapshot.state();
+        let error = process_peer(Box::new(server), &snapshot).expect_err("app_id before hello");
+        assert!(matches!(error, ListenerError::Frame(_)));
+        assert!(snapshot.active_app_id().is_none());
     }
 
     /// A peer that sends `hello` followed by `app_id` in a single
@@ -1281,8 +1245,15 @@ mod tests {
             Err(ActiveAppError::Unavailable) => {}
             other => panic!("expected Unavailable before any peer, got {other:?}"),
         }
-        snapshot.set_state(GnomeIntegrationState::Connected);
-        snapshot.set_active_app_id(Some("firefox.desktop".to_string()));
+        let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let payload = format!(
+            "{{\"v\":{PROTOCOL_VERSION},\"kind\":\"hello\"}}\n{{\"v\":{PROTOCOL_VERSION},\"kind\":\"app_id\",\"app_id\":\"firefox.desktop\"}}\n"
+        );
+        std::io::Write::write_all(&mut client, payload.as_bytes()).expect("write frames");
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("close writer");
+        process_peer(Box::new(server), &snapshot).expect("process peer");
         let app = probe.active_application().expect("ok").expect("app");
         assert_eq!(app.identifier, "firefox.desktop");
     }

@@ -77,3 +77,32 @@ La escritura debe ser atómica, no debe sobrescribir una extensión ajena con el
 En Ubuntu GNOME Wayland, tras aceptar la activación, una captura de Chrome, Firefox o Terminal obtiene `source_app`; el provider Linux existente resuelve nombre e icono y el blacklist puede actuar antes de persistir.
 
 Si la integración no está instalada, fue rechazada, está deshabilitada o es incompatible, ClipVault continúa sin fallar y muestra `Unavailable`/aplicación desconocida según el contrato actual.
+
+## Validación de runtime y límite actual
+
+La validación manual reportada en Ubuntu GNOME Wayland confirmó el transporte:
+la sesión `linux_wayland` tiene consentimiento `accepted`, el estado técnico
+alcanza `identified` y el diagnóstico publica `window:6`. Esto confirma que la
+extensión habilitada completa el handshake local y comunica únicamente un
+identificador opaco de la aplicación enfocada.
+
+Ese hito no garantiza que cada identificador pueda resolverse a un icono
+renderizable. Actualmente ClipVault conserva la detección de origen de las
+capturas (por ejemplo Chrome, Firefox, Terminal y Warp) en X11 y Wayland, pero
+en Wayland no muestra el icono de la aplicación. La resolución y presentación
+de iconos para identificadores Wayland será un cambio OpenSpec posterior: no
+forma parte de esta integración metadata-only ni autoriza a la extensión a
+transportar iconos, rutas, títulos o contenido adicional.
+
+La build Linux normal de ClipVault debe incluir la feature del shell que
+expone esta integración. `feature_disabled` sólo es admisible en una build
+reducida solicitada intencionalmente; no puede ser el resultado de `cargo
+tauri dev` ni del artefacto Linux estándar, porque impediría al usuario dar
+su consentimiento e instalar el recurso local.
+
+La extensión incluida debe invocar las APIs GI y las propiedades GObject con el
+contrato que publica la versión de GNOME Shell declarada como compatible. En particular, una
+integración instalada y habilitada que no pueda abrir el socket local no puede
+quedar indefinidamente en `activation_pending` por una llamada JavaScript
+inválida: debe poder completar el `hello` o informar un error de comunicación
+tipado, sin afectar la captura normal.

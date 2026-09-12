@@ -85,8 +85,10 @@ pub use runtime::linux_gnome_integration::{
 };
 #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
 pub use runtime::linux_gnome_shell_integration::{
-    GnomeDiagnostics, GnomeIntegrationState, GnomeShellActiveApplication, UnixListenerTransport,
-    MAX_FRAME_BYTES as GNOME_MAX_FRAME_BYTES, PROTOCOL_VERSION as GNOME_PROTOCOL_VERSION,
+    spawn_listener_thread_with_socket, GnomeDiagnostics, GnomeIntegrationState,
+    GnomeShellActiveApplication, GnomeShellListener, ListenerHandle, SharedGnomeSnapshot,
+    UnixListenerTransport, MAX_FRAME_BYTES as GNOME_MAX_FRAME_BYTES,
+    PROTOCOL_VERSION as GNOME_PROTOCOL_VERSION,
 };
 pub use stub::{data_dir, DefaultPlatform, PlatformError};
 pub use tiff_metadata::{parse_tiff_metadata, TiffMetadata, TiffResolutionUnit};

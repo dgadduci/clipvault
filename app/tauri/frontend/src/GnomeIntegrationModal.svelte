@@ -13,6 +13,7 @@
     gnomeIntegrationStatusCommand,
     gnomeIntegrationUninstallCommand,
   } from "./lib/tauri";
+  import { describeGnomeIntegrationError } from "./lib/gnomeIntegrationError";
   import type {
     GnomeConsentDecision,
     GnomeIntegrationPayload,
@@ -40,7 +41,7 @@
         dispatch("statusChanged", status);
       }
     } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
+      lastError = describeGnomeIntegrationError(err);
     }
   }
 
@@ -56,7 +57,7 @@
       status = { kind: "ready", payload };
       dispatch("statusChanged", status);
     } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
+      lastError = describeGnomeIntegrationError(err);
     } finally {
       busy = false;
     }
@@ -71,7 +72,7 @@
       await gnomeIntegrationInstallCommand();
       await refresh();
     } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
+      lastError = describeGnomeIntegrationError(err);
     } finally {
       busy = false;
     }
@@ -86,7 +87,7 @@
       dispatch("deactivated");
       await refresh();
     } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
+      lastError = describeGnomeIntegrationError(err);
     } finally {
       busy = false;
     }
@@ -100,7 +101,7 @@
       await gnomeIntegrationRetryCommand();
       await refresh();
     } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
+      lastError = describeGnomeIntegrationError(err);
     } finally {
       busy = false;
     }

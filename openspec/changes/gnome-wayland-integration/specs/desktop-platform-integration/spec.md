@@ -69,6 +69,17 @@ El canal entre la extensión y ClipVault SHALL ser local a la sesión del usuari
 - THEN se aplica backoff o coalescencia
 - AND no se genera una tormenta de conexiones ni se bloquea GNOME Shell
 
+#### Scenario: Extensión habilitada conecta en GNOME Shell compatible
+
+- GIVEN GNOME Shell 42 o una versión declarada compatible
+- AND `clipvault@clipvault.app` está instalada y habilitada
+- AND ClipVault está ejecutando su listener local
+- WHEN la extensión inicia la conexión con `Gio.SocketClient.connect_async`
+- THEN crea el cliente con la propiedad GI soportada `type: Gio.SocketType.STREAM`
+- AND invoca la firma GI soportada con `connectable`, `cancellable` y callback
+- AND envía el `hello` solamente después de que `connect_finish` confirma la conexión
+- AND el diagnóstico deja `activation_pending` y llega a `connected` o `identified`
+
 ### Requirement: Persistencia y ciclo de vida
 
 La instalación SHALL ser atómica, reversible y limitada al directorio de extensiones del usuario; MUST NOT sobrescribir extensiones ajenas ni borrar recursos que no pertenezcan a ClipVault.

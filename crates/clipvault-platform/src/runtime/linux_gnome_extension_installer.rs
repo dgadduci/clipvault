@@ -655,12 +655,12 @@ mod tests {
     #[test]
     fn symlink_audit_rejects_escape() {
         let dir = TempDir::new().expect("tempdir");
-        let root = dir.path();
+        let root = dir.path().join("root");
         fs::create_dir_all(root.join("inside")).expect("mkdir");
         let outside = dir.path().join("outside");
         fs::create_dir_all(&outside).expect("mkdir outside");
         std::os::unix::fs::symlink(&outside, root.join("inside/escape")).expect("symlink");
-        let result = audit_no_symlink_escape(root, root);
+        let result = audit_no_symlink_escape(&root, &root);
         assert!(result.is_err(), "symlink escape must be refused");
     }
 

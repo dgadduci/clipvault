@@ -4149,6 +4149,8 @@ mod tests {
             cancel_capture: Arc::new(AtomicBool::new(false)),
             active_app_refresher: None,
             metadata_scheduler: Arc::new(MetadataEnrichmentScheduler::new()),
+            #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+            gnome_integration: None,
         }
     }
 

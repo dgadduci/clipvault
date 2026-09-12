@@ -20,6 +20,8 @@ MiniMax implementa este cambio. Codex mantiene la arquitectura y revisa el resul
 - [x] 2.6 Implementar reconexión controlada con backoff exponencial (250 ms → 4 s) y limpieza al desaparecer ClipVault.
 - [x] 2.7 Endurecer el handshake con una cola de escritura estrictamente serializada: el flag `handshake_complete` permanece `false` hasta que el callback de `write_async` del `hello` confirma los bytes, `_sendQueued` se niega a despachar ningún `app_id` mientras la bandera esté baja y `_checkFocus()` ya no encola hasta que el handshake termina. El handshake y el `app_id` comparten ahora el mismo flag `sending`, así no puede haber dos `write_async` simultáneos sobre la misma `output_stream`. Tests: `process_peer_refuses_app_id_before_hello`, `wire_protocol_accepts_hello_then_app_id`, `wire_protocol_treats_empty_app_id_as_no_active_application`. La verificación manual en Ubuntu GNOME Wayland permanece en la sección 8.
 - [x] 2.8 Limpiar `handshake_complete` en `disable()` y en `_resetSocket()` para que el próximo `enable` arranque de cero sin arrastrar estado del ciclo anterior.
+- [x] 2.9 Corregir la conexión asíncrona de la extensión para invocar `Gio.SocketClient.connect_async(connectable, cancellable, callback)` con la firma GI de tres argumentos que GNOME Shell 42 expone; no pasar prioridad ni placeholders de otra API. Mantener el handshake posterior a `connect_finish` y el backoff no bloqueante. La regresión `gnomeExtensionSocket.test.ts`, `npm run check`, `npm test`, `gjs --check` y la consulta GI de aridad 3 pasan; la prueba de integración visual sigue pendiente en 8.11.
+- [x] 2.10 Crear `Gio.SocketClient` con la propiedad GObject GI `type: Gio.SocketType.STREAM`, no con la inexistente `socket_type`. `gnomeExtensionSocket.test.ts` protege constructor y llamada; `npm run check`, `npm test`, `gjs --check` y la creación directa con `gjs` en GNOME Shell 42 pasan. La prueba manual 8.11 sigue pendiente.
 
 ## 3. IPC y adapter Linux
 
@@ -30,6 +32,7 @@ MiniMax implementa este cambio. Codex mantiene la arquitectura y revisa el resul
 - [x] 3.5 Traducir peer ausente, versión incompatible, error y desconexión a estados tipados (`NoActiveApplication`, `WireError::ProtocolVersion`, `CommunicationError`, `Disconnected`).
 - [x] 3.6 Mantener precedencia GNOME conectado → Wayland público → XWayland → desconocido; el `swap_active_app_probe` queda dentro de `AppContext::cached_active_app` y el watcher nunca construye un segundo probe.
 - [x] 3.7 Marcar `Installation::target_dir` y `Installation::metadata_json` con `#[serde(skip_serializing)]` para que el `InstallResult` que Tauri devuelve nunca incluya la ruta absoluta de instalación ni el cuerpo del `metadata.json`. La vista interna de Rust sigue disponible para tests e instalador.
+- [ ] 3.8 Hacer que `ListenerHandle` sea `Send` por composición (sin `unsafe`) y reutilizar `spawn_listener_thread_with_socket` desde el shell Tauri; cubrir el contrato de compilación `Send` y el shutdown del socket.
 
 ## 4. Instalación y activación consentida
 
@@ -44,6 +47,10 @@ MiniMax implementa este cambio. Codex mantiene la arquitectura y revisa el resul
 - [x] 4.9 No modificar configuraciones del usuario silenciosamente (ningún `dconf`, `gsettings` ni edición de archivos del usuario fuera del directorio de la extensión).
 - [x] 4.10 Corregir el estado inicial y el ciclo de consentimiento: `payload()` ahora deriva `applicable` y la sesión de `gnome_detect_session()` y no exige un live handle; cuando no hay live handle el helper sirve el consentimiento persistido y el estado técnico cacheado, así la primera ejecución en GNOME Wayland muestra el prompt en lugar de colapsar a `not_applicable`. La pre-carga del cache vive en `GnomeIntegrationService::prime_from_database`, llamado una sola vez desde `AppBootstrap::build_default`. Tests: `first_launch_reports_unknown_consent_without_installing`, `non_linux_session_reports_not_applicable`, `install_refuses_with_declined_consent`, `declined_consent_keeps_snapshot_in_not_installed`.
 - [x] 4.11 `reactivate_if_consented` queda como el único punto que crea el live handle tras un reinicio, sólo si el consentimiento persistido es `accepted` Y la extensión está instalada; `unknown` / `declined` / `disabled` no construyen platform service, ni listener, ni socket.
+- [ ] 4.12 Activar `clipvault-app/linux-gnome-shell-integration` en la configuración Linux normal de Tauri, no sólo la feature de `clipvault-platform`. El `DevCommand` y la build empaquetada deben compilar los módulos y comandos GNOME del shell; macOS debe continuar excluyéndolos mediante `cfg(target_os = "linux")`.
+- [x] 4.13 Conectar la tarjeta de diagnóstico GNOME aplicable con el modal de consentimiento: ofrece **Configurar integración GNOME** cuando el snapshot es aplicable y le pasa ese snapshot al modal, sin mutar consentimiento ni instalar la extensión desde el botón de entrada. Verificado con `npm run check`, `npm test` y `npm run build`.
+- [x] 4.14 Renderizar los `CommandError` tipados del flujo GNOME con mensajes seguros y accionables; nunca mostrar `[object Object]` ni detalles locales crudos de I/O. Verificado con `npm run check`, `npm test` (73 pruebas) y `npm run build`.
+- [x] 4.15 Resolver los recursos de extensión desde las dos disposiciones válidas de `resource_dir` de Tauri en Linux (dev con prefijo `resources/` y bundle), sin usar el árbol fuente; cubierta la disposición de desarrollo con `bundled_resource_resolution_supports_tauri_dev_resources_layout`.
 
 ## 5. Integración con captura y metadata
 
@@ -72,10 +79,17 @@ MiniMax implementa este cambio. Codex mantiene la arquitectura y revisa el resul
 - [x] 7.7 Probar ausencia de filtraciones metadata-only: `payload_does_not_leak_absolute_paths`, `status_omits_install_target_dir`, `diagnostics_payload_never_carries_paths_or_secrets`; la nueva serialización omite `target_dir` y `metadata_json` del `Installation` que `InstallResult` propaga.
 - [x] 7.8 Ejecutar regresiones completas de Rust, frontend, imágenes, tags, colecciones, favoritos, búsqueda, Quick Paste y drag-and-drop: 319 core, 163 platform, 117 db, 31 search, 85 app, 77 bin = 792 tests Rust pasando; 1197 tests frontend pasando; ninguna regresión funcional en `pointerDragAndDrop.ts`, `HistoryCardRail` ni en los assets de imágenes.
 - [x] 7.9 Ejecutar `fmt`, `clippy` con `-D warnings`, tests Rust, check/build/tests frontend y `openspec validate --strict`.
+- [ ] 7.10 En Ubuntu, ejecutar el comando normal `cargo tauri dev` y una build Linux de producción; comprobar que ambos seleccionan `clipvault-app/linux-gnome-shell-integration` (la línea `DevCommand` la incluye) y que el status GNOME no devuelve `feature_disabled`. Repetir los checks Rust/Tauri afectados después de la corrección.
+- [ ] 7.11 Ejecutar el check y los tests de `clipvault-app` con `--no-default-features --features clipboard-arboard,hotkey-global,linux-gnome-shell-integration`; esta combinación compila los comandos y el estado Tauri que la build normal Linux selecciona.
 
 ## 8. Verificación manual Ubuntu GNOME Wayland — pendiente del usuario
 
 > MiniMax corre en macOS y NO puede validar el runtime real de Ubuntu GNOME Wayland. Las tareas de esta sección deben quedarse sin marcar; el usuario las ejecuta tras la próxima build de Codex.
+
+> Bloqueo observado el 2026-09-11: el primer runtime Ubuntu GNOME Wayland
+> informó `Integración no disponible (feature_disabled)`. No se puede marcar
+> ninguna tarea de esta sección hasta completar 4.12 y 7.10 con la build
+> normal.
 
 - [ ] 8.1 Verificar primer inicio, consentimiento y ausencia de root.
 - [ ] 8.2 Verificar Terminal GNOME nativa: nombre, icono, blacklist y persistencia.
@@ -87,6 +101,8 @@ MiniMax implementa este cambio. Codex mantiene la arquitectura y revisa el resul
 - [ ] 8.8 Verificar GNOME Shell incompatible o sin integración disponible.
 - [ ] 8.9 Registrar distro, versión GNOME, tipo de sesión, versión ClipVault y resultado sin incluir datos sensibles.
 - [ ] 8.10 Verificar manualmente que la primera ejecución muestra el prompt de consentimiento y que `hello` se publica antes del primer `app_id` (logs `tracing` del listener en `debug`).
+- [ ] 8.11 En GNOME Shell 42.9, con la extensión instalada y `ENABLED` y el listener de ClipVault presente, verificar que tras enfocar Terminal GNOME el diagnóstico pasa de `activation_pending` a `connected` o `identified` y publica el desktop id; registrar sólo versión, estados y resultado.
+- [x] 8.12 Registrar el smoke test reportado en Ubuntu GNOME Wayland: sesión `linux_wayland`, consentimiento `accepted`, estado técnico `identified` e identificador publicado `window:6`. Confirma que la extensión y el listener completan el transporte metadata-only; no completa 8.2, 8.3 ni 8.11 porque el icono Wayland continúa ausente y el identificador observado no es un desktop id.
 
 ## 9. Cierre
 
@@ -102,6 +118,10 @@ MiniMax implementa este cambio. Codex mantiene la arquitectura y revisa el resul
 2. **Handshake y primer `app_id` se emitían concurrentes sobre la misma `output_stream`**: el `_sendQueued()` revisaba sólo el flag `sending` propio, pero la escritura del `hello` no quedaba registrada en él. Un cambio de foco podía programar un `write_async` de `app_id` antes de que el `hello` flusheara, desordenando el protocolo y arriesgando que el listener descartara el `hello`. Corrección: la escritura del handshake ahora marca `sending = true` desde el inicio, `_sendQueued()` se niega a despachar mientras `handshake_complete` siga `false`, y el callback del handshake vacía la cola una vez confirmado. La limpieza en `disable()` y `_resetSocket()` garantiza que el próximo `enable` arranque de cero.
 
 3. **`InstallResult` filtraba `target_dir` y `metadata_json` en JSON**: el struct público del Tauri command serializaba la ruta absoluta de instalación y el cuerpo de `metadata.json`. El frontend nunca los mostraba, pero el contrato privacy-by-default quedaba violado. Corrección: `serde(skip_serializing)` sobre los dos campos.
+
+4. **La extensión habilitada no completaba la conexión en GNOME Shell 42.9**: durante la verificación manual del 2026-09-12, el diagnóstico quedó en `activation_pending` aunque `gnome-extensions info clipvault@clipvault.app` informó `ENABLED` y el socket del listener existía. `Gio.SocketClient.connect_async` expone una firma de tres argumentos en ese runtime, mientras `extension.js` le pasaba cinco (`connectable`, `cancellable`, prioridad, placeholder y callback). La llamada lanza antes del handshake, la excepción se absorbe y el backoff reintenta sin peer. La tarea 2.9 reemplaza la invocación por la firma GI correcta y añade una regresión; 8.11 conserva la prueba manual que reprodujo el defecto.
+
+5. **El constructor de `Gio.SocketClient` también usaba una propiedad GObject inexistente en GNOME Shell 42.9**: tras reinstalar la corrección 2.9, la copia instalada ya tenía la firma correcta pero el diagnóstico continuó en `activation_pending`. La consulta directa con `gjs` devolvió `Error: No property socket_type on GSocketClient`; la excepción sucede antes de `connect_async` y el `catch` la convierte en un reintento silencioso. La tarea 2.10 reemplaza `socket_type` por la propiedad GI `type`, protege ambas formas y mantiene 8.11 pendiente hasta obtener un `hello` real.
 
 ## Verificación ejecutada en este pase
 
@@ -125,9 +145,24 @@ MiniMax implementa este cambio. Codex mantiene la arquitectura y revisa el resul
 | `openspec validate gnome-wayland-integration --strict --type change` | OK ("Change 'gnome-wayland-integration' is valid") |
 | `openspec validate --all --strict` | 27 passed, 0 failed |
 
+## Revalidación en este workspace Linux
+
+| Check | Resultado |
+|---|---|
+| `cargo fmt --all -- --check` | OK |
+| `openspec validate gnome-wayland-integration --strict --type change` | OK |
+| `npm run check` | OK (0 errores, 15 warnings existentes) |
+| `npm test` | OK (74 archivos de prueba, 0 fallos; incluye GNOME y drag-and-drop) |
+| `npm run build` | OK (15 warnings existentes) |
+| `cargo test -p clipvault-platform --lib` | No apto como gate en este sandbox: 188 passed y 23 fallos concentrados en `linux_app_metadata` |
+| Tests GNOME de `clipvault-platform` | 14 passed y 6 fallos porque el sandbox devuelve `EPERM` al crear/bindear sockets Unix |
+| Tests `clipvault-app` con la combinación Linux GNOME | Los binarios de test compilan, pero lib (82/96) y bin (74/88) fallan 14 casos de bootstrap existentes con capturas `Ignored` y un probe Wayland `Unavailable`; 7.11 permanece pendiente |
+| `cargo clippy -p clipvault-app --lib --no-default-features --features clipboard-arboard,hotkey-global,linux-gnome-shell-integration -- -D warnings` | Bloqueado por `clippy::overly_complex_bool_expr` ya presente en `crates/clipvault-core/src/content_type.rs:784` |
+
 ## Limitaciones de este pase
 
 - `clipvault-app` no se compila para `x86_64-unknown-linux-gnu` desde macOS porque Tauri requiere `pkg-config` con `gdk-pixbuf`, `cairo`, `pango`, `atk` y `webkit2gtk-4.1` enlazados contra un sysroot Linux. Los crates `clipvault-platform`, `clipvault-core` y `clipvault-search` se compilaron limpiamente para `x86_64-unknown-linux-gnu` con las features reales.
 - Los tests de runtime Linux (socket, restart, privacidad, precedence del probe) sólo se ejecutan en un binario Linux enlazado. Las pruebas añadidas están compilando correctamente pero requieren un runner Linux para ejercitarse.
-- La sección 8 sigue pendiente de verificación manual en Ubuntu GNOME Wayland. MiniMax no marcó ninguna tarea de esa sección.
+- El smoke test reportado de Ubuntu GNOME Wayland confirma `accepted` → `identified` y el identificador opaco `window:6`, por lo que el transporte local está operativo. Las verificaciones de nombre, icono, blacklist, persistencia y el desktop id real siguen pendientes en la sección 8.
+- La ausencia de icono de aplicación en cards Wayland queda deliberadamente fuera de este cambio: se tratará como una propuesta OpenSpec posterior para resolver y presentar iconos a partir de metadata ya disponible, sin ampliar el canal de la extensión.
 - El binario final de Tauri Linux y la prueba real de GNOME Wayland siguen requiriendo la máquina Ubuntu del usuario; Codex cierra el ciclo con commit + push y el usuario ejecuta el smoke test.

@@ -23,6 +23,7 @@
     refreshCapabilitiesCommand,
   } from "./lib/tauri";
   import { shouldEnablePasteButton } from "./lib/guidance";
+  import { describeGnomeIntegrationError } from "./lib/gnomeIntegrationError";
   import { createEventDispatcher } from "svelte";
   import type {
     ActiveApplicationResponse,
@@ -53,6 +54,7 @@
     entriesChanged: EntryRecord[];
     pasteFailed: PasteResponse;
     gnomeStatusChanged: GnomeIntegrationStatusResponse;
+    configureGnome: GnomeIntegrationStatusResponse;
   }>();
 
   async function refreshDiagnostics(): Promise<void> {
@@ -79,10 +81,20 @@
       gnomeStatus = await gnomeIntegrationStatusCommand();
       dispatch("gnomeStatusChanged", gnomeStatus);
     } catch (err) {
-      gnomeError = err instanceof Error ? err.message : String(err);
+      gnomeError = describeGnomeIntegrationError(err);
     } finally {
       gnomeBusy = false;
     }
+  }
+
+  function configureGnome(): void {
+    if (gnomeStatus?.kind !== "ready" || !gnomeStatus.payload.applicable) {
+      return;
+    }
+    // Opening the configuration surface is deliberately separate
+    // from querying diagnostics: this button never persists consent
+    // or installs the extension by itself.
+    dispatch("configureGnome", gnomeStatus);
   }
 
   async function refreshCapabilities(): Promise<void> {
@@ -300,6 +312,16 @@
       >
         {gnomeBusy ? "Actualizando…" : "Refrescar integración"}
       </button>
+      {#if gnomeStatus?.kind === "ready" && gnomeStatus.payload.applicable}
+        <button
+          type="button"
+          on:click={configureGnome}
+          disabled={gnomeBusy}
+          data-testid="gnome-configure"
+        >
+          Configurar integración GNOME
+        </button>
+      {/if}
     </div>
   </article>
 </section>

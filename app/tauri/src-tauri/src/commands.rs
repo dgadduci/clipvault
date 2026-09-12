@@ -1750,7 +1750,7 @@ mod gnome_commands {
         }
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, serde::Deserialize)]
     pub struct GnomeConsentUpdate {
         pub decision: String,
     }

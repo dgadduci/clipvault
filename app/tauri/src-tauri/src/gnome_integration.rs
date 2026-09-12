@@ -12,14 +12,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clipvault_core::{
-    GnomeConsentDecision, GnomeIntegrationService as CoreIntegrationService,
-    GnomeIntegrationSnapshot, GnomeTechnicalState,
+    GnomeConsentDecision, GnomeIntegrationService as CoreIntegrationService, GnomeTechnicalState,
 };
 use clipvault_platform::{
-    gnome_detect_session, GnomeConsentDecision as PlatformConsentDecision,
-    GnomeIntegrationService as PlatformIntegrationService, GnomeShellListener, ListenerHandle,
-    SharedGnomeSnapshot, UnixListenerTransport, GNOME_BACKEND_NAME, GNOME_EXTENSION_UUID,
-    GNOME_PROTOCOL_VERSION,
+    spawn_listener_thread_with_socket, GnomeConsentDecision as PlatformConsentDecision,
+    GnomeIntegrationService as PlatformIntegrationService, ListenerHandle, SharedGnomeSnapshot,
+    UnixListenerTransport, GNOME_BACKEND_NAME, GNOME_EXTENSION_UUID, GNOME_PROTOCOL_VERSION,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -63,15 +61,6 @@ impl GnomeIntegrationState {
         }
     }
 
-    /// Return the live handle when the integration is active.
-    pub fn live(&self) -> Option<LiveGnomeHandleRef> {
-        self.live.lock().as_ref().map(|handle| LiveGnomeHandleRef {
-            platform_service: handle.platform_service.clone(),
-            probe: handle.probe.clone(),
-            snapshot: handle.snapshot.clone(),
-        })
-    }
-
     /// Persist a consent decision through the core service. The helper
     /// also forwards the value to the platform service when a live
     /// handle exists so the listener observes the new decision.
@@ -97,22 +86,11 @@ impl GnomeIntegrationState {
         self.core_service.save_technical_state(context, state)
     }
 
-    pub fn snapshot(
-        &self,
-        context: &clipvault_core::AppContext,
-    ) -> Result<GnomeIntegrationSnapshot, clipvault_core::GnomeIntegrationError> {
-        self.core_service.snapshot(context)
-    }
-
     pub fn load_consent(
         &self,
         context: &clipvault_core::AppContext,
     ) -> Result<GnomeConsentDecision, clipvault_core::GnomeIntegrationError> {
         self.core_service.load_consent(context)
-    }
-
-    pub fn core_service(&self) -> &Arc<CoreIntegrationService> {
-        &self.core_service
     }
 
     /// Build (or fetch) the live platform service. Builds a fresh one
@@ -127,7 +105,7 @@ impl GnomeIntegrationState {
         }
         let service = Arc::new(PlatformIntegrationService::new(convert_consent(consent)));
         service.refresh_session_state();
-        let snapshot = service.snapshot();
+        let snapshot = service.snapshot().clone();
         let probe = Arc::new(clipvault_platform::GnomeShellActiveApplication::new(
             snapshot.clone(),
         ));
@@ -219,26 +197,10 @@ impl GnomeIntegrationState {
                 return Err(format!("bind: {error}"));
             }
         };
-        let listener = GnomeShellListener::new(handle.snapshot.clone(), transport);
-        let alive = listener.alive_flag();
-        let socket_path_for_handle = socket_path.clone();
-        let join = std::thread::Builder::new()
-            .name("clipvault-gnome-listener".into())
-            .spawn(move || {
-                while alive.load(std::sync::atomic::Ordering::Acquire) {
-                    if let Err(_error) = listener.handle_one() {
-                        if !alive.load(std::sync::atomic::Ordering::Acquire) {
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                }
-            })
-            .ok();
-        handle.listener = Some(ListenerHandle::from_thread_with_socket(
-            alive,
-            join,
-            socket_path_for_handle,
+        handle.listener = Some(spawn_listener_thread_with_socket(
+            handle.snapshot.clone(),
+            transport,
+            socket_path,
         ));
         Ok(())
     }
@@ -287,14 +249,8 @@ impl GnomeIntegrationState {
         // "connected" status. The live handle is created on demand
         // the first time the user accepts the integration; the
         // listener and socket stay unbound until then.
-        let stored_consent = self
-            .core_service
-            .load_consent_from_cache()
-            .unwrap_or(GnomeConsentDecision::Unknown);
-        let technical_state = self
-            .core_service
-            .load_technical_state_from_cache()
-            .unwrap_or(GnomeTechnicalState::NotInstalled);
+        let stored_consent = self.core_service.load_consent_from_cache();
+        let technical_state = self.core_service.load_technical_state_from_cache();
         GnomeIntegrationPayload::from_parts(
             session,
             desktop,
@@ -350,22 +306,6 @@ impl GnomeIntegrationState {
         self.record_technical_state(context, technical_state)
             .map_err(|error| InstallError::Consent(error.to_string()))?;
         Ok(())
-    }
-}
-
-/// Lightweight handle the Tauri commands consume when they need a
-/// reference into the live integration state.
-pub struct LiveGnomeHandleRef {
-    pub platform_service: Arc<PlatformIntegrationService>,
-    pub probe: Arc<clipvault_platform::GnomeShellActiveApplication>,
-    pub snapshot: SharedGnomeSnapshot,
-}
-
-impl Drop for LiveGnomeHandleRef {
-    fn drop(&mut self) {
-        // The owning Arc on the platform service keeps the listener
-        // alive; dropping the reference does not stop the thread. The
-        // shell handles teardown through `stop_listener`.
     }
 }
 
@@ -483,15 +423,25 @@ impl std::error::Error for BundledError {}
 pub fn bundled_resource_path(handle: &tauri::AppHandle, resource: &str) -> Option<PathBuf> {
     let resolver = handle.path();
     let resource_dir = resolver.resource_dir().ok()?;
-    let candidate = resource_dir.join(BUNDLE_DIR).join(resource);
-    if candidate.exists() {
-        return Some(candidate);
-    }
-    let fallback = resource_dir.join(resource);
-    if fallback.exists() {
-        return Some(fallback);
-    }
-    None
+    bundled_resource_path_from(&resource_dir, resource)
+}
+
+/// Find a resource inside one of Tauri's supported on-disk layouts.
+///
+/// `cargo tauri dev` copies a configured path such as
+/// `resources/gnome-extension/metadata.json` beneath
+/// `<resource_dir>/resources/`. Linux bundles can expose configured
+/// resources directly below `<resource_dir>`. Neither layout may fall
+/// back to the source checkout: release binaries must only execute the
+/// bytes that were embedded in their own resource directory.
+fn bundled_resource_path_from(resource_dir: &std::path::Path, resource: &str) -> Option<PathBuf> {
+    [
+        resource_dir.join(BUNDLE_DIR).join(resource),
+        resource_dir.join(resource),
+        resource_dir.join("resources").join(resource),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
 }
 
 /// Read the bundled extension resources from disk.
@@ -589,21 +539,10 @@ fn convert_technical_state_from_platform(
     }
 }
 
-/// Convenience the bootstrap calls once the `AppHandle` is available
-/// so subsequent Tauri commands can resolve the bundled extension.
-pub fn install_extension_into_user_dir(
-    context: &clipvault_core::AppContext,
-    state: &GnomeIntegrationState,
-    handle: &tauri::AppHandle,
-) -> Result<InstallResult, InstallError> {
-    let bundled = read_bundled_extension(handle)
-        .map_err(|error| InstallError::Installer(error.to_string()))?;
-    state.install(context, &bundled)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn not_applicable_payload_carries_protocol_constants() {
@@ -643,6 +582,20 @@ mod tests {
         let bundle = BundledBytes::new("meta".to_string(), "code".to_string());
         assert_eq!(bundle.metadata_json, "meta");
         assert_eq!(bundle.extension_js, "code");
+    }
+
+    #[test]
+    fn bundled_resource_resolution_supports_tauri_dev_resources_layout() {
+        let temp = TempDir::new().expect("tempdir");
+        let resource = temp.path().join("resources").join(BUNDLED_METADATA_PATH);
+        std::fs::create_dir_all(resource.parent().expect("resource parent"))
+            .expect("create resource parent");
+        std::fs::write(&resource, "{}\n").expect("write bundled metadata");
+
+        assert_eq!(
+            bundled_resource_path_from(temp.path(), BUNDLED_METADATA_PATH),
+            Some(resource)
+        );
     }
 
     #[test]
