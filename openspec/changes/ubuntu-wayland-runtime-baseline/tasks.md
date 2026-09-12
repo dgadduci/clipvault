@@ -52,5 +52,8 @@
   Node 20.
 - [x] 5.4 Verificar sin regresiones de imágenes, SQLite, organización, Quick
   Paste, búsqueda y drag and drop.
-- [ ] 5.5 Validar OpenSpec, revisar `git diff --check` y no archivar/sincronizar
+- [x] 5.5 Validar OpenSpec, revisar `git diff --check` y no archivar/sincronizar
   hasta que Ubuntu confirme una ventana visible.
+  - `openspec validate ubuntu-wayland-runtime-baseline --strict --type change`
+    pasó con OpenSpec 1.13.0; la prueba manual Wayland ya había confirmado una
+    ventana visible antes de sincronizar.
