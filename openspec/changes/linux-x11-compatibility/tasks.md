@@ -60,9 +60,11 @@
   --no-default-features --features clipboard-arboard,hotkey-global`,
   `cargo test --workspace`. No se marca como completada hasta correr
   realmente en el host Ubuntu.
-- [ ] 5.6 Pendiente en Ubuntu X11 real: pegar en la app activa, leer
-  `WM_CLASS` de la app activa, detectar cambios de foco. No se marca
-  como completada hasta ejecutar la sesión real.
+- [x] 5.6 Validado en Ubuntu X11 real: se leyó `WM_CLASS` de la ventana
+  activa, se detectaron cambios de foco y el pegado sintético en la app
+  activa fue confirmado manualmente el 2026-09-11. La shell nueva arrancó
+  con `display=x11` y las capacidades de clipboard, hotkey, pegado sintético
+  y aplicación activa habilitadas.
 
 ## 6. Regresión cruzada: `MainQueueActiveAppRefresher` en Ubuntu
 
