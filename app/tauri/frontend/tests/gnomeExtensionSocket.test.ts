@@ -32,6 +32,16 @@ const extensionSource = readFileSync(
   "utf8",
 );
 
+test("the GNOME extension exports the legacy lifecycle entry points", () => {
+  // GNOME Shell 42 loads legacy extensions through `init()` before it
+  // evaluates `enable()`. Omitting it can leave an extension reported as
+  // enabled without ever starting its local bridge. It must remain a no-op:
+  // consent-gated connection setup belongs exclusively to `enable()`.
+  assert.match(extensionSource, /function init\(\)\s*\{\s*\}/);
+  assert.match(extensionSource, /function enable\(\)/);
+  assert.match(extensionSource, /function disable\(\)/);
+});
+
 test("the GNOME extension uses GNOME 42's GSocketClient constructor and async connect signatures", () => {
   assert.match(
     extensionSource,

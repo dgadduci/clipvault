@@ -29,11 +29,16 @@ use crate::commands::run_retention;
 use crate::state::SharedState;
 use crate::tray::{menu_event_to_action, TauriTrayController};
 
+const WINDOW_LIFECYCLE_DEBUG_ENV: &str = "CLIPVAULT_DEBUG_WINDOW_LIFECYCLE";
+
 fn main() {
     init_tracing();
 
     tauri::Builder::default()
         .setup(|app| {
+            trace_main_window_lifecycle_for_app(app.handle(), "configured", None);
+            trace_main_window_lifecycle_for_app(app.handle(), "setup_entered", None);
+
             // Resize the main window to the available work area before
             // anything else so the first paint already shows a desktop
             // that fills the monitor horizontally. The operation only
@@ -43,10 +48,15 @@ fn main() {
             // back to the conf-file defaults declared in
             // `tauri.conf.json` so the setup never blocks startup.
             resize_main_window_to_monitor(app);
+            trace_main_window_lifecycle_for_app(app.handle(), "layout_completed", None);
 
             let state = match build_state() {
-                Ok(state) => state,
+                Ok(state) => {
+                    trace_main_window_lifecycle_for_app(app.handle(), "state_built", None);
+                    state
+                }
                 Err(error) => {
+                    trace_main_window_lifecycle_for_app(app.handle(), "state_build_failed", None);
                     error!(error = %error, "ClipVault bootstrap failed");
                     return Err(error);
                 }
@@ -70,15 +80,18 @@ fn main() {
                     warn!(error = %error, "tray installation failed; running without tray");
                 }
             }
+            trace_main_window_lifecycle_for_app(app.handle(), "tray_configured", None);
 
             // Register the default global hotkey.
             let outcome = register_default_hotkey(&state, app.handle());
             info!(kind = outcome.kind(), "default hotkey outcome");
+            trace_main_window_lifecycle_for_app(app.handle(), "hotkey_configured", None);
 
             // Apply the configured retention policy as part of the
             // startup pass. Failures are logged but never block the
             // first paint of the UI.
             run_retention(&state.context);
+            trace_main_window_lifecycle_for_app(app.handle(), "retention_completed", None);
 
             // Warm the active-app cache synchronously on the main
             // thread before the background loop starts so the very
@@ -88,6 +101,7 @@ fn main() {
             // Tauri-command path) and goes straight to the inner
             // probe, so this warm-up is a single, fast call.
             let _ = refresh_active_app_cached(&state.context, Some(app.handle()));
+            trace_main_window_lifecycle_for_app(app.handle(), "active_app_warmed", None);
 
             // Register the managed state BEFORE spinning up the
             // capture loop. The loop's first iteration runs in
@@ -100,6 +114,7 @@ fn main() {
             // lives for the application's lifetime through this
             // `SharedState` — the setup callback MUST NOT touch it.
             app.manage(SharedState::new(state));
+            trace_main_window_lifecycle_for_app(app.handle(), "state_managed", None);
 
             // Schedule the main-thread refresh of the active-app
             // cache and start polling the clipboard from a background
@@ -111,9 +126,26 @@ fn main() {
             } else {
                 warn!("shared state not available; capture loop not installed");
             }
+            trace_main_window_lifecycle_for_app(app.handle(), "capture_loop_configured", None);
+
+            trace_main_window_lifecycle_for_app(app.handle(), "setup_completed", None);
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == "main" {
+                let stage = match event {
+                    WindowEvent::Focused(_) => Some("focused"),
+                    WindowEvent::Resized(_) => Some("resized"),
+                    WindowEvent::Moved(_) => Some("moved"),
+                    WindowEvent::CloseRequested { .. } => Some("close_requested"),
+                    WindowEvent::Destroyed => Some("destroyed"),
+                    _ => None,
+                };
+                if let Some(stage) = stage {
+                    trace_main_window_event_lifecycle(window, stage);
+                }
+            }
+
             if let WindowEvent::CloseRequested { api, .. } = event {
                 // Hide instead of close: the application keeps running
                 // from the tray. Quit is initiated through the tray.
@@ -156,6 +188,10 @@ fn main() {
             commands::clipvault_ignored_app_pick_and_add,
             commands::clipvault_ignored_apps_list_with_metadata,
             commands::clipvault_ignored_app_icon,
+            #[cfg(target_os = "linux")]
+            commands::clipvault_ignored_app_linux_catalog,
+            #[cfg(target_os = "linux")]
+            commands::clipvault_ignored_app_linux_add,
             commands::clipvault_set_entry_title,
             commands::clipvault_source_app_icon,
             commands::clipvault_clipboard_asset,
@@ -188,6 +224,10 @@ fn main() {
 }
 
 fn handle_run_event<R: tauri::Runtime>(app: &AppHandle<R>, event: RunEvent) {
+    if matches!(event, RunEvent::Ready) {
+        trace_main_window_lifecycle_for_app(app, "runtime_ready", None);
+    }
+
     if let RunEvent::ExitRequested { .. } = event {
         cleanup(app);
         info!("ClipVault exiting cleanly");
@@ -250,6 +290,86 @@ fn init_tracing() {
         .try_init();
 }
 
+fn window_lifecycle_debug_enabled() -> bool {
+    matches!(
+        std::env::var(WINDOW_LIFECYCLE_DEBUG_ENV).as_deref(),
+        Ok("1")
+    )
+}
+
+fn normalize_window_visibility(result: Result<bool, ()>) -> &'static str {
+    match result {
+        Ok(true) => "visible",
+        Ok(false) => "hidden",
+        Err(()) => "query_failed",
+    }
+}
+
+fn trace_window_lifecycle(
+    stage: &'static str,
+    main_present: bool,
+    monitor_available: Option<bool>,
+    visible: &'static str,
+) {
+    info!(
+        event = "clipvault_window_lifecycle",
+        stage,
+        main_present,
+        ?monitor_available,
+        visible,
+        "main window lifecycle"
+    );
+}
+
+fn trace_main_window_lifecycle<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    stage: &'static str,
+    monitor_available: Option<bool>,
+) {
+    if !window_lifecycle_debug_enabled() {
+        return;
+    }
+
+    trace_window_lifecycle(
+        stage,
+        true,
+        monitor_available,
+        normalize_window_visibility(window.is_visible().map_err(|_| ())),
+    );
+}
+
+fn trace_main_window_event_lifecycle<R: tauri::Runtime>(
+    window: &tauri::Window<R>,
+    stage: &'static str,
+) {
+    if !window_lifecycle_debug_enabled() {
+        return;
+    }
+
+    trace_window_lifecycle(
+        stage,
+        true,
+        None,
+        normalize_window_visibility(window.is_visible().map_err(|_| ())),
+    );
+}
+
+fn trace_main_window_lifecycle_for_app<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    stage: &'static str,
+    monitor_available: Option<bool>,
+) {
+    if !window_lifecycle_debug_enabled() {
+        return;
+    }
+
+    if let Some(window) = app.get_webview_window("main") {
+        trace_main_window_lifecycle(&window, stage, monitor_available);
+    } else {
+        trace_window_lifecycle(stage, false, monitor_available, "not_applicable");
+    }
+}
+
 #[allow(dead_code)]
 fn _ensure_arc(_: &Arc<()>) {}
 
@@ -277,17 +397,23 @@ fn resize_main_window_to_monitor(app: &mut tauri::App) {
     use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 
     let Some(window) = app.get_webview_window("main") else {
+        trace_main_window_lifecycle_for_app(app.handle(), "monitor_available", None);
         warn!("main window not present at setup; skipping initial layout");
         return;
     };
 
     let monitor = match window.primary_monitor() {
-        Ok(Some(monitor)) => monitor,
+        Ok(Some(monitor)) => {
+            trace_main_window_lifecycle(&window, "monitor_available", Some(true));
+            monitor
+        }
         Ok(None) => {
+            trace_main_window_lifecycle(&window, "monitor_available", Some(false));
             warn!("no primary monitor reported; keeping conf defaults");
             return;
         }
         Err(error) => {
+            trace_main_window_lifecycle(&window, "monitor_available", None);
             warn!(error = %error, "primary monitor query failed; keeping conf defaults");
             return;
         }
@@ -333,4 +459,16 @@ fn resize_main_window_to_monitor(app: &mut tauri::App) {
         scale = layout.scale_factor,
         "main window positioned at top center of the primary monitor"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_window_visibility;
+
+    #[test]
+    fn window_lifecycle_visibility_is_normalized_without_error_details() {
+        assert_eq!(normalize_window_visibility(Ok(true)), "visible");
+        assert_eq!(normalize_window_visibility(Ok(false)), "hidden");
+        assert_eq!(normalize_window_visibility(Err(())), "query_failed");
+    }
 }

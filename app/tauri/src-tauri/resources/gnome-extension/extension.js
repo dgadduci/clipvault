@@ -49,6 +49,12 @@ const AppState = {
   destroyed: false,
 };
 
+// GNOME Shell 42 loads legacy extensions through this lifecycle entry point.
+// There is deliberately no work here: opening the local socket or publishing
+// focus before the user-enabled lifecycle reaches `enable()` would violate the
+// consent boundary and could leave a stale connection across reloads.
+function init() {}
+
 function _log(...args) {
     return;
 }

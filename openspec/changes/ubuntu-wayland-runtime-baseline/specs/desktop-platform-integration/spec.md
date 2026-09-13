@@ -31,6 +31,15 @@ la primera transición fallida.
 - AND no incluye clipboard, títulos, PID, rutas, hashes, assets,
   identificadores externos de ventana ni variables de entorno
 
+#### Scenario: El monitor primario no determina la causa
+
+- GIVEN una sesión Wayland donde `primary_monitor()` devuelve ausencia durante
+  `setup`
+- WHEN el diagnóstico de ventana está habilitado
+- THEN registra `monitor_available = false` como estado normalizado
+- AND continúa registrando las etapas de creación y runtime de `main`
+- AND no infiere que el toplevel sea invisible únicamente por esa ausencia
+
 ### Requirement: Corrección guiada por evidencia
 
 El shell MUST NOT introducir solicitudes de ventana antes del mapeo sin que la
@@ -57,3 +66,21 @@ drag and drop.
 - WHEN se revisa el diff
 - THEN no cambia SQLite, `EntryRecord`, assets de clipboard ni el controlador
   de drag and drop
+
+### Requirement: El handshake Wayland no bloquea el setup del shell
+
+El adaptador nativo Wayland MUST tener un plazo acotado durante su handshake
+inicial. El vencimiento MUST completar como no disponible y MUST permitir que
+el `setup` de Tauri continúe; no debe impedir que la ventana `main` llegue al
+runtime.
+
+#### Scenario: El compositor acepta el socket pero no responde el registro
+
+- GIVEN una sesión Wayland donde el socket del compositor acepta la conexión
+  pero no responde el intercambio de registro inicial
+- WHEN `build_state` construye el adaptador de aplicación activa
+- THEN el handshake termina como no disponible dentro de su plazo acotado
+- AND el hilo de I/O puede finalizar antes de que el shell haga `join`
+- AND Tauri continúa hasta `setup_completed` y `runtime_ready`
+- AND el shell no solicita foco, posición, tamaño ni visibilidad como
+  recuperación especulativa

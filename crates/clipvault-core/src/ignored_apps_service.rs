@@ -75,6 +75,76 @@ impl IgnoredAppsService {
             .collect())
     }
 
+    /// Add a blacklisted application entry from a Linux catalog
+    /// selection. The Linux picker catalog returns the deterministic
+    /// identifier the active-app adapter publishes (StartupWMClass,
+    /// X-GNOME-WMClass, filename stem or Desktop File ID), the
+    /// user-visible display name and an optional icon reference. The
+    /// service normalises the identifier, persists the row
+    /// idempotently and updates the privacy gate so a capture from
+    /// the application is rejected on the next loop tick.
+    ///
+    /// This path mirrors [`Self::pick_and_add`] but skips the
+    /// `ApplicationPicker` invocation because the catalog already
+    /// produced the deterministic identifier the active-app adapter
+    /// publishes. The caller (a Tauri command) MUST guarantee the
+    /// identifier comes from a deterministic Linux picker source —
+    /// the service never re-validates the mapping.
+    pub fn add_with_metadata(
+        &self,
+        context: &AppContext,
+        identifier: &str,
+        display_name: Option<&str>,
+        icon_ref: Option<&str>,
+    ) -> Result<PickAndAddOutcome, IgnoredAppsServiceError> {
+        let normalized = normalize_identifier(identifier);
+        if normalized.is_empty() {
+            return Err(IgnoredAppError::MissingIdentifier.into());
+        }
+
+        let was_present = {
+            let mut db = context.database().lock();
+            let conn = db.connection_mut();
+            let repo = IgnoredAppRepository::new(conn);
+            repo.get(&normalized)?.is_some()
+        };
+
+        let now = self.clock.now();
+        let row = {
+            let mut db = context.database().lock();
+            let conn = db.connection_mut();
+            let mut repo = IgnoredAppRepository::new(conn);
+            repo.upsert(&normalized, display_name, icon_ref, now)?
+        };
+
+        let ignored: Vec<String> = self
+            .list(context)?
+            .into_iter()
+            .map(|entry| normalize_identifier(&entry.id))
+            .filter(|id| !id.is_empty())
+            .collect();
+        self.privacy_gate.update_ignored(ignored);
+
+        if was_present {
+            warn!(
+                identifier = %row.id,
+                "linux catalog produced an already-present identifier; refreshed metadata without duplicating"
+            );
+        }
+
+        let entry = IgnoredAppEntry {
+            id: row.id,
+            display_name: row.display_name,
+            icon_ref: row.icon_ref,
+            created_at: row.created_at,
+        };
+        Ok(if was_present {
+            PickAndAddOutcome::Updated(entry)
+        } else {
+            PickAndAddOutcome::Added(entry)
+        })
+    }
+
     /// Drive the picker, normalise the identifier, persist the row
     /// idempotently and update the privacy gate. The icon failure
     /// is independent: when the adapter returns `icon_ref = None`
@@ -470,5 +540,121 @@ mod tests {
 
         let picker = MacOsApplicationPicker::new(PathBuf::from("/tmp"));
         assert_eq!(picker.name(), "macos_app_picker");
+    }
+
+    // -----------------------------------------------------------------
+    // `add_with_metadata` — Linux catalog flow.
+    //
+    // The Linux picker does not use `ApplicationPicker::pick` because
+    // there is no deterministic Linux equivalent of `NSOpenPanel`
+    // that can list `.desktop` files. Instead, the catalog returns a
+    // list of candidates with deterministic identifiers and the
+    // service persists the chosen row directly. The path mirrors
+    // `pick_and_add` but skips the picker invocation; the catalog is
+    // responsible for proving the identifier maps to the active-app
+    // adapter's published value.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn add_with_metadata_persists_row_and_refreshes_gate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let context = build_context(&dir);
+        let gate = PrivacyGate::from_probe(fixed_probe(), vec![]);
+        let service = IgnoredAppsService::new(context.clock(), gate.clone());
+
+        let outcome = service
+            .add_with_metadata(
+                &context,
+                "firefox",
+                Some("Firefox"),
+                Some("application-icons/firefox.png"),
+            )
+            .expect("add");
+        match outcome {
+            PickAndAddOutcome::Added(entry) => {
+                assert_eq!(entry.id, "firefox");
+                assert_eq!(entry.display_name.as_deref(), Some("Firefox"));
+                assert_eq!(
+                    entry.icon_ref.as_deref(),
+                    Some("application-icons/firefox.png")
+                );
+            }
+            other => panic!("expected Added, got {other:?}"),
+        }
+        // The privacy gate MUST observe the new identifier so a
+        // capture loop tick immediately rejects content from Firefox.
+        assert!(matches!(
+            gate.evaluate(Some("firefox")),
+            crate::CaptureDecision::Discard { .. }
+        ));
+    }
+
+    #[test]
+    fn add_with_metadata_normalises_identifier_to_lowercase() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let context = build_context(&dir);
+        let gate = PrivacyGate::from_probe(fixed_probe(), vec![]);
+        let service = IgnoredAppsService::new(context.clock(), gate);
+
+        let outcome = service
+            .add_with_metadata(&context, "  Org.Mozilla.Firefox  ", Some("Firefox"), None)
+            .expect("add");
+        match outcome {
+            PickAndAddOutcome::Added(entry) => {
+                assert_eq!(entry.id, "org.mozilla.firefox");
+            }
+            other => panic!("expected Added, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_with_metadata_is_idempotent() {
+        // Selecting the same application twice MUST update the
+        // existing row, never create a duplicate, and never
+        // overwrite previously stored metadata with `None`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let context = build_context(&dir);
+        let gate = PrivacyGate::from_probe(fixed_probe(), vec![]);
+        let service = IgnoredAppsService::new(context.clock(), gate);
+
+        let first = service
+            .add_with_metadata(
+                &context,
+                "firefox",
+                Some("Firefox"),
+                Some("application-icons/firefox.png"),
+            )
+            .expect("first");
+        let second = service
+            .add_with_metadata(&context, "firefox", Some("Firefox"), None)
+            .expect("second");
+        assert!(matches!(first, PickAndAddOutcome::Added(_)));
+        assert!(matches!(second, PickAndAddOutcome::Updated(_)));
+        let entries = service.list(&context).expect("list");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].icon_ref.as_deref(),
+            Some("application-icons/firefox.png"),
+            "icon must persist across a metadata refresh"
+        );
+    }
+
+    #[test]
+    fn add_with_metadata_rejects_blank_identifier() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let context = build_context(&dir);
+        let gate = PrivacyGate::from_probe(fixed_probe(), vec![]);
+        let service = IgnoredAppsService::new(context.clock(), gate);
+
+        let err = service
+            .add_with_metadata(&context, "   ", Some("Ghost"), None)
+            .expect_err("blank identifier must be rejected");
+        match err {
+            IgnoredAppsServiceError::Domain(IgnoredAppError::MissingIdentifier) => {}
+            other => panic!("expected MissingIdentifier, got {other:?}"),
+        }
+        // The blacklist MUST stay empty on a rejected insert.
+        let entries = service.list(&context).expect("list");
+        assert!(entries.is_empty());
     }
 }

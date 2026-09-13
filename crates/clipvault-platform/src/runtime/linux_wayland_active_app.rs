@@ -108,11 +108,20 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
 use tracing::warn;
 
 use crate::active_app::{ActiveAppError, ActiveApplication, ActiveApplicationProbe, ProbeStage};
+
+/// The native probe runs its registry handshake while the Tauri shell is still
+/// constructing the main window. A compositor that accepts the socket but
+/// never answers the registry request must not leave that startup path waiting
+/// on a blocking `read_exact` forever. The timeout exists only until a
+/// supported protocol is bound; the long-lived dispatch loop clears it.
+const HANDSHAKE_IO_TIMEOUT: Duration = Duration::from_millis(250);
+const HANDSHAKE_DEADLINE: Duration = Duration::from_millis(500);
 
 // =====================================================================
 // Backend names
@@ -1245,7 +1254,6 @@ fn wait_for_handshake(
     rx: &std::sync::mpsc::Receiver<StartupReport>,
     _alive: &Arc<AtomicBool>,
 ) -> StartupReport {
-    const HANDSHAKE_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
     let start = std::time::Instant::now();
     loop {
         match rx.recv_timeout(std::time::Duration::from_millis(50)) {
@@ -1361,6 +1369,19 @@ fn io_thread_main<T: Transport>(
     let outcome = drive_protocol(&mut connection, &snapshot, &mut state, &alive);
     match outcome {
         DriveOutcome::Operational { backend } => {
+            // The startup read deadline prevents a stalled compositor from
+            // freezing Tauri's setup through `IoThread::shutdown().join()`.
+            // Once the registry has bound a supported protocol, restore the
+            // normal blocking mode so an idle compositor does not look like a
+            // disconnected one between focus changes.
+            if connection.clear_startup_timeout().is_err() {
+                snapshot.set_cause(ConnectionCause::HandshakeFailed);
+                let _ = handshake_tx.send(StartupReport::Unavailable {
+                    cause: UnavailableCause::HandshakeFailed,
+                });
+                alive.store(false, Ordering::Release);
+                return;
+            }
             snapshot.set_cause(ConnectionCause::Connected);
             let _ = handshake_tx.send(StartupReport::Operational { backend });
             dispatch_loop(&mut connection, &snapshot, state, &alive);
@@ -1400,6 +1421,7 @@ impl WaylandConnection<UnixStreamTransport> {
     pub fn connect(socket_path: &PathBuf) -> io::Result<Self> {
         let stream = UnixStream::connect(socket_path)?;
         stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(HANDSHAKE_IO_TIMEOUT))?;
         Ok(Self {
             transport: UnixStreamTransport(stream),
             next_id: 2,
@@ -1458,6 +1480,10 @@ impl<T: Transport> WaylandConnection<T> {
             unmarshal: Unmarshal::new(payload),
         })
     }
+
+    fn clear_startup_timeout(&mut self) -> io::Result<()> {
+        self.transport.clear_startup_timeout()
+    }
 }
 
 /// In-process variant of `drive_protocol` the integration tests
@@ -1492,6 +1518,13 @@ pub fn drive_protocol_in_process<T: Transport>(
 pub trait Transport: Send + Sync {
     fn send(&mut self, bytes: &[u8]) -> io::Result<()>;
     fn recv(&mut self, bytes: &mut [u8]) -> io::Result<()>;
+
+    /// Production Wayland transport applies a bounded read only while the
+    /// initial registry exchange is in progress. Test transports and other
+    /// in-memory implementations have no kernel timeout to reset.
+    fn clear_startup_timeout(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Production transport backed by a `UnixStream`.
@@ -1503,6 +1536,10 @@ impl Transport for UnixStreamTransport {
     }
     fn recv(&mut self, bytes: &mut [u8]) -> io::Result<()> {
         self.0.read_exact(bytes)
+    }
+
+    fn clear_startup_timeout(&mut self) -> io::Result<()> {
+        self.0.set_read_timeout(None)
     }
 }
 
@@ -1564,6 +1601,45 @@ impl Transport for MemoryTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TimedOutTransport;
+
+    impl Transport for TimedOutTransport {
+        fn send(&mut self, _bytes: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn recv(&mut self, _bytes: &mut [u8]) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "scripted startup timeout",
+            ))
+        }
+    }
+
+    #[test]
+    fn timed_out_startup_handshake_returns_without_blocking_the_join() {
+        let connection = WaylandConnection::with_transport(TimedOutTransport);
+        let snapshot = Arc::new(Snapshot::new());
+        let alive = Arc::new(AtomicBool::new(true));
+        let initial_state = Arc::new(parking_lot::Mutex::new(StartupReport::Pending));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let io = IoThread::spawn(connection, snapshot, alive.clone(), initial_state, tx);
+
+        assert!(matches!(
+            wait_for_handshake(&rx, &alive),
+            StartupReport::Unavailable {
+                cause: UnavailableCause::HandshakeFailed
+            }
+        ));
+
+        let shutdown_started = std::time::Instant::now();
+        io.shutdown();
+        assert!(
+            shutdown_started.elapsed() < Duration::from_secs(1),
+            "a stalled Wayland handshake must not keep startup blocked"
+        );
+    }
 
     #[test]
     fn pick_active_app_id_prefers_lowest_handle() {

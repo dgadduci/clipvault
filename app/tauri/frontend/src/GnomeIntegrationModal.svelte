@@ -169,12 +169,12 @@
       <p class="muted">
         La extensión está instalada en
         <code>~/.local/share/gnome-shell/extensions/</code> pero GNOME Shell
-        aún no la habilitó. Para terminar la activación usá
-        <code>gnome-extensions enable clipvault@clipvault.app</code> desde
-        una terminal, o abrí la app
-        <strong>Extensiones</strong> de GNOME y activala desde ahí. Si la
-        activación requiere reiniciar GNOME Shell, hacelo y volvé a
-        iniciar ClipVault.
+        aún no completó la conexión. Si actualizaste ClipVault, primero elegí
+        <strong>Reinstalar extensión</strong> para copiar el recurso actual.
+        Después cerrá la sesión GNOME y volvé a iniciarla: en GNOME Shell 42,
+        deshabilitar y habilitar una extensión no recarga necesariamente el
+        módulo ya cargado. Al volver, comprobá que ClipVault esté habilitada en
+        <strong>Extensiones</strong> e iniciá ClipVault.
       </p>
     {:else if technicalState === "connected"}
       <p class="muted">
@@ -242,8 +242,9 @@
         <p class="muted">
           ClipVault instala la extensión localmente. La activación en
           GNOME requiere una acción manual del usuario (ver el panel
-          de estado más abajo). Sin descargas externas, sin permisos
-          de administrador.
+          de estado más abajo): después de instalar o reinstalar, cerrá
+          la sesión GNOME y volvé a iniciarla. Sin descargas externas,
+          sin permisos de administrador.
         </p>
         <div class="row">
           {#if !isInstalled}
@@ -257,6 +258,15 @@
               {busy ? "Instalando…" : "Instalar"}
             </button>
           {:else}
+            <button
+              type="button"
+              class="primary"
+              on:click={activate}
+              disabled={busy}
+              data-testid="gnome-reinstall-action"
+            >
+              {busy ? "Reinstalando…" : "Reinstalar extensión"}
+            </button>
             <button
               type="button"
               class="secondary"

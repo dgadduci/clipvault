@@ -20,6 +20,8 @@ import type {
   GnomeIntegrationPayload,
   GnomeIntegrationStatusResponse,
   IgnoredAppEntry,
+  LinuxCatalogResponse,
+  LinuxPickAndAddResponse,
   MigrationsApplied,
   OrganizationSnapshot,
   PasteResponse,
@@ -320,6 +322,40 @@ export const ignoredAppIconCommand: ClipvaultCommandArg<
   { ref: string }
 > = (args) =>
   invoke<number[]>("clipvault_ignored_app_icon", { iconRef: args.ref });
+
+/**
+ * Linux-only: enumerate the installed `.desktop` files whose
+ * identifier maps deterministically to the active-app adapter's
+ * published value. The wrapper exposes the discriminated
+ * `kind: "supported" | "unsupported"` response so the settings panel
+ * can render either the picker modal or the manual-entry fallback
+ * without inspecting free-form text.
+ */
+export const ignoredAppLinuxCatalogCommand: ClipvaultCommand<
+  LinuxCatalogResponse
+> = () => invoke<LinuxCatalogResponse>("clipvault_ignored_app_linux_catalog");
+
+/**
+ * Linux-only: persist the user-selected catalog entry as a
+ * blacklisted application. The wrapper forwards the deterministic
+ * identifier returned by the catalog, the user-visible display
+ * name and the optional icon reference; the Rust side normalises
+ * the identifier and updates the privacy gate identically to the
+ * macOS picker flow.
+ */
+export const ignoredAppLinuxAddCommand: ClipvaultCommandArg<
+  LinuxPickAndAddResponse,
+  {
+    identifier: string;
+    displayName: string | null;
+    iconRef: string | null;
+  }
+> = (args) =>
+  invoke<LinuxPickAndAddResponse>("clipvault_ignored_app_linux_add", {
+    identifier: args.identifier,
+    displayName: args.displayName,
+    iconRef: args.iconRef,
+  });
 
 /**
  * Resolve a `source_app_icon_ref` produced by the

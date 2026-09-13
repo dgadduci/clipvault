@@ -14,8 +14,11 @@
 
 - [x] 2.1 Ejecutar `CARGO_BUILD_JOBS=1 cargo tauri dev` desde `app/tauri`, sin
   `GDK_BACKEND` ni features GNOME.
-- [x] 2.2 Verificar visualmente la ventana `main`; no usar `wmctrl` como prueba
+- [ ] 2.2 Verificar visualmente la ventana `main`; no usar `wmctrl` como prueba
   de ausencia de una superficie Wayland nativa.
+  - Regresión reabierta el 2026-09-13: el binario inicia en GNOME Wayland y
+    registra `no primary monitor reported; keeping conf defaults`, pero no
+    aparece el desktop. La marca previa no representa el estado actual.
 - [x] 2.3 Ocultar la ventana y verificar que Open ClipVault del tray la restaura.
 - [x] 2.4 Cerrar la aplicación, confirmar que no queda proceso del workspace y
   repetir el arranque una vez.
@@ -23,30 +26,41 @@
 
 ## 3. Instrumentación mínima si falla el baseline
 
-- [ ] 3.1 Relevar la API Tauri/Wry instalada para consultas no mutantes de
+- [x] 3.1 Relevar la API Tauri/Wry instalada para consultas no mutantes de
   ventana y documentar el punto de ciclo de vida disponible.
-- [ ] 3.2 Añadir `clipvault_window_lifecycle`, desactivada por defecto y
+  - Tauri 2.11.5 expone `is_visible`; `primary_monitor()` puede devolver
+    `None`, mientras que la configuración de ventana usa `visible = true` por
+    defecto. Por tanto, el warning de monitor no es evidencia suficiente de
+    que la ventana no se haya creado o mapeado.
+- [x] 3.2 Añadir `clipvault_window_lifecycle`, desactivada por defecto y
   habilitable sólo mediante un booleano de diagnóstico documentado.
-- [ ] 3.3 Emitir etapas normalizadas para `setup`, monitor y eventos de `main`.
-- [ ] 3.4 Probar la normalización y prohibir por test datos sensibles en logs.
-- [ ] 3.5 Repetir en Ubuntu y registrar la primera transición que no ocurre.
+- [x] 3.3 Emitir etapas normalizadas para `configured`, `setup`, monitor,
+  `runtime_ready` y eventos de `main`, más `main_present` y `visible` cuando
+  sus consultas no mutantes respondan.
+- [x] 3.4 Probar la normalización y prohibir por test datos sensibles en logs.
+- [x] 3.5 Repetir en Ubuntu y registrar la primera transición que no ocurre.
+  - La traza llegó a `layout_completed` con `visible = true`, pero no a
+    `state_built`; el bloqueo estaba dentro de `build_state`, no en el monitor.
 
 ## 4. Corrección mínima guiada por evidencia
 
 - [x] 4.1 Documentar la causa observada en Ubuntu antes de modificar el shell.
-- [x] 4.2 Aplicar una corrección acotada; no agregar múltiples fallbacks de
-  `show`, foco, tamaño o posición.
+  - El handshake nativo Wayland podía dejar un `read_exact` bloqueado mientras
+    `IoThread::shutdown` esperaba su `join`, reteniendo el `setup` de Tauri.
+- [x] 4.2 Aplicar una corrección acotada, elegida desde la primera transición
+  ausente; no agregar múltiples fallbacks de `show`, foco, tamaño o posición.
 - [x] 4.3 Mantener separado el arranque y la restauración desde tray.
-- [x] 4.4 Agregar la regresión automática proporcional.
+- [x] 4.4 Agregar la regresión automática proporcional a la corrección que
+  resulte de la traza.
 - [x] 4.5 Si hubo cambio funcional, incrementar una sola vez el patch canónico
   en manifests y `projects.md`.
-  - Versión canónica incrementada una sola vez: `0.0.12` → `0.0.13`.
+  - Versión canónica incrementada de `0.0.14` a `0.0.15`.
 
 ## 5. Verificación y cierre
 
-- [x] 5.1 En Ubuntu GNOME Wayland verificar inicio, ocultar, tray y reinicio.
-  - Confirmado manualmente: abrir, ocultar con `X`, restaurar desde el tray y
-    salir mediante `Quit ClipVault`.
+- [ ] 5.1 En Ubuntu GNOME Wayland verificar inicio, ocultar, tray y reinicio.
+  - El inicio corregido llegó a `runtime_ready`, `moved`, `resized` y
+    `focused` con `visible = true`; quedan por repetir ocultar, tray y reinicio.
 - [ ] 5.2 En Ubuntu X11 ejecutar un smoke test de arranque y restauración.
 - [x] 5.3 Ejecutar fmt, tests Rust relevantes y frontend check/build/test con
   Node 20.

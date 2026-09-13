@@ -22,6 +22,7 @@ MiniMax implementa este cambio. Codex mantiene la arquitectura y revisa el resul
 - [x] 2.8 Limpiar `handshake_complete` en `disable()` y en `_resetSocket()` para que el próximo `enable` arranque de cero sin arrastrar estado del ciclo anterior.
 - [x] 2.9 Corregir la conexión asíncrona de la extensión para invocar `Gio.SocketClient.connect_async(connectable, cancellable, callback)` con la firma GI de tres argumentos que GNOME Shell 42 expone; no pasar prioridad ni placeholders de otra API. Mantener el handshake posterior a `connect_finish` y el backoff no bloqueante. La regresión `gnomeExtensionSocket.test.ts`, `npm run check`, `npm test`, `gjs --check` y la consulta GI de aridad 3 pasan; la prueba de integración visual sigue pendiente en 8.11.
 - [x] 2.10 Crear `Gio.SocketClient` con la propiedad GObject GI `type: Gio.SocketType.STREAM`, no con la inexistente `socket_type`. `gnomeExtensionSocket.test.ts` protege constructor y llamada; `npm run check`, `npm test`, `gjs --check` y la creación directa con `gjs` en GNOME Shell 42 pasan. La prueba manual 8.11 sigue pendiente.
+- [x] 2.11 Corregir la regresión de ciclo de vida observada en GNOME Shell 42.9: el recurso distribuido exporta `init()` además de `enable()` y `disable()`. `init()` es un no-op sin socket, foco ni escritura; `gnomeExtensionSocket.test.ts` fija la regresión y pasan `node --check`, `npm run check`, `npm test` y `openspec validate`. La prueba real de 8.11 queda pendiente hasta instalar y recargar la extensión actualizada.
 
 ## 3. IPC y adapter Linux
 
@@ -51,6 +52,8 @@ MiniMax implementa este cambio. Codex mantiene la arquitectura y revisa el resul
 - [x] 4.13 Conectar la tarjeta de diagnóstico GNOME aplicable con el modal de consentimiento: ofrece **Configurar integración GNOME** cuando el snapshot es aplicable y le pasa ese snapshot al modal, sin mutar consentimiento ni instalar la extensión desde el botón de entrada. Verificado con `npm run check`, `npm test` y `npm run build`.
 - [x] 4.14 Renderizar los `CommandError` tipados del flujo GNOME con mensajes seguros y accionables; nunca mostrar `[object Object]` ni detalles locales crudos de I/O. Verificado con `npm run check`, `npm test` (73 pruebas) y `npm run build`.
 - [x] 4.15 Resolver los recursos de extensión desde las dos disposiciones válidas de `resource_dir` de Tauri en Linux (dev con prefijo `resources/` y bundle), sin usar el árbol fuente; cubierta la disposición de desarrollo con `bundled_resource_resolution_supports_tauri_dev_resources_layout`.
+- [x] 4.16 Ofrecer una acción explícita **Reinstalar extensión** cuando el usuario ya consintió y la extensión existe; reutiliza la instalación atómica, conserva el consentimiento e indica la recarga manual de GNOME sin actualizar el recurso silenciosamente. La regresión `gnomeIntegrationEntryPoint.test.ts`, `npm run check`, `npm test`, `npm run build` y `openspec validate` pasan.
+- [x] 4.17 Corregir la guía de activación en GNOME Shell 42: después de reinstalar un recurso actualizado requiere cerrar sesión y volver a iniciarla, no sólo deshabilitar/habilitar la extensión; no reinicia ni mata GNOME Shell desde ClipVault. La regresión `gnomeIntegrationEntryPoint.test.ts`, `npm run check`, `npm test`, `npm run build` y `openspec validate` pasan.
 
 ## 5. Integración con captura y metadata
 
@@ -122,6 +125,25 @@ MiniMax implementa este cambio. Codex mantiene la arquitectura y revisa el resul
 4. **La extensión habilitada no completaba la conexión en GNOME Shell 42.9**: durante la verificación manual del 2026-09-12, el diagnóstico quedó en `activation_pending` aunque `gnome-extensions info clipvault@clipvault.app` informó `ENABLED` y el socket del listener existía. `Gio.SocketClient.connect_async` expone una firma de tres argumentos en ese runtime, mientras `extension.js` le pasaba cinco (`connectable`, `cancellable`, prioridad, placeholder y callback). La llamada lanza antes del handshake, la excepción se absorbe y el backoff reintenta sin peer. La tarea 2.9 reemplaza la invocación por la firma GI correcta y añade una regresión; 8.11 conserva la prueba manual que reprodujo el defecto.
 
 5. **El constructor de `Gio.SocketClient` también usaba una propiedad GObject inexistente en GNOME Shell 42.9**: tras reinstalar la corrección 2.9, la copia instalada ya tenía la firma correcta pero el diagnóstico continuó en `activation_pending`. La consulta directa con `gjs` devolvió `Error: No property socket_type on GSocketClient`; la excepción sucede antes de `connect_async` y el `catch` la convierte en un reintento silencioso. La tarea 2.10 reemplaza `socket_type` por la propiedad GI `type`, protege ambas formas y mantiene 8.11 pendiente hasta obtener un `hello` real.
+
+6. **El recurso distribuido no exportaba `init()`**: en Ubuntu GNOME Shell
+   42.9, después de confirmar que el listener local aceptaba un `hello` enviado
+   por GJS, la extensión `clipvault@clipvault.app` seguía en `ENABLED` sin abrir
+   un peer. A diferencia de las extensiones que GNOME carga en esa sesión, el
+   recurso de ClipVault sólo declaraba `enable()` y `disable()`. La ausencia del
+   entry point impedía iniciar el bridge y dejaba el selector visual en
+   `unsupported`. La tarea 2.11 añade `init()` sin efectos secundarios y fija
+   su presencia con una regresión antes de repetir 8.11.
+
+7. **La extensión ya cargada no relee el recurso reinstalado en GNOME Shell
+   42**: tras reinstalar el archivo con `init()` y deshabilitar/habilitar la
+   extensión, la copia instalada coincidía con el bundle actual y seguía sin
+   abrir un peer. El listener local y una conexión `Gio.SocketClient` con la
+   misma firma de la extensión completaron `hello`, descartando el socket y las
+   APIs GI. El proceso Shell Wayland se había iniciado antes de la
+   reinstalación y su interfaz D-Bus sólo expone `ListExtensions`, sin una
+   recarga del módulo. La tarea 4.17 exige cerrar sesión y volver a iniciarla;
+   no se reinicia GNOME Shell desde ClipVault.
 
 ## Verificación ejecutada en este pase
 

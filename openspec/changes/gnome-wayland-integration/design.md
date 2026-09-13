@@ -30,6 +30,14 @@ La extracción debe probar, en orden documentado, las APIs públicas disponibles
 
 Al habilitarse, la extensión se conecta al canal de ClipVault y publica el estado actual; ante cambios de foco publica sólo el nuevo identificador. Al deshabilitarse o perder la conexión, limpia su estado y libera todas las señales.
 
+Para las versiones legacy de GNOME Shell declaradas en `metadata.json`, el
+recurso también debe exportar `function init()`. El entry point puede ser un
+no-op porque el estado se inicializa al habilitarse, pero su ausencia impide
+que el cargador de extensiones complete el ciclo de vida aun cuando
+`gnome-extensions` muestre la extensión como habilitada. `init()` no puede
+abrir sockets, leer foco ni modificar preferencias: esas acciones siguen
+viviendo exclusivamente en `enable()` después del consentimiento.
+
 ### 2. Canal de comunicación
 
 Usar el bus D-Bus de sesión del usuario o el mecanismo IPC de GNOME soportado por la versión objetivo. El diseño final debe justificar:
@@ -156,9 +164,20 @@ Crear un servicio de instalación de usuario con estas propiedades:
 - no sigue symlinks fuera del directorio de instalación;
 - no borra una extensión que no pertenezca a ClipVault;
 - permite deshabilitar y desinstalar de forma reversible;
-- detecta cambios de versión y puede actualizar la extensión sólo si el usuario ya había consentido.
+- detecta cambios de versión y puede actualizar la extensión sólo tras una
+  acción explícita de **Reinstalar extensión** de un usuario que ya había
+  consentido; no actualiza recursos silenciosamente.
 
 La activación debe usar una API soportada por GNOME. Si la versión instalada no permite activar sin reinicio o requiere una acción del usuario, la UI debe indicarlo y el diagnóstico debe reflejar `activation_pending`, no declarar éxito prematuramente.
+
+La acción de reinstalación reutiliza el mismo instalador atómico que la primera
+instalación y no cambia la preferencia de consentimiento. Al terminar, la UI
+debe indicar que el usuario tiene que cerrar la sesión GNOME y volver a
+iniciarla para que GNOME Shell evalúe el recurso actualizado. En GNOME Shell
+42 no hay una operación pública de recarga disponible para ClipVault y el
+toggle de habilitación puede reutilizar el módulo ya cargado; ClipVault no debe
+matar ni reiniciar el proceso Shell. Tampoco debe afirmar que el bridge está
+conectado antes de recibir el `hello`.
 
 La preferencia de consentimiento debe guardarse en la configuración local de ClipVault, separada del estado técnico de la extensión:
 
@@ -231,6 +250,8 @@ La integración no debe afectar macOS, X11, XWayland, otros compositores Wayland
 - no sobrescritura de extensión ajena;
 - activación exitosa, activación pendiente e incompatibilidad;
 - negociación del canal y versión;
+- presencia del entry point `init()` junto con `enable()` y `disable()` en el
+  recurso distribuido;
 - app_id válido, vacío y cambios de foco;
 - limpieza al deshabilitar y desconectar;
 - snapshot no bloqueante y único;

@@ -80,6 +80,16 @@ El canal entre la extensión y ClipVault SHALL ser local a la sesión del usuari
 - AND envía el `hello` solamente después de que `connect_finish` confirma la conexión
 - AND el diagnóstico deja `activation_pending` y llega a `connected` o `identified`
 
+#### Scenario: El cargador de GNOME Shell inicializa el recurso distribuido
+
+- GIVEN GNOME Shell 42 o una versión legacy declarada compatible
+- AND el recurso `clipvault@clipvault.app` está instalado y habilitado
+- WHEN GNOME Shell carga el módulo de la extensión
+- THEN el recurso exporta `init()`, `enable()` y `disable()`
+- AND `init()` no abre sockets ni publica metadata
+- AND `enable()` conserva la responsabilidad exclusiva de iniciar la conexión
+  local después del consentimiento
+
 ### Requirement: Persistencia y ciclo de vida
 
 La instalación SHALL ser atómica, reversible y limitada al directorio de extensiones del usuario; MUST NOT sobrescribir extensiones ajenas ni borrar recursos que no pertenezcan a ClipVault.
@@ -98,6 +108,20 @@ La instalación SHALL ser atómica, reversible y limitada al directorio de exten
 - THEN ClipVault deja de usar el snapshot GNOME
 - AND vuelve al fallback disponible
 - AND las capturas continúan funcionando
+
+#### Scenario: Reinstalar un recurso de extensión actualizado
+
+- GIVEN que el usuario ya aceptó la integración y la extensión de ClipVault ya
+  está instalada
+- WHEN selecciona **Reinstalar extensión**
+- THEN ClipVault reemplaza atómicamente sólo su propio recurso por el bundle
+  actual
+- AND conserva el consentimiento existente
+- AND solicita al usuario cerrar la sesión GNOME y volver a iniciarla antes de
+  declarar la conexión activa
+- AND no afirma que deshabilitar/habilitar la extensión recargue el módulo
+  actualizado en GNOME Shell 42
+- AND no actualiza la extensión silenciosamente
 
 ### Requirement: Precedencia y compatibilidad
 

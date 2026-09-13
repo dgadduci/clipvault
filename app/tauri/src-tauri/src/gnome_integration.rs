@@ -86,6 +86,22 @@ impl GnomeIntegrationState {
         self.core_service.save_technical_state(context, state)
     }
 
+    /// Copy the current listener state into the core's process-local runtime
+    /// snapshot. This deliberately does not persist: focus transitions are
+    /// frequent, while `app_settings` is only the conservative fallback used
+    /// before a live listener exists. The value contains only the lifecycle
+    /// enum, never an application identifier or any clipboard metadata.
+    pub fn sync_runtime_technical_state(&self) {
+        let live_state = self
+            .live
+            .lock()
+            .as_ref()
+            .map(|handle| convert_technical_state_from_platform(handle.snapshot.state()));
+        if let Some(live_state) = live_state {
+            self.core_service.set_runtime_technical_state(live_state);
+        }
+    }
+
     pub fn load_consent(
         &self,
         context: &clipvault_core::AppContext,
@@ -233,6 +249,8 @@ impl GnomeIntegrationState {
             let status = handle.platform_service.status();
             let consent = handle.platform_service.consent();
             let technical_state = convert_technical_state_from_platform(handle.snapshot.state());
+            self.core_service
+                .set_runtime_technical_state(technical_state);
             return GnomeIntegrationPayload::from_parts(
                 session,
                 desktop,

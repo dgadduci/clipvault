@@ -124,6 +124,8 @@ fn build_harness_with_identifier(identifier: &'static str) -> (tempfile::TempDir
         metadata_scheduler: Arc::new(
             clipvault_app::metadata_scheduler::MetadataEnrichmentScheduler::new(),
         ),
+        #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+        gnome_integration: None,
     };
     (dir, SharedState::new(app_state))
 }
@@ -209,6 +211,8 @@ fn capture_tick_with_empty_cache_persists_unknown_source() {
         metadata_scheduler: Arc::new(
             clipvault_app::metadata_scheduler::MetadataEnrichmentScheduler::new(),
         ),
+        #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+        gnome_integration: None,
     };
     let state = SharedState::new(app_state);
 
@@ -303,6 +307,8 @@ fn capture_tick_uses_cached_identifier_for_privacy_gate() {
         metadata_scheduler: Arc::new(
             clipvault_app::metadata_scheduler::MetadataEnrichmentScheduler::new(),
         ),
+        #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+        gnome_integration: None,
     };
     let state = SharedState::new(app_state);
 

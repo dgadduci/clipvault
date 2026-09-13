@@ -49,6 +49,16 @@ test("opening GNOME configuration only forwards the status snapshot to the modal
   assert.match(app, /on:configureGnome=\{onConfigureGnome\}/);
 });
 
+test("an installed GNOME integration can explicitly reinstall the bundled resource", () => {
+  const modal = loadSource("src/GnomeIntegrationModal.svelte");
+
+  assert.match(modal, /data-testid="gnome-reinstall-action"/);
+  assert.match(modal, /on:click=\{activate\}/);
+  assert.match(modal, /Reinstalar extensión/);
+  assert.match(modal, /cerrá la sesión GNOME y volvé a iniciarla/);
+  assert.doesNotMatch(modal, /deshabilitala\/habilitala/);
+});
+
 test("GNOME command errors are actionable and never stringified as an IPC object", () => {
   assert.match(
     describeGnomeIntegrationError({ kind: "bundled_missing", message: "/private/path" }),

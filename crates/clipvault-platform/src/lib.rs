@@ -18,6 +18,7 @@ mod clipboard_image_png;
 pub mod guidance;
 mod hotkey;
 mod info;
+mod linux_picker_support;
 mod noop;
 pub mod paste;
 pub mod runtime;
@@ -66,11 +67,14 @@ pub use hotkey::{
     HotkeyKey, HotkeyManager, HotkeyModifiers, HotkeyOutcome,
 };
 pub use info::{DisplayServer, OsFamily, PlatformInfo};
+pub use linux_picker_support::LinuxPickerBackend;
 pub use noop::{
     NoopActiveApplicationProbe, NoopClipboardBackend, NoopHotkeyManager, NoopPasteController,
     NoopSettingsNavigator, NoopTrayController, NoopTrayHandle,
 };
 pub use paste::{PasteBackendKind, PasteController, PasteError};
+#[cfg(target_os = "linux")]
+pub use runtime::linux_app_catalog::{CandidateApplication, IdentifierStrategy};
 #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
 pub use runtime::linux_gnome_extension_installer::{
     BundledExtension, ExtensionInstaller, InstallOutcome, Installation, InstallerError,

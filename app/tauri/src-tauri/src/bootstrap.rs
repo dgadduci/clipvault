@@ -1337,13 +1337,35 @@ fn build_active_application(
                     // protocols. We try it first and only fall back
                     // to the XWayland EWMH probe when the native
                     // adapter is unavailable AND `$DISPLAY` is set.
-                    #[cfg(feature = "linux-wayland-active-app")]
+                    //
+                    // The gate is intentionally `#[cfg(target_os =
+                    // "linux")]` (matching the surrounding Linux
+                    // arm) and not `feature =
+                    // "linux-wayland-active-app"`: the native
+                    // Wayland probe lives in `clipvault-platform` and
+                    // the
+                    // `[target.'cfg(all(target_os = "linux", not(target_os =
+                    // "macos")))'.dependencies]` block in the shell
+                    // `Cargo.toml` already enables the
+                    // `linux-wayland-active-app` feature on the
+                    // platform crate for every Linux build. Cargo
+                    // does not propagate a dependency feature back
+                    // into the `[features]` table of the consumer,
+                    // so gating this branch on the homonymous
+                    // `clipvault-app` feature (which is not part of
+                    // `default = [...]`) compiled the Wayland arm
+                    // out and the bootstrap always fell through to
+                    // the XWayland EWMH probe on Wayland sessions.
+                    // The platform-side feature still controls
+                    // whether the `linux_wayland_active_app` module
+                    // exists, so a build that explicitly opts out of
+                    // the feature will not see the call site.
                     {
                         match clipvault_platform::runtime::linux_wayland_active_app::try_build() {
-                            clipvault_platform::runtime::linux_wayland_active_app::ConnectionOutcome::Operational(probe) => {
+                            clipvault_platform::runtime::linux_wayland_active_app::ConnectionOutcome::Operational { probe, backend: _ } => {
                                 return Arc::new(probe);
                             }
-                            clipvault_platform::runtime::linux_wayland_active_app::ConnectionOutcome::Unavailable => {
+                            clipvault_platform::runtime::linux_wayland_active_app::ConnectionOutcome::Unavailable { cause: _ } => {
                                 // No native protocol on this session
                                 // — fall through to the XWayland
                                 // fallback when `$DISPLAY` is set.
@@ -4524,6 +4546,73 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "bootstrap.rs must not gate build_active_application / build_paste_controller on the `linux-x11` feature (target-specific dep already enables linux-x11 in clipvault-platform). Offending lines: {offenders:?}"
+        );
+    }
+
+    /// Structural regression: the shell must NOT gate the native
+    /// Wayland probe call site on the homonymous
+    /// `linux-wayland-active-app` feature. The
+    /// `[target.'cfg(all(target_os = "linux", not(target_os =
+    /// "macos")))'.dependencies]` block in the shell `Cargo.toml`
+    /// already enables the `linux-wayland-active-app` feature on
+    /// the platform crate for every Linux build, so any future
+    /// contributor who gates the shell-side wiring on the
+    /// `linux-wayland-active-app` feature reintroduces the
+    /// `linux-blacklist-app-picker` regression: the Wayland arm is
+    /// dropped at compile time, the bootstrap always falls back to
+    /// the XWayland EWMH probe on Wayland sessions, the picker
+    /// backend stays `X11OrXWaylandEwmh` (or `Unsupported` if
+    /// `$DISPLAY` is empty) and the visual Linux picker button in
+    /// the settings panel degrades to "La selección visual no está
+    /// disponible todavía en esta plataforma".
+    ///
+    /// The test only disqualifies arms that BOTH mention
+    /// `target_os = "linux"` AND require the
+    /// `linux-wayland-active-app` feature, mirroring the X11
+    /// structural guard above. Standalone `cfg(feature =
+    /// "linux-wayland-active-app")` arms (for example guarding
+    /// optional integration code that genuinely depends on the
+    /// feature being turned on explicitly) are intentionally
+    /// accepted so the linter does not over-fire.
+    ///
+    /// The source scanner strips `/* ... */` blocks, `// ...` line
+    /// comments and `"..."` strings so prose that mentions the
+    /// disallowed attribute does not trip the linter. The test
+    /// runs on every target (macOS dev hosts included) so the
+    /// guard fires the moment a regression is committed,
+    /// regardless of the host that produced it.
+    #[test]
+    fn shell_linux_wayland_active_app_cfg_does_not_require_homonymous_feature() {
+        let source_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bootstrap.rs");
+        let source = std::fs::read_to_string(&source_path)
+            .unwrap_or_else(|error| panic!("read bootstrap source: {error}"));
+        let stripped = strip_prose_for_cfg_scan(&source);
+        let mut offenders = Vec::new();
+        for (idx, raw_line) in stripped.lines().enumerate() {
+            let trimmed = raw_line.trim();
+            // Match any `#[cfg(...)]` line that mentions the
+            // homonymous feature. We deliberately do not restrict
+            // the prefix to `#[cfg(all(...))]` because future
+            // contributors might write `#[cfg(target_os = "linux"
+            // ... feature = "linux-wayland-active-app")]`.
+            if !trimmed.contains("feature = \"linux-wayland-active-app\"") {
+                continue;
+            }
+            // The disqualified arms are those that ALSO gate on
+            // `target_os = "linux"`. The platform-side feature
+            // gate inside `clipvault-platform` keeps the
+            // `linux_wayland_active_app` module out of the build
+            // when the dependency feature is off, so the shell
+            // does not need a redundant consumer-side gate on
+            // Linux.
+            if trimmed.contains("target_os = \"linux\"") {
+                offenders.push(idx + 1);
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "bootstrap.rs must not gate the native Wayland probe on the homonymous `linux-wayland-active-app` feature on Linux builds (target-specific dep on clipvault-platform already enables it). Offending lines: {offenders:?}"
         );
     }
 

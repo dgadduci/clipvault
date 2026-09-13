@@ -22,6 +22,7 @@ pub mod history;
 pub mod ignored_apps;
 pub mod ignored_apps_service;
 pub mod image_capture_diagnostic;
+pub mod linux_picker;
 pub mod management;
 pub mod organization;
 pub mod paste;

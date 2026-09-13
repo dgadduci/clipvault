@@ -116,6 +116,15 @@ impl LinuxApplicationMetadataProvider {
         Self::with_filesystem(assets_dir, std::sync::Arc::new(HostFilesystem))
     }
 
+    /// Public factory for the production filesystem the provider
+    /// uses. Exposed so peer modules (the picker catalog) can
+    /// construct a `DesktopFilesystem` shared with the metadata
+    /// provider without forcing every consumer to know about the
+    /// private `HostFilesystem` adapter.
+    pub fn host_filesystem() -> std::sync::Arc<dyn DesktopFilesystem> {
+        std::sync::Arc::new(HostFilesystem)
+    }
+
     /// Test-only constructor that injects a filesystem
     /// abstraction. Kept public so the integration suite can drive
     /// the parser against a memory-backed filesystem without going
@@ -218,6 +227,26 @@ impl LinuxApplicationMetadataProvider {
 
     fn record_icon(&self, snapshot: IconDiagnostics) {
         *self.last_icon.lock() = snapshot;
+    }
+
+    /// Snapshot of the XDG `applications/` directories the provider
+    /// cached at construction time. Peer modules (the picker catalog)
+    /// walk the same roots so the candidate set stays in lock-step
+    /// with the matcher. The list is already deduplicated and
+    /// filtered by `is_dir` so callers can iterate it without
+    /// additional validation.
+    pub fn cached_application_roots(&self) -> Vec<PathBuf> {
+        self.app_dirs.clone()
+    }
+
+    /// Snapshot of the per-theme `apps/` directories the icon
+    /// resolver probes when looking up `<theme>/<size>x<size>/apps/`.
+    /// Exposed for diagnostics and tests; production code never needs
+    /// to walk the list directly.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn cached_icon_apps_dirs(&self) -> Vec<PathBuf> {
+        self.icon_apps_dirs.clone()
     }
 }
 
@@ -593,6 +622,17 @@ impl LinuxApplicationMetadataProvider {
         {
             return None;
         }
+        if !self.fs.is_file(&candidate) {
+            return None;
+        }
+        let canonical = self.fs.canonicalize_if_safe(&candidate).ok()?;
+        if !self
+            .icon_roots
+            .iter()
+            .any(|root| canonical.starts_with(root))
+        {
+            return None;
+        }
         Some(ResolvedIcon {
             path: canonical,
             kind,
@@ -651,7 +691,7 @@ fn classify_icon_value(value: &str) -> IconSourceKind {
 /// Lower-is-better priority the matcher assigns to a candidate
 /// `.desktop` entry. Lower values mean the entry should win.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum MatchPriority {
+pub enum MatchPriority {
     /// Highest confidence: the identifier matches the Desktop File ID
     /// of the candidate — the basename of the `.desktop` file
     /// including the extension, compared case-insensitively. This
@@ -681,6 +721,14 @@ enum MatchPriority {
 }
 
 fn classify(entry: &DesktopEntry, identifier: &str) -> Option<MatchPriority> {
+    classify_pub(entry, identifier)
+}
+
+/// Public counterpart of [`classify`]. The private helper stays
+/// available so the unit tests inside this module can keep using
+/// it without crossing the public boundary; peer modules reach the
+/// same algorithm through this public alias.
+pub fn classify_pub(entry: &DesktopEntry, identifier: &str) -> Option<MatchPriority> {
     // Desktop File ID match — restricted to identifiers whose shape
     // confirms the caller meant a freedesktop id. The branch wins
     // over the WM_CLASS / filename stem matchers so an unambiguous
@@ -773,7 +821,11 @@ pub struct DesktopEntry {
 }
 
 impl DesktopEntry {
-    fn is_application(&self) -> bool {
+    /// Returns `true` when the entry advertises itself as an
+    /// `Application` and is not flagged `Hidden`. The picker catalog
+    /// shares this filter so the candidate set never exposes a
+    /// directory or a hidden app to the user.
+    pub fn is_application(&self) -> bool {
         self.type_is_application && !self.hidden
     }
 }

@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {
   activeAppDiagnosticsCommand,
   ignoredAppIconCommand,
+  ignoredAppLinuxAddCommand,
+  ignoredAppLinuxCatalogCommand,
   ignoredAppPickAndAddCommand,
   ignoredAppsAddCommand,
   ignoredAppsListCommand,
@@ -17,6 +19,8 @@ import type {
   ActiveAppDiagnostics,
   ActiveAppRefreshOutcome,
   IgnoredAppEntry,
+  LinuxCatalogResponse,
+  LinuxPickAndAddResponse,
   PickAndAddResponse,
   PickErrorReason,
   RetentionPolicy,
@@ -549,3 +553,112 @@ test("ignoredAppIconCommand rejects absolute paths", async () => {
   );
 });
 
+
+// ---------------------------------------------------------------------------
+// Linux picker catalog (`linux-blacklist-app-picker` capability).
+//
+// The Linux picker replaces the synchronous `ApplicationPicker::pick`
+// path with a deterministic catalog so the user picks the
+// installed `.desktop` entry whose identifier the active-app
+// adapter publishes. The catalog command returns either the list
+// of candidates or a typed `unsupported` reason; the add command
+// persists the chosen candidate through the same service the macOS
+// picker uses.
+// ---------------------------------------------------------------------------
+
+test("ignoredAppLinuxCatalogCommand returns the supported list", async () => {
+  const response: LinuxCatalogResponse = {
+    kind: "supported",
+    strategy: "wm_class",
+    candidates: [
+      {
+        identifier: "firefox",
+        display_name: "Firefox",
+        icon_ref: "application-icons/firefox.png",
+        strategy: "wm_class",
+      },
+      {
+        identifier: "code",
+        display_name: "Visual Studio Code",
+        icon_ref: null,
+        strategy: "wm_class",
+      },
+    ],
+  };
+  installTauriMock(async (cmd) => {
+    assert.equal(cmd, "clipvault_ignored_app_linux_catalog");
+    return response;
+  });
+  const result = await ignoredAppLinuxCatalogCommand();
+  assert.equal(result.kind, "supported");
+  if (result.kind === "supported") {
+    assert.equal(result.strategy, "wm_class");
+    assert.equal(result.candidates.length, 2);
+    assert.equal(result.candidates[0].identifier, "firefox");
+  }
+});
+
+test("ignoredAppLinuxCatalogCommand surfaces the unsupported reason", async () => {
+  const response: LinuxCatalogResponse = {
+    kind: "unsupported",
+    reason: "no compositor publishes a stable app_id",
+  };
+  installTauriMock(async () => response);
+  const result = await ignoredAppLinuxCatalogCommand();
+  assert.equal(result.kind, "unsupported");
+  if (result.kind === "unsupported") {
+    assert.match(result.reason, /app_id/);
+  }
+});
+
+test("ignoredAppLinuxAddCommand forwards the chosen identifier and metadata", async () => {
+  const observed: Record<string, unknown> = {};
+  installTauriMock(async (cmd, args) => {
+    assert.equal(cmd, "clipvault_ignored_app_linux_add");
+    Object.assign(observed, args);
+    return {
+      kind: "added",
+      entry: {
+        id: (args?.identifier as string) ?? "",
+        display_name: (args?.displayName as string | null) ?? null,
+        icon_ref: (args?.iconRef as string | null) ?? null,
+        created_at: "2026-01-02T03:04:05Z",
+      },
+    } satisfies LinuxPickAndAddResponse;
+  });
+  const result = await ignoredAppLinuxAddCommand({
+    identifier: "firefox",
+    displayName: "Firefox",
+    iconRef: "application-icons/firefox.png",
+  });
+  assert.equal(observed.identifier, "firefox");
+  assert.equal(observed.displayName, "Firefox");
+  assert.equal(observed.iconRef, "application-icons/firefox.png");
+  assert.equal(result.kind, "added");
+});
+
+test("ignoredAppLinuxAddCommand propagates backend errors without leaking payloads", async () => {
+  installTauriMock(async () => {
+    throw { kind: "missing_identifier", message: "missing_identifier" };
+  });
+  await assert.rejects(
+    ignoredAppLinuxAddCommand({
+      identifier: "",
+      displayName: null,
+      iconRef: null,
+    }),
+    (error: unknown) => {
+      assert.equal((error as { kind: string }).kind, "missing_identifier");
+      // The error MUST NOT carry clipboard content, hashes or
+      // snippets — the backend never has them and the wrapper
+      // forwards the typed error verbatim.
+      assert.equal(
+        (error as { content?: unknown }).content,
+        undefined,
+      );
+      assert.equal((error as { hash?: unknown }).hash, undefined);
+      assert.equal((error as { snippet?: unknown }).snippet, undefined);
+      return true;
+    },
+  );
+});

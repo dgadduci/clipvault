@@ -106,3 +106,38 @@ integración instalada y habilitada que no pueda abrir el socket local no puede
 quedar indefinidamente en `activation_pending` por una llamada JavaScript
 inválida: debe poder completar el `hello` o informar un error de comunicación
 tipado, sin afectar la captura normal.
+
+### Regresión reabierta: entry point de GNOME Shell ausente
+
+La reproducción en Ubuntu GNOME Shell 42.9 confirma que el listener local de
+ClipVault acepta el handshake `hello` correcto, pero que una extensión
+`clipvault@clipvault.app` instalada y marcada como `ENABLED` no abre ningún
+peer. El recurso distribuido declara `enable()` y `disable()`, pero no exporta
+el entry point `init()` que el cargador de extensiones de ese runtime espera.
+Como resultado, el bridge no llega a publicar el handshake, el probe GNOME
+permanece en `activation_pending` y el selector visual de Privacidad rechaza
+el catálogo por no tener un adaptador de aplicación activa operativo.
+
+La corrección mínima añade un `init()` sin efectos secundarios y una regresión
+source-level que exige su presencia. No cambia el protocolo, el consentimiento,
+la lista de candidatos, la privacidad del canal ni el fallback XWayland. Tras
+instalar el recurso actualizado, la extensión debe recargarse mediante el
+mecanismo de GNOME para que el Shell evalúe el nuevo archivo.
+
+Cuando ClipVault ya tiene una extensión instalada, el recurso actualizado no
+puede aplicarse hasta que el usuario lo solicite: la interfaz ofrecerá
+**Reinstalar extensión** como acción explícita. Reutiliza el instalador atómico
+existente, conserva el consentimiento ya otorgado y pide recargar la extensión
+desde GNOME; nunca actualiza el directorio de extensiones silenciosamente.
+
+### Corrección de activación: reinicio de sesión requerido en GNOME 42
+
+La reproducción posterior confirma que la extensión instalada ya coincide con
+el recurso actualizado, el listener existe y una conexión local que replica
+las llamadas GI de la extensión completa `hello`. Sin embargo, el proceso
+GNOME Shell Wayland se inició antes de instalar el nuevo recurso. En GNOME
+42, deshabilitar y habilitar una extensión no vuelve a evaluar ese módulo ya
+cargado, y el servicio D-Bus de extensiones de esta versión no expone una
+operación de recarga. Por ello el flujo debe pedir cerrar sesión y volver a
+iniciarla después de **Reinstalar extensión**; no debe sugerir que un toggle
+recargará el código ni matar/reiniciar GNOME Shell desde ClipVault.

@@ -21,6 +21,20 @@ use tracing::warn;
 
 use crate::state::SharedState;
 
+/// Synchronise the process-local GNOME lifecycle state before a Linux picker
+/// operation. The GNOME bridge may be connected while the persisted fallback
+/// still says `activation_pending`; the picker must use the live enum without
+/// writing each focus transition to SQLite.
+#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+fn sync_linux_picker_gnome_runtime_state(state: &SharedState) {
+    if let Some(gnome) = state.app_state().gnome_integration.as_ref() {
+        gnome.sync_runtime_technical_state();
+    }
+}
+
+#[cfg(not(all(target_os = "linux", feature = "linux-gnome-shell-integration")))]
+fn sync_linux_picker_gnome_runtime_state(_state: &SharedState) {}
+
 /// Metadata-only event the shell fires after every successful
 /// organization mutation. The payload is `()` — the frontend never
 /// inspects the event details, it only re-reads the organization
@@ -1082,6 +1096,400 @@ pub fn clipvault_ignored_app_icon_for_test(
         )),
         Err(other) => Err(CommandError::new("icon_read_error", other.to_string())),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Linux visual blacklist picker (`linux-blacklist-app-picker` change).
+//
+// The Linux picker mirrors the macOS flow but bypasses the
+// synchronous `ApplicationPicker::pick()` because Linux sessions
+// cannot offer a native `.desktop` chooser without executing an
+// arbitrary helper. The catalog presents a list of installed
+// `.desktop` files with a deterministic identifier the active-app
+// adapter publishes; the frontend shows the list and forwards the
+// user's selection to `clipvault_ignored_app_linux_add`.
+//
+// All the commands below are `#[cfg(target_os = "linux")]` so macOS
+// and Windows builds never see the new surface.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LinuxCatalogResponse {
+    /// The picker catalog is supported on this session and produced
+    /// a list of candidates the frontend can render.
+    Supported {
+        /// Backend the resolver selected. The frontend surfaces the
+        /// label so the user can tell apart X11/XWayland, native
+        /// Wayland and GNOME Wayland selections.
+        backend: &'static str,
+        strategy: &'static str,
+        candidates: Vec<clipvault_platform::CandidateApplication>,
+    },
+    /// The current Linux session cannot guarantee a deterministic
+    /// mapping between an installed `.desktop` file and the
+    /// identifier the active-app adapter publishes (for example a
+    /// Wayland session without any compositors that publish a
+    /// stable `app_id`). The frontend keeps the manual-entry
+    /// surface enabled.
+    Unsupported { reason: String },
+}
+
+#[cfg(target_os = "linux")]
+#[tauri::command]
+pub fn clipvault_ignored_app_linux_catalog(
+    state: State<'_, SharedState>,
+) -> Result<LinuxCatalogResponse, CommandError> {
+    let info = state.context().platform();
+    if !matches!(info.os_family, clipvault_platform::OsFamily::Linux) {
+        return Ok(LinuxCatalogResponse::Unsupported {
+            reason: "linux picker is only available on linux hosts".into(),
+        });
+    }
+
+    sync_linux_picker_gnome_runtime_state(state.inner());
+
+    // Resolve the picker backend from the runtime state the
+    // capture loop is using. The diagnostic surface reports the
+    // active-app backend on every refresh; the GNOME integration
+    // service reports the consent decision and the technical
+    // state. The resolver refuses to invent an identifier when
+    // the session cannot guarantee a deterministic mapping.
+    let picker_backend = state.context().linux_picker_backend();
+    let Some(strategy) = picker_backend.strategy() else {
+        tracing::warn!(
+            backend = picker_backend.as_str(),
+            "linux application picker is unavailable for the active session"
+        );
+        return Ok(LinuxCatalogResponse::Unsupported {
+            reason: format!(
+                "linux picker session is not supported ({})",
+                picker_backend.as_str()
+            ),
+        });
+    };
+
+    clipvault_ignored_app_linux_catalog_for_test(
+        state.context(),
+        &info.data_dir.join("assets"),
+        strategy,
+    )
+}
+
+/// Test-friendly handle for [`clipvault_ignored_app_linux_catalog`]
+/// so the integration suite can drive the catalog against a
+/// deterministic `.desktop` fixture without standing up a Tauri
+/// runtime. The `assets_dir` parameter points at the per-session
+/// `<data_dir>/assets/` directory the icon writer consumes.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub fn clipvault_ignored_app_linux_catalog_for_test(
+    context: &clipvault_core::AppContext,
+    assets_dir: &std::path::Path,
+    strategy: clipvault_platform::IdentifierStrategy,
+) -> Result<LinuxCatalogResponse, CommandError> {
+    use clipvault_platform::runtime::linux_app_catalog::LinuxApplicationCatalog;
+
+    if !matches!(
+        context.platform().os_family,
+        clipvault_platform::OsFamily::Linux
+    ) {
+        return Ok(LinuxCatalogResponse::Unsupported {
+            reason: "linux picker is only available on linux hosts".into(),
+        });
+    }
+
+    let catalog = LinuxApplicationCatalog::new(assets_dir, strategy);
+    // The catalog command resolves the picker backend independently
+    // of the `for_test` helper so the test surface can keep the
+    // caller-supplied strategy while the production command only
+    // ever runs through the resolver.
+    let picker_backend = context.linux_picker_backend();
+    match catalog.list() {
+        Ok(candidates) if !candidates.is_empty() => Ok(LinuxCatalogResponse::Supported {
+            backend: picker_backend.as_str(),
+            strategy: strategy.as_str(),
+            candidates,
+        }),
+        Ok(_) => {
+            // An empty catalog is not a usable picker surface:
+            // the user would see an empty modal. Fall back to
+            // `Unsupported` so the manual-entry surface stays the
+            // documented fallback.
+            tracing::warn!(
+                backend = picker_backend.as_str(),
+                "linux application picker catalog is empty"
+            );
+            Ok(LinuxCatalogResponse::Unsupported {
+                reason: "linux picker catalog is empty for this session".into(),
+            })
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "linux picker catalog enumeration failed");
+            Ok(LinuxCatalogResponse::Unsupported {
+                reason: error.to_string(),
+            })
+        }
+    }
+}
+
+/// Test-friendly handle that drives the catalog against an
+/// in-memory filesystem fixture so the integration suite can pin
+/// the candidate list without depending on the host's installed
+/// `.desktop` files. The integration tests for the picker
+/// resolution matrix use this surface so they can assert the
+/// `Supported` / `Unsupported` boundary deterministically instead
+/// of riding on whatever the host happens to install.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub fn clipvault_ignored_app_linux_catalog_for_test_with_fs(
+    assets_dir: &std::path::Path,
+    strategy: clipvault_platform::IdentifierStrategy,
+    backend: clipvault_platform::LinuxPickerBackend,
+    fs: std::sync::Arc<dyn clipvault_platform::runtime::linux_app_metadata::DesktopFilesystem>,
+) -> Result<LinuxCatalogResponse, CommandError> {
+    use clipvault_platform::runtime::linux_app_catalog::LinuxApplicationCatalog;
+
+    let catalog = LinuxApplicationCatalog::with_filesystem(assets_dir, fs, strategy);
+    match catalog.list() {
+        Ok(candidates) if !candidates.is_empty() => Ok(LinuxCatalogResponse::Supported {
+            backend: backend.as_str(),
+            strategy: strategy.as_str(),
+            candidates,
+        }),
+        Ok(_) => Ok(LinuxCatalogResponse::Unsupported {
+            reason: "linux picker catalog is empty for this session".into(),
+        }),
+        Err(error) => {
+            tracing::warn!(error = %error, "linux picker catalog enumeration failed");
+            Ok(LinuxCatalogResponse::Unsupported {
+                reason: error.to_string(),
+            })
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LinuxPickAndAddResponse {
+    Added { entry: IgnoredAppEntry },
+    Updated { entry: IgnoredAppEntry },
+}
+
+#[cfg(target_os = "linux")]
+#[tauri::command]
+pub fn clipvault_ignored_app_linux_add(
+    state: State<'_, SharedState>,
+    identifier: String,
+    display_name: Option<String>,
+    icon_ref: Option<String>,
+) -> Result<LinuxPickAndAddResponse, CommandError> {
+    sync_linux_picker_gnome_runtime_state(state.inner());
+    clipvault_ignored_app_linux_add_for_test(
+        state.context(),
+        &identifier,
+        display_name.as_deref(),
+        icon_ref.as_deref(),
+    )
+}
+
+/// Test-friendly handle for [`clipvault_ignored_app_linux_add`]. The
+/// helper exists so the integration suite can exercise the same
+/// validation pipeline the Tauri command runs without standing up a
+/// Tauri runtime.
+///
+/// The helper is the single point of truth for the Linux catalog-add
+/// validation pipeline:
+///
+/// 1. Re-resolve the picker backend from the current runtime
+///    state. A session that flipped to `Unsupported` after the user
+///    opened the catalog (for example the GNOME extension crashed
+///    or the X server disconnected) MUST reject the add.
+/// 2. Re-run the catalog against the resolved strategy and look up
+///    the requested identifier. The catalog is the only authority
+///    that knows which identifiers are safe to persist.
+/// 3. Use the catalog's `display_name` and `icon_ref` instead of
+///    whatever the frontend supplied. The frontend may have cached
+///    stale metadata or be running an older build that ships
+///    different icons; the catalog is the live source of truth.
+/// 4. Persist through [`IgnoredAppsService::add_with_metadata`]
+///    which already updates the privacy gate.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub fn clipvault_ignored_app_linux_add_for_test(
+    context: &clipvault_core::AppContext,
+    identifier: &str,
+    _display_name: Option<&str>,
+    _icon_ref: Option<&str>,
+) -> Result<LinuxPickAndAddResponse, CommandError> {
+    use clipvault_platform::runtime::linux_app_catalog::LinuxApplicationCatalog;
+
+    let info = context.platform();
+    if !matches!(info.os_family, clipvault_platform::OsFamily::Linux) {
+        return Err(CommandError::new(
+            "unsupported_session",
+            "linux picker is only available on linux hosts",
+        ));
+    }
+
+    // 1. Re-resolve the picker backend from the runtime state.
+    //    The catalog was built when the user opened the modal; a
+    //    session that flipped since then MUST reject the add.
+    let picker_backend = context.linux_picker_backend();
+    let Some(strategy) = picker_backend.strategy() else {
+        return Err(CommandError::new(
+            "unsupported_session",
+            format!(
+                "linux picker session is not supported ({})",
+                picker_backend.as_str()
+            ),
+        ));
+    };
+
+    // 2. Re-run the catalog and look up the requested identifier.
+    let assets_dir = info.data_dir.join("assets");
+    let catalog = LinuxApplicationCatalog::new(&assets_dir, strategy);
+    let candidate = match catalog.find(identifier) {
+        Ok(Some(candidate)) => candidate,
+        Ok(None) => {
+            // The identifier does not belong to the catalog for the
+            // current session. Refuse the add — the catalog command is
+            // the single authority that knows which identifiers are
+            // safe to persist.
+            return Err(CommandError::new(
+                "unsupported_session",
+                format!(
+                    "identifier {:?} is not present in the linux picker catalog",
+                    identifier
+                ),
+            ));
+        }
+        Err(error) => {
+            return Err(CommandError::new(
+                "backend_unavailable",
+                format!("linux catalog enumeration failed: {error}"),
+            ));
+        }
+    };
+
+    // 3. Use the catalog's metadata verbatim. The frontend-supplied
+    //    `display_name` and `icon_ref` are ignored on purpose.
+    let outcome = context
+        .ignored_apps()
+        .add_with_metadata(
+            context,
+            candidate.identifier.as_str(),
+            candidate.display_name.as_deref(),
+            candidate.icon_ref.as_deref(),
+        )
+        .map_err(|error| match error {
+            clipvault_core::IgnoredAppsServiceError::Domain(
+                clipvault_core::IgnoredAppError::MissingIdentifier,
+            ) => CommandError::new("missing_identifier", "missing_identifier"),
+            clipvault_core::IgnoredAppsServiceError::Domain(other) => {
+                CommandError::new(other.kind_str(), other.to_string())
+            }
+            clipvault_core::IgnoredAppsServiceError::Persistence(reason) => {
+                CommandError::new("persistence_error", reason.to_string())
+            }
+        })?;
+    Ok(match outcome {
+        PickAndAddOutcome::Added(entry) => LinuxPickAndAddResponse::Added { entry },
+        PickAndAddOutcome::Updated(entry) => LinuxPickAndAddResponse::Updated { entry },
+        PickAndAddOutcome::Cancelled => unreachable!(
+            "add_with_metadata never returns Cancelled; the catalog flow has no picker \
+             dismissal event, the frontend never invokes clipvault_ignored_app_linux_add \
+             without a chosen identifier"
+        ),
+    })
+}
+
+/// Test-friendly handle for [`clipvault_ignored_app_linux_add`]
+/// that drives the catalog against an in-memory filesystem
+/// fixture. Mirrors the production helper but lets the integration
+/// suite pin the candidate list without touching the host's
+/// installed `.desktop` files.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub fn clipvault_ignored_app_linux_add_for_test_with_fs(
+    context: &clipvault_core::AppContext,
+    identifier: &str,
+    _display_name: Option<&str>,
+    _icon_ref: Option<&str>,
+    fs: std::sync::Arc<dyn clipvault_platform::runtime::linux_app_metadata::DesktopFilesystem>,
+) -> Result<LinuxPickAndAddResponse, CommandError> {
+    use clipvault_platform::runtime::linux_app_catalog::LinuxApplicationCatalog;
+
+    let info = context.platform();
+    if !matches!(info.os_family, clipvault_platform::OsFamily::Linux) {
+        return Err(CommandError::new(
+            "unsupported_session",
+            "linux picker is only available on linux hosts",
+        ));
+    }
+
+    let picker_backend = context.linux_picker_backend();
+    let Some(strategy) = picker_backend.strategy() else {
+        return Err(CommandError::new(
+            "unsupported_session",
+            format!(
+                "linux picker session is not supported ({})",
+                picker_backend.as_str()
+            ),
+        ));
+    };
+
+    let assets_dir = info.data_dir.join("assets");
+    let catalog = LinuxApplicationCatalog::with_filesystem(&assets_dir, fs, strategy);
+    let candidate = match catalog.find(identifier) {
+        Ok(Some(candidate)) => candidate,
+        Ok(None) => {
+            return Err(CommandError::new(
+                "unsupported_session",
+                format!(
+                    "identifier {:?} is not present in the linux picker catalog",
+                    identifier
+                ),
+            ));
+        }
+        Err(error) => {
+            return Err(CommandError::new(
+                "backend_unavailable",
+                format!("linux catalog enumeration failed: {error}"),
+            ));
+        }
+    };
+
+    let outcome = context
+        .ignored_apps()
+        .add_with_metadata(
+            context,
+            candidate.identifier.as_str(),
+            candidate.display_name.as_deref(),
+            candidate.icon_ref.as_deref(),
+        )
+        .map_err(|error| match error {
+            clipvault_core::IgnoredAppsServiceError::Domain(
+                clipvault_core::IgnoredAppError::MissingIdentifier,
+            ) => CommandError::new("missing_identifier", "missing_identifier"),
+            clipvault_core::IgnoredAppsServiceError::Domain(other) => {
+                CommandError::new(other.kind_str(), other.to_string())
+            }
+            clipvault_core::IgnoredAppsServiceError::Persistence(reason) => {
+                CommandError::new("persistence_error", reason.to_string())
+            }
+        })?;
+    Ok(match outcome {
+        PickAndAddOutcome::Added(entry) => LinuxPickAndAddResponse::Added { entry },
+        PickAndAddOutcome::Updated(entry) => LinuxPickAndAddResponse::Updated { entry },
+        PickAndAddOutcome::Cancelled => unreachable!(
+            "add_with_metadata never returns Cancelled; the catalog flow has no picker \
+             dismissal event, the frontend never invokes clipvault_ignored_app_linux_add \
+             without a chosen identifier"
+        ),
+    })
 }
 
 // ---------------------------------------------------------------------------

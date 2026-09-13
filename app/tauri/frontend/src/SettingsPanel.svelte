@@ -131,19 +131,6 @@
     );
   }
 
-  async function applyRetention(policy: RetentionPolicy) {
-    if (!settings) return;
-    pickerError = null;
-    try {
-      settings = await settingsSetCommand({ retention: policy });
-      actionMessage = `Política de retención actualizada: ${describeRetention(policy)}`;
-      onSettingsChanged(settings);
-      recomputeBlacklistMatch();
-    } catch (error) {
-      pickerError = describeError(error);
-    }
-  }
-
   async function pickAndAddIgnored() {
     pickerError = null;
     actionMessage = null;
@@ -155,6 +142,19 @@
       pickerError = describeError(error);
     } finally {
       pickerPending = false;
+    }
+  }
+
+  async function applyRetention(policy: RetentionPolicy) {
+    if (!settings) return;
+    pickerError = null;
+    try {
+      settings = await settingsSetCommand({ retention: policy });
+      actionMessage = `Política de retención actualizada: ${describeRetention(policy)}`;
+      onSettingsChanged(settings);
+      recomputeBlacklistMatch();
+    } catch (error) {
+      pickerError = describeError(error);
     }
   }
 

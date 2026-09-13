@@ -16,6 +16,8 @@
   import {
     activeAppDiagnosticsCommand,
     ignoredAppIconCommand,
+    ignoredAppLinuxAddCommand,
+    ignoredAppLinuxCatalogCommand,
     ignoredAppPickAndAddCommand,
     ignoredAppsListWithMetadataCommand,
     ignoredAppsRemoveCommand,
@@ -25,6 +27,8 @@
   import type {
     ActiveAppDiagnostics,
     IgnoredAppEntry,
+    LinuxCatalogResponse,
+    LinuxPickerCandidate,
     PickAndAddResponse,
     PickErrorReason,
     Settings,
@@ -49,6 +53,13 @@
   let pickerPending = false;
   let iconUrls: Record<string, string> = {};
   let iconFailures: Record<string, boolean> = {};
+  let linuxPicker: LinuxCatalogResponse | null = null;
+  let linuxPickerOpen = false;
+  let linuxPickerLoading = false;
+  let linuxPickerError: string | null = null;
+  let linuxPickerIconUrls: Record<string, string> = {};
+  let linuxPickerIconFailures: Record<string, boolean> = {};
+  let linuxPickerIconRefs: Record<string, string> = {};
 
   const tauriIconLoader: IconLoader = {
     async loadIconBytes(ref) {
@@ -60,6 +71,8 @@
     },
   };
   const iconResolver: IconResolver = createIconResolver(tauriIconLoader);
+  const linuxPickerIconResolver: IconResolver =
+    createIconResolver(tauriIconLoader);
 
   async function refresh(): Promise<void> {
     loading = true;
@@ -129,6 +142,20 @@
     actionMessage = null;
     pickerPending = true;
     try {
+      const linuxCatalog = await loadLinuxCatalog();
+      if (linuxCatalog) {
+        if (linuxCatalog.kind === "supported") {
+          linuxPicker = linuxCatalog;
+          linuxPickerOpen = true;
+          return;
+        }
+        // The Linux command answered successfully, but determined that this
+        // session cannot provide a deterministic catalog. Do not replace that
+        // answer with the legacy picker: on Linux it reports the unrelated
+        // `unsupported_session` fallback and masks the actual condition.
+        pickerError = describeLinuxCatalogUnavailable(linuxCatalog.reason);
+        return;
+      }
       const response: PickAndAddResponse = await ignoredAppPickAndAddCommand();
       handlePickResponse(response);
     } catch (error) {
@@ -136,6 +163,79 @@
     } finally {
       pickerPending = false;
     }
+  }
+
+  async function loadLinuxCatalog(): Promise<LinuxCatalogResponse | null> {
+    linuxPickerLoading = true;
+    linuxPickerError = null;
+    try {
+      const response = await ignoredAppLinuxCatalogCommand();
+      if (response.kind === "supported") {
+        await refreshLinuxPickerIcons(response.candidates);
+      }
+      return response;
+    } catch (error) {
+      // Linux-only commands are absent from non-Linux builds. Keep the
+      // existing picker path available there instead of surfacing an IPC
+      // command-not-found error as a Linux-specific UI failure.
+      linuxPickerError = describeError(error);
+      return null;
+    } finally {
+      linuxPickerLoading = false;
+    }
+  }
+
+  async function refreshLinuxPickerIcons(
+    candidates: readonly LinuxPickerCandidate[],
+  ): Promise<void> {
+    const nextUrls: Record<string, string> = {};
+    const nextFailures: Record<string, boolean> = {};
+    const nextRefs: Record<string, string> = {};
+    for (const candidate of candidates) {
+      if (!candidate.icon_ref) continue;
+      const resolution = await linuxPickerIconResolver.resolve(candidate.icon_ref);
+      if (resolution.ok && resolution.url) {
+        nextUrls[candidate.identifier] = resolution.url;
+        nextRefs[candidate.identifier] = candidate.icon_ref;
+      } else {
+        nextFailures[candidate.identifier] = true;
+      }
+    }
+    linuxPickerIconUrls = nextUrls;
+    linuxPickerIconFailures = nextFailures;
+    linuxPickerIconRefs = nextRefs;
+  }
+
+  async function confirmLinuxPick(candidate: LinuxPickerCandidate): Promise<void> {
+    pickerError = null;
+    pickerPending = true;
+    try {
+      const response = await ignoredAppLinuxAddCommand({
+        identifier: candidate.identifier,
+        displayName: candidate.display_name,
+        iconRef: candidate.icon_ref,
+      });
+      closeLinuxPicker();
+      if (response.kind === "added" || response.kind === "updated") {
+        syncEntriesWithPicker([response.entry]);
+        actionMessage = `Aplicación añadida: ${describeEntryName(response.entry)}.`;
+      }
+    } catch (error) {
+      pickerError = describeError(error);
+    } finally {
+      pickerPending = false;
+    }
+  }
+
+  function closeLinuxPicker(): void {
+    for (const ref of Object.values(linuxPickerIconRefs)) {
+      linuxPickerIconResolver.releaseFor(ref);
+    }
+    linuxPickerIconUrls = {};
+    linuxPickerIconFailures = {};
+    linuxPickerIconRefs = {};
+    linuxPickerOpen = false;
+    linuxPicker = null;
   }
 
   function handlePickResponse(response: PickAndAddResponse): void {
@@ -237,6 +337,13 @@
       default:
         return fallback;
     }
+  }
+
+  function describeLinuxCatalogUnavailable(reason: string): string {
+    if (reason === "linux picker catalog is empty for this session") {
+      return "No se encontraron aplicaciones instaladas compatibles con el selector visual de Linux.";
+    }
+    return "El catálogo visual de aplicaciones no está disponible en esta sesión de Linux. Vuelve a intentarlo cuando el adaptador de aplicación activa esté disponible.";
   }
 
   function describeError(error: unknown): string {
@@ -359,7 +466,9 @@
   });
 
   onDestroy(() => {
+    closeLinuxPicker();
     iconResolver.release();
+    linuxPickerIconResolver.release();
     iconUrls = {};
     iconFailures = {};
   });
@@ -453,6 +562,112 @@
       </ul>
     {/if}
   </article>
+
+  {#if linuxPickerOpen && linuxPicker && linuxPicker.kind === "supported"}
+    <div
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="linux-picker-title"
+      data-testid="linux-picker-modal"
+    >
+      <div class="modal" data-testid="linux-picker-modal-content">
+        <h3 id="linux-picker-title">Selecciona una aplicación instalada</h3>
+        <p class="muted">
+          {#if linuxPicker.strategy === "desktop_file_id"}
+            Estrategia: <code>desktop_file_id</code>. La sesión Wayland publica el Desktop File ID
+            de la aplicación activa.
+          {:else}
+            Estrategia: <code>wm_class</code>. La sesión publica el <code>WM_CLASS</code> o
+            <code>app_id</code> de la aplicación activa.
+          {/if}
+        </p>
+        {#if linuxPickerLoading}
+          <p class="muted">Cargando catálogo…</p>
+        {:else if linuxPicker.candidates.length === 0}
+          <p class="muted" data-testid="linux-picker-empty">
+            No hay aplicaciones instaladas con un identificador determinista. Usa el ingreso
+            manual o instala más paquetes.
+          </p>
+        {:else}
+          <ul class="ignored-list" data-testid="linux-picker-list">
+            {#each linuxPicker.candidates as candidate (candidate.identifier)}
+              {@const iconUrl = linuxPickerIconUrls[candidate.identifier]}
+              {@const iconFailed = linuxPickerIconFailures[candidate.identifier]}
+              <li data-testid="linux-picker-row">
+                <button
+                  type="button"
+                  class="link-button"
+                  on:click={() => confirmLinuxPick(candidate)}
+                  disabled={pickerPending}
+                  aria-busy={pickerPending}
+                  data-testid="linux-picker-confirm"
+                  aria-label={`Añadir ${candidate.display_name ?? candidate.identifier}`}
+                >
+                  <span class="icon-cell">
+                    {#if iconUrl}
+                      <img
+                        class="icon-image"
+                        src={iconUrl}
+                        alt=""
+                        aria-hidden="true"
+                        data-testid="linux-picker-icon-image"
+                        on:error={() => {
+                          if (candidate.icon_ref) {
+                            linuxPickerIconResolver.releaseFor(candidate.icon_ref);
+                          }
+                          linuxPickerIconUrls = { ...linuxPickerIconUrls };
+                          delete linuxPickerIconUrls[candidate.identifier];
+                          linuxPickerIconRefs = { ...linuxPickerIconRefs };
+                          delete linuxPickerIconRefs[candidate.identifier];
+                          linuxPickerIconFailures = {
+                            ...linuxPickerIconFailures,
+                            [candidate.identifier]: true,
+                          };
+                        }}
+                      />
+                    {:else}
+                      <span
+                        class="icon-fallback"
+                        class:muted={!candidate.icon_ref || iconFailed}
+                        aria-hidden="true"
+                        data-testid="linux-picker-fallback"
+                      >
+                        {(candidate.display_name ?? candidate.identifier)
+                          .slice(0, 1)
+                          .toUpperCase()}
+                      </span>
+                    {/if}
+                  </span>
+                  <span class="name-cell" data-testid="linux-picker-name">
+                    {candidate.display_name ?? candidate.identifier}
+                  </span>
+                  <span class="muted identifier-cell" data-testid="linux-picker-identifier">
+                    {candidate.identifier}
+                  </span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if linuxPickerError}
+          <p class="error" role="alert" data-testid="linux-picker-error">
+            {linuxPickerError}
+          </p>
+        {/if}
+        <div class="row">
+          <button
+            type="button"
+            class="secondary"
+            on:click={closeLinuxPicker}
+            data-testid="linux-picker-cancel"
+          >
+            Cancelar
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <article data-testid="privacy-diagnostics-card">
     <h3>Diagnóstico de la caché</h3>
@@ -634,6 +849,49 @@
   .diagnostics dd {
     margin: 0;
     word-break: break-all;
+  }
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  .modal {
+    background: var(--cv-bg-surface, #0e1116);
+    color: var(--cv-fg, #f8fafc);
+    border: 1px solid var(--cv-border, #30363d);
+    border-radius: var(--cv-radius-md, 10px);
+    padding: 1rem;
+    width: min(36rem, 90vw);
+    max-height: 80vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .link-button {
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.25rem 0;
+    text-align: left;
+  }
+  .link-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+  .identifier-cell {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85em;
   }
 
   button {

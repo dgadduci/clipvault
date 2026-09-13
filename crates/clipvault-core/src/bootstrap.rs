@@ -338,6 +338,68 @@ impl AppContext {
         &self.paste_suppression
     }
 
+    /// Snapshot the runtime state the Linux visual blacklist picker
+    /// needs to decide whether the current session supports the
+    /// picker. The helper reads the backend from the
+    /// [`clipvault_platform::CachedActiveApplication`] wrapper —
+    /// *not* from the [`crate::ActiveAppDiagnosticsState`] snapshot —
+    /// so the resolution reflects the probe the capture loop is
+    /// using *right now*, including the value
+    /// [`Self::swap_active_app_probe`] just swapped in (for example
+    /// the GNOME-backed probe the integration installs once the user
+    /// accepts the consent prompt). The diagnostics snapshot keeps
+    /// the backend it was constructed with, which lags behind the
+    /// probe swap and would otherwise keep reporting the original
+    /// `x11_ewmh` / `xwayland_ewmh` / `unavailable` hint after the
+    /// integration took over.
+    ///
+    /// The helper also reads the GNOME integration consent and live
+    /// technical state in one place so the picker command and the
+    /// catalog-add command always agree on the resolution. Before a
+    /// listener exists, the runtime state is initialised from the
+    /// durable fallback; the shell updates it from the live snapshot
+    /// before either picker command. Linux hosts that have not
+    /// installed the GNOME integration pass `None` for both GNOME
+    /// fields and the resolver falls back to the EWMH / native
+    /// Wayland branch. The helper is a pure read; calling it does not
+    /// mutate the diagnostics or the integration state.
+    pub fn linux_picker_session_state(&self) -> crate::linux_picker::LinuxPickerSessionState<'_> {
+        let (consent_decision, technical_state) =
+            if self.platform().os_family == clipvault_platform::OsFamily::Linux {
+                (
+                    Some(self.gnome_integration.load_consent_from_cache()),
+                    Some(self.gnome_integration.runtime_technical_state()),
+                )
+            } else {
+                (None, None)
+            };
+        // The probe wrapper is the source of truth for the backend
+        // the capture loop is using. `swap_active_app_probe` rewrites
+        // the wrapper but leaves the diagnostics backend untouched,
+        // so reading `diagnostics.backend` here would keep reporting
+        // the initial `DisplayServer`-derived hint forever. The
+        // wrapper exposes the current probe through `inner().name()`
+        // and `CachedActiveApplication::name` is a thin forwarding
+        // accessor, so we use it directly to avoid the extra lock.
+        let backend = Some(self.cached_active_app.name());
+        crate::linux_picker::LinuxPickerSessionState {
+            backend,
+            cache_populated: false,
+            gnome_consent: consent_decision
+                .map(crate::linux_picker::GnomeConsentDecision::from_core),
+            gnome_technical_state: technical_state
+                .map(crate::linux_picker::GnomeTechnicalState::from_core),
+        }
+    }
+
+    /// Resolve the Linux picker backend from the runtime state. Thin
+    /// wrapper around [`crate::linux_picker::resolve_linux_picker_backend`]
+    /// that builds the [`LinuxPickerSessionState`] from the
+    /// diagnostics and GNOME integration state.
+    pub fn linux_picker_backend(&self) -> clipvault_platform::LinuxPickerBackend {
+        crate::linux_picker::resolve_linux_picker_backend(self.linux_picker_session_state())
+    }
+
     /// Optional, opt-in capture-debug sink the `linux-source-app-metadata`
     /// instrumentation installs. The bootstrap wires this from the
     /// `CLIPVAULT_DEBUG_CAPTURE` environment variable; tests inject

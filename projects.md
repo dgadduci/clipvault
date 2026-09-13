@@ -46,11 +46,11 @@ canonical value and never fall back to a hard-coded constant.
 
 | Surface | Version |
 | --- | --- |
-| Cargo workspace (`Cargo.toml`) | 0.0.14 |
-| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.14 |
-| Frontend package (`app/tauri/frontend/package.json`) | 0.0.14 |
+| Cargo workspace (`Cargo.toml`) | 0.0.15 |
+| Tauri config (`app/tauri/src-tauri/tauri.conf.json`) | 0.0.15 |
+| Frontend package (`app/tauri/frontend/package.json`) | 0.0.15 |
 
-The canonical public version is **0.0.14**. The 0.0.13 version was
+The canonical public version is **0.0.15**. The 0.0.14 version was
 intentionally established as the prior baseline.
 The earlier `0.1.x` values were development manifest values and did not
 represent a public product release. The `0.0.1` baseline pinned the
@@ -165,6 +165,9 @@ to the WM_CLASS / filename stem matchers, XDG precedence wins over a
 lexicographic tie-break when two roots declare the same id, the backfill
 loop skips `window:*` rows and a legacy `window:6` row is never rewritten —
 is a functional change, so the patch is incremented to **0.0.14**.
+The bounded Wayland startup handshake that prevents a stalled compositor
+response from blocking Tauri before `runtime_ready` is a functional change, so
+the patch is incremented to **0.0.15**.
 
 ## Bumping the version
 

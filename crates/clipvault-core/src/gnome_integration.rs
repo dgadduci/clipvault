@@ -28,8 +28,9 @@ use crate::clock::Clock;
 /// so a user that upgrades ClipVault keeps the previous decision.
 pub const GNOME_CONSENT_STORAGE_KEY: &str = "gnome_shell_integration_consent";
 
-/// Storage key the technical state service uses. Updated by the
-/// platform adapter on every transition.
+/// Storage key for the last durable technical state. This is only a
+/// conservative startup fallback: a live GNOME listener keeps its
+/// transient state in memory so focus changes never turn into SQLite writes.
 pub const GNOME_STATE_STORAGE_KEY: &str = "gnome_shell_integration_state";
 
 /// User-facing consent states. The first launch resolves to
@@ -165,10 +166,14 @@ pub struct GnomeIntegrationService {
     /// live platform service exists, and the in-memory copy is
     /// refreshed whenever [`save_consent`] commits a new value.
     cached_consent: Arc<parking_lot::RwLock<GnomeConsentDecision>>,
-    /// Cached technical state. Mirrors the same lifecycle the
-    /// platform layer reports so the diagnostics card can render
-    /// the last-known value even when the listener is down.
+    /// Last durable technical state, loaded from or written to
+    /// `app_settings`. It is used when no live GNOME listener exists.
     cached_technical_state: Arc<parking_lot::RwLock<GnomeTechnicalState>>,
+    /// Current process-local GNOME technical state. The shell updates this
+    /// from its live `SharedGnomeSnapshot` before a picker operation. Keeping
+    /// it separate from the durable fallback means a focus transition such as
+    /// `NoActiveApplication` never produces a SQLite write.
+    runtime_technical_state: Arc<parking_lot::RwLock<GnomeTechnicalState>>,
 }
 
 impl Clone for GnomeIntegrationService {
@@ -177,6 +182,7 @@ impl Clone for GnomeIntegrationService {
             clock: Arc::clone(&self.clock),
             cached_consent: Arc::clone(&self.cached_consent),
             cached_technical_state: Arc::clone(&self.cached_technical_state),
+            runtime_technical_state: Arc::clone(&self.runtime_technical_state),
         }
     }
 }
@@ -187,6 +193,9 @@ impl GnomeIntegrationService {
             clock,
             cached_consent: Arc::new(parking_lot::RwLock::new(GnomeConsentDecision::Unknown)),
             cached_technical_state: Arc::new(parking_lot::RwLock::new(
+                GnomeTechnicalState::NotInstalled,
+            )),
+            runtime_technical_state: Arc::new(parking_lot::RwLock::new(
                 GnomeTechnicalState::NotInstalled,
             )),
         }
@@ -209,6 +218,21 @@ impl GnomeIntegrationService {
         *self.cached_technical_state.read()
     }
 
+    /// Return the in-process technical state used by runtime decisions such
+    /// as the Linux visual picker. Before a GNOME listener exists this is
+    /// initialised from the durable cache, so callers degrade conservatively.
+    pub fn runtime_technical_state(&self) -> GnomeTechnicalState {
+        *self.runtime_technical_state.read()
+    }
+
+    /// Update the in-process state from a live platform snapshot. This method
+    /// is intentionally storage-free: focus updates can happen frequently and
+    /// must not cause SQLite writes or overwrite the conservative startup
+    /// fallback.
+    pub fn set_runtime_technical_state(&self, state: GnomeTechnicalState) {
+        *self.runtime_technical_state.write() = state;
+    }
+
     /// Prime the in-memory cache from the persistence layer using the
     /// raw `Database` mutex the bootstrap owns. Bootstrap calls this
     /// once at startup so the public payload can answer the first
@@ -226,8 +250,9 @@ impl GnomeIntegrationService {
                 GnomeConsentDecision::from_storage(Some(row.value.as_str()));
         }
         if let Some(row) = repo.get(GNOME_STATE_STORAGE_KEY)? {
-            *self.cached_technical_state.write() =
-                GnomeTechnicalState::from_storage(Some(row.value.as_str()));
+            let state = GnomeTechnicalState::from_storage(Some(row.value.as_str()));
+            *self.cached_technical_state.write() = state;
+            *self.runtime_technical_state.write() = state;
         }
         Ok(())
     }
@@ -293,6 +318,7 @@ impl GnomeIntegrationService {
             .map_err(GnomeIntegrationError::AppSettings)?;
         drop(db);
         *self.cached_technical_state.write() = state;
+        *self.runtime_technical_state.write() = state;
         Ok(())
     }
 
@@ -310,6 +336,7 @@ impl GnomeIntegrationService {
             GnomeTechnicalState::from_storage(stored.as_ref().map(|row| row.value.as_str()));
         drop(db);
         *self.cached_technical_state.write() = state;
+        *self.runtime_technical_state.write() = state;
         Ok(state)
     }
 
@@ -370,6 +397,32 @@ mod tests {
             .expect("save");
         let loaded = service.load_technical_state(&context).expect("load");
         assert_eq!(loaded, GnomeTechnicalState::ActivationPending);
+    }
+
+    #[test]
+    fn runtime_technical_state_does_not_overwrite_durable_fallback() {
+        let (_dir, context) = context_with_clock();
+        let service = GnomeIntegrationService::new(fixed_clock(time::OffsetDateTime::UNIX_EPOCH));
+        service
+            .save_technical_state(&context, GnomeTechnicalState::ActivationPending)
+            .expect("save durable fallback");
+
+        service.set_runtime_technical_state(GnomeTechnicalState::NoActiveApplication);
+
+        assert_eq!(
+            service.runtime_technical_state(),
+            GnomeTechnicalState::NoActiveApplication
+        );
+        assert_eq!(
+            service.load_technical_state_from_cache(),
+            GnomeTechnicalState::ActivationPending,
+            "the startup fallback must not be rewritten for a focus transition"
+        );
+        let persisted = service
+            .read_setting(&context, GNOME_STATE_STORAGE_KEY)
+            .expect("read technical setting")
+            .expect("technical setting exists");
+        assert_eq!(persisted.value, "activation_pending");
     }
 
     #[test]

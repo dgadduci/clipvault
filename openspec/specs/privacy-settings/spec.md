@@ -249,3 +249,34 @@ selection with clipboard payloads or capture diagnostics.
 
 - **WHEN** Linux cannot provide a stable mapping from an installed application entry to the active-app identifier used by the blacklist
 - **THEN** ClipVault reports the unsupported capability without inventing an identifier and leaves existing local settings and capture pipeline unchanged
+
+### Requirement: Selector Linux sólo con asociación estable
+
+El selector visual Linux SHALL ofrecer una aplicación únicamente cuando pueda
+devolver el mismo identificador estable que consume el active-app adapter de
+la sesión actual. MUST NOT inventar un identificador a partir del nombre
+visible, `Exec=`, PID, título o una ruta.
+
+#### Scenario: Sesión Linux con asociación determinista
+
+- GIVEN una aplicación instalada con metadata local y una asociación
+  determinista con el identificador activo de la sesión
+- WHEN el usuario selecciona la aplicación desde Privacidad
+- THEN el picker devuelve el identificador estable, nombre e icono opcional
+- AND la blacklist persiste el identificador como clave de matching
+
+#### Scenario: Sesión Linux sin asociación segura
+
+- GIVEN que la sesión no permite demostrar la correspondencia entre la
+  aplicación seleccionada y el identificador activo
+- WHEN el usuario abre o usa el selector visual
+- THEN devuelve `unsupported_session` o un error local tipado
+- AND la UI conserva el ingreso manual
+- AND no modifica la blacklist ni crea assets
+
+#### Scenario: Cancelación del selector Linux
+
+- GIVEN que el usuario cancela la selección
+- WHEN el picker devuelve cancelación
+- THEN la blacklist permanece sin cambios
+- AND no se crea ni se elimina metadata de aplicación

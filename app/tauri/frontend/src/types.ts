@@ -416,6 +416,66 @@ export type PickAndAddResponse =
   | { kind: "cancelled" }
   | { kind: "error"; reason: PickErrorReason; message: string };
 
+// ---------------------------------------------------------------------------
+// Linux picker (`linux-blacklist-app-picker` capability).
+//
+// The Linux picker mirrors the macOS flow but presents a list of
+// installed `.desktop` files the user can pick from. The
+// frontend never executes any helper process: the catalog returns a
+// deterministic identifier the active-app adapter publishes, the
+// user picks one and the frontend forwards the selection to the
+// `clipvault_ignored_app_linux_add` command.
+// ---------------------------------------------------------------------------
+
+/**
+ * Strategy the catalog used to compute the identifier. Mirrors the
+ * Rust enum. The UI surfaces the strategy in the picker header so the
+ * user can distinguish X11 / Wayland native (`wm_class`) candidates
+ * from GNOME Wayland (`desktop_file_id`) candidates.
+ */
+export type LinuxPickerStrategy = "wm_class" | "desktop_file_id";
+
+/**
+ * One entry the Linux picker catalog exposes. The frontend renders
+ * every entry as a row in the picker modal; the backend persists the
+ * row the user clicked.
+ */
+export interface LinuxPickerCandidate {
+  /** Deterministic identifier the active-app adapter publishes. */
+  identifier: string;
+  /** User-visible display name. `null` when the `.desktop` lacks `Name=`. */
+  display_name: string | null;
+  /** Opaque icon reference. `null` when the icon could not be persisted. */
+  icon_ref: string | null;
+  strategy: LinuxPickerStrategy;
+}
+
+/**
+ * Discriminated response of [`clipvault_ignored_app_linux_catalog`].
+ *
+ * - `supported` carries the deterministic identifier strategy the
+ *   catalog applied and the candidate list the frontend renders.
+ * - `unsupported` keeps the manual entry surface enabled; the
+ *   reason is a metadata-only diagnostic string the UI may show in a
+ *   tooltip but never parses as a key.
+ */
+export type LinuxCatalogResponse =
+  | {
+      kind: "supported";
+      strategy: LinuxPickerStrategy;
+      candidates: LinuxPickerCandidate[];
+    }
+  | { kind: "unsupported"; reason: string };
+
+/**
+ * Response of [`clipvault_ignored_app_linux_add`]. Mirrors the
+ * macOS picker shape minus the `cancelled` variant (the catalog
+ * flow has no equivalent of the user dismissing a native dialog).
+ */
+export type LinuxPickAndAddResponse =
+  | { kind: "added"; entry: IgnoredAppEntry }
+  | { kind: "updated"; entry: IgnoredAppEntry };
+
 export interface CommandError {
   kind: string;
   message: string;
