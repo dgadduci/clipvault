@@ -18,6 +18,7 @@ mod clipboard_image_png;
 pub mod guidance;
 mod hotkey;
 mod info;
+#[cfg(target_os = "linux")]
 mod linux_picker_support;
 mod noop;
 pub mod paste;
@@ -67,6 +68,7 @@ pub use hotkey::{
     HotkeyKey, HotkeyManager, HotkeyModifiers, HotkeyOutcome,
 };
 pub use info::{DisplayServer, OsFamily, PlatformInfo};
+#[cfg(target_os = "linux")]
 pub use linux_picker_support::LinuxPickerBackend;
 pub use noop::{
     NoopActiveApplicationProbe, NoopClipboardBackend, NoopHotkeyManager, NoopPasteController,

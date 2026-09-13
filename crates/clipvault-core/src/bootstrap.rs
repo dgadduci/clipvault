@@ -363,6 +363,7 @@ impl AppContext {
     /// fields and the resolver falls back to the EWMH / native
     /// Wayland branch. The helper is a pure read; calling it does not
     /// mutate the diagnostics or the integration state.
+    #[cfg(target_os = "linux")]
     pub fn linux_picker_session_state(&self) -> crate::linux_picker::LinuxPickerSessionState<'_> {
         let (consent_decision, technical_state) =
             if self.platform().os_family == clipvault_platform::OsFamily::Linux {
@@ -396,6 +397,7 @@ impl AppContext {
     /// wrapper around [`crate::linux_picker::resolve_linux_picker_backend`]
     /// that builds the [`LinuxPickerSessionState`] from the
     /// diagnostics and GNOME integration state.
+    #[cfg(target_os = "linux")]
     pub fn linux_picker_backend(&self) -> clipvault_platform::LinuxPickerBackend {
         crate::linux_picker::resolve_linux_picker_backend(self.linux_picker_session_state())
     }

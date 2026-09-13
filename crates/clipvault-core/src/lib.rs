@@ -22,6 +22,7 @@ pub mod history;
 pub mod ignored_apps;
 pub mod ignored_apps_service;
 pub mod image_capture_diagnostic;
+#[cfg(target_os = "linux")]
 pub mod linux_picker;
 pub mod management;
 pub mod organization;
