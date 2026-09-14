@@ -15,6 +15,16 @@ La estructura visual debe quedar conceptualmente así:
 Debe existir una sola instancia de DesktopToolbar. No debe quedar otra barra
 global por encima del workspace ni una segunda búsqueda en el rail.
 
+El workspace debe ser también el panel visual común de las tres zonas de la
+referencia: (1) el panel/lista de colecciones, (2) la fila de búsqueda y
+acciones y (3) la fila/rail de historial. La jerarquía debe tener un único
+contenedor raíz acotado que posea el fondo, borde, radio y padding del panel,
+con el panel de colecciones y la columna de contenido como descendientes. No
+se debe dejar la zona 1 como un panel hermano visual separado del contenedor
+que agrupa las zonas 2 y 3. Si los componentes internos necesitan wrappers,
+esos wrappers no deben crear una segunda altura independiente ni otra
+superficie exterior que vuelva a separar visualmente la zona 1.
+
 desktop-workspace usa una grilla de dos columnas con min-width: 0 en la
 columna derecha y align-items: stretch. La altura natural de la columna
 derecha —barra de búsqueda, estado mínimo y rail— determina la altura del
@@ -25,6 +35,15 @@ El panel de colecciones mantiene un layout flex de columna. Su encabezado
 permanece visible y su lista usa flex: 1, min-height: 0 y overflow-y: auto.
 Agregar colecciones no puede aumentar la altura del desktop ni crear una
 segunda barra de scroll para el panel.
+
+El viewport de la lista debe estar limitado por la altura disponible del
+panel común, no por la cantidad de filas. La lista es el único descendiente
+que puede tener scroll vertical: el encabezado, el control de nueva colección,
+la fila de búsqueda, la fila de historial y el body no deben crecer ni crear
+un scroll vertical alternativo. La implementación puede usar `height: 100%`,
+`flex: 1 1 auto`, `min-height: 0` y `overflow-y: auto` según la jerarquía real,
+pero debe conservar una única fuente de altura y no hardcodear un segundo
+valor que diverja del workspace.
 
 El rail conserva su altura y el tamaño cuadrado fijo de sus cards. La
 columna derecha debe tener min-width: 0 y el viewport horizontal del rail

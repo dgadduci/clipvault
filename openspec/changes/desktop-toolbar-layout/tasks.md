@@ -105,3 +105,42 @@
 
 La validación manual de platform-permission-guidance permanece separada y no
 debe marcarse como completada por este cambio.
+
+## 9. Modificación solicitada: panel unificado y lista acotada
+
+- [x] 9.1 Revisar la jerarquía DOM y CSS actual contra la referencia: localizar
+  explícitamente la zona 1 (colecciones), la zona 2 (búsqueda/acciones) y la
+  zona 3 (historial), y confirmar cuál wrapper será el único panel común.
+- [x] 9.2 Mantener las tres zonas dentro de un único contenedor/panel de
+  workspace, con una sola superficie exterior y sin dejar la zona 1 como un
+  panel visual hermano separado de las zonas 2 y 3.
+- [x] 9.3 Hacer que el viewport de la lista de colecciones tenga tamaño fijo
+  derivado de la altura disponible del panel: encabezado y nueva colección
+  fijos; lista con `flex: 1`, `min-height: 0` y `overflow-y: auto`.
+- [x] 9.4 Confirmar que agregar colecciones no aumenta el panel, la ventana ni
+  el body, y que no aparece un segundo scroll vertical fuera de la lista.
+- [x] 9.5 Preservar selección, creación, renombrado, borrado, drop sobre filas
+  scrolleadas, rail horizontal y todos los contratos protegidos de
+  drag-and-drop; no cambiar payloads ni assets.
+- [x] 9.6 Agregar o ajustar sólo las regresiones frontend necesarias para la
+  jerarquía del panel y el viewport fijo, ejecutar las regresiones de
+  drag-and-drop afectadas y actualizar la evidencia de verificación.
+
+Evidencia de implementación y verificación reportada por MiniMax:
+
+- `.layout` (`data-testid="desktop-workspace"`) es el único panel visual común
+  para las zonas 1, 2 y 3; `.sidebar` quedó transparente.
+- `<main>` reserva `height: 100vh`; el workspace usa `flex: 1`,
+  `min-height: 0`, `grid-template-rows: minmax(0, 1fr)` y `overflow: hidden`.
+- La lista de colecciones conserva viewport acotado con `flex: 1 1 auto`,
+  `min-height: 0` y `overflow-y: auto`, con encabezado y botón fuera del
+  scroll.
+- Se añadieron 7 regresiones frontend para los contratos del panel, viewport,
+  drop sobre filas scrolleables y payload limitado al identificador opaco de
+  entrada. Las regresiones de drag-and-drop afectadas quedaron verdes.
+- Verificaciones reportadas: `cargo fmt --all -- --check`, `npm run check`,
+  1225 tests frontend, `npm run build`, validación OpenSpec estricta y
+  `git diff --check`; la prueba manual en Wayland fue aprobada.
+
+La verificación manual de macOS y X11 indicada en las tareas 8.1–8.5 sigue
+pendiente; este resultado no la sustituye.

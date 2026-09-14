@@ -1601,7 +1601,7 @@
     </p>
     <button type="button" on:click={() => void refresh()}>Reintentar</button>
   {:else if diagnostics}
-    <div class="layout">
+    <div class="layout" data-testid="desktop-workspace">
       <OrganizationSidebar
         collections={organization?.collections ?? []}
         activeCollectionId={selectedCollectionId}
@@ -1882,13 +1882,25 @@
      * enough vertical breathing room for the search-status bar and
      * the listener-status line without leaving the empty band the
      * previous `2rem` produced once the redundant title line was
-     * removed. */
+     * removed.
+     *
+     * Vertically the desktop fills the Tauri window through
+     * `height: 100vh` and the flex column below so the unified
+     * workspace panel (`.layout`) owns the available height. The
+     * previous block layout grew with the sidebar content and
+     * pushed the bottom of the body past the Tauri window on long
+     * collection lists; the new flex column reserves the full
+     * window height for the workspace so adding collections can
+     * never grow the body. */
     box-sizing: border-box;
     width: 100%;
+    height: 100vh;
     max-width: none;
     margin: 0;
     padding: 1rem 1.25rem 1rem;
     line-height: 1.5;
+    display: flex;
+    flex-direction: column;
   }
 
   .status {
@@ -1924,30 +1936,59 @@
   }
 
   /*
-   * Two-column grid: the sidebar takes a fixed slice and the rail
-   * owns the remaining width. The `minmax(0, 1fr)` on the rail
-   * column is the key piece of CSS that prevents the rail from
-   * *forcing* the grid track to grow with its content (a default
-   * `minmax(auto, 1fr)` would let the row's intrinsic minimum
-   * expand to fit every card, breaking the horizontal scroll). With
-   * `0` as the minimum the rail can shrink to its container width
-   * and the cards stay at their fixed `--cv-card-size`.
+   * Unified workspace panel. The desktop-toolbar-layout task 9
+   * change collapses the previous standalone collection card and
+   * the right content column into a SINGLE bounded panel: zone 1
+   * (collections), zone 2 (search/actions) and zone 3 (history rail)
+   * are descendants of `.layout`. The single surface owns the
+   * background, border, radius and padding so the collection zone
+   * is no longer an outer panel sibling of the search and rail
+   * zones — both columns sit on the same card.
    *
-   * `align-items: stretch` makes the sidebar fill the row height
-   * the right column owns; `OrganizationSidebar.svelte` then sizes
-   * its panel with `height: 100%` so the two columns stay visually
-   * aligned without the layout needing a second fixed-height token.
-   * Adding many collections cannot grow the row because the sidebar
-   * carries `min-height: 0` on its internal list and only the list
-   * owns the vertical scroller.
+   * Structural anchors pinned by the change:
+   *
+   *   - `display: grid` + `align-items: stretch` keeps the two
+   *     columns sharing the same visible height; `OrganizationSidebar`
+   *     sizes itself through `height: 100%` so the panels stay
+   *     visually aligned without a second fixed-height token.
+   *   - `minmax(180px, 220px) minmax(0, 1fr)` pins the sidebar
+   *     width and lets the rail column shrink to its container so
+   *     the cards stay at their fixed `--cv-card-size` (the `0`
+   *     minimum prevents the grid track from growing to fit every
+   *     card, which would defeat the rail's horizontal scroll).
+   *   - `flex: 1 1 auto` + `min-height: 0` makes the panel consume
+   *     the vertical space `<main>` reserves through `100vh`.
+   *     Together with `overflow: hidden` this guarantees that
+   *     adding collections cannot grow the desktop body: the grid
+   *     row is capped by the flex-allocated height and only the
+   *     collection list owns the vertical scroller.
+   *   - The collection list inside `.sidebar` keeps `flex: 1 1
+   *     auto; min-height: 0; overflow-y: auto` so the viewport is
+   *     derived from the panel height (`panel height - header`)
+   *     rather than from the number of collections the user has
+   *     defined. The header (`flex: 0 0 auto`) and the new-icon
+   *     control stay pinned above the list at every list length.
+   *   - The rail inside `.layout-main` keeps its fixed
+   *     `height: var(--cv-card-rail-height)` plus its horizontal
+   *     overflow contract, so the workspace does not introduce a
+   *     second vertical scrollbar or push the cards vertically.
    */
   .layout {
     display: grid;
     grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     gap: 1rem;
     align-items: stretch;
     width: 100%;
+    flex: 1 1 auto;
     min-width: 0;
+    min-height: 0;
+    box-sizing: border-box;
+    background: var(--cv-bg-elevated, #161b22);
+    border: 1px solid var(--cv-border, #30363d);
+    border-radius: var(--cv-radius-md, 10px);
+    padding: 0.85rem 1rem;
+    overflow: hidden;
   }
 
   .layout-main {

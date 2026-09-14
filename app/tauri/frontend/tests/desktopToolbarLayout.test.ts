@@ -476,3 +476,325 @@ test("DesktopToolbar never logs clipboard content, snippets or asset references"
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// Task 9.x: unified workspace panel + bounded collection viewport.
+//
+// The desktop-toolbar-layout task 9 follow-up collapses the
+// previous standalone collection card and the right content
+// column into ONE bounded panel. The tests below pin the CSS
+// and DOM contracts the change introduces:
+//
+//   - The `.layout` wrapper carries the visual surface
+//     (background, border, radius, padding) and the bounded
+//     height. Zone 1 (collections), zone 2 (search/actions) and
+//     zone 3 (rail) are all descendants of `.layout`.
+//
+//   - `OrganizationSidebar.svelte` no longer carries the outer
+//     visual surface so the panel can never split zones 1 and 2–3
+//     into two separate cards.
+//
+//   - The collection list keeps `flex: 1 1 auto; min-height: 0;
+//     overflow-y: auto` so the viewport is derived from the panel
+//     height (`panel height - header`) rather than from the number
+//     of collections the user has defined. The header pins to the
+//     top through `flex: 0 0 auto` and the new-collection button
+//     stays reachable at every list length.
+//
+//   - The workspace height is bounded by `flex: 1 1 auto` and
+//     `min-height: 0` (capped at the row's `minmax(0, 1fr)`), and
+//     the body fills the Tauri window through `main { height:
+//     100vh }`. Together these pin the no-body-growth contract
+//     even when the user has hundreds of collections.
+//
+//   - Drop targets use the workspace-local `data-collection-id`
+//     and `data-drop-target` hooks; the helper module resolves
+//     rows through those attributes only, never through content,
+//     so the payload contract (entry id only) survives the layout
+//     change.
+// ---------------------------------------------------------------------------
+
+test("App.svelte renders the unified workspace panel as the single ancestor of zones 1, 2 and 3", () => {
+  const source = stripComments(loadSource("src/App.svelte"));
+  // The wrapper must carry the documented testid so any regression
+  // that splits the workspace into nested sibling panels surfaces
+  // as a failed assertion.
+  const wrapperRegex = /<div\s+class="layout"[^>]*data-testid="desktop-workspace"\s*>/;
+  const openMatch = wrapperRegex.exec(source);
+  assert.ok(
+    openMatch,
+    "the unified workspace wrapper must exist with data-testid=desktop-workspace",
+  );
+  // Everything the user perceives as the workspace (zone 1: the
+  // collection sidebar, zone 2: the search/actions row, zone 3:
+  // the rail of cards) must appear inside the workspace wrapper.
+  // We capture the wrapper region by walking through the source
+  // one character at a time and tracking the open / close balance
+  // of <div> tags — any nested Svelte {#if} blocks are tracked
+  // separately so the wrapper-closing `</div>` is the one that
+  // returns the depth to zero.
+  const openIdx = openMatch.index;
+  const diagnosticsIdx = source.indexOf("{:else if diagnostics}");
+  assert.notEqual(diagnosticsIdx, -1, "the desktop branch must start at {:else if diagnostics}");
+  assert.ok(
+    openIdx > diagnosticsIdx,
+    "the workspace wrapper must open inside the diagnostics branch, not before it",
+  );
+  let depth = 0;
+  let i = openIdx;
+  let wrapperClose = -1;
+  while (i < source.length) {
+    if (source.startsWith("<div", i)) {
+      depth += 1;
+      i = source.indexOf(">", i) + 1;
+      continue;
+    }
+    if (source.startsWith("</div>", i)) {
+      depth -= 1;
+      i += "</div>".length;
+      if (depth === 0) {
+        wrapperClose = i;
+        break;
+      }
+      continue;
+    }
+    i += 1;
+  }
+  assert.notEqual(
+    wrapperClose,
+    -1,
+    "the workspace wrapper must close with a balanced </div> tag",
+  );
+  const workspaceBody = source.slice(openIdx, wrapperClose);
+  assert.match(
+    workspaceBody,
+    /<OrganizationSidebar/,
+    "zone 1 (OrganizationSidebar) must descend from the workspace wrapper",
+  );
+  assert.match(
+    workspaceBody,
+    /<div\s+class="layout-main"[^>]*data-testid="layout-main"\s*>/,
+    "zones 2 + 3 (.layout-main column) must descend from the workspace wrapper",
+  );
+  assert.match(
+    workspaceBody,
+    /<DesktopToolbar/,
+    "zone 2 (DesktopToolbar) must descend from the workspace wrapper",
+  );
+  assert.match(
+    workspaceBody,
+    /<HistoryCardRail/,
+    "zone 3 (HistoryCardRail) must descend from the workspace wrapper",
+  );
+});
+
+test("App.svelte owns the unified panel's visual surface on .layout", () => {
+  const source = stripComments(loadSource("src/App.svelte"));
+  // The unified panel MUST own the background, border, radius
+  // and padding. A regression that strips any of them re-introduces
+  // the "no visible surface" case the design doc rules out.
+  for (const pattern of [
+    /\.layout\s*\{[^}]*background:\s*var\(--cv-bg-elevated/,
+    /\.layout\s*\{[^}]*border:\s*1px\s+solid\s+var\(--cv-border/,
+    /\.layout\s*\{[^}]*border-radius:\s*var\(--cv-radius-md/,
+    /\.layout\s*\{[^}]*padding:/,
+  ]) {
+    assert.match(
+      source,
+      pattern,
+      `.layout must own the unified panel visual surface (${pattern})`,
+    );
+  }
+});
+
+test("App.svelte caps the workspace height so the body cannot grow with collections", () => {
+  const source = stripComments(loadSource("src/App.svelte"));
+  // `<main>` must reserve the full Tauri window height so the
+  // workspace panel can grow with `flex: 1 1 auto` without the
+  // page-level vertical scrollbar appearing on long collection
+  // lists.
+  assert.match(
+    source,
+    /main\s*\{[^}]*height:\s*100vh/,
+    "<main> must reserve the full Tauri window height (height: 100vh)",
+  );
+  assert.match(
+    source,
+    /main\s*\{[^}]*display:\s*flex/,
+    "<main> must be a flex column so the workspace panel can fill it",
+  );
+  assert.match(
+    source,
+    /main\s*\{[^}]*flex-direction:\s*column/,
+    "<main> must stack children vertically through flex-direction: column",
+  );
+  // The workspace grid must cap its row at the available height
+  // (minmax(0, 1fr)) so the grid track never auto-grows with the
+  // sidebar's intrinsic content size.
+  assert.match(
+    source,
+    /\.layout\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\)/,
+    ".layout must cap its row at minmax(0, 1fr) so the collection panel never grows the row",
+  );
+  // The panel must consume the vertical space `<main>` reserves
+  // through `flex: 1 1 auto` + `min-height: 0` and must clip its
+  // own overflow so the body can never scroll because of the
+  // sidebar's content.
+  assert.match(
+    source,
+    /\.layout\s*\{[^}]*flex:\s*1 1 auto/,
+    ".layout must grow to fill <main> through flex: 1 1 auto",
+  );
+  assert.match(
+    source,
+    /\.layout\s*\{[^}]*min-height:\s*0/,
+    ".layout must allow shrinking below its intrinsic content",
+  );
+  assert.match(
+    source,
+    /\.layout\s*\{[^}]*overflow:\s*hidden/,
+    ".layout must clip its own overflow so the body never gets a second vertical scrollbar",
+  );
+});
+
+test("OrganizationSidebar drops the outer panel visual surface in favour of the unified workspace", () => {
+  const source = stripComments(loadSource("src/OrganizationSidebar.svelte"));
+  // The collection panel must NOT carry its own background,
+  // border, radius or padding any more: the unified `.layout`
+  // workspace panel is the single owner of those tokens. A
+  // regression that re-introduces them would split zones 1 and
+  // 2–3 into two sibling cards, which the spec forbids.
+  for (const forbidden of [
+    /\.sidebar\s*\{[^}]*background:/,
+    /\.sidebar\s*\{[^}]*border:\s*1px/,
+    /\.sidebar\s*\{[^}]*border-radius:/,
+    /\.sidebar\s*\{[^}]*padding:/,
+  ]) {
+    assert.equal(
+      forbidden.test(source),
+      false,
+      `.sidebar must not carry the outer panel visual surface (${forbidden})`,
+    );
+  }
+});
+
+test("OrganizationSidebar keeps the bounded internal scroller for the collection list", () => {
+  const source = stripComments(loadSource("src/OrganizationSidebar.svelte"));
+  // The collection list MUST size itself from the available panel
+  // height, NOT from the number of rows the user has. The pinned
+  // flex triple (`flex: 1 1 auto` + `min-height: 0`) plus the
+  // vertical auto overflow is what guarantees that adding
+  // collections can never grow the desktop body.
+  assert.match(
+    source,
+    /\.collection-list\s*\{[^}]*flex:\s*1 1 auto/,
+    ".collection-list must consume the remaining vertical space through flex: 1 1 auto",
+  );
+  assert.match(
+    source,
+    /\.collection-list\s*\{[^}]*min-height:\s*0/,
+    ".collection-list must allow shrinking below its intrinsic content",
+  );
+  assert.match(
+    source,
+    /\.collection-list\s*\{[^}]*overflow-y:\s*auto/,
+    ".collection-list must own the vertical scroller",
+  );
+  // The header above the list MUST stay pinned at every list
+  // length. `flex: 0 0 auto` is the single switch that prevents
+  // the header from shrinking when the list grows.
+  assert.match(
+    source,
+    /\.sidebar-header\s*\{[^}]*flex:\s*0 0 auto/,
+    ".sidebar-header must not shrink above the list",
+  );
+  // The new-collection icon button MUST remain in the DOM. A
+  // regression that moves it outside the header (or that wraps
+  // it in another shadow DOM) would surface here as a missing
+  // `data-testid="sidebar-new-collection"` attribute.
+  assert.match(
+    source,
+    /data-testid="sidebar-new-collection"/,
+    "the new-collection icon must remain reachable inside the panel header",
+  );
+});
+
+test("OrganizationSidebar keeps the scrolled-row drop contract the helper module resolves", () => {
+  const source = stripComments(loadSource("src/OrganizationSidebar.svelte"));
+  // The drop zone's delegated handlers must continue to live on
+  // the scrollable viewport so a drop that lands on a row which
+  // is currently scrolled out of the initial visible portion
+  // still resolves correctly (the scrollable container stays in
+  // the DOM, the rows it scrolls remain descendants, and the
+  // delegated helper resolves them through the workspace-local
+  // attributes only).
+  assert.match(
+    source,
+    /data-collections-drop-viewport=/,
+    "the scrollable viewport must keep the delegated drop-zone hook",
+  );
+  assert.match(
+    source,
+    /data-drop-target=/,
+    "every drop-target row must keep the workspace-local drop-target hook",
+  );
+  assert.match(
+    source,
+    /data-collection-id=/,
+    "every drop-target row must carry the numeric collection id the helper reads",
+  );
+  assert.match(
+    source,
+    /createCollectionDropZoneHandlers/,
+    "the helper module the drop-zone delegates to must remain imported",
+  );
+  assert.match(
+    source,
+    /document\.addEventListener\("dragend", onWindowDragEnd\)/,
+    "the global dragend listener must survive the unified panel change",
+  );
+  assert.match(
+    source,
+    /document\.removeEventListener\("dragend", onWindowDragEnd\)/,
+    "the global dragend listener cleanup must survive the unified panel change",
+  );
+});
+
+test("pointerDragAndDrop keeps the opaque entry-id-only payload", () => {
+  const source = stripComments(loadSource("src/lib/pointerDragAndDrop.ts"));
+  // The pointer-drag controller is the single source of truth for
+  // the drag payload. The card drag MUST keep reading only the
+  // numeric entry id (the workspace-local attribute), never the
+  // clipboard content, snippet, asset path, image bytes or hash.
+  // A regression that wires a richer payload would surface as
+  // either a missing / replaced selector or a forbidden literal
+  // surfacing in the source.
+  assert.match(
+    source,
+    /card\.getAttribute\("data-entry-id"\)/,
+    "the pointer controller must read only data-entry-id from the card",
+  );
+  assert.match(
+    source,
+    /isValidEntryId/,
+    "the pointer controller must validate the entry id through the opaque-id helper",
+  );
+  for (const forbidden of [
+    "content_hash",
+    "snippet",
+    "asset_ref",
+    "mime_type",
+    "DataTransfer.setData",
+    "DataTransfer.items",
+    "base64",
+    "getData(\"text/plain\")",
+    "innerHTML",
+    "outerHTML",
+  ]) {
+    assert.equal(
+      source.includes(forbidden),
+      false,
+      `pointerDragAndDrop must keep the payload opaque to entry id (no "${forbidden}")`,
+    );
+  }
+});

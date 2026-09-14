@@ -638,20 +638,27 @@
 
 <style>
   .sidebar {
-    /* Stretch the panel to match the right column the grid owns.
-     * The `.layout` grid sets `align-items: stretch`, so each row
-     * item fills the row's available height — paired with
-     * `height: 100%` here, the collection panel grows to the same
-     * visible height as the search + status + rail column without
-     * introducing a second fixed-height token. `min-height: 0` is
-     * the structural guard that lets the panel shrink below its
-     * intrinsic content (a long list of collections) so the row
-     * height is driven by the rail, not by the panel content. The
-     * collection list below is the only internal scroller. */
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 10px;
-    padding: 0.6rem 0.75rem 0.75rem;
+    /* The collection panel no longer carries its own background,
+     * border, radius or padding: the unified `.layout` workspace
+     * panel is the single bounded surface that owns those tokens
+     * (see `App.svelte`'s `.layout` rule). Stripping the visual
+     * surface here means zones 1 (collections) and zones 2–3
+     * (search/actions/rail) read as one panel instead of two.
+     *
+     * The internal layout stays untouched:
+     *
+     *   - `display: flex; flex-direction: column; gap` keeps the
+     *     header, inline create form, rename form and list stacked
+     *     top-to-bottom.
+     *   - `height: 100%` + `min-height: 0` makes the panel stretch
+     *     to the row the workspace grid owns (`align-items: stretch`)
+     *     while still allowing the internal list to shrink below
+     *     its intrinsic content so the row height is driven by the
+     *     rail, not by the number of collections. `overflow: hidden`
+     *     keeps the rounded workspace corners visually consistent
+     *     with the unified panel.
+     *   - `flex-shrink: 0` prevents a regression where the panel
+     *     shrinks below its content inside a future flex row. */
     display: flex;
     flex-direction: column;
     gap: 0.45rem;

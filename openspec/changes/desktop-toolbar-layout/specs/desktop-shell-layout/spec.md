@@ -7,6 +7,25 @@ collection panel and a right content column containing the search surface and
 the horizontal history-card rail, while preserving the existing commands and
 states.
 
+#### Scenario: Main desktop shows the primary workflow
+
+- **WHEN** the main window is open
+- **THEN** it shows the search surface, recent-history rail and compact global
+  controls without displaying the full diagnostic, privacy, retention or
+  quick-paste configuration sections inline
+
+#### Scenario: Existing cards remain the visual focus
+
+- **WHEN** the main window contains text, rich-text or image captures
+- **THEN** the existing horizontal rail and square card layout remain
+  available with their current actions and metadata
+
+#### Scenario: Empty history remains usable
+
+- **WHEN** there are no captures
+- **THEN** the compact desktop shows the existing empty state and the toolbar
+  controls remain usable
+
 #### Scenario: Search is above the cards
 
 - **WHEN** the main desktop renders the active collection and its entries
@@ -47,6 +66,31 @@ states.
 ClipVault SHALL apply the existing local visual tokens to the reorganized
 toolbar, overflow menu, collection panel and card rail without changing card
 dimensions or requesting external resources.
+
+#### Scenario: Typography hierarchy
+
+- **WHEN** the main desktop or one of its modals renders text
+- **THEN** body text uses approximately 14–15 px, secondary text 12–13 px,
+  main title 24–28 px, section/modal titles 16–18 px and compact controls
+  12–14 px
+
+#### Scenario: Responsive toolbar
+
+- **WHEN** the application window becomes narrow
+- **THEN** toolbar controls wrap or reflow without clipping the trash action,
+  modal triggers or search field
+
+#### Scenario: Cards keep their dimensions
+
+- **WHEN** the visual styles are applied
+- **THEN** the existing horizontal rail and fixed-size square cards do not
+  become a vertical list or change size based on diagnostic/modal content
+
+#### Scenario: No external visual resources
+
+- **WHEN** the desktop renders icons, fonts and controls
+- **THEN** it uses local assets/styles and makes no network request for visual
+  resources
 
 #### Scenario: Responsive workspace
 
@@ -139,3 +183,36 @@ organization operations and drag-and-drop.
   callback
 - **THEN** no clipboard content, snippets, hashes, asset bytes or absolute
   paths are added to logs, events or DOM attributes
+
+### Requirement: One bounded panel contains the desktop workspace zones
+
+The main desktop SHALL render the collection list, the search/actions row and
+the history-card row inside one bounded workspace div/panel. The collection
+zone SHALL NOT remain a separate outer panel from the content zones, and the
+workspace SHALL own the shared visible height and outer visual surface.
+
+#### Scenario: Collection list and content rows share one panel
+
+- **WHEN** the main desktop renders the three zones represented in the
+  reference layout
+- **THEN** the collection list, the search/actions row and the history-card
+  row are descendants of the same bounded workspace container
+- **AND** no zone is rendered as a sibling outside that container
+- **AND** the outer background, border, radius and padding do not split zone 1
+  away from zones 2 and 3
+
+#### Scenario: Collection viewport stays fixed while rows grow
+
+- **WHEN** the number of user collections exceeds the available workspace
+  height
+- **THEN** the workspace keeps its visible height
+- **AND** only the collection-list viewport scrolls vertically
+- **AND** the collection header and new-collection control remain usable
+- **AND** the desktop body does not gain a second vertical scrollbar
+
+#### Scenario: Existing organization and card interactions survive
+
+- **WHEN** the user selects, creates, renames or deletes a collection, or
+  drags a card over a scrolled collection row
+- **THEN** the existing organization and drop-zone behavior remains intact
+- **AND** the drag payload continues to contain only the opaque entry id

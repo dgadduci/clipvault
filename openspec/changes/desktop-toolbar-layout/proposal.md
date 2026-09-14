@@ -23,6 +23,10 @@ acción destructiva independiente a la derecha del menú.
   confirmación y su acción actual.
 - Introducir un contenedor de trabajo común que alinee verticalmente el panel
   de colecciones con la columna de búsqueda y cards.
+- Consolidar la lista de colecciones (zona 1), la fila de búsqueda/acciones
+  (zona 2) y la fila/rail de historial (zona 3) dentro de un único div/panel
+  visual del desktop; ninguna de las tres zonas debe quedar fuera de ese
+  contenedor común.
 - Mantener el listado de colecciones dentro de un viewport scrolleable sin
   permitir que el desktop crezca por la cantidad de colecciones.
 - Mantener el atajo visual Cmd-F/Ctrl-F dentro de la barra de búsqueda.
