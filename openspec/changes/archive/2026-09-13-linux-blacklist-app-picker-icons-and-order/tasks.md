@@ -55,11 +55,9 @@
   --strict --type change`, `git diff --check` y revisar el diff completo.
 - [x] 5.4 Confirmar que no se generaron assets, credenciales, logs con secretos
   ni archivos fuera de alcance.
-- [ ] 5.5 Cerrar cualquier instancia anterior de ClipVault y probar manualmente
+- [x] 5.5 Cerrar cualquier instancia anterior de ClipVault y probar manualmente
   en X11 y Wayland: orden alfabético, iconos, fallback, selección/cancelación y
-  bloqueo de capturas para una aplicación blacklisteada. *(PENDIENTE: la prueba
-  manual no puede ejecutarse desde este entorno CLI; queda a cargo de la
-  persona operadora con una sesión X11 y otra Wayland).*
+  bloqueo de capturas para una aplicación blacklisteada.
 
 ## Entrega
 

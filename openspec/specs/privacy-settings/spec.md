@@ -359,6 +359,113 @@ y SHALL usar `clipvault_ignored_app_linux_add` para confirmar una fila.
 - AND no se invoca `clipvault_ignored_app_linux_add`
 - AND no cambia la lista de aplicaciones ignoradas
 
+### Requirement: El catálogo Linux se ordena por nombre visible
+
+El catálogo de aplicaciones Linux usado por el selector de Privacidad MUST
+devolver sus candidatas en orden alfabético por nombre visible. El nombre
+visible es `display_name` cuando existe después de quitar espacios exteriores;
+si falta o queda vacío, se debe usar `identifier`. La comparación MUST ser
+insensible a mayúsculas, independiente del locale y determinista ante nombres
+iguales.
+
+#### Scenario: Ordena por nombre y no por identificador
+
+- **GIVEN** candidatas con nombres visibles `Zed`, `alpha` y `Beta`, descubiertas
+  en cualquier orden y con identificadores que no siguen ese orden
+- **WHEN** se solicita el catálogo Linux
+- **THEN** el resultado aparece como `alpha`, `Beta`, `Zed`
+- **AND** el orden es el mismo para X11, XWayland y Wayland cuando las
+  candidatas contienen la misma metadata
+
+#### Scenario: Usa el identificador cuando falta el nombre
+
+- **GIVEN** una candidata sin `display_name` o con un nombre compuesto solo por
+  espacios
+- **WHEN** se solicita el catálogo Linux
+- **THEN** se ordena usando su `identifier`
+- **AND** la candidata sigue siendo seleccionable y la UI usa el identificador
+  como texto de fallback
+
+#### Scenario: Desempata nombres visibles iguales de forma estable
+
+- **GIVEN** dos o más candidatas con el mismo nombre visible ignorando
+  mayúsculas y espacios exteriores
+- **WHEN** se solicita el catálogo Linux más de una vez
+- **THEN** se ordenan por el identificador normalizado y después por el
+  identificador original
+- **AND** el resultado no depende del orden de descubrimiento ni de la
+  estrategia (`WmClass` o `DesktopFileId`)
+
+### Requirement: El selector muestra iconos locales de las candidatas
+
+Cuando una candidata Linux contiene un `icon_ref` válido bajo el namespace
+`application-icons/`, el selector de aplicaciones de Privacidad MUST cargarlo
+mediante `sourceAppIconCommand` y el resolver de iconos existente, y MUST
+mostrar la imagen local resultante en la fila de la candidata.
+
+#### Scenario: Muestra un icono de una candidata X11 o XWayland
+
+- **GIVEN** una candidata descubierta desde X11 o XWayland con un
+  `icon_ref` relativo `application-icons/...` que resuelve a un PNG válido
+- **WHEN** se abre el selector de aplicaciones
+- **THEN** la fila muestra el icono en un elemento de imagen
+- **AND** la carga usa el comando de iconos de aplicaciones
+- **AND** no se llama al comando restringido a `ignored-apps/...`
+
+#### Scenario: Muestra un icono de una candidata Wayland
+
+- **GIVEN** una candidata Wayland respaldada por Desktop File ID
+- **AND** el proveedor local resolvió `Name` e `Icon` mediante metadata XDG,
+  incluyendo rasterización SVG local cuando corresponde
+- **WHEN** se abre el selector de aplicaciones
+- **THEN** la fila muestra el icono referenciado bajo `application-icons/`
+- **AND** no se requiere consultar GNOME Shell, títulos de ventana, PID ni
+  filesystem desde el frontend
+
+#### Scenario: Conserva un fallback cuando el icono no está disponible
+
+- **GIVEN** una candidata sin icono, con un `icon_ref` no resoluble o cuya
+  lectura devuelve un error
+- **WHEN** el selector intenta cargar sus iconos
+- **THEN** la fila muestra la primera inicial en mayúsculas del nombre visible o
+  del identificador
+- **AND** no aparece una imagen rota
+- **AND** las demás filas continúan cargándose y siendo seleccionables
+
+#### Scenario: Libera los recursos visuales del selector
+
+- **GIVEN** el selector creó Blob URLs para iconos de candidatas
+- **WHEN** se cierra o se destruye el modal, o se reemplaza el catálogo
+- **THEN** se liberan las referencias del resolver y las Blob URLs que ya no se
+  usan
+- **AND** una resolución tardía no vuelve a insertar una URL en un catálogo
+  descartado
+
+### Requirement: El cambio visual no altera la privacidad
+
+El orden y los iconos del selector MUST ser cambios de presentación. La
+selección de una candidata MUST continuar enviando solo su identificador opaco,
+y la blacklist MUST conservar su comportamiento de alta, baja, cancelación,
+persistencia y bloqueo de capturas.
+
+#### Scenario: Una aplicación blacklisteada sigue sin generar capturas
+
+- **GIVEN** una aplicación seleccionada desde el selector y agregada a la
+  blacklist
+- **WHEN** esa aplicación vuelve a estar activa y se produce un evento de
+  captura
+- **THEN** no se agrega una nueva captura
+- **AND** ordenar la lista o mostrar su icono no modifica esta decisión
+
+#### Scenario: La selección no transporta contenido de la aplicación
+
+- **GIVEN** una persona selecciona una candidata con nombre e icono visibles
+- **WHEN** confirma el alta en la blacklist
+- **THEN** el payload contiene únicamente el identificador opaco requerido por
+  el contrato existente
+- **AND** no contiene nombre, contenido, hash, ruta, bytes de imagen ni
+  referencias adicionales
+
 ### Requirement: No existe una implementación Linux duplicada en una superficie no montada
 
 El flujo Linux SHALL estar definido en `PrivacyModal.svelte`, que es la
@@ -378,3 +485,269 @@ superficie activa, y SHALL NOT permanecer duplicado en `SettingsPanel.svelte`.
 - THEN en ambas sesiones se muestra la lista de aplicaciones disponibles para
   agregarlas a la blacklist
 - AND las aplicaciones incluidas en la blacklist no generan nuevas capturas
+
+### Requirement: La build Linux normal incluye la sonda Wayland
+
+La build Linux normal de `clipvault-app` SHALL compilar la rama de
+`build_active_application` que intenta la sonda `linux-wayland-active-app`
+cuando la dependencia target-specific de `clipvault-platform` habilita esa
+feature. El shell MUST NOT condicionar esa rama únicamente a una feature
+homónima de `clipvault-app` que no forme parte de la configuración normal.
+
+#### Scenario: Wayland nativo en la build normal
+
+- GIVEN una build Linux normal con `linux-wayland-active-app` habilitada en
+  `clipvault-platform`
+- WHEN el host ejecuta una sesión Wayland y el compositor publica un
+  protocolo compatible
+- THEN el bootstrap intenta construir la sonda Wayland nativa antes del
+  fallback XWayland
+- AND el selector visual no cae a `Unsupported` únicamente porque la rama
+  nativa fue excluida en compilación.
+
+### Requirement: El selector frontend y los comandos Linux deben pertenecer al mismo build
+
+La verificación y distribución del selector Linux SHALL usar un bundle
+frontend generado después de la implementación del catálogo y un binario
+Tauri que registre `clipvault_ignored_app_linux_catalog` y
+`clipvault_ignored_app_linux_add` desde el mismo checkout. Una ejecución que
+consuma un `frontendDist` anterior MUST detectarse como artefacto obsoleto y
+no contarse como una prueba del runtime X11 o Wayland.
+
+#### Scenario: Bundle actualizado en X11 o Wayland
+
+- GIVEN el bundle frontend contiene `linux-picker-modal` y la invocación a
+  `clipvault_ignored_app_linux_catalog`
+- AND el binario Tauri registra los dos comandos Linux del catálogo
+- WHEN el usuario pulsa `Seleccionar aplicación` en X11 o Wayland
+- THEN la UI intenta primero el catálogo Linux
+- AND la UI sólo conserva el fallback manual si el catálogo informa una
+  sesión realmente `Unsupported` o un catálogo vacío.
+
+#### Scenario: Artefacto frontend obsoleto
+
+- GIVEN `frontendDist` fue generado antes de incorporar el catálogo Linux
+- WHEN se ejecuta un binario Tauri que consume ese directorio
+- THEN la ejecución se identifica como inválida para la prueba manual
+- AND no se interpreta el mensaje del picker legado como evidencia de que
+  X11 o Wayland carecen de soporte.
+
+### Requirement: El selector Linux deriva su disponibilidad del runtime real
+
+El selector visual Linux SHALL ofrecer una aplicación únicamente cuando el
+backend del picker resuelva `X11OrXWaylandEwmh`, `WaylandNative` o
+`GnomeShellExtension` a partir del estado real del runtime. El backend
+se deriva del probe activo que el `CachedActiveApplication` envuelve,
+del consentimiento y del estado técnico de la `GnomeIntegrationService`.
+La presencia o ausencia de una ventana activa (es decir, la flag
+`cache_populated`) no participa en la decisión: el catálogo deriva el
+identificador de las entradas `.desktop` instaladas, no del cache del
+probe. MUST NOT inventar un identificador a partir del nombre visible,
+`Exec=`, PID, título o una ruta.
+
+#### Scenario: Sesión Linux con asociación determinista
+
+- GIVEN el probe activo expone uno de los nombres `x11_ewmh`,
+  `xwayland_ewmh`, `wayland_foreign_toplevel` o
+  `wayland_wlr_foreign_toplevel` (independientemente de si la caché
+  ha observado o no una ventana)
+- WHEN el usuario abre el selector visual
+- THEN el picker devuelve el identificador estable, nombre e icono
+  opcional
+- AND la blacklist persiste el identificador como clave de matching
+
+#### Scenario: XWayland usa la rama X11/EWMH
+
+- GIVEN el probe activo expone `xwayland_ewmh`
+- WHEN el usuario abre el selector visual
+- THEN el backend resuelto es `X11OrXWaylandEwmh` y el catálogo usa la
+  estrategia `wm_class`
+
+#### Scenario: GNOME Shell extension aceptado y operativo
+
+- GIVEN el probe activo expone `gnome_shell_extension`, el
+  consentimiento es `Accepted` y el estado técnico es `Connected`,
+  `Identified` o `NoActiveApplication`
+- WHEN el usuario abre el selector visual
+- THEN el backend resuelto es `GnomeShellExtension` y el catálogo usa la
+  estrategia `desktop_file_id` (Desktop File ID literal)
+
+#### Scenario: GNOME Shell extension en `ActivationPending`
+
+- GIVEN el probe activo expone `gnome_shell_extension`, el
+  consentimiento es `Accepted` y el estado técnico es `ActivationPending`
+- WHEN el usuario abre el selector visual
+- THEN el backend resuelto es `Unsupported` y la UI conserva el
+  ingreso manual
+- AND la razón reportada explica que la extensión aún no completó el
+  handshake
+
+#### Scenario: GNOME aceptado pero extensión ausente o inactiva
+
+- GIVEN el probe activo expone `gnome_shell_extension` y el estado
+  técnico es `NotInstalled`, `Disabled`, `Incompatible`,
+  `Disconnected` o `CommunicationError`
+- WHEN el usuario abre el selector visual
+- THEN el backend resuelto es `Unsupported` y el catálogo devuelve el
+  error tipado
+
+#### Scenario: Sesión sin backend estable
+
+- GIVEN `OsFamily == Linux` pero el probe activo expone `unavailable`
+  o ningún probe está instalado
+- WHEN el usuario abre el selector visual
+- THEN el backend resuelto es `Unsupported` y la UI conserva el ingreso
+  manual
+
+#### Scenario: Catálogo vacío en sesión soportada
+
+- GIVEN el backend resuelto es uno de los soportados pero no hay
+  aplicaciones instaladas con identificador determinista
+- WHEN el usuario abre el selector visual
+- THEN el picker devuelve `Unsupported` con razón "linux picker catalog
+  is empty for this session"
+
+### Requirement: El selector Linux observa el probe activo después de un swap
+
+El backend del picker SHALL consultar el probe actualmente envuelto por
+`CachedActiveApplication`, no el `ActiveAppDiagnostics.backend` que el
+bootstrap fija al inicio. Tras un `AppContext::swap_active_app_probe`,
+la siguiente lectura de `linux_picker_backend()` SHALL reflejar el
+backend del probe nuevo sin necesidad de reiniciar el proceso ni
+refrescar manualmente las diagnostics.
+
+#### Scenario: Swap de probe X11 → GNOME
+
+- GIVEN un contexto cuyo probe inicial es `x11_ewmh`
+- AND el probe se reemplaza por uno que expone `gnome_shell_extension`
+  vía `swap_active_app_probe`
+- AND el consentimiento GNOME es `Accepted` y el estado técnico es
+  `Connected` / `Identified` / `NoActiveApplication`
+- WHEN el usuario abre el selector visual
+- THEN el backend resuelto es `GnomeShellExtension` y el catálogo usa
+  la estrategia `desktop_file_id`
+
+### Requirement: El selector GNOME usa estado técnico runtime vivo
+
+El selector Linux SHALL decidir la disponibilidad de la extensión GNOME con
+el snapshot técnico runtime actual, no exclusivamente con el último valor
+persistido. El valor persistido sólo puede inicializar una degradación
+conservadora antes de que exista un listener vivo. La sincronización runtime
+MUST transportar únicamente el enum de estado; no debe transportar ni
+persistir contenido del clipboard, identificadores de aplicación, títulos,
+PID, rutas o assets.
+
+#### Scenario: Listener conectado sin aplicación identificable
+
+- GIVEN el probe activo expone `gnome_shell_extension`
+- AND el consentimiento GNOME es `Accepted`
+- AND el valor técnico persistido es `ActivationPending`
+- AND el `SharedGnomeSnapshot` vivo informa `NoActiveApplication`
+- WHEN el usuario abre el selector visual
+- THEN el backend resuelto es `GnomeShellExtension`
+- AND el catálogo usa `desktop_file_id`
+- AND no se escribe el estado técnico en SQLite como efecto de abrir el
+  catálogo
+
+#### Scenario: Aún no existe snapshot vivo
+
+- GIVEN el probe activo expone `gnome_shell_extension`
+- AND el consentimiento GNOME es `Accepted`
+- AND no existe un handle GNOME vivo
+- AND el valor técnico persistido es `ActivationPending`
+- WHEN el usuario abre el selector visual
+- THEN el backend resuelto es `Unsupported`
+- AND la UI conserva el ingreso manual
+
+### Requirement: El comando Linux `add` rechaza identificadores arbitrarios
+
+El comando `clipvault_ignored_app_linux_add` SHALL revalidar el
+identificador recibido contra el catálogo vivo de la sesión actual
+antes de persistirlo. MUST NOT aceptar identificadores arbitrarios
+que el catálogo no pueda reproducir. La metadata persistida
+(`display_name`, `icon_ref`) MUST provenir del catálogo, no del
+frontend.
+
+#### Scenario: Identificador presente en el catálogo
+
+- GIVEN el catálogo de la sesión actual contiene un candidato con
+  identificador `X`
+- WHEN el usuario confirma la selección del candidato `X`
+- THEN el comando persiste el identificador normalizado, el
+  `display_name` y el `icon_ref` del catálogo
+- AND la metadata del frontend es ignorada
+
+#### Scenario: Identificador no presente en el catálogo
+
+- GIVEN el catálogo de la sesión actual NO contiene un candidato con
+  identificador `X`
+- WHEN el frontend envía la orden `add` con identificador `X`
+- THEN el comando rechaza con `unsupported_session`
+- AND la blacklist permanece inalterada
+
+#### Scenario: Sesión `Unsupported`
+
+- GIVEN el backend resuelto para la sesión actual es `Unsupported`
+- WHEN el frontend envía la orden `add` con cualquier identificador
+- THEN el comando rechaza con `unsupported_session`
+- AND la blacklist permanece inalterada
+
+### Requirement: Cancelación del modal nunca crea filas vacías
+
+El comando `clipvault_ignored_app_linux_add` SHALL delegar la
+persistencia en `IgnoredAppsService::add_with_metadata`, que sólo
+devuelve `PickAndAddOutcome::{Added, Updated}`. El brazo `Cancelled`
+del mapeo del comando SHALL ser inalcanzable: si una refactorización
+futura permitiera que `Cancelled` escapase, el proceso abortaría con
+`unreachable!()` antes de fabricar una fila `Added` con identificador
+vacío. La cancelación del modal (cierre sin selección) MUST NOT
+invocar el comando, y la blacklist MUST permanecer inalterada.
+
+#### Scenario: Cancelación del modal
+
+- GIVEN el catálogo de la sesión actual está disponible y poblado
+- WHEN el usuario cierra el modal sin seleccionar ninguna aplicación
+- THEN el comando `add` nunca se invoca
+- AND la blacklist permanece vacía
+- AND no se crean assets nuevos
+
+### Requirement: Modal Linux renderiza icono del catálogo
+
+El modal del selector Linux SHALL resolver cada `icon_ref` del catálogo
+a través del `iconResolver` existente y SHALL mostrar el PNG local
+cuando la resolución es exitosa. Cuando el icono no se puede resolver
+o el catálogo no devuelve `icon_ref`, SHALL mostrar la inicial como
+fallback. MUST NOT cargar rutas arbitrarias, URLs remotas ni paths del
+sistema: la validación del `iconResolver` es la única vía autorizada.
+
+#### Scenario: Icono resuelto correctamente
+
+- GIVEN el catálogo devuelve un candidato con `icon_ref` válido
+- WHEN el modal renderiza la fila del candidato
+- THEN se muestra el PNG local obtenido vía `clipvault_ignored_app_icon`
+- AND el blob URL se libera al cerrar el modal
+
+#### Scenario: Icono no disponible
+
+- GIVEN el catálogo devuelve un candidato sin `icon_ref` o con un
+  `icon_ref` rechazado por el backend
+- WHEN el modal renderiza la fila del candidato
+- THEN se muestra la inicial del nombre visible como fallback
+
+### Requirement: Flujo de privacidad Linux validado en sesiones X11 y Wayland
+
+El flujo del selector Linux SHALL conservar la misma semántica de blacklist
+en X11 y Wayland: el catálogo puede mostrar aplicaciones disponibles para
+agregarlas y PrivacyGate debe impedir la persistencia de nuevas capturas
+originadas por una aplicación incluida en la blacklist.
+
+#### Scenario: Prueba manual end-to-end en X11 y Wayland
+
+- GIVEN el bundle frontend y el binario Tauri fueron generados desde el mismo
+  checkout
+- WHEN el usuario abre Privacidad en una sesión X11 y en una sesión Wayland
+- THEN en ambas sesiones aparece la lista de aplicaciones disponibles para
+  agregarlas a la blacklist
+- AND una aplicación incluida en la blacklist no agrega nuevas capturas
+- AND la UI conserva la semántica local y no requiere red ni un servicio
+  externo

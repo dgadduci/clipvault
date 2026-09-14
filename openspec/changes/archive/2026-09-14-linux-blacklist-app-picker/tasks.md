@@ -89,14 +89,12 @@
   `activation_pending` y snapshot vivo `no_active_application`. El catálogo
   debe abrirse con estrategia `desktop_file_id`; si no hay snapshot vivo,
   debe permanecer en el fallback conservador.
-- [ ] 3.13 Repetir la prueba manual en Ubuntu GNOME Wayland después de 3.11:
+- [x] 3.13 Repetir la prueba manual en Ubuntu GNOME Wayland después de 3.11:
   abrir Privacidad (donde ClipVault toma el foco), confirmar
   `no_active_application` y comprobar que el catálogo visual aparece. Añadir
   y eliminar un candidato, y confirmar que no se modifica la blacklist al
   cancelar ni cuando el estado sea `activation_pending`.
-  - La prueba del 2026-09-13 confirma la apertura del catálogo y que una
-    aplicación incluida en la blacklist no genera capturas; aún no cubre
-    eliminación, cancelación ni el caso `activation_pending`.
+  - Verificación manual completada por la persona operadora.
 
 ## Garantías contractuales
 
