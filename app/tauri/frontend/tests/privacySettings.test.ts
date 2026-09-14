@@ -611,7 +611,11 @@ test("ignoredAppLinuxCatalogCommand surfaces the unsupported reason", async () =
   }
 });
 
-test("ignoredAppLinuxAddCommand forwards the chosen identifier and metadata", async () => {
+test("ignoredAppLinuxAddCommand forwards only the opaque identifier", async () => {
+  // The Linux picker IPC contract keeps the payload identifier-only:
+  // the backend re-runs the catalog and uses its own metadata, so the
+  // frontend MUST NOT echo the display name, icon reference or any
+  // other metadata that already lives in the catalog.
   const observed: Record<string, unknown> = {};
   installTauriMock(async (cmd, args) => {
     assert.equal(cmd, "clipvault_ignored_app_linux_add");
@@ -620,20 +624,17 @@ test("ignoredAppLinuxAddCommand forwards the chosen identifier and metadata", as
       kind: "added",
       entry: {
         id: (args?.identifier as string) ?? "",
-        display_name: (args?.displayName as string | null) ?? null,
-        icon_ref: (args?.iconRef as string | null) ?? null,
+        display_name: null,
+        icon_ref: null,
         created_at: "2026-01-02T03:04:05Z",
       },
     } satisfies LinuxPickAndAddResponse;
   });
   const result = await ignoredAppLinuxAddCommand({
     identifier: "firefox",
-    displayName: "Firefox",
-    iconRef: "application-icons/firefox.png",
   });
+  assert.deepEqual(Object.keys(observed), ["identifier"]);
   assert.equal(observed.identifier, "firefox");
-  assert.equal(observed.displayName, "Firefox");
-  assert.equal(observed.iconRef, "application-icons/firefox.png");
   assert.equal(result.kind, "added");
 });
 
@@ -644,8 +645,6 @@ test("ignoredAppLinuxAddCommand propagates backend errors without leaking payloa
   await assert.rejects(
     ignoredAppLinuxAddCommand({
       identifier: "",
-      displayName: null,
-      iconRef: null,
     }),
     (error: unknown) => {
       assert.equal((error as { kind: string }).kind, "missing_identifier");

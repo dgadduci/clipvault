@@ -23,6 +23,7 @@
     ignoredAppsRemoveCommand,
     refreshActiveAppDiagnosticsCommand,
     settingsGetCommand,
+    sourceAppIconCommand,
   } from "./lib/tauri";
   import type {
     ActiveAppDiagnostics,
@@ -70,9 +71,26 @@
       }
     },
   };
+  // Catalog candidates live in the `application-icons/` namespace
+  // (the metadata provider persists them there when it rasterises the
+  // resolved icon). `clipvault_ignored_app_icon` only accepts the
+  // `ignored-apps/` namespace, so the picker MUST go through
+  // `clipvault_source_app_icon` instead — the same bridge the
+  // capture pipeline already uses for `source_app_icon_ref`. The
+  // blacklist panel keeps the `ignoredAppIconCommand` loader because
+  // its rows are persisted under `ignored-apps/`.
+  const linuxPickerIconLoader: IconLoader = {
+    async loadIconBytes(ref) {
+      try {
+        return await sourceAppIconCommand({ ref });
+      } catch {
+        return null;
+      }
+    },
+  };
   const iconResolver: IconResolver = createIconResolver(tauriIconLoader);
   const linuxPickerIconResolver: IconResolver =
-    createIconResolver(tauriIconLoader);
+    createIconResolver(linuxPickerIconLoader);
 
   async function refresh(): Promise<void> {
     loading = true;
@@ -188,6 +206,15 @@
   async function refreshLinuxPickerIcons(
     candidates: readonly LinuxPickerCandidate[],
   ): Promise<void> {
+    // Release any previously-displayed Blob URLs before resolving
+    // the new catalog: the resolver reuses cached entries, so a ref
+    // that disappears from the new catalog would otherwise stay
+    // cached until the resolver itself is fully released. Releasing
+    // here keeps the Blob URL lifecycle tied to whichever catalog is
+    // currently rendered.
+    for (const ref of Object.values(linuxPickerIconRefs)) {
+      linuxPickerIconResolver.releaseFor(ref);
+    }
     const nextUrls: Record<string, string> = {};
     const nextFailures: Record<string, boolean> = {};
     const nextRefs: Record<string, string> = {};
@@ -210,10 +237,14 @@
     pickerError = null;
     pickerPending = true;
     try {
+      // The backend re-resolves the catalog against the requested
+      // identifier and uses its own `display_name` / `icon_ref` as
+      // the source of truth. The frontend MUST only forward the
+      // opaque identifier so the picker payload never carries
+      // application names, icon references or any other metadata
+      // that could leak beyond the catalog itself.
       const response = await ignoredAppLinuxAddCommand({
         identifier: candidate.identifier,
-        displayName: candidate.display_name,
-        iconRef: candidate.icon_ref,
       });
       closeLinuxPicker();
       if (response.kind === "added" || response.kind === "updated") {

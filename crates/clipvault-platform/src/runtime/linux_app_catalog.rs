@@ -205,8 +205,19 @@ impl LinuxApplicationCatalog {
 
     /// Enumerate every installed `.desktop` entry that exposes a
     /// deterministic identifier under the configured strategy. The
-    /// list is sorted lexicographically by identifier so the
-    /// frontend renders the same order across sessions.
+    /// list is sorted alphabetically by visible name so the
+    /// frontend renders the order the user expects regardless of
+    /// identifier shape or discovery order.
+    ///
+    /// The sort key is `display_name.trim()` when present and
+    /// non-empty, falling back to the candidate's `identifier`. The
+    /// comparison is case-insensitive and locale-independent
+    /// (byte-wise lowercased), with deterministic tiebreakers
+    /// (`identifier.to_ascii_lowercase()`, then the original
+    /// `identifier`) so the rendered order stays stable across
+    /// sessions and discovery strategies. The original `display_name`
+    /// is preserved unchanged for the UI; only the comparison key is
+    /// normalised.
     ///
     /// Entries whose identifier cannot be matched deterministically
     /// (no `StartupWMClass`, no `X-GNOME-WMClass`, no filename stem,
@@ -217,10 +228,20 @@ impl LinuxApplicationCatalog {
         let candidates = self.collect_candidates()?;
         // The collector already deduplicates by lower-cased
         // identifier and respects the XDG precedence the matcher
-        // uses. The sort keeps the rendered order stable across
-        // sessions so the UI never reshuffles on refresh.
+        // uses. Sorting by the user-visible name keeps the rendered
+        // order stable across sessions so the UI never reshuffles on
+        // refresh and matches the labels the picker shows.
         let mut sorted = candidates;
-        sorted.sort_by(|a, b| a.identifier.cmp(&b.identifier));
+        sorted.sort_by(|a, b| {
+            let key_a = display_sort_key(a);
+            let key_b = display_sort_key(b);
+            key_a.cmp(&key_b).then_with(|| {
+                let id_a = a.identifier.to_ascii_lowercase();
+                let id_b = b.identifier.to_ascii_lowercase();
+                id_a.cmp(&id_b)
+                    .then_with(|| a.identifier.cmp(&b.identifier))
+            })
+        });
         Ok(sorted)
     }
 
@@ -335,6 +356,24 @@ impl LinuxApplicationCatalog {
         }
         Ok(entries)
     }
+}
+
+/// Sort key derived from the user-visible name the picker renders.
+///
+/// Uses `display_name.trim()` when present and non-empty; otherwise
+/// falls back to the candidate's `identifier`. The comparison is
+/// case-insensitive and locale-independent (byte-wise ASCII
+/// lowercased) so the rendered order stays stable across locales and
+/// sessions.
+fn display_sort_key(candidate: &CandidateApplication) -> String {
+    let trimmed = candidate
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    trimmed
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| candidate.identifier.to_ascii_lowercase())
 }
 
 /// Compute the deterministic identifier an installed `.desktop` entry
@@ -834,7 +873,11 @@ mod tests {
     }
 
     #[test]
-    fn candidates_are_sorted_lexicographically_by_identifier() {
+    fn candidates_are_sorted_by_visible_name_not_identifier() {
+        // The picker renders the user-visible name. The catalog must
+        // sort by `display_name` so the order matches what the user
+        // sees, regardless of how the identifier or filename happen
+        // to be spelled.
         let _guard = HomeGuard::new("/home/tester");
         let (fs, assets) = harness();
         fs.write(
@@ -855,11 +898,134 @@ mod tests {
             IdentifierStrategy::DesktopFileId,
         );
         let candidates = catalog.list().expect("list");
+        let names: Vec<&str> = candidates
+            .iter()
+            .map(|c| c.display_name.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(names, vec!["Alpha", "Middle", "ZTerm"]);
+        // The identifiers happen to align with the names here; the
+        // important invariant is the name ordering, which the test
+        // above pins.
         let ids: Vec<&str> = candidates.iter().map(|c| c.identifier.as_str()).collect();
         assert_eq!(
             ids,
             vec!["alpha.desktop", "middle.desktop", "zterm.desktop"]
         );
+    }
+
+    #[test]
+    fn candidates_compare_visible_names_case_insensitively() {
+        // Mixed-case visible names MUST surface in the canonical
+        // order regardless of identifier spelling. The test uses
+        // names whose identifier does NOT match the visible name so
+        // a regression to identifier-based sorting would surface
+        // `Firefox` first instead of `Chromium`.
+        let _guard = HomeGuard::new("/home/tester");
+        let (fs, assets) = harness();
+        fs.write(
+            &PathBuf::from("/home/tester/.local/share/applications/chromium.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Chromium\nStartupWMClass=Chromium\n",
+        );
+        fs.write(
+            &PathBuf::from("/home/tester/.local/share/applications/zed.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Zed\nStartupWMClass=Zed\n",
+        );
+        fs.write(
+            &PathBuf::from("/home/tester/.local/share/applications/firefox.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=firefox\nStartupWMClass=Firefox\n",
+        );
+        fs.write(
+            &PathBuf::from("/home/tester/.local/share/applications/beta.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Beta\nStartupWMClass=Beta\n",
+        );
+        let catalog = LinuxApplicationCatalog::with_filesystem(
+            assets,
+            Arc::new(fs),
+            IdentifierStrategy::WmClass,
+        );
+        let candidates = catalog.list().expect("list");
+        let names: Vec<&str> = candidates
+            .iter()
+            .map(|c| c.display_name.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(names, vec!["Beta", "Chromium", "firefox", "Zed"]);
+    }
+
+    #[test]
+    fn candidates_fall_back_to_identifier_when_visible_name_is_missing() {
+        // Entries without a `Name=` key or with a whitespace-only
+        // name MUST still surface and use their identifier as the
+        // sort key. The catalog never invents a `display_name`.
+        let _guard = HomeGuard::new("/home/tester");
+        let (fs, assets) = harness();
+        fs.write(
+            &PathBuf::from("/home/tester/.local/share/applications/alpha.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Alpha\nStartupWMClass=Alpha\n",
+        );
+        fs.write(
+            &PathBuf::from("/home/tester/.local/share/applications/blank.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=   \nStartupWMClass=Blank\n",
+        );
+        fs.write(
+            &PathBuf::from("/home/tester/.local/share/applications/noname.desktop"),
+            b"[Desktop Entry]\nType=Application\nStartupWMClass=Ghost\n",
+        );
+        let catalog = LinuxApplicationCatalog::with_filesystem(
+            assets,
+            Arc::new(fs),
+            IdentifierStrategy::WmClass,
+        );
+        let candidates = catalog.list().expect("list");
+        assert_eq!(candidates.len(), 3);
+        let first = &candidates[0];
+        assert_eq!(first.display_name.as_deref(), Some("Alpha"));
+        let blank = candidates
+            .iter()
+            .find(|c| c.identifier == "Blank")
+            .expect("blank candidate");
+        // The `.desktop` parser trims the `Name=` value; the
+        // whitespace-only entry collapses to `Some("")` so the
+        // catalog must treat it as missing for sorting purposes.
+        assert_eq!(blank.display_name.as_deref(), Some(""));
+        let ghost = candidates
+            .iter()
+            .find(|c| c.identifier == "Ghost")
+            .expect("ghost candidate");
+        assert!(ghost.display_name.is_none());
+        // Identifier-fallback candidates sort by their identifier,
+        // so `Blank` lands after `Alpha` and before `Ghost`.
+        let ids: Vec<&str> = candidates.iter().map(|c| c.identifier.as_str()).collect();
+        assert_eq!(ids, vec!["Alpha", "Blank", "Ghost"]);
+    }
+
+    #[test]
+    fn candidates_break_ties_on_visible_name_with_identifier() {
+        // Two `.desktop` files that share the same visible name
+        // (after trim + lowercase) MUST order deterministically by
+        // identifier so the rendered list never reshuffles between
+        // refreshes.
+        let _guard = HomeGuard::new("/home/tester");
+        let (fs, assets) = harness();
+        fs.write(
+            &PathBuf::from("/home/tester/.local/share/applications/term-a.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Term\nStartupWMClass=TermB\n",
+        );
+        fs.write(
+            &PathBuf::from("/home/tester/.local/share/applications/term-b.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=Term\nStartupWMClass=TermA\n",
+        );
+        let catalog = LinuxApplicationCatalog::with_filesystem(
+            assets,
+            Arc::new(fs),
+            IdentifierStrategy::WmClass,
+        );
+        let first = catalog.list().expect("list");
+        let second = catalog.list().expect("list");
+        let ids_first: Vec<&str> = first.iter().map(|c| c.identifier.as_str()).collect();
+        let ids_second: Vec<&str> = second.iter().map(|c| c.identifier.as_str()).collect();
+        // Lowercased identifier tiebreak: `terma` precedes `termb`.
+        assert_eq!(ids_first, vec!["TermA", "TermB"]);
+        assert_eq!(ids_second, vec!["TermA", "TermB"]);
     }
 
     #[test]

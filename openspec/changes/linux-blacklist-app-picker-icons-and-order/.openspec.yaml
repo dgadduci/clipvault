@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-13
+goal: Mostrar el catálogo Linux ordenado por nombre visible y renderizar los
+  iconos locales de las aplicaciones en X11 y Wayland

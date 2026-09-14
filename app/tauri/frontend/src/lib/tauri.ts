@@ -337,24 +337,22 @@ export const ignoredAppLinuxCatalogCommand: ClipvaultCommand<
 
 /**
  * Linux-only: persist the user-selected catalog entry as a
- * blacklisted application. The wrapper forwards the deterministic
- * identifier returned by the catalog, the user-visible display
- * name and the optional icon reference; the Rust side normalises
- * the identifier and updates the privacy gate identically to the
- * macOS picker flow.
+ * blacklisted application. The wrapper forwards **only** the
+ * deterministic identifier the catalog returned; the Rust side
+ * re-resolves the catalog, ignores any frontend-supplied metadata
+ * and updates the privacy gate identically to the macOS picker
+ * flow. Keeping the payload identifier-only ensures the IPC
+ * bridge never carries application names, icon references or
+ * other metadata the picker UI already has in memory.
  */
 export const ignoredAppLinuxAddCommand: ClipvaultCommandArg<
   LinuxPickAndAddResponse,
   {
     identifier: string;
-    displayName: string | null;
-    iconRef: string | null;
   }
 > = (args) =>
   invoke<LinuxPickAndAddResponse>("clipvault_ignored_app_linux_add", {
     identifier: args.identifier,
-    displayName: args.displayName,
-    iconRef: args.iconRef,
   });
 
 /**
