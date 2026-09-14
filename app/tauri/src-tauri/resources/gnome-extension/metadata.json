@@ -2,7 +2,7 @@
   "uuid": "clipvault@clipvault.app",
   "name": "ClipVault GNOME Focus Bridge",
   "description": "Shares the focused application's desktop identifier with the ClipVault clipboard manager over a local socket so it can attribute captures to the originating application.",
-  "version": 1,
+  "version": 2,
   "session-modes": ["user"],
   "shell-version": [
     "42",

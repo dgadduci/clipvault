@@ -904,3 +904,106 @@ match exacto.
 - WHEN el provider recibe `other-firefox.desktop`
 - THEN no usa `Exec=firefox` ni filename stem como fallback
 - AND devuelve el resultado no resoluble actual
+
+### Requirement: GNOME Wayland debe reenviar una solicitud de Quick Paste local
+
+Cuando la integración GNOME de ClipVault esté habilitada y conectada, la
+extensión SHALL registrar `Ctrl+Shift+V` mediante la API de Mutter y enviar un
+mensaje de activación local al socket Unix de ClipVault. El mensaje SHALL
+contener únicamente la versión de protocolo y el tipo `quick_paste`.
+
+#### Scenario: atajo desde una superficie Wayland nativa
+
+- **WHEN** la persona presiona `Ctrl+Shift+V` desde GNOME Terminal, Files,
+  Chrome u otra superficie Wayland nativa en una sesión GNOME Wayland
+- **THEN** la extensión SHALL comunicar una solicitud local de Quick Paste al
+  proceso ClipVault
+- **AND** no SHALL incluir contenido del portapapeles, datos de ventana,
+  rutas, hashes ni imágenes en el mensaje
+
+#### Scenario: ciclo de vida de la extensión
+
+- **WHEN** la integración GNOME se deshabilita o se recarga
+- **THEN** la extensión SHALL desconectar la señal del acelerador y liberar el
+  grab registrado
+- **AND** no SHALL conservar una solicitud de Quick Paste para una conexión
+  posterior
+
+### Requirement: el listener validará eventos de activación tras el handshake
+
+El listener de la integración GNOME SHALL aceptar el tipo `quick_paste` solo
+después de `hello`. El listener SHALL comunicarlo a través de un callback de
+evento sin modificar el snapshot de foco.
+
+#### Scenario: evento válido posterior al handshake
+
+- **WHEN** un peer conectado envía `hello` seguido de
+  `{ "v": 1, "kind": "quick_paste" }`
+- **THEN** el listener SHALL invocar una vez el callback de Quick Paste
+
+#### Scenario: evento antes del handshake
+
+- **WHEN** un peer envía `quick_paste` antes de `hello`
+- **THEN** el listener SHALL ignorar el mensaje
+- **AND** no SHALL invocar el callback
+
+### Requirement: el backend X11 no se usará para un hotkey Wayland
+
+En una sesión Linux Wayland, el bootstrap SHALL no inicializar el backend
+global X11 para el atajo de Quick Paste. En Linux X11 SHALL conservar el
+preflight y el registro global existentes.
+
+#### Scenario: sesión Wayland
+
+- **WHEN** ClipVault arranca en Linux Wayland
+- **THEN** el manager de hotkeys del backend X11 SHALL ser no-op
+- **AND** la integración GNOME consentida seguirá pudiendo solicitar Quick
+  Paste por el canal local
+
+### Requirement: X11 conservará el hotkey durante un grab activo ajeno
+
+En Linux X11, ClipVault SHALL conservar `Ctrl+Shift+V` cuando otro cliente
+mantenga temporalmente un grab activo de teclado. Un único adaptador SHALL
+mantener el grab pasivo como ruta primaria y SHALL usar eventos raw XInput2
+solo cuando el `KeyPress` pasivo correspondiente no llegue durante un grab
+activo del teclado.
+
+#### Scenario: pulsación X11 sin grab ajeno
+
+- **GIVEN** una sesión Linux X11 sin un `XGrabKeyboard` activo de otro cliente
+- **WHEN** la persona presiona `Ctrl+Shift+V`
+- **THEN** el backend pasivo existente SHALL entregar una activación
+- **AND** el observador raw SHALL no entregar una segunda activación
+
+#### Scenario: pulsación X11 con grab activo ajeno
+
+- **GIVEN** una sesión Linux X11 donde otro cliente mantiene un
+  `XGrabKeyboard` activo
+- **AND** XInput2 está disponible
+- **WHEN** la persona presiona `Ctrl+Shift+V`
+- **THEN** el fallback raw SHALL entregar una sola activación al callback de
+  hotkey registrado
+- **AND** la pulsación siguiente, tras su release, SHALL poder activar de
+  nuevo
+
+#### Scenario: XInput2 no está disponible
+
+- **GIVEN** una sesión Linux X11 sin XInput2 utilizable
+- **WHEN** ClipVault inicia
+- **THEN** SHALL conservar el backend de grab pasivo
+- **AND** SHALL exponer solo un diagnóstico técnico sanitizado de la
+  indisponibilidad
+- **AND** SHALL continuar vivo sin declarar que el fallback raw está activo
+
+### Requirement: el fallback X11 preservará las fronteras de plataforma
+
+El fallback SHALL vivir en `clipvault-platform`, compilado solo para Linux
+X11. No SHALL depender de Tauri, Svelte, navegador, clipboard ni de datos de
+ventana o usuario.
+
+#### Scenario: arranque Wayland
+
+- **WHEN** ClipVault arranca en Linux Wayland
+- **THEN** SHALL no inicializar el observador X11/XInput2
+- **AND** el mecanismo GNOME consentido seguirá siendo la ruta de hotkey
+  Wayland

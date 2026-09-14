@@ -451,9 +451,10 @@ fn capabilities_for(info: &PlatformInfo) -> Capabilities {
                 // Wayland session has no verifiable rich-text path.
                 clipboard_read_rich_text: false,
                 clipboard_write_rich_text: false,
-                // global-hotkey uses wlr-global-shortcuts when available;
-                // we report it as available and surface failures through
-                // HotkeyOutcome::Unsupported.
+                // Native Wayland global shortcuts are compositor-specific.
+                // GNOME can supply this capability through the separately
+                // consented Shell bridge; the runtime adapter remains the
+                // authority for a particular desktop session.
                 global_hotkey: true,
                 // No portable synthetic-paste API under Wayland: report
                 // unavailable so the UI disables the action.

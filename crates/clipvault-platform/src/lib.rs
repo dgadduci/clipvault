@@ -95,8 +95,9 @@ pub use runtime::linux_gnome_integration::{
 };
 #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
 pub use runtime::linux_gnome_shell_integration::{
-    spawn_listener_thread_with_socket, GnomeDiagnostics, GnomeIntegrationState,
-    GnomeShellActiveApplication, GnomeShellListener, ListenerHandle, SharedGnomeSnapshot,
+    spawn_listener_thread_with_socket, spawn_listener_thread_with_socket_and_events,
+    GnomeDiagnostics, GnomeIntegrationState, GnomeShellActiveApplication, GnomeShellEvent,
+    GnomeShellEventSink, GnomeShellListener, ListenerHandle, SharedGnomeSnapshot,
     UnixListenerTransport, MAX_FRAME_BYTES as GNOME_MAX_FRAME_BYTES,
     PROTOCOL_VERSION as GNOME_PROTOCOL_VERSION,
 };

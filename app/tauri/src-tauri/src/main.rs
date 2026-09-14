@@ -18,12 +18,13 @@ use std::sync::Arc;
 use clipvault_core::{RedactingMakeWriter, WatchTickOutcome};
 use tauri::menu::MenuEvent;
 use tauri::tray::{TrayIcon, TrayIconEvent};
-use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
 use crate::bootstrap::{
     build_state, install_capture_loop, refresh_active_app_cached, register_default_hotkey,
+    QUICK_SEARCH_EVENT,
 };
 use crate::commands::run_retention;
 use crate::state::SharedState;
@@ -72,6 +73,9 @@ fn main() {
                     return Err(error);
                 }
             };
+
+            #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+            configure_gnome_quick_paste_sink(&state, app.handle());
 
             // Install and retain the Tauri-backed tray. Its managed state owns
             // the native icon and is the sole dispatcher for native menu
@@ -232,6 +236,26 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building ClipVault")
         .run(handle_run_event);
+}
+
+/// Route a valid metadata-free request from the consented GNOME bridge through
+/// the same event the X11 hotkey adapter emits. The integration may have
+/// started its listener during bootstrap, before Tauri exposed an `AppHandle`,
+/// so this attaches the deferred shell callback once the handle exists.
+#[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+fn configure_gnome_quick_paste_sink(
+    state: &crate::bootstrap::AppState,
+    handle: &AppHandle<tauri::Wry>,
+) {
+    let Some(gnome_integration) = state.gnome_integration.as_ref() else {
+        return;
+    };
+    let app_handle = handle.clone();
+    gnome_integration.set_quick_paste_activation_sink(Arc::new(move || {
+        if let Err(error) = app_handle.emit(QUICK_SEARCH_EVENT, ()) {
+            warn!(error = %error, "failed to emit GNOME quick-search event");
+        }
+    }));
 }
 
 fn handle_run_event<R: tauri::Runtime>(app: &AppHandle<R>, event: RunEvent) {

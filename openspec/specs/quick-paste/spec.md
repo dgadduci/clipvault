@@ -845,3 +845,39 @@ chrome or row titles when the desktop uses the primary UI font.
 - **WHEN** the shared visual system changes
 - **THEN** both the main desktop and Quick Paste consume the updated token
   values without requiring two unrelated hardcoded scales
+
+### Requirement: una activación GNOME abrirá el flujo Quick Paste existente
+
+El adaptador Tauri SHALL transformar una solicitud `quick_paste` válida de la
+integración GNOME en la emisión de `clipvault://quick-search`. El frontend
+SHALL reutilizar el flujo Quick Paste ya existente.
+
+#### Scenario: solicitud local válida
+
+- **WHEN** el listener de GNOME comunica una solicitud de Quick Paste válida
+- **THEN** Tauri SHALL emitir `clipvault://quick-search` sin payload de
+  contenido
+- **AND** la aplicación SHALL usar el mismo modal y flujo de pegado que para
+  el atajo global existente
+
+### Requirement: una activación X11 de fallback abrirá el flujo existente
+
+Cuando el fallback X11 reconozca una binding registrada durante un grab activo
+ajeno, SHALL reutilizar exactamente la activación Quick Paste existente. El
+backend SHALL publicar solamente la señal de activación; Tauri y el frontend
+conservarán la secuencia vigente de captura de target, show, focus y apertura.
+
+#### Scenario: activación por evento raw X11
+
+- **WHEN** el fallback X11 reconoce `Ctrl+Shift+V` durante un grab activo
+  ajeno
+- **THEN** SHALL invocar el callback registrado una vez
+- **AND** Tauri SHALL emitir `clipvault://quick-search` con payload vacío
+- **AND** no SHALL transportar contenido de clipboard, hashes, rutas, assets,
+  datos de ventana ni títulos
+
+#### Scenario: activación normal X11
+
+- **WHEN** el grab pasivo del manager X11 entrega `Ctrl+Shift+V` sin grab ajeno
+- **THEN** SHALL abrir el mismo flujo Quick Paste
+- **AND** SHALL no abrir una segunda instancia por el observador raw

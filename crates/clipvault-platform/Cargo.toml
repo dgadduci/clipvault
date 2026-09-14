@@ -22,7 +22,10 @@ macos-native = [
     "dep:dispatch2",
     "dep:block2",
 ]
-# Linux X11 active app + synthetic paste via `x11rb`.
+# Linux X11 active app, synthetic paste and the raw-input hotkey fallback via
+# `x11rb`. The XInput2 extension lets the hotkey adapter recover when a
+# passive key event is not delivered during an active keyboard grab; it does
+# not affect Wayland or non-Linux builds.
 linux-x11 = ["dep:x11rb"]
 # Process-wide Xlib thread-safety preflight (`XInitThreads`).
 # Compiled only when the host can create the Xlib backend of
@@ -80,7 +83,7 @@ png = { workspace = true }
 
 arboard = { workspace = true, optional = true }
 global-hotkey = { workspace = true, optional = true }
-x11rb = { workspace = true, optional = true, features = ["allow-unsafe-code", "xtest"] }
+x11rb = { workspace = true, optional = true, features = ["allow-unsafe-code", "xinput", "xtest"] }
 # Dynamic Xlib loader used by the `linux-xlib-init` preflight to call
 # `XInitThreads` once before `global-hotkey` opens its Xlib thread.
 # The crate is the same one `global-hotkey` already pulls in

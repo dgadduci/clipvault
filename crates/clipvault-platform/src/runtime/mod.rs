@@ -60,4 +60,6 @@ pub mod linux_wayland_active_app;
 #[cfg(all(target_os = "linux", feature = "linux-x11"))]
 pub mod linux_x11_active_app;
 #[cfg(all(target_os = "linux", feature = "linux-x11"))]
+pub mod linux_x11_hotkey;
+#[cfg(all(target_os = "linux", feature = "linux-x11"))]
 pub mod linux_x11_paste;

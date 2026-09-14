@@ -11,7 +11,8 @@
 //!    over a local Unix-domain socket.
 //! 2. ClipVault owns the listener end of that socket, drops
 //!    everything the extension sends except a JSON envelope that
-//!    carries only `{ v, kind, app_id }`. The adapter implements
+//!    carries only `{ v, kind, app_id }` or the metadata-free
+//!    `quick_paste` activation. The adapter implements
 //!    [`ActiveApplicationProbe`] so the rest of the capture pipeline
 //!    keeps using the cached identifier contract the X11 / Wayland
 //!    probes also honour.
@@ -35,6 +36,9 @@
 //!   if the extension sends an empty `app_id`, the snapshot drops
 //!   to `None` so the watcher can ask the X11 fallback for an answer
 //!   without inheriting a stale XWayland identity.
+//! - After the handshake the extension may send `{ "v": <protocol>,
+//!   "kind": "quick_paste" }`. The listener forwards that signal to
+//!   its caller without changing the focus snapshot.
 //! - Messages that fail to parse JSON, that miss `kind`, that are
 //!   longer than [`MAX_FRAME_BYTES`] or that carry a different
 //!   protocol version are dropped. The connection is closed and the
@@ -42,7 +46,7 @@
 //!
 //! The protocol carries:
 //!   - `v` (u16): protocol version,
-//!   - `kind` (string): `hello` or `app_id`,
+//!   - `kind` (string): `hello`, `app_id` or `quick_paste`,
 //!   - `app_id` (string): the desktop identifier or empty string.
 //!
 //! It must never carry:
@@ -107,6 +111,18 @@ pub const EXTENSION_PARENT_DIR: &str = "clipvault@clipvault.app";
 /// Bundled extension resource directory path, relative to the
 /// shell binary that consumes it.
 pub const EXTENSION_RESOURCE_PARENT: &str = "gnome-extension";
+
+/// Metadata-free requests the GNOME extension can send after its
+/// local-socket handshake. The platform layer intentionally leaves
+/// presentation to its caller; this enum carries no clipboard, window
+/// or filesystem data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GnomeShellEvent {
+    QuickPasteRequested,
+}
+
+/// Callback invoked by the listener for a valid GNOME Shell event.
+pub type GnomeShellEventSink = Arc<dyn Fn(GnomeShellEvent) + Send + Sync + 'static>;
 
 // =====================================================================
 // Snapshot
@@ -375,6 +391,8 @@ impl WireEnvelope<'_> {
         }
         match self.kind {
             "hello" | "app_id" => Ok(()),
+            "quick_paste" if self.app_id.is_none() => Ok(()),
+            "quick_paste" => Err(WireError::UnexpectedAppId),
             other => Err(WireError::UnknownKind(other.to_string())),
         }
     }
@@ -389,6 +407,7 @@ enum WireError {
     FrameTooLarge,
     ProtocolVersion,
     UnknownKind(String),
+    UnexpectedAppId,
     Json(String),
     Io(String),
 }
@@ -399,6 +418,7 @@ impl WireError {
             WireError::FrameTooLarge => "frame_too_large",
             WireError::ProtocolVersion => "protocol_version_mismatch",
             WireError::UnknownKind(_) => "unknown_kind",
+            WireError::UnexpectedAppId => "unexpected_app_id",
             WireError::Json(_) => "invalid_json",
             WireError::Io(_) => "io_error",
         }
@@ -411,6 +431,9 @@ impl std::fmt::Display for WireError {
             WireError::FrameTooLarge => f.write_str("frame exceeded maximum size"),
             WireError::ProtocolVersion => f.write_str("protocol version does not match"),
             WireError::UnknownKind(kind) => write!(f, "unknown kind: {kind}"),
+            WireError::UnexpectedAppId => {
+                f.write_str("quick_paste must not carry an application identifier")
+            }
             WireError::Json(error) => write!(f, "json parse failure: {error}"),
             WireError::Io(error) => write!(f, "i/o failure: {error}"),
         }
@@ -497,6 +520,7 @@ pub struct GnomeShellListener<T: ListenerTransport + 'static> {
     snapshot: SharedGnomeSnapshot,
     transport: Arc<T>,
     alive: Arc<AtomicBool>,
+    event_sink: Option<GnomeShellEventSink>,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -504,10 +528,28 @@ impl<T: ListenerTransport + 'static> GnomeShellListener<T> {
     /// Build a listener that drives the supplied transport until
     /// [`Self::shutdown`] is called or the alive flag flips.
     pub fn new(snapshot: SharedGnomeSnapshot, transport: Arc<T>) -> Self {
+        Self::new_with_optional_event_sink(snapshot, transport, None)
+    }
+
+    /// Build a listener that reports valid post-handshake GNOME events.
+    pub fn new_with_event_sink(
+        snapshot: SharedGnomeSnapshot,
+        transport: Arc<T>,
+        event_sink: GnomeShellEventSink,
+    ) -> Self {
+        Self::new_with_optional_event_sink(snapshot, transport, Some(event_sink))
+    }
+
+    fn new_with_optional_event_sink(
+        snapshot: SharedGnomeSnapshot,
+        transport: Arc<T>,
+        event_sink: Option<GnomeShellEventSink>,
+    ) -> Self {
         Self {
             snapshot,
             transport,
             alive: Arc::new(AtomicBool::new(true)),
+            event_sink,
             _marker: std::marker::PhantomData,
         }
     }
@@ -523,7 +565,7 @@ impl<T: ListenerTransport + 'static> GnomeShellListener<T> {
             .transport
             .accept()
             .map_err(|error| ListenerError::Accept(error.to_string()))?;
-        process_peer(peer, &self.snapshot)?;
+        process_peer(peer, &self.snapshot, self.event_sink.as_ref())?;
         Ok(())
     }
 }
@@ -535,14 +577,37 @@ pub fn spawn_listener_thread<T: ListenerTransport + 'static>(
     snapshot: SharedGnomeSnapshot,
     transport: Arc<T>,
 ) -> ListenerHandle {
+    spawn_listener_thread_with_optional_events(snapshot, transport, None)
+}
+
+/// Spawn a listener that reports valid post-handshake GNOME events.
+pub fn spawn_listener_thread_with_events<T: ListenerTransport + 'static>(
+    snapshot: SharedGnomeSnapshot,
+    transport: Arc<T>,
+    event_sink: GnomeShellEventSink,
+) -> ListenerHandle {
+    spawn_listener_thread_with_optional_events(snapshot, transport, Some(event_sink))
+}
+
+fn spawn_listener_thread_with_optional_events<T: ListenerTransport + 'static>(
+    snapshot: SharedGnomeSnapshot,
+    transport: Arc<T>,
+    event_sink: Option<GnomeShellEventSink>,
+) -> ListenerHandle {
     let alive = Arc::new(AtomicBool::new(true));
     let alive_for_thread = alive.clone();
     let transport_for_thread = transport.clone();
     let snapshot_for_thread = snapshot.clone();
+    let event_sink_for_thread = event_sink.clone();
     let join = thread::Builder::new()
         .name("clipvault-gnome-listener".into())
         .spawn(move || {
-            run_listener_loop(snapshot_for_thread, transport_for_thread, alive_for_thread);
+            run_listener_loop(
+                snapshot_for_thread,
+                transport_for_thread,
+                alive_for_thread,
+                event_sink_for_thread,
+            );
         })
         .ok();
     ListenerHandle {
@@ -566,17 +631,30 @@ pub fn spawn_listener_thread_with_socket<T: ListenerTransport + 'static>(
     handle
 }
 
+/// Spawn an event-reporting listener that removes its socket at shutdown.
+pub fn spawn_listener_thread_with_socket_and_events<T: ListenerTransport + 'static>(
+    snapshot: SharedGnomeSnapshot,
+    transport: Arc<T>,
+    socket_path: PathBuf,
+    event_sink: GnomeShellEventSink,
+) -> ListenerHandle {
+    let mut handle = spawn_listener_thread_with_events(snapshot, transport, event_sink);
+    handle.socket_path = Some(socket_path);
+    handle
+}
+
 fn run_listener_loop<T: ListenerTransport + 'static>(
     snapshot: SharedGnomeSnapshot,
     transport: Arc<T>,
     alive: Arc<AtomicBool>,
+    event_sink: Option<GnomeShellEventSink>,
 ) {
     let mut backoff = INITIAL_BACKOFF;
     while alive.load(Ordering::Acquire) {
         match transport.accept() {
             Ok(peer) => {
                 backoff = INITIAL_BACKOFF;
-                if let Err(error) = process_peer(peer, &snapshot) {
+                if let Err(error) = process_peer(peer, &snapshot, event_sink.as_ref()) {
                     let stable = stable_error_label(&error);
                     snapshot.set_state(GnomeIntegrationState::CommunicationError);
                     snapshot.set_detail(Some(stable));
@@ -697,6 +775,7 @@ impl std::fmt::Display for ListenerError {
 fn process_peer(
     peer: Box<dyn PeerStream + Send>,
     snapshot: &SharedGnomeSnapshot,
+    event_sink: Option<&GnomeShellEventSink>,
 ) -> Result<(), ListenerError> {
     let mut peer = peer;
     let mut reader = BufReader::new(Read::by_ref(&mut peer));
@@ -764,6 +843,18 @@ fn process_peer(
                     snapshot.set_stage(ProbeStage::Identified);
                 }
                 snapshot.set_detail::<String>(None);
+            }
+            "quick_paste" => {
+                // Unlike an app identifier, an activation received before
+                // `hello` is harmless but cannot be trusted as an event from
+                // the connected extension. Ignore it without changing any
+                // snapshot state or invoking the callback.
+                if !handshake_seen {
+                    continue;
+                }
+                if let Some(event_sink) = event_sink {
+                    event_sink(GnomeShellEvent::QuickPasteRequested);
+                }
             }
             _ => {}
         }
@@ -1051,6 +1142,24 @@ mod tests {
     }
 
     #[test]
+    fn wire_envelope_accepts_metadata_free_quick_paste() {
+        let raw = "{\"v\":1,\"kind\":\"quick_paste\"}";
+        let envelope: WireEnvelope = serde_json::from_str(raw).expect("parse");
+        envelope.validate().expect("validate");
+        assert!(envelope.app_id.is_none());
+    }
+
+    #[test]
+    fn wire_envelope_rejects_quick_paste_with_app_id() {
+        let raw = "{\"v\":1,\"kind\":\"quick_paste\",\"app_id\":\"firefox.desktop\"}";
+        let envelope: WireEnvelope = serde_json::from_str(raw).expect("parse");
+        assert!(matches!(
+            envelope.validate(),
+            Err(WireError::UnexpectedAppId)
+        ));
+    }
+
+    #[test]
     fn probe_returns_unavailable_until_connected() {
         let snapshot = SharedGnomeSnapshot::new();
         let probe = GnomeShellActiveApplication::new(snapshot);
@@ -1229,7 +1338,8 @@ mod tests {
             .shutdown(std::net::Shutdown::Write)
             .expect("close writer");
         let snapshot = SharedGnomeSnapshot::new();
-        let error = process_peer(Box::new(server), &snapshot).expect_err("app_id before hello");
+        let error =
+            process_peer(Box::new(server), &snapshot, None).expect_err("app_id before hello");
         assert!(matches!(error, ListenerError::Frame(_)));
         assert!(snapshot.active_app_id().is_none());
     }
@@ -1253,9 +1363,35 @@ mod tests {
         client
             .shutdown(std::net::Shutdown::Write)
             .expect("close writer");
-        process_peer(Box::new(server), &snapshot).expect("process peer");
+        process_peer(Box::new(server), &snapshot, None).expect("process peer");
         let app = probe.active_application().expect("ok").expect("app");
         assert_eq!(app.identifier, "firefox.desktop");
+    }
+
+    #[test]
+    fn wire_protocol_reports_quick_paste_only_after_hello() {
+        use std::sync::atomic::AtomicUsize;
+
+        let snapshot = SharedGnomeSnapshot::new();
+        let events = Arc::new(AtomicUsize::new(0));
+        let events_for_sink = events.clone();
+        let sink: GnomeShellEventSink = Arc::new(move |event| {
+            assert_eq!(event, GnomeShellEvent::QuickPasteRequested);
+            events_for_sink.fetch_add(1, Ordering::SeqCst);
+        });
+        let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let payload = format!(
+            "{{\"v\":{PROTOCOL_VERSION},\"kind\":\"quick_paste\"}}\n{{\"v\":{PROTOCOL_VERSION},\"kind\":\"hello\"}}\n{{\"v\":{PROTOCOL_VERSION},\"kind\":\"quick_paste\"}}\n"
+        );
+        std::io::Write::write_all(&mut client, payload.as_bytes()).expect("write frames");
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("close writer");
+
+        process_peer(Box::new(server), &snapshot, Some(&sink)).expect("process peer");
+
+        assert_eq!(events.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot.state(), GnomeIntegrationState::Connected);
     }
 
     /// An empty `app_id` MUST move the snapshot to

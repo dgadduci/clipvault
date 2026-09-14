@@ -26,6 +26,9 @@ use tracing::{info, warn};
 
 use crate::metadata_scheduler::MetadataEnrichmentScheduler;
 
+/// Frontend event shared by every platform-specific Quick Paste trigger.
+pub const QUICK_SEARCH_EVENT: &str = "clipvault://quick-search";
+
 /// Resolved bootstrap state handed to Tauri.
 pub struct AppState {
     pub context: AppContext,
@@ -1175,7 +1178,7 @@ pub fn register_default_hotkey<R: Runtime>(
             &binding,
             Box::new(move || {
                 info!(id = %hotkey_id, "global hotkey activated");
-                if let Err(error) = app_handle.emit("clipvault://quick-search", ()) {
+                if let Err(error) = app_handle.emit(QUICK_SEARCH_EVENT, ()) {
                     warn!(error = %error, "failed to emit quick-search event");
                 } else {
                     info!("quick-search event emitted");
@@ -1251,14 +1254,23 @@ fn build_clipboard(
 /// cannot race the XCB assertion the change ships to fix.
 #[cfg(all(target_os = "linux", feature = "linux-xlib-init"))]
 fn build_hotkey(
-    _info: &PlatformInfo,
+    info: &PlatformInfo,
     capabilities: Capabilities,
     xlib_preflight: &clipvault_platform::XlibInitOutcome,
 ) -> Arc<dyn HotkeyManager> {
+    // `global-hotkey` implements Linux registration through X11 only.
+    // Constructing it inside Wayland can at best grab XWayland clients
+    // (and makes the shortcut appear selectively broken), while GNOME's
+    // consented local bridge owns the native-Wayland path.
+    if info.os_family == OsFamily::Linux
+        && info.display_server == clipvault_platform::DisplayServer::Wayland
+    {
+        return Arc::new(clipvault_platform::NoopHotkeyManager);
+    }
     if !xlib_preflight.is_initialized() {
         return Arc::new(clipvault_platform::NoopHotkeyManager);
     }
-    build_hotkey_inner(_info, capabilities)
+    build_hotkey_inner(info, capabilities)
 }
 
 /// Linux + non-Xlib backend builds, plus macOS, Windows and every
@@ -1270,7 +1282,27 @@ fn build_hotkey(info: &PlatformInfo, capabilities: Capabilities) -> Arc<dyn Hotk
     build_hotkey_inner(info, capabilities)
 }
 
-fn build_hotkey_inner(_info: &PlatformInfo, capabilities: Capabilities) -> Arc<dyn HotkeyManager> {
+fn build_hotkey_inner(info: &PlatformInfo, capabilities: Capabilities) -> Arc<dyn HotkeyManager> {
+    if info.os_family == OsFamily::Linux
+        && info.display_server == clipvault_platform::DisplayServer::Wayland
+    {
+        return Arc::new(clipvault_platform::NoopHotkeyManager);
+    }
+    #[cfg(all(target_os = "linux", feature = "hotkey-global"))]
+    if info.os_family == OsFamily::Linux
+        && info.display_server == clipvault_platform::DisplayServer::X11
+    {
+        match clipvault_platform::runtime::linux_x11_hotkey::LinuxX11HotkeyManagerAdapter::new() {
+            Ok(adapter) => return Arc::new(adapter),
+            Err(error) => {
+                // A successful native adapter owns passive and raw routes on
+                // one X11 connection, preventing duplicate activation. Only
+                // an unavailable X11 setup falls through to the legacy
+                // backend as a degraded escape hatch.
+                warn!(error = %error, "native X11 hotkey adapter failed to initialise");
+            }
+        }
+    }
     #[cfg(feature = "hotkey-global")]
     {
         match clipvault_platform::runtime::hotkey_global::GlobalHotkeyManagerAdapter::new() {
@@ -5075,6 +5107,30 @@ mod tests {
             manager.name(),
             clipvault_platform::HotkeyBackendKind::Unavailable.as_str(),
             "a failed preflight must skip the Xlib backend and return the no-op manager"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "linux-xlib-init"))]
+    #[test]
+    fn build_hotkey_returns_noop_for_wayland_even_when_xlib_is_ready() {
+        // `global-hotkey` can only grab X11 clients. A successful Xlib
+        // preflight does not make it a Wayland backend, so constructing it
+        // here would reintroduce the partial Warp/xterm-only shortcut.
+        let info = clipvault_platform::PlatformInfo {
+            home_dir: std::path::PathBuf::from("/tmp"),
+            data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+            os_family: clipvault_platform::OsFamily::Linux,
+            display_server: clipvault_platform::DisplayServer::Wayland,
+        };
+        let manager = build_hotkey(
+            &info,
+            clipvault_platform::Capabilities::ALL_AVAILABLE,
+            &clipvault_platform::XlibInitOutcome::Initialized,
+        );
+        assert_eq!(
+            manager.name(),
+            clipvault_platform::HotkeyBackendKind::Unavailable.as_str(),
+            "Wayland must not initialise the X11 hotkey backend"
         );
     }
 

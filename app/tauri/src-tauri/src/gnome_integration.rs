@@ -15,7 +15,7 @@ use clipvault_core::{
     GnomeConsentDecision, GnomeIntegrationService as CoreIntegrationService, GnomeTechnicalState,
 };
 use clipvault_platform::{
-    spawn_listener_thread_with_socket, GnomeConsentDecision as PlatformConsentDecision,
+    spawn_listener_thread_with_socket_and_events, GnomeConsentDecision as PlatformConsentDecision,
     GnomeIntegrationService as PlatformIntegrationService, ListenerHandle, SharedGnomeSnapshot,
     UnixListenerTransport, GNOME_BACKEND_NAME, GNOME_EXTENSION_UUID, GNOME_PROTOCOL_VERSION,
 };
@@ -34,7 +34,10 @@ pub const BUNDLED_EXTENSION_PATH: &str = "gnome-extension/extension.js";
 pub struct GnomeIntegrationState {
     core_service: Arc<CoreIntegrationService>,
     live: Mutex<Option<LiveGnomeHandle>>,
+    quick_paste_activation_sink: Arc<Mutex<Option<QuickPasteActivationSink>>>,
 }
+
+type QuickPasteActivationSink = Arc<dyn Fn() + Send + Sync + 'static>;
 
 /// Bundle the state keeps around the live probe + listener.
 pub struct LiveGnomeHandle {
@@ -58,7 +61,15 @@ impl GnomeIntegrationState {
         Self {
             core_service,
             live: Mutex::new(None),
+            quick_paste_activation_sink: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Set the shell callback for a valid GNOME Quick Paste request. The
+    /// listener reads this indirection at event time because it can start
+    /// while `build_state` is still assembling the Tauri application handle.
+    pub fn set_quick_paste_activation_sink(&self, sink: QuickPasteActivationSink) {
+        *self.quick_paste_activation_sink.lock() = Some(sink);
     }
 
     /// Persist a consent decision through the core service. The helper
@@ -213,10 +224,20 @@ impl GnomeIntegrationState {
                 return Err(format!("bind: {error}"));
             }
         };
-        handle.listener = Some(spawn_listener_thread_with_socket(
+        let quick_paste_activation_sink = Arc::clone(&self.quick_paste_activation_sink);
+        let event_sink = Arc::new(move |_event| {
+            // Never call into Tauri while the indirection mutex is held: the
+            // callback can synchronously schedule work on the UI runtime.
+            let activation = quick_paste_activation_sink.lock().clone();
+            if let Some(activation) = activation {
+                activation();
+            }
+        });
+        handle.listener = Some(spawn_listener_thread_with_socket_and_events(
             handle.snapshot.clone(),
             transport,
             socket_path,
+            event_sink,
         ));
         Ok(())
     }

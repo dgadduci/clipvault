@@ -58,6 +58,50 @@ test("the GNOME extension uses GNOME 42's GSocketClient constructor and async co
   );
 });
 
+test("the GNOME extension owns a Mutter Quick Paste accelerator for its enabled lifetime", () => {
+  assert.match(extensionSource, /const Meta = imports\.gi\.Meta/);
+  assert.match(extensionSource, /const QUICK_PASTE_ACCELERATOR = '<Control><Shift>v'/);
+  assert.match(
+    extensionSource,
+    /global\.display\.grab_accelerator\(\s*QUICK_PASTE_ACCELERATOR,\s*Meta\.KeyBindingFlags\.IGNORE_AUTOREPEAT,/,
+  );
+  assert.match(
+    extensionSource,
+    /Main\.wm\.allowKeybinding\(bindingName, QUICK_PASTE_ACTION_MODES\)/,
+  );
+  assert.match(
+    extensionSource,
+    /global\.display\.connect\(\s*'accelerator-activated'/,
+  );
+  assert.match(extensionSource, /global\.display\.ungrab_accelerator\(action\)/);
+  assert.match(
+    extensionSource,
+    /Main\.wm\.allowKeybinding\(bindingName, Shell\.ActionMode\.NONE\)/,
+  );
+});
+
+test("the GNOME accelerator serialises only the metadata-free Quick Paste request", () => {
+  const quickPasteEnvelope = extensionSource.match(
+    /JSON\.stringify\(\s*\{\s*v:\s*PROTOCOL_VERSION,\s*kind:\s*'quick_paste',\s*\}\s*\)\s*\+\s*'\\n'/,
+  );
+  assert.ok(quickPasteEnvelope, "quick_paste envelope must exist");
+  assert.doesNotMatch(
+    quickPasteEnvelope[0],
+    /\b(app_id|title|pid|path|hash|snippet)\s*:/,
+    "quick_paste envelope must not carry focus or clipboard metadata",
+  );
+  assert.match(
+    extensionSource,
+    /_checkFocus\(\);\s*_publishQuickPaste\(\);/,
+    "focus metadata must be queued before the Quick Paste request",
+  );
+  assert.match(
+    extensionSource,
+    /AppState\.pending_quick_paste = false;/,
+    "a socket reset must discard any stale Quick Paste request",
+  );
+});
+
 test("the GNOME extension refuses to publish ids for window-backed Shell.App instances", () => {
   // The extension MUST consult `is_window_backed()` when present and
   // collapse the resolved id to absence so the channel never carries
