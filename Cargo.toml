@@ -41,6 +41,15 @@ sha2 = "0.10"
 flate2 = "1"
 global-hotkey = "0.6"
 x11rb = "0.13"
+# Direct dependency on the dynamic Xlib loader used by the
+# `linux-x11-quick-paste-thread-safety` change to call `XInitThreads`
+# before any other component opens Xlib. The same crate is already
+# pulled in transitively by `global-hotkey` on Linux, so promoting it
+# to a direct dependency does not add new third-party code: it only
+# gives the platform crate a stable surface to load `XInitThreads`
+# without depending on a transitive import that could disappear with
+# an upstream refactor.
+x11-dl = "2.21"
 # Pure-Rust SVG → PNG rasterizer used by the Linux application
 # metadata provider to honour `.desktop` entries whose `Icon=` value
 # ships as SVG instead of PNG. With `default-features = false` we

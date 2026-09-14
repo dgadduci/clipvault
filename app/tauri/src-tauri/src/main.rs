@@ -32,6 +32,17 @@ use crate::tray::{menu_event_to_action, TauriTrayController};
 const WINDOW_LIFECYCLE_DEBUG_ENV: &str = "CLIPVAULT_DEBUG_WINDOW_LIFECYCLE";
 
 fn main() {
+    // X11 thread-safety preflight: must run before Tauri/GTK or
+    // the global-hotkey backend open Xlib so the rule
+    // `XInitThreads` enables is in place for the whole process.
+    // The helper is a no-op on every platform other than Linux
+    // builds with the `linux-xlib-init` feature enabled.
+    #[cfg(all(target_os = "linux", feature = "linux-xlib-init"))]
+    {
+        use clipvault_platform::xlib_init_once;
+        let _ = xlib_init_once();
+    }
+
     init_tracing();
 
     tauri::Builder::default()

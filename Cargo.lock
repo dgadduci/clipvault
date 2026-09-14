@@ -464,6 +464,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
+ "x11-dl",
  "x11rb",
 ]
 

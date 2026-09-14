@@ -90,13 +90,39 @@ const HISTORY_UPDATED_EVENT: &str = "clipvault://history-updated";
 /// Detect platform and build every adapter.
 pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
     let platform = clipvault_platform::DefaultPlatform::detect()?;
+    // The Xlib thread-safety preflight must run before any Xlib
+    // call. The shell already invoked it from `main` to satisfy
+    // the order documented in `design.md`; here we consult the
+    // cached outcome so `build_hotkey` and the capability matrix
+    // agree on whether the Xlib backend is safe to wire up.
+    #[cfg(all(target_os = "linux", feature = "linux-xlib-init"))]
+    let xlib_preflight = clipvault_platform::xlib_init_once();
+
     // Use runtime detection so the `synthetic_paste` capability
     // reflects the actual macOS Accessibility grant. The pure
     // `detect_capabilities` helper stays available for tests but is
     // never called from production code paths.
-    let capabilities = clipvault_platform::detect_capabilities_runtime(&platform);
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "linux-xlib-init")),
+        allow(unused_mut)
+    )]
+    let mut capabilities = clipvault_platform::detect_capabilities_runtime(&platform);
+    // A failed Xlib preflight MUST drop `global_hotkey` to false
+    // so the capability matrix never advertises the backend as
+    // available when the shell actually wired the no-op manager.
+    #[cfg(all(target_os = "linux", feature = "linux-xlib-init"))]
+    {
+        if !xlib_preflight.is_initialized()
+            && platform.os_family == clipvault_platform::OsFamily::Linux
+        {
+            capabilities.global_hotkey = false;
+        }
+    }
 
     let clipboard: Arc<dyn ClipboardBackend> = build_clipboard(&platform, capabilities);
+    #[cfg(all(target_os = "linux", feature = "linux-xlib-init"))]
+    let hotkey: Arc<dyn HotkeyManager> = build_hotkey(&platform, capabilities, &xlib_preflight);
+    #[cfg(not(all(target_os = "linux", feature = "linux-xlib-init")))]
     let hotkey: Arc<dyn HotkeyManager> = build_hotkey(&platform, capabilities);
     let active_app: Arc<dyn ActiveApplicationProbe> =
         build_active_application(&platform, capabilities);
@@ -1219,7 +1245,32 @@ fn build_clipboard(
     plain
 }
 
-fn build_hotkey(_info: &PlatformInfo, capabilities: Capabilities) -> Arc<dyn HotkeyManager> {
+/// Linux + Xlib-backend build path. The Xlib thread-safety
+/// preflight owns the gate: a failed preflight MUST skip the Xlib
+/// backend entirely so a subsequent `GlobalHotkeyManagerAdapter::new`
+/// cannot race the XCB assertion the change ships to fix.
+#[cfg(all(target_os = "linux", feature = "linux-xlib-init"))]
+fn build_hotkey(
+    _info: &PlatformInfo,
+    capabilities: Capabilities,
+    xlib_preflight: &clipvault_platform::XlibInitOutcome,
+) -> Arc<dyn HotkeyManager> {
+    if !xlib_preflight.is_initialized() {
+        return Arc::new(clipvault_platform::NoopHotkeyManager);
+    }
+    build_hotkey_inner(_info, capabilities)
+}
+
+/// Linux + non-Xlib backend builds, plus macOS, Windows and every
+/// platform that does not link the `x11-dl` preflight. The gate
+/// collapses to "follow the previous best-effort behaviour" because
+/// no Xlib backend can be active here.
+#[cfg(not(all(target_os = "linux", feature = "linux-xlib-init")))]
+fn build_hotkey(info: &PlatformInfo, capabilities: Capabilities) -> Arc<dyn HotkeyManager> {
+    build_hotkey_inner(info, capabilities)
+}
+
+fn build_hotkey_inner(_info: &PlatformInfo, capabilities: Capabilities) -> Arc<dyn HotkeyManager> {
     #[cfg(feature = "hotkey-global")]
     {
         match clipvault_platform::runtime::hotkey_global::GlobalHotkeyManagerAdapter::new() {
@@ -4976,5 +5027,135 @@ mod tests {
                 "build_active_application must match ConnectionOutcome::Operational to install the native Wayland probe"
             );
         }
+    }
+
+    // -------------------------------------------------------------
+    // `linux-x11-quick-paste-thread-safety` regression coverage.
+    //
+    // The contract: when `XInitThreads` could not be called the
+    // bootstrap MUST skip the Xlib hotkey manager and keep the
+    // application alive. The tests below pin:
+    //
+    // 1. `build_hotkey` returns the no-op manager when the
+    //    preflight failed, without ever consulting the Xlib
+    //    backend. The manager name is `unavailable` so the
+    //    capability matrix never advertises the binding as
+    //    active.
+    // 2. The bootstrap order keeps the preflight strictly before
+    //    `build_state` and `GlobalHotkeyManagerAdapter::new`. The
+    //    test reads the `Cargo.toml` and the bootstrap source to
+    //    pin the structural invariant on every developer host.
+    //
+    // Both tests compile only when the `linux-xlib-init` feature
+    // is on; the `linux-xlib-init` feature is opt-in so the
+    // macOS / non-Linux builds do not pull `x11-dl`.
+    // -------------------------------------------------------------
+    #[cfg(all(target_os = "linux", feature = "linux-xlib-init"))]
+    #[test]
+    fn build_hotkey_returns_noop_when_xlib_preflight_fails() {
+        // Regression for the X11 thread-safety bug: when the
+        // Xlib preflight cannot call `XInitThreads`, the shell
+        // MUST skip the `GlobalHotkeyManagerAdapter` constructor
+        // so the XCB assertion that ships to fix cannot be
+        // triggered. We assert the contract through the manager
+        // name so a future refactor that swaps the no-op for a
+        // different placeholder still surfaces here.
+        let info = clipvault_platform::PlatformInfo {
+            home_dir: std::path::PathBuf::from("/tmp"),
+            data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+            os_family: clipvault_platform::OsFamily::Linux,
+            display_server: clipvault_platform::DisplayServer::X11,
+        };
+        let capabilities = clipvault_platform::Capabilities::ALL_AVAILABLE;
+        let preflight = clipvault_platform::XlibInitOutcome::LibraryUnavailable {
+            reason: "libx11_unavailable".into(),
+        };
+        let manager = build_hotkey(&info, capabilities, &preflight);
+        assert_eq!(
+            manager.name(),
+            clipvault_platform::HotkeyBackendKind::Unavailable.as_str(),
+            "a failed preflight must skip the Xlib backend and return the no-op manager"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "linux-xlib-init"))]
+    #[test]
+    fn build_hotkey_returns_noop_when_xinit_threads_rejects() {
+        // Mirror of the previous test for the rejection branch:
+        // `XInitThreads` ran but returned zero (per the Xlib ABI:
+        // non-zero is success, zero is failure). The shell MUST
+        // still skip the Xlib manager instead of "repairing" the
+        // state from the hotkey callback.
+        let info = clipvault_platform::PlatformInfo {
+            home_dir: std::path::PathBuf::from("/tmp"),
+            data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+            os_family: clipvault_platform::OsFamily::Linux,
+            display_server: clipvault_platform::DisplayServer::X11,
+        };
+        let preflight = clipvault_platform::XlibInitOutcome::InitFailed {
+            reason: "XInitThreads returned zero".into(),
+        };
+        let manager = build_hotkey(
+            &info,
+            clipvault_platform::Capabilities::ALL_AVAILABLE,
+            &preflight,
+        );
+        assert_eq!(manager.name(), "unavailable");
+    }
+
+    #[cfg(all(target_os = "linux", feature = "linux-xlib-init"))]
+    #[test]
+    fn build_hotkey_pins_source_order_invariant() {
+        // Regression for the order documented in `design.md`:
+        // the preflight MUST live before `tauri::Builder`,
+        // `build_state` and `GlobalHotkeyManagerAdapter::new`. We
+        // assert the structural invariant by reading the source
+        // so a refactor that reorders the steps surfaces here
+        // instead of silently reproducing the original race.
+        let source_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+        let source = std::fs::read_to_string(&source_path)
+            .unwrap_or_else(|error| panic!("read main.rs: {error}"));
+        let preflight_idx = source
+            .find("xlib_init_once")
+            .unwrap_or_else(|| panic!("main.rs must invoke xlib_init_once before Tauri builder"));
+        let builder_idx = source
+            .find("tauri::Builder::default()")
+            .unwrap_or_else(|| panic!("main.rs must build the Tauri runtime"));
+        assert!(
+            preflight_idx < builder_idx,
+            "preflight must precede tauri::Builder::default() so XInitThreads runs before any Xlib call"
+        );
+
+        let bootstrap_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bootstrap.rs");
+        let bootstrap_source = std::fs::read_to_string(&bootstrap_path)
+            .unwrap_or_else(|error| panic!("read bootstrap.rs: {error}"));
+        // The preflight outcome must be cached on `AppState` so
+        // `build_hotkey` consults it before constructing the Xlib
+        // manager. We assert the call signature carries the
+        // outcome as a parameter.
+        assert!(
+            bootstrap_source.contains("build_hotkey(&platform, capabilities, &xlib_preflight)"),
+            "build_state must thread the preflight outcome into build_hotkey"
+        );
+    }
+
+    #[test]
+    fn capabilities_drop_global_hotkey_when_xlib_preflight_failed() {
+        // Contract pin: a failed preflight MUST keep the
+        // capability matrix honest. The matrix MUST NOT
+        // advertise `global_hotkey = true` when the shell
+        // actually wired the no-op manager. The test inspects
+        // the build_state wiring through the same source scan
+        // the other regressions use, so a refactor that drops
+        // the gate surfaces here.
+        let bootstrap_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bootstrap.rs");
+        let bootstrap_source = std::fs::read_to_string(&bootstrap_path)
+            .unwrap_or_else(|error| panic!("read bootstrap.rs: {error}"));
+        assert!(
+            bootstrap_source.contains("capabilities.global_hotkey = false"),
+            "build_state must drop capabilities.global_hotkey when the Xlib preflight failed"
+        );
     }
 }

@@ -20,6 +20,8 @@ mod hotkey;
 mod info;
 #[cfg(target_os = "linux")]
 mod linux_picker_support;
+#[cfg(all(target_os = "linux", feature = "linux-xlib-init"))]
+mod linux_xlib_init;
 mod noop;
 pub mod paste;
 pub mod runtime;
@@ -70,6 +72,8 @@ pub use hotkey::{
 pub use info::{DisplayServer, OsFamily, PlatformInfo};
 #[cfg(target_os = "linux")]
 pub use linux_picker_support::LinuxPickerBackend;
+#[cfg(all(target_os = "linux", feature = "linux-xlib-init"))]
+pub use linux_xlib_init::{xlib_init_once, XlibHandle, XlibInitOutcome, XlibLoadError, XlibLoader};
 pub use noop::{
     NoopActiveApplicationProbe, NoopClipboardBackend, NoopHotkeyManager, NoopPasteController,
     NoopSettingsNavigator, NoopTrayController, NoopTrayHandle,

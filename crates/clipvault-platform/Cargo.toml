@@ -24,6 +24,14 @@ macos-native = [
 ]
 # Linux X11 active app + synthetic paste via `x11rb`.
 linux-x11 = ["dep:x11rb"]
+# Process-wide Xlib thread-safety preflight (`XInitThreads`).
+# Compiled only when the host can create the Xlib backend of
+# `global-hotkey` so macOS, Windows and Linux builds that opt out of
+# the `hotkey-global` feature do not link `x11-dl`. The crate ships
+# the same dynamic loader `global-hotkey` already pulls in
+# transitively on Linux builds, so adding it here does not bring a
+# new third-party dependency into the graph.
+linux-xlib-init = ["dep:x11-dl"]
 # Linux native Wayland active-app probe. Uses only `std::os::unix`
 # primitives plus the bundled protocol parser so the build does not
 # need `wayland-scanner`, `libwayland-bin` or any external tool at
@@ -73,6 +81,13 @@ png = { workspace = true }
 arboard = { workspace = true, optional = true }
 global-hotkey = { workspace = true, optional = true }
 x11rb = { workspace = true, optional = true, features = ["allow-unsafe-code", "xtest"] }
+# Dynamic Xlib loader used by the `linux-xlib-init` preflight to call
+# `XInitThreads` once before `global-hotkey` opens its Xlib thread.
+# The crate is the same one `global-hotkey` already pulls in
+# transitively on Linux builds; declaring it directly keeps the
+# platform crate's Xlib surface stable instead of relying on the
+# accidental transitive import.
+x11-dl = { workspace = true, optional = true }
 # JSON serialisation for the GNOME integration wire envelopes and
 # the consent/installation surfaces. Already in the workspace graph
 # through `clipvault-core`; surfaced here so the platform layer can

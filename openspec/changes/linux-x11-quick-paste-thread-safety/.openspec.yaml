@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-13
+goal: Evitar el aborto de XCB al abrir Quick Paste con Ctrl+Shift+V en sesiones Linux X11, inicializando Xlib de forma segura y conservando una degradación no bloqueante.
