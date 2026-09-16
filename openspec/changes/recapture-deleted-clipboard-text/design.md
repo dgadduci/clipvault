@@ -46,6 +46,15 @@ atómica) para que la revisión y el contenido correspondan siempre a la
 misma observación. La trait actualiza la firma para ofrecer ambos datos
 acoplados.
 
+Cuando macOS se construye como `CompositeClipboard`, la señal no puede
+quedar encerrada en el adaptador rico nativo: el watcher usa
+`ClipboardBackend::revision` directamente al establecer el baseline tras un
+borrado. Por ello el adaptador nativo implementa ese accessor con
+`NSPasteboard.changeCount` y el composite lo reexpone con prioridad sobre la
+pata `arboard`. La misma prioridad se usa para `read_observation`. Linux no
+cambia de ruta: allí ambas patas son el backend `arboard` y su contador
+XFixes sigue siendo la fuente de revisión.
+
 ## Modelo del watcher
 
 `WatcherState` deja de almacenar solo `last_hash` y pasa a guardar:

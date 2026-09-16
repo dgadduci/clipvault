@@ -28,6 +28,15 @@ revision is stored as a new row with a fresh opaque identifier.
   polls, regardless of whether the text matches the previous observation
 - **THEN** the watcher returns `Unchanged` without persisting anything
 
+#### Scenario: macOS composite preserves the native revision for a deletion baseline
+
+- **GIVEN** the macOS runtime uses the composite clipboard backend and
+  `NSPasteboard.changeCount` is `R`
+- **WHEN** a history row is deleted and the watcher establishes its
+  metadata-only baseline
+- **THEN** the composite exposes `R` to that baseline and a later poll at
+  the same `R` returns `Unchanged` without recreating the deleted row
+
 #### Scenario: Deleted text is recaptured after a clipboard rewrite
 
 - **GIVEN** a text capture with hash `H` existed at revision `R1`, was

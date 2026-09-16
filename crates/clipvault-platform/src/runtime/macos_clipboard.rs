@@ -381,6 +381,15 @@ impl ClipboardBackend for MacOsPasteboardClipboard {
         true
     }
 
+    fn revision(&self) -> ClipboardRevision {
+        // `CaptureWatcher::baseline_dedupe_state` reads this accessor
+        // directly after a destructive operation. Exposing the same
+        // `NSPasteboard.changeCount` as `read_observation` is therefore
+        // required for the baseline to reach the native macOS change
+        // signal instead of degrading to `UNKNOWN`.
+        macos_clipboard_main_queue::read_change_count_main_thread()
+    }
+
     fn name(&self) -> &'static str {
         "macos_pasteboard"
     }
@@ -396,7 +405,7 @@ impl ClipboardBackend for MacOsPasteboardClipboard {
     /// bridge cannot hop to the main thread so the watcher preserves
     /// its previous state instead of inventing observations.
     fn read_observation(&self) -> Result<ClipboardObservation, ClipboardBackendError> {
-        let revision = macos_clipboard_main_queue::read_change_count_main_thread();
+        let revision = self.revision();
         let payload = self.read_payload()?;
         Ok(ClipboardObservation { payload, revision })
     }

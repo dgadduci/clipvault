@@ -89,6 +89,9 @@
 - [x] 5.9 Verificar que el fallback de `ArboardClipboard` conserva dedupe de
   payload para polls ordinarios, pero no fabrica una revisión utilizable para
   baseline sin XFixes.
+- [x] 5.10 Cubrir que `CompositeClipboard` reexpone primero la revisión del
+  adaptador rico nativo y usa la pata plain solo como fallback, para que el
+  baseline de macOS reciba `NSPasteboard.changeCount`.
 
 ## Verificación y cierre
 
@@ -98,7 +101,10 @@
   `git diff --check`.
 - [x] 6.2 Ejecutar `openspec validate recapture-deleted-clipboard-text
   --strict --type change` y revisar el diff completo.
-- [ ] 6.3 Repetir la validación automatizada y manual de recaptura en X11 y
+- [x] 6.3 Repetir la validación automatizada y manual de recaptura en X11 y
   Wayland/XWayland después de sustituir el contador por diff de payload por
   el monitor de ownership XFixes.
-- [ ] 6.4 No sincronizar specs canónicas ni archivar el cambio todavía.
+- [ ] 6.4 Repetir manualmente en macOS el flujo: capturar `A`, eliminarla y
+  mantener `A` sin nueva copia; debe devolver `Unchanged` y no recrear la
+  fila. Después, copiar `A` de nuevo y verificar que se recaptura.
+- [ ] 6.5 No sincronizar specs canónicas ni archivar el cambio todavía.

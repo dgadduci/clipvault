@@ -61,7 +61,7 @@ use std::sync::Arc;
 
 use crate::clipboard::{
     ClipboardBackend, ClipboardBackendError, ClipboardImage, ClipboardObservation,
-    ClipboardPayload, RichTextPayload,
+    ClipboardPayload, ClipboardRevision, RichTextPayload,
 };
 
 /// Composite backend that dispatches each [`ClipboardBackend`]
@@ -436,6 +436,23 @@ impl ClipboardBackend for CompositeClipboard {
         "composite"
     }
 
+    fn revision(&self) -> ClipboardRevision {
+        // The destructive baseline asks the composite directly for its
+        // revision, rather than going through `read_observation`. Keep
+        // the same priority used below: macOS supplies
+        // `NSPasteboard.changeCount` through the native rich adapter;
+        // Linux keeps using the existing arboard/XFixes revision from
+        // that same rich adapter. The plain leg is only a fallback for
+        // future compositions whose rich adapter cannot report a
+        // revision.
+        let rich_revision = self.rich.revision();
+        if rich_revision.is_unknown() {
+            self.plain.revision()
+        } else {
+            rich_revision
+        }
+    }
+
     /// Atomic snapshot. On macOS the rich adapter exposes
     /// `NSPasteboard.changeCount` through its `read_observation`
     /// override; on Linux the rich adapter is the same `arboard`
@@ -447,16 +464,7 @@ impl ClipboardBackend for CompositeClipboard {
     /// preserves its previous state.
     fn read_observation(&self) -> Result<ClipboardObservation, ClipboardBackendError> {
         let payload = self.read_payload()?;
-        // Prefer the rich adapter's revision: on macOS this is
-        // `NSPasteboard.changeCount` and it covers every flavour the
-        // composite surfaces; on Linux it is the textual diff counter
-        // and matches the plain adapter.
-        let rich_revision = self.rich.revision();
-        let revision = if rich_revision.is_unknown() {
-            self.plain.revision()
-        } else {
-            rich_revision
-        };
+        let revision = self.revision();
         Ok(ClipboardObservation { payload, revision })
     }
 }
@@ -583,6 +591,37 @@ mod tests {
         }
     }
 
+    /// Minimal backend whose only relevant behaviour is a stable,
+    /// metadata-only revision. It lets this module pin the forwarding
+    /// contract without a macOS pasteboard or an X11 display.
+    struct RevisionFake {
+        revision: ClipboardRevision,
+    }
+
+    impl RevisionFake {
+        fn new(revision: ClipboardRevision) -> Self {
+            Self { revision }
+        }
+    }
+
+    impl ClipboardBackend for RevisionFake {
+        fn read_text(&self) -> Result<Option<String>, ClipboardBackendError> {
+            Ok(Some("revision-fake".to_string()))
+        }
+
+        fn write_text(&self, _text: &str) -> Result<(), ClipboardBackendError> {
+            Ok(())
+        }
+
+        fn revision(&self) -> ClipboardRevision {
+            self.revision
+        }
+
+        fn name(&self) -> &'static str {
+            "revision-fake"
+        }
+    }
+
     #[test]
     fn dispatches_text_and_image_to_plain_and_rich_to_rich() {
         let plain = Arc::new(PlainFake::default());
@@ -628,6 +667,27 @@ mod tests {
         assert!(composite.supports_image_read());
         assert!(composite.supports_image_write());
         assert_eq!(composite.name(), "composite");
+    }
+
+    /// Regression for macOS recapture after deletion: the watcher asks
+    /// the composite for a metadata-only revision while establishing its
+    /// baseline. That revision must reach the native rich leg rather
+    /// than silently becoming `UNKNOWN`; otherwise the same clipboard
+    /// contents can be reconsidered on every poll. The fallback also
+    /// remains available for non-native compositions.
+    #[test]
+    fn revision_forwards_rich_then_plain_metadata_signal() {
+        let known_rich = CompositeClipboard::new(
+            Arc::new(RevisionFake::new(ClipboardRevision::new(7))),
+            Arc::new(RevisionFake::new(ClipboardRevision::new(42))),
+        );
+        assert_eq!(known_rich.revision(), ClipboardRevision::new(42));
+
+        let fallback_plain = CompositeClipboard::new(
+            Arc::new(RevisionFake::new(ClipboardRevision::new(7))),
+            Arc::new(RevisionFake::new(ClipboardRevision::UNKNOWN)),
+        );
+        assert_eq!(fallback_plain.revision(), ClipboardRevision::new(7));
     }
 
     /// `read_payload` MUST surface a `RichText` payload when the

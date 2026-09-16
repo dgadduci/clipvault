@@ -104,6 +104,10 @@ o devuelve `Duplicate` (la fila original sigue viva).
 - En X11 y en sesiones Wayland servidas por XWayland, una segunda copia de
   `A` emite una notificación de ownership nueva aun cuando el contenido sea
   idéntico, y por eso se recaptura tras eliminarla.
+- En macOS, el backend compuesto propaga `NSPasteboard.changeCount` tanto
+  para las observaciones del watcher como para el baseline posterior a un
+  borrado. Un portapapeles sin nueva escritura conserva la misma revisión y
+  no vuelve a crear la captura eliminada.
 - Si no existe un stream de ownership utilizable, el backend devuelve
   `ClipboardRevision::UNKNOWN`; no simula una revisión a partir del texto y
   conserva el fallback seguro documentado.
