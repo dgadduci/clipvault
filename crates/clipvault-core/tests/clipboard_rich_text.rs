@@ -683,6 +683,53 @@ fn identical_rich_payload_refreshes_row() {
 }
 
 #[test]
+fn rich_then_plain_same_text_refreshes_the_rich_row() {
+    let h = harness(vec![]);
+    let first = h.context.history().record_clipboard_payload(
+        &h.context,
+        ClipboardPayload::RichText(rich_text(Some("<b>plain</b>"), None)),
+        Some("com.apple.TextEdit"),
+    );
+    let asset_count = assets_on_disk(&h).len();
+    let second = h.context.history().record_clipboard_payload(
+        &h.context,
+        ClipboardPayload::Text("plain".into()),
+        Some("com.apple.TextEdit"),
+    );
+
+    let first_id = match first {
+        HistoryOutcome::Stored { id } => id,
+        other => panic!("expected Stored, got {other:?}"),
+    };
+    assert_eq!(second, HistoryOutcome::Duplicate { id: first_id });
+    assert_eq!(history_count(&h), 1);
+    assert_eq!(assets_on_disk(&h).len(), asset_count);
+}
+
+#[test]
+fn plain_then_rich_same_text_refreshes_without_writing_rich_assets() {
+    let h = harness(vec![]);
+    let first = h.context.history().record_clipboard_payload(
+        &h.context,
+        ClipboardPayload::Text("plain".into()),
+        Some("com.apple.TextEdit"),
+    );
+    let second = h.context.history().record_clipboard_payload(
+        &h.context,
+        ClipboardPayload::RichText(rich_text(Some("<b>plain</b>"), None)),
+        Some("com.apple.TextEdit"),
+    );
+
+    let first_id = match first {
+        HistoryOutcome::Stored { id } => id,
+        other => panic!("expected Stored, got {other:?}"),
+    };
+    assert_eq!(second, HistoryOutcome::Duplicate { id: first_id });
+    assert_eq!(history_count(&h), 1);
+    assert!(assets_on_disk(&h).is_empty());
+}
+
+#[test]
 fn same_plain_with_different_styles_creates_distinct_rows() {
     let h = harness(vec![]);
     let plain_a = rich_text(Some("<b>x</b>"), None);

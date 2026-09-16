@@ -76,8 +76,7 @@ o devuelve `Duplicate` (la fila original sigue viva).
   logs o respuestas. La señal de revisión es metadata-only.
 - Recuperar el identificador de una captura eliminada, crear historial de
   versiones o reescribir la deduplicación de filas vivas.
-- Modificar migraciones SQLite, el formato persistido de hashes o el
-  contrato de `insert_or_touch`.
+- Modificar migraciones SQLite o el formato persistido de hashes.
 - Modificar la política de expiración, favoritos, búsqueda o limpieza de
   assets, salvo para conservar sus contratos actuales.
 
@@ -91,6 +90,9 @@ o devuelve `Duplicate` (la fila original sigue viva).
 - Copiar `A` mientras la fila original sigue viva: el siguiente tick con
   revisión nueva devuelve `Duplicate` sobre el id existente, nunca crea
   una fila nueva.
+- Si `A` ya está viva como captura rich y vuelve a aparecer como texto plain
+  (o a la inversa), se refresca la misma fila por su hash textual canónico;
+  no aparece una segunda card ni se escriben assets rich sin referencia.
 - El borrado sin confirmación, el borrado de un id inexistente y un
   `clear_non_favorites` que no eliminó filas no alteran el baseline del
   watcher (el siguiente tick con la misma revisión sigue devolviendo

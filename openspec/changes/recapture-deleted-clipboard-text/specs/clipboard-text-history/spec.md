@@ -16,6 +16,17 @@ revision is stored as a new row with a fresh opaque identifier.
   clipboard reports a new revision
 - **THEN** ClipVault does not create a second identical row and updates the existing entry's latest-seen metadata as defined by the data model
 
+#### Scenario: Same text is republished in a different representation
+
+- **GIVEN** a live history row contains text `A` captured as rich text or as
+  plain text
+- **WHEN** a new clipboard revision publishes the same canonical text `A` in
+  the other representation
+- **THEN** ClipVault refreshes that live row and returns `Duplicate` instead
+  of creating a second history card
+- **AND** a rich rendition that resolves as `Duplicate` writes no new rich
+  asset files
+
 #### Scenario: Different content is copied
 
 - **WHEN** the clipboard content differs and produces a different hash and the

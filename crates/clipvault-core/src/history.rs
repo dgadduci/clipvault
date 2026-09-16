@@ -422,22 +422,51 @@ impl TextHistoryService {
     /// independently by the asset store; the card only ever receives
     /// the preview reference, never the raw bytes.
     ///
-    /// The dedupe column compares both `content_hash` and
-    /// `rich_text_hash`, so two captures with identical plain text but
-    /// different styles do not collapse to a single row.
+    /// `content_hash` keeps a rich/plain rendition of the same text on
+    /// one history row. An exact rich match is preferred, while a rich
+    /// rendition can also refresh an existing plain row. Separate rich
+    /// style variants still remain distinct when no plain row exists.
     fn persist_rich_text(
         &self,
         context: &AppContext,
         payload: &RichTextPayload,
         source_app: Option<String>,
     ) -> HistoryOutcome {
+        let rich_hash = canonical_rich_text_hash(payload);
+        let now = self.clock.now();
+        let plain = payload.plain_text();
+        let content_type = detect_content_type(plain);
+        let plain_hash = hash_content(plain);
+
+        // Check the same identity used by `insert_or_touch` before
+        // writing rich assets. In particular, this covers a rich
+        // rendition of a pre-existing plain capture and avoids leaving
+        // assets with no row to reference them.
+        let existing = {
+            let mut db = context.database().lock();
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.touch_matching(&plain_hash, Some(&rich_hash), now)
+        };
+        match existing {
+            Ok(Some(record)) => {
+                self.enrich_metadata(context, record.id, source_app.as_deref());
+                return HistoryOutcome::Duplicate { id: record.id };
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(error = %error, "history persistence failed");
+                return HistoryOutcome::Failed {
+                    message: error.to_string(),
+                };
+            }
+        }
+
         let Some(store) = self.rich_asset_store.as_ref() else {
             return HistoryOutcome::Failed {
                 message: failure::ASSET_STORE_UNAVAILABLE.to_string(),
             };
         };
 
-        let rich_hash = canonical_rich_text_hash(payload);
         let outcome = match store.store(&rich_hash, payload) {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -448,11 +477,6 @@ impl TextHistoryService {
                 };
             }
         };
-
-        let now = self.clock.now();
-        let plain = payload.plain_text();
-        let content_type = detect_content_type(plain);
-        let plain_hash = hash_content(plain);
 
         let new_entry = NewEntry {
             content: plain.to_string(),

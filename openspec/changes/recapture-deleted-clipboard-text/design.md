@@ -110,6 +110,15 @@ estado anterior — un fallo de baseline no resetea el fingerprint.
   filas vivas. Cuando el watcher detecta una nueva revisión y la fila
   viva correspondiente existe, SQLite devuelve `Duplicate` con el id
   existente (no se crea una segunda fila).
+- Para texto, `content_hash` es la identidad canónica incluso si la
+  representación cambia entre plain y rich. Una captura plain refresca la
+  fila textual viva más reciente con ese hash; una captura rich prefiere su
+  `rich_text_hash` exacto y, si no existe, refresca una fila plain con el
+  mismo texto. Así una copia/pegado que cambie de representación no crea una
+  segunda card. Dos variantes rich independientes conservan filas separadas
+  cuando no existe una fila plain que las unifique. Antes de escribir assets
+  rich, el core consulta esa misma identidad y actualiza la fila existente si
+  corresponde, de modo que un `Duplicate` no deja archivos sin referencia.
 - Cuando el watcher detecta una nueva revisión y la fila viva
   correspondiente no existe (por una eliminación previa), SQLite crea
   una fila nueva con un id distinto.

@@ -92,6 +92,10 @@
 - [x] 5.10 Cubrir que `CompositeClipboard` reexpone primero la revisión del
   adaptador rico nativo y usa la pata plain solo como fallback, para que el
   baseline de macOS reciba `NSPasteboard.changeCount`.
+- [x] 5.11 Cubrir en SQLite que una fila textual viva conserva su id cuando
+  el mismo contenido alterna entre representación rich y plain.
+- [x] 5.12 Cubrir end-to-end ambos órdenes rich→plain y plain→rich; el
+  segundo no debe crear assets rich sin una fila que los referencie.
 
 ## Verificación y cierre
 

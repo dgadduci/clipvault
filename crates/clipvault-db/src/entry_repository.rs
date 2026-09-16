@@ -129,13 +129,15 @@ impl<'a> EntryRepository<'a> {
     /// timestamps of the existing one with the same hash, all within a
     /// single transaction.
     ///
-    /// The dedupe rule extends the legacy `content_hash` lookup with a
-    /// secondary `rich_text_hash` match: a plain-text capture matches
-    /// on `content_hash` alone (and so does an image row), but a
-    /// rich-text capture only matches a previous row when *both* the
-    /// plain-text hash and the rich-text hash agree. The same plain
-    /// text with different styles therefore produces two rows instead
-    /// of collapsing silently.
+    /// `content_hash` is the canonical identity of textual content
+    /// across a plain/rich representation transition. A plain-text
+    /// capture therefore refreshes the freshest live row with that
+    /// hash, even when that row retains rich metadata. A rich-text
+    /// capture first prefers an exact `rich_text_hash` match; if none
+    /// exists, it refreshes a prior plain row with the same text.
+    /// This prevents copying a card in a different representation
+    /// from creating a second history card, while two independently
+    /// captured rich style variants can still coexist.
     ///
     /// A freshly inserted row is attached to the system `Historial`
     /// collection inside the same transaction so the invariant "every
@@ -147,26 +149,7 @@ impl<'a> EntryRepository<'a> {
         let rich_hash = new.rich_text_hash.clone();
         let last_seen = format_timestamp(new.last_seen_at);
 
-        let existing: Option<i64> = match rich_hash.as_deref() {
-            Some(rich) => tx
-                .query_row(
-                    "SELECT id FROM clipboard_entries
-                     WHERE content_hash = ?1
-                       AND rich_text_hash IS NOT NULL
-                       AND rich_text_hash = ?2",
-                    params![plain_hash, rich],
-                    |row| row.get(0),
-                )
-                .optional()?,
-            None => tx
-                .query_row(
-                    "SELECT id FROM clipboard_entries
-                     WHERE content_hash = ?1 AND rich_text_hash IS NULL",
-                    params![plain_hash],
-                    |row| row.get(0),
-                )
-                .optional()?,
-        };
+        let existing = find_matching_entry_id(&tx, &plain_hash, rich_hash.as_deref())?;
 
         let outcome = if let Some(id) = existing {
             tx.execute(
@@ -229,6 +212,37 @@ impl<'a> EntryRepository<'a> {
 
         tx.commit()?;
         Ok(outcome)
+    }
+
+    /// Refresh an existing row matching the capture dedupe identity,
+    /// without inserting when no row matches.
+    ///
+    /// Rich-text capture uses this before writing filesystem assets so
+    /// a rich rendition of an already-captured plain row does not
+    /// create unreferenced assets just to return `Duplicate`.
+    pub fn touch_matching(
+        &mut self,
+        content_hash: &str,
+        rich_text_hash: Option<&str>,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<Option<EntryRecord>, EntryRepositoryError> {
+        let tx = self.conn.transaction()?;
+        let Some(id) = find_matching_entry_id(&tx, content_hash, rich_text_hash)? else {
+            tx.commit()?;
+            return Ok(None);
+        };
+
+        let last_seen = format_timestamp(last_seen_at);
+        tx.execute(
+            "UPDATE clipboard_entries
+             SET updated_at = ?1,
+                 last_seen_at = ?1
+             WHERE id = ?2",
+            params![last_seen, id],
+        )?;
+        let record = fetch_by_id(&tx, id)?.expect("row updated above must still exist");
+        tx.commit()?;
+        Ok(Some(record))
     }
 
     pub fn find_by_hash(&self, hash: &str) -> Result<Option<EntryRecord>, EntryRepositoryError> {
@@ -1005,6 +1019,46 @@ fn fetch_by_id(conn: &Connection, id: i64) -> Result<Option<EntryRecord>, EntryR
     Ok(record)
 }
 
+/// Return the live row whose identity matches an incoming capture.
+///
+/// Rich rows prefer the exact rich representation and otherwise reuse a
+/// plain row with the same canonical text. Plain rows intentionally match any
+/// existing representation of that text so copying/pasting a rich card as
+/// plain cannot create another history entry. Ordering is explicit because
+/// legacy databases can already contain more than one rich style variant.
+fn find_matching_entry_id(
+    conn: &Connection,
+    content_hash: &str,
+    rich_text_hash: Option<&str>,
+) -> Result<Option<i64>, EntryRepositoryError> {
+    let existing = match rich_text_hash {
+        Some(rich) => conn
+            .query_row(
+                "SELECT id FROM clipboard_entries
+                 WHERE content_hash = ?1
+                   AND (rich_text_hash = ?2 OR rich_text_hash IS NULL)
+                 ORDER BY CASE WHEN rich_text_hash = ?2 THEN 0 ELSE 1 END,
+                          updated_at DESC,
+                          id DESC
+                 LIMIT 1",
+                params![content_hash, rich],
+                |row| row.get(0),
+            )
+            .optional()?,
+        None => conn
+            .query_row(
+                "SELECT id FROM clipboard_entries
+                 WHERE content_hash = ?1
+                 ORDER BY updated_at DESC, id DESC
+                 LIMIT 1",
+                params![content_hash],
+                |row| row.get(0),
+            )
+            .optional()?,
+    };
+    Ok(existing)
+}
+
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord> {
     let content_type_raw: String = row.get(2)?;
     let content_type = parse_content_type(&content_type_raw).ok_or_else(|| {
@@ -1166,7 +1220,6 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)]
     fn new_rich_entry(
         plain: &str,
         hash: &str,
@@ -1236,6 +1289,62 @@ mod tests {
 
         let repo = EntryRepository::new(db.connection_mut());
         assert_eq!(repo.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn plain_and_rich_versions_of_live_text_share_one_row() {
+        let t1 = datetime!(2026-01-02 03:04:05 UTC);
+        let t2 = datetime!(2026-01-02 03:05:00 UTC);
+
+        let (_dir, mut db) = open_temp_db();
+        let rich_id = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_rich_entry(
+                "same text",
+                "rich-hash-a",
+                Some("<b>same text</b>"),
+                None,
+                t1,
+            ))
+            .expect("insert rich")
+            .record()
+            .id
+        };
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_entry("same text", t2))
+                .expect("refresh plain")
+        };
+        assert!(matches!(outcome, EntryOutcome::Updated(ref row) if row.id == rich_id));
+        assert_eq!(
+            EntryRepository::new(db.connection_mut()).count().unwrap(),
+            1
+        );
+
+        let (_dir, mut db) = open_temp_db();
+        let plain_id = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_entry("same text", t1))
+                .expect("insert plain")
+                .record()
+                .id
+        };
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_rich_entry(
+                "same text",
+                "rich-hash-a",
+                Some("<b>same text</b>"),
+                None,
+                t2,
+            ))
+            .expect("refresh rich")
+        };
+        assert!(matches!(outcome, EntryOutcome::Updated(ref row) if row.id == plain_id));
+        assert_eq!(
+            EntryRepository::new(db.connection_mut()).count().unwrap(),
+            1
+        );
     }
 
     #[test]
