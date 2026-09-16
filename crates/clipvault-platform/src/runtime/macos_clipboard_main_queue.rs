@@ -59,7 +59,7 @@ use objc2::runtime::AnyObject;
 use objc2::AnyThread;
 use objc2_foundation::MainThreadMarker;
 
-use crate::clipboard::ClipboardBackendError;
+use crate::clipboard::{ClipboardBackendError, ClipboardRevision};
 use crate::Capability;
 
 /// Why a pasteboard operation could not hop to the Cocoa main thread.
@@ -277,6 +277,38 @@ pub fn read_rich_main_thread() -> BridgeResult<Option<crate::clipboard::RichText
         }
         RichTextPayload::new(plain_text, html, rtf).ok()
     })
+}
+
+/// Read `NSPasteboard.changeCount` on the main thread.
+///
+/// Apple documents `changeCount` as the canonical marker for "the
+/// pasteboard changed since the last time you asked". The capture
+/// watcher compares the value against the previously recorded revision
+/// to decide whether a poll corresponds to a fresh clipboard event.
+///
+/// The helper MUST run on the Cocoa main thread: `NSPasteboard` calls
+/// are documented as main-thread only. When the bridge cannot hop to
+/// the main thread the function returns
+/// [`ClipboardRevision::UNKNOWN`] so the watcher preserves its
+/// previous state instead of fabricating observations.
+pub fn read_change_count_main_thread() -> ClipboardRevision {
+    match dispatch_main_thread(|_mtm| {
+        use objc2_app_kit::NSPasteboard;
+        let pasteboard = NSPasteboard::generalPasteboard();
+        // `changeCount` is a signed `NSInteger`. The watcher treats
+        // the value as an opaque monotonic counter; a negative value
+        // is folded to `0` so the wrapper stays unsigned without
+        // inventing a higher-resolution signal.
+        let value = pasteboard.changeCount();
+        if value < 0 {
+            ClipboardRevision::new(0)
+        } else {
+            ClipboardRevision::new(value as u64)
+        }
+    }) {
+        Ok(revision) => revision,
+        Err(_) => ClipboardRevision::UNKNOWN,
+    }
 }
 
 /// Write a rich-text payload to `NSPasteboard` on the main thread.

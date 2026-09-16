@@ -30,7 +30,9 @@ use clipvault_core::{
     RichTextPayload, SuppressionFingerprint, WatchTickOutcome,
     CLIPBOARD_WRITE_RICH_TEXT_CAPABILITY,
 };
-use clipvault_platform::{Capability, ClipboardBackend, DisplayServer, PasteController};
+use clipvault_platform::{
+    Capability, ClipboardBackend, ClipboardRevision, DisplayServer, PasteController,
+};
 use tempfile::TempDir;
 use time::macros::datetime;
 
@@ -333,6 +335,9 @@ fn token_is_consumed_by_the_first_matching_observation() {
     h.clipboard.push_read(Ok(Some("single shot".into())));
     h.clipboard.push_read(Ok(Some("single shot".into())));
     h.clipboard.push_read(Ok(Some("single shot".into())));
+    h.clipboard.push_revision(ClipboardRevision::new(1));
+    h.clipboard.push_revision(ClipboardRevision::new(1));
+    h.clipboard.push_revision(ClipboardRevision::new(1));
 
     let _ = h
         .context

@@ -37,6 +37,7 @@ use crate::privacy::{CoreBlacklistMatcher, PrivacyGate};
 use crate::rich_text::RichTextAssetStore;
 use crate::search::SearchService;
 use crate::settings_service::SettingsService;
+use crate::watcher::CaptureWatcher;
 
 #[derive(Debug, Error)]
 pub enum BootstrapError {
@@ -425,6 +426,26 @@ impl AppContext {
     pub fn mark_environment_snapshot_emitted(&self) {
         self.environment_snapshot_emitted
             .store(true, Ordering::Release);
+    }
+
+    /// Wire the shared [`CaptureWatcher`] the destructive operations
+    /// rebaseline after a successful row removal. The Tauri shell
+    /// calls this once at startup, right after the context and the
+    /// watcher are built, so the management layer can forward
+    /// baseline requests to the same watcher instance the background
+    /// capture loop and the manual `Tick capture` command already
+    /// share. The accessor only forwards to the management service;
+    /// the shell stays a thin adapter and never inspects the
+    /// watcher's dedupe state directly.
+    pub fn attach_capture_watcher(&self, watcher: Arc<CaptureWatcher>) {
+        self.management.set_capture_watcher_invalidator(
+            watcher
+                as Arc<
+                    dyn crate::management::CaptureWatcherInvalidator<
+                        Baseline = crate::watcher::BaselineOutcome,
+                    >,
+                >,
+        );
     }
 
     /// Record a synchronous-refresh failure observed by the shell

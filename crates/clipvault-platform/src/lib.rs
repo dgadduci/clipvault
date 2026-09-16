@@ -51,8 +51,9 @@ pub use capabilities::{
 };
 pub use clipboard::{
     checked_rgba_len, ClipboardBackend, ClipboardBackendError, ClipboardBackendKind,
-    ClipboardImage, ClipboardPayload, ImageValidationError, PasteboardImageMetadata,
-    RichTextPayload, MAX_CLIPBOARD_IMAGE_DIM, MAX_CLIPBOARD_IMAGE_RGBA_BYTES, RGBA_BYTES_PER_PIXEL,
+    ClipboardImage, ClipboardObservation, ClipboardPayload, ClipboardRevision,
+    ImageValidationError, PasteboardImageMetadata, RichTextPayload, MAX_CLIPBOARD_IMAGE_DIM,
+    MAX_CLIPBOARD_IMAGE_RGBA_BYTES, RGBA_BYTES_PER_PIXEL,
 };
 pub use clipboard_image_png::{
     chunk, parse_ppu_triple, phys_to_dpi, png_metadata_summary, validate_png, ChunkType,

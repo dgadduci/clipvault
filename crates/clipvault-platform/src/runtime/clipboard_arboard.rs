@@ -51,17 +51,88 @@
 use std::borrow::Cow;
 
 use arboard::{Clipboard as Arboard, Error as ArboardError, ImageData};
+use parking_lot::Mutex;
 
 use crate::clipboard::{
     checked_rgba_len, ClipboardBackend, ClipboardBackendError, ClipboardImage,
-    ImageValidationError, RichTextPayload,
+    ClipboardObservation, ClipboardRevision, ImageValidationError, RichTextPayload,
 };
 use crate::Capability;
+
+#[cfg(all(target_os = "linux", feature = "linux-x11"))]
+use crate::runtime::linux_x11_clipboard_revision::X11ClipboardRevisionMonitor;
+
+/// Conservative payload-diff fallback used only when the current host cannot
+/// subscribe to the X11/XWayland ownership stream.
+///
+/// This fallback cannot detect a second copy of identical text. It is never
+/// presented as a real revision: `revision()` reports `UNKNOWN`, so a
+/// destructive baseline cannot accidentally invent a recapture. The watcher
+/// still gets the historical payload-deduplication behaviour for ordinary
+/// polling on hosts without XFixes.
+#[derive(Debug, Default)]
+struct FallbackRevisionState {
+    counter: u64,
+    last_text: Option<String>,
+}
+
+enum RevisionSource {
+    #[cfg(all(target_os = "linux", feature = "linux-x11"))]
+    X11(Box<Mutex<X11ClipboardRevisionMonitor>>),
+    Fallback(Mutex<FallbackRevisionState>),
+}
+
+impl RevisionSource {
+    fn new() -> Self {
+        #[cfg(all(target_os = "linux", feature = "linux-x11"))]
+        if let Ok(monitor) = X11ClipboardRevisionMonitor::new() {
+            return Self::X11(Box::new(Mutex::new(monitor)));
+        }
+
+        Self::Fallback(Mutex::new(FallbackRevisionState::default()))
+    }
+
+    fn revision(&self) -> ClipboardRevision {
+        match self {
+            #[cfg(all(target_os = "linux", feature = "linux-x11"))]
+            Self::X11(monitor) => monitor
+                .lock()
+                .revision()
+                .map(ClipboardRevision::new)
+                .unwrap_or(ClipboardRevision::UNKNOWN),
+            // Without an ownership-event stream there is no payload-free
+            // baseline to read. Returning UNKNOWN preserves the existing
+            // dedupe state instead of manufacturing a false change signal.
+            Self::Fallback(_) => ClipboardRevision::UNKNOWN,
+        }
+    }
+
+    fn observe_payload(&self, text_leg: Option<String>) -> ClipboardRevision {
+        match self {
+            #[cfg(all(target_os = "linux", feature = "linux-x11"))]
+            Self::X11(monitor) => monitor
+                .lock()
+                .revision()
+                .map(ClipboardRevision::new)
+                .unwrap_or(ClipboardRevision::UNKNOWN),
+            Self::Fallback(state) => {
+                let mut state = state.lock();
+                if state.last_text != text_leg {
+                    state.counter = state.counter.saturating_add(1);
+                    state.last_text = text_leg;
+                }
+                ClipboardRevision::new(state.counter)
+            }
+        }
+    }
+}
 
 /// Thin wrapper around [`arboard::Clipboard`]. Each method takes the
 /// global lock lazily so the backend stays cheap to share across
 /// threads.
-pub struct ArboardClipboard;
+pub struct ArboardClipboard {
+    revision_source: RevisionSource,
+}
 
 impl Default for ArboardClipboard {
     fn default() -> Self {
@@ -71,7 +142,9 @@ impl Default for ArboardClipboard {
 
 impl ArboardClipboard {
     pub fn new() -> Self {
-        Self
+        Self {
+            revision_source: RevisionSource::new(),
+        }
     }
 }
 
@@ -279,6 +352,29 @@ impl ClipboardBackend for ArboardClipboard {
     fn name(&self) -> &'static str {
         "arboard"
     }
+
+    fn revision(&self) -> ClipboardRevision {
+        self.revision_source.revision()
+    }
+
+    /// One watcher observation: read the payload, then drain every queued
+    /// XFixes ownership event before returning its metadata-only revision.
+    /// The revision is intentionally event-derived rather than content-derived;
+    /// a new copy of identical text is therefore visible to the watcher.
+    /// The monitor serializes its own X11 connection while it drains events,
+    /// and the payload remains confined to this adapter boundary.
+    fn read_observation(&self) -> Result<ClipboardObservation, ClipboardBackendError> {
+        let payload = self.read_payload()?;
+        let text_leg = match &payload {
+            Some(crate::clipboard::ClipboardPayload::Text(text)) => Some(text.clone()),
+            Some(crate::clipboard::ClipboardPayload::RichText(rich)) => {
+                Some(rich.plain_text().to_string())
+            }
+            Some(crate::clipboard::ClipboardPayload::Image(_)) | None => None,
+        };
+        let revision = self.revision_source.observe_payload(text_leg);
+        Ok(ClipboardObservation { payload, revision })
+    }
 }
 
 #[cfg(test)]
@@ -388,5 +484,29 @@ mod tests {
         let backend = ArboardClipboard::new();
         assert!(backend.supports_rich_read());
         assert!(backend.supports_rich_write());
+    }
+
+    #[test]
+    fn payload_diff_fallback_never_claims_a_payload_free_revision() {
+        // A host without the XFixes/XWayland ownership stream can still
+        // collapse ordinary identical polls, but it cannot safely baseline a
+        // destructive operation. The payload-free accessor must therefore
+        // report UNKNOWN instead of turning a content diff into a fake event.
+        let source = RevisionSource::Fallback(Mutex::new(FallbackRevisionState::default()));
+
+        assert_eq!(source.revision(), ClipboardRevision::UNKNOWN);
+        assert_eq!(
+            source.observe_payload(Some("same text".into())),
+            ClipboardRevision::new(1)
+        );
+        assert_eq!(
+            source.observe_payload(Some("same text".into())),
+            ClipboardRevision::new(1)
+        );
+        assert_eq!(
+            source.observe_payload(Some("other text".into())),
+            ClipboardRevision::new(2)
+        );
+        assert_eq!(source.revision(), ClipboardRevision::UNKNOWN);
     }
 }

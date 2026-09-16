@@ -2,18 +2,48 @@
 //!
 //! `arboard` and most platform clipboard APIs do not expose native
 //! change events in a portable way. ClipVault falls back to polling at
-//! a configurable interval and compares the hash of the latest read
-//! against the previous one. The watcher never panics: every
-//! clipboard error becomes a [`WatchTickOutcome`] variant so the
-//! caller can react without inspecting the adapter.
+//! a configurable interval and compares the platform-supplied
+//! clipboard revision (metadata-only) against the previously recorded
+//! one. The watcher never panics: every clipboard error becomes a
+//! [`WatchTickOutcome`] variant so the caller can react without
+//! inspecting the adapter.
 //!
-//! The watcher is `Clone` and shares its dedupe state (`last_hash`,
-//! `interval`) across every clone. The shell relies on this so the
-//! background capture loop and the manual `Tick capture` command
-//! operate on the same dedupe history — when the loop discards a
-//! blacklisted payload the manual tick sees the same hash and returns
-//! `Unchanged` instead of re-running the `PrivacyGate` with a stale
-//! source-application snapshot.
+//! The watcher is `Clone` and shares its dedupe state
+//! (`last_revision`, `last_hash`, `interval`) across every clone. The
+//! shell relies on this so the background capture loop and the manual
+//! `Tick capture` command operate on the same dedupe history — when
+//! the loop discards a blacklisted payload the manual tick sees the
+//! same revision and returns `Unchanged` instead of re-running the
+//! `PrivacyGate` with a stale source-application snapshot.
+//!
+//! ## Revision-based change detection
+//!
+//! Earlier revisions of this watcher deduplicated by comparing the
+//! payload's content hash against the previously stored hash. That
+//! approach cannot distinguish between "the clipboard still holds the
+//! same text" and "the user copied the same text again" — both
+//! observations share the same hash. The watcher would either
+//! incorrectly discard a fresh copy as `Unchanged` or, after a
+//! destructive invalidation, recreate a deleted row even though the
+//! user never copied anything new.
+//!
+//! The current contract uses a metadata-only revision counter the
+//! platform layer reports alongside the payload
+//! (análogo a `NSPasteboard.changeCount` en macOS,
+//! `XFixesSetSelectionOwnerNotifyMask` en X11 y seriales de
+//! `wl_data_device.data_offer` en Wayland). Two consecutive polls with
+//! the same revision always report `Unchanged`, regardless of the
+//! payload. A new revision routes the payload to the persistence
+//! layer, where the SQLite `insert_or_touch` deduplication decides
+//! between `Stored` and `Duplicate` against the live history row.
+//!
+//! When a destructive operation removes at least one row, the
+//! management service calls [`CaptureWatcher::baseline_dedupe_state`]
+//! which reads the current revision and stamps it as the new baseline
+//! WITHOUT persisting anything. The next poll with the same revision
+//! therefore returns `Unchanged`; a subsequent poll with a new
+//! revision routes the payload to persistence as if it were a fresh
+//! observation.
 //!
 //! ## Opt-in capture debug instrumentation
 //!
@@ -44,7 +74,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clipvault_platform::{
-    ClipboardBackend, ClipboardBackendError, ClipboardImage, ClipboardPayload, RichTextPayload,
+    ClipboardBackend, ClipboardBackendError, ClipboardImage, ClipboardPayload, ClipboardRevision,
+    RichTextPayload,
 };
 use parking_lot::Mutex;
 use tracing::warn;
@@ -97,8 +128,26 @@ struct CaptureWatcherInner {
     state: Mutex<WatcherState>,
 }
 
+/// Outcome of [`CaptureWatcher::baseline_dedupe_state`]. The watcher
+/// distinguishes three branches because the underlying platform layer
+/// may not be able to report a stable revision for the current
+/// session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaselineOutcome {
+    /// The watcher stamped the current revision as the new baseline.
+    /// The next poll at the same revision returns `Unchanged` without
+    /// reaching persistence; a poll at a different revision is routed
+    /// through the capture pipeline.
+    Rebaselined { revision: ClipboardRevision },
+    /// The platform layer cannot report a revision. The watcher
+    /// preserves its previous state; callers should treat this as a
+    /// documented limitation and surface it through diagnostics.
+    Unavailable,
+}
+
 #[derive(Debug)]
 struct WatcherState {
+    last_revision: Option<ClipboardRevision>,
     last_hash: Option<String>,
     interval: Duration,
 }
@@ -110,6 +159,7 @@ impl CaptureWatcher {
             inner: Arc::new(CaptureWatcherInner {
                 clipboard,
                 state: Mutex::new(WatcherState {
+                    last_revision: None,
                     last_hash: None,
                     interval,
                 }),
@@ -125,6 +175,52 @@ impl CaptureWatcher {
     /// Configured polling interval.
     pub fn interval(&self) -> Duration {
         self.inner.state.lock().interval
+    }
+
+    /// Rebaseline the in-memory change-detection state against the
+    /// clipboard's current revision.
+    ///
+    /// The destructive path (single-entry delete, clear non-favorites,
+    /// clear unorganized, retention purge) calls this method after a
+    /// successful row removal. The watcher stamps the current revision
+    /// as the new baseline WITHOUT persisting anything: a follow-up
+    /// poll that observes the same revision reports `Unchanged`, so
+    /// the text the user already had on the clipboard is not recreated
+    /// automatically. A later poll with a new revision — for example
+    /// after the user copies the same text again — routes the payload
+    /// to persistence as a fresh observation.
+    ///
+    /// The method is metadata-only: it never receives content, hashes,
+    /// `asset_ref` values, source identifiers or filesystem paths. The
+    /// revision is read through the same backend the watcher's tick
+    /// uses, so the baseline and the next observation come from the
+    /// same adapter surface.
+    ///
+    /// When the platform layer cannot report a stable revision the
+    /// watcher preserves its previous state and returns
+    /// [`BaselineOutcome::Unavailable`]. The limitation is documented
+    /// in OpenSpec; the watcher MUST NOT fabricate a revision to keep
+    /// going because doing so would re-introduce the
+    /// "auto-recapture after delete" regression the contract forbids.
+    pub fn baseline_dedupe_state(&self) -> BaselineOutcome {
+        // Read the current revision through the same backend the tick
+        // would use. This is the only call the watcher makes against
+        // the platform layer for the baseline; the payload is
+        // intentionally NOT read so the baseline does not depend on
+        // a clipboard contents inspection (the destructive path never
+        // needs the payload, only the change signal).
+        let revision = self.inner.clipboard.revision();
+        if revision.is_unknown() {
+            return BaselineOutcome::Unavailable;
+        }
+        let mut state = self.inner.state.lock();
+        state.last_revision = Some(revision);
+        // Hash is intentionally reset: the next observation at a new
+        // revision recomputes the fingerprint from the actual payload.
+        // The current payload is unknown at baseline time because we
+        // deliberately do NOT read it here.
+        state.last_hash = None;
+        BaselineOutcome::Rebaselined { revision }
     }
 
     /// Force one tick right now. Returns the outcome.
@@ -177,7 +273,7 @@ impl CaptureWatcher {
             let cache_populated_before = context.cached_active_application().is_some();
             let has_previous_value = {
                 let s = self.inner.state.lock();
-                s.last_hash.is_some()
+                s.last_revision.is_some()
             };
             let started_at_unix_ms = unix_millis_now();
             let attempt = AttemptSnapshot {
@@ -195,86 +291,17 @@ impl CaptureWatcher {
             debug_handle.sink().attempt_start(id, attempt);
         }
 
+        // Atomic observation: payload and revision come from the same
+        // platform snapshot, so the watcher can correlate "same
+        // revision" with "same payload" without racing two backend
+        // calls. The method is metadata-only: it never carries
+        // clipboard content, hashes or paths through the return value.
         let read_started = Instant::now();
-        let read_result = self.inner.clipboard.read_payload();
+        let read_result = self.inner.clipboard.read_observation();
         let read_duration_ms = read_started.elapsed().as_millis() as u64;
 
-        match read_result {
-            Ok(Some(payload)) => {
-                if let Some(id) = correlation_id {
-                    let snapshot = build_clipboard_snapshot(
-                        &payload,
-                        read_duration_ms,
-                        self.inner.clipboard.name(),
-                        None,
-                    );
-                    debug_handle.sink().clipboard_read(id, snapshot);
-                }
-                let new_hash = payload_fingerprint(&payload);
-                let changed = {
-                    let mut state = self.inner.state.lock();
-                    let previous = state.last_hash.clone();
-                    state.last_hash = Some(new_hash.clone());
-                    previous.as_ref() != Some(&new_hash)
-                };
-                if !changed {
-                    if let Some(id) = correlation_id {
-                        debug_handle.sink().outcome(
-                            id,
-                            build_outcome_snapshot(context, "unchanged", started_at, None),
-                        );
-                    }
-                    return WatchTickOutcome::Unchanged;
-                }
-                // Suppression check happens AFTER the dedupe state is
-                // updated so the next observation of the same payload
-                // — whether it arrives inside or outside the
-                // suppression window — is always reported as
-                // `Unchanged`. The token is metadata-only: a payload
-                // match is decided on canonical hashes, never on
-                // text or bytes.
-                let fingerprint = suppression_fingerprint_for(&payload);
-                if context
-                    .paste_suppression()
-                    .matches_and_consume(&fingerprint)
-                {
-                    if let Some(id) = correlation_id {
-                        debug_handle.sink().outcome(
-                            id,
-                            build_outcome_snapshot(context, "suppressed", started_at, None),
-                        );
-                    }
-                    return WatchTickOutcome::Suppressed;
-                }
-                let history = context.history();
-                let outcome = history.record_clipboard_payload_with_correlation(
-                    context,
-                    payload,
-                    source_app,
-                    correlation_id,
-                );
-                if let Some(id) = correlation_id {
-                    debug_handle.sink().outcome(
-                        id,
-                        build_outcome_snapshot(context, outcome.kind(), started_at, None),
-                    );
-                }
-                WatchTickOutcome::Captured(outcome)
-            }
-            Ok(None) => {
-                if let Some(id) = correlation_id {
-                    debug_handle.sink().outcome(
-                        id,
-                        build_outcome_snapshot(
-                            context,
-                            "ignored_empty_clipboard",
-                            started_at,
-                            Some("empty"),
-                        ),
-                    );
-                }
-                WatchTickOutcome::Ignored
-            }
+        let observation = match read_result {
+            Ok(observation) => observation,
             Err(error) => {
                 let kind_static: &'static str = match error.kind_str() {
                     "empty" => "empty",
@@ -297,9 +324,156 @@ impl CaptureWatcher {
                         ),
                     );
                 }
-                WatchTickOutcome::Failed { message }
+                return WatchTickOutcome::Failed { message };
+            }
+        };
+
+        let payload = observation.payload;
+        let revision = observation.revision;
+
+        // Revision comparison happens FIRST so the watcher can
+        // distinguish "the clipboard still holds the same payload"
+        // from "the user copied the same payload again". Two polls
+        // that report the same revision never reach persistence, even
+        // when their payloads differ — the platform layer is the
+        // source of truth for "the clipboard changed".
+        //
+        // The comparison ignores `UNKNOWN` revisions: a missing
+        // revision MUST NOT be silently treated as a change, because
+        // doing so would re-introduce the auto-recapture regression.
+        // When the platform cannot report a revision the watcher
+        // falls back to the legacy payload-fingerprint comparison so
+        // a host with no native counter keeps deduping consecutive
+        // identical polls.
+        if revision.is_unknown() {
+            // Unknown revision: fall back to the fingerprint-based
+            // comparison. The previous behavior (hash dedupe) remains
+            // for hosts that cannot expose a stable counter.
+        } else {
+            let same_revision = {
+                let state = self.inner.state.lock();
+                state.last_revision == Some(revision)
+            };
+            if same_revision {
+                if let Some(id) = correlation_id {
+                    debug_handle.sink().outcome(
+                        id,
+                        build_outcome_snapshot(context, "unchanged", started_at, None),
+                    );
+                }
+                return WatchTickOutcome::Unchanged;
             }
         }
+
+        let Some(payload) = payload else {
+            // No payload: empty clipboard or unsupported format.
+            // Still stamp the new revision so the watcher collapses
+            // subsequent identical empty observations to `Unchanged`.
+            if !revision.is_unknown() {
+                let mut state = self.inner.state.lock();
+                state.last_revision = Some(revision);
+                state.last_hash = None;
+            } else {
+                // Unknown revision + empty payload: keep the previous
+                // state and report `Ignored` so the watcher keeps
+                // polling.
+            }
+            if let Some(id) = correlation_id {
+                debug_handle.sink().outcome(
+                    id,
+                    build_outcome_snapshot(
+                        context,
+                        "ignored_empty_clipboard",
+                        started_at,
+                        Some("empty"),
+                    ),
+                );
+            }
+            return WatchTickOutcome::Ignored;
+        };
+
+        if let Some(id) = correlation_id {
+            let snapshot = build_clipboard_snapshot(
+                &payload,
+                read_duration_ms,
+                self.inner.clipboard.name(),
+                None,
+            );
+            debug_handle.sink().clipboard_read(id, snapshot);
+        }
+
+        let new_hash = payload_fingerprint(&payload);
+
+        // Unknown revision path: keep the legacy payload-fingerprint
+        // comparison so hosts without a stable counter still collapse
+        // identical consecutive polls. The `last_revision` is left at
+        // `None` because we have no signal to stamp.
+        if revision.is_unknown() {
+            let changed = {
+                let mut state = self.inner.state.lock();
+                let previous = state.last_hash.clone();
+                state.last_hash = Some(new_hash.clone());
+                previous.as_ref() != Some(&new_hash)
+            };
+            if !changed {
+                if let Some(id) = correlation_id {
+                    debug_handle.sink().outcome(
+                        id,
+                        build_outcome_snapshot(context, "unchanged", started_at, None),
+                    );
+                }
+                return WatchTickOutcome::Unchanged;
+            }
+        } else {
+            // Known revision: stamp the new revision + fingerprint
+            // atomically so the next observation at the same revision
+            // returns `Unchanged`.
+            let mut state = self.inner.state.lock();
+            state.last_revision = Some(revision);
+            state.last_hash = Some(new_hash.clone());
+        }
+
+        // Suppression check happens AFTER the dedupe state is updated
+        // so the next observation of the same payload — whether it
+        // arrives inside or outside the suppression window — is always
+        // reported as `Unchanged`. The token is metadata-only: a
+        // payload match is decided on canonical hashes, never on text
+        // or bytes.
+        let fingerprint = suppression_fingerprint_for(&payload);
+        if context
+            .paste_suppression()
+            .matches_and_consume(&fingerprint)
+        {
+            if let Some(id) = correlation_id {
+                debug_handle.sink().outcome(
+                    id,
+                    build_outcome_snapshot(context, "suppressed", started_at, None),
+                );
+            }
+            return WatchTickOutcome::Suppressed;
+        }
+        let history = context.history();
+        let outcome = history.record_clipboard_payload_with_correlation(
+            context,
+            payload,
+            source_app,
+            correlation_id,
+        );
+        if let Some(id) = correlation_id {
+            debug_handle.sink().outcome(
+                id,
+                build_outcome_snapshot(context, outcome.kind(), started_at, None),
+            );
+        }
+        WatchTickOutcome::Captured(outcome)
+    }
+}
+
+impl crate::management::CaptureWatcherInvalidator for CaptureWatcher {
+    type Baseline = BaselineOutcome;
+
+    fn baseline_dedupe_state(&self) -> BaselineOutcome {
+        CaptureWatcher::baseline_dedupe_state(self)
     }
 }
 
@@ -632,6 +806,7 @@ mod tests {
     use super::*;
     use crate::bootstrap::AppBootstrap;
     use crate::fakes::FakeClipboardBackend;
+    use clipvault_platform::{ClipboardBackend, ClipboardObservation};
 
     fn tempdir() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
@@ -653,11 +828,30 @@ mod tests {
             .expect("bootstrap")
     }
 
+    /// Convenience: queue a `read_text` script and pair it with a
+    /// revision sequence so the test can pin the exact revision /
+    /// payload timeline the watcher observes. The first tuple
+    /// element is the textual payload (`Some("...")`); use `None` for
+    /// the empty-clipboard leg.
+    ///
+    /// The fake's queue is LIFO (`Vec::push` + `Vec::pop`), so the
+    /// helper iterates the plan in reverse order: the first entry
+    /// becomes the last pushed and therefore the first popped.
+    fn script_revisions(backend: &FakeClipboardBackend, plan: &[(Option<&str>, u64)]) {
+        for (text, revision) in plan.iter().rev() {
+            let payload = text.map(|value| value.to_string());
+            backend.push_read(Ok(payload));
+            backend.push_revision(ClipboardRevision::new(*revision));
+        }
+    }
+
     #[test]
     fn tick_emits_unchanged_for_same_payload() {
         let backend = Arc::new(FakeClipboardBackend::new());
-        backend.push_read(Ok(Some("hello".into())));
-        backend.push_read(Ok(Some("hello".into())));
+        // Two consecutive polls at the same revision with the same
+        // payload: the watcher collapses the second poll to
+        // `Unchanged`.
+        script_revisions(&backend, &[(Some("hello"), 1), (Some("hello"), 1)]);
         let context = bootstrap_default();
         let watcher = CaptureWatcher::new(backend, Duration::from_millis(10));
 
@@ -675,6 +869,7 @@ mod tests {
     fn tick_reports_ignored_when_clipboard_empty() {
         let backend = Arc::new(FakeClipboardBackend::new());
         backend.push_read(Ok(None));
+        backend.push_revision(ClipboardRevision::new(1));
         let context = bootstrap_default();
         let watcher = CaptureWatcher::new(backend, Duration::from_millis(10));
         assert_eq!(
@@ -696,8 +891,7 @@ mod tests {
     #[test]
     fn tick_records_new_payload_when_content_changes() {
         let backend = Arc::new(FakeClipboardBackend::new());
-        backend.push_read(Ok(Some("first".into())));
-        backend.push_read(Ok(Some("second".into())));
+        script_revisions(&backend, &[(Some("first"), 1), (Some("second"), 2)]);
         let context = bootstrap_default();
         let watcher = CaptureWatcher::new(backend, Duration::from_millis(10));
 
@@ -718,16 +912,19 @@ mod tests {
         // Bug regression: the background capture loop and the manual
         // `Tick capture` command both hold a handle to the watcher.
         // Both handles MUST report the same dedupe outcome for the
-        // same clipboard payload so a discarded event cannot be
+        // same clipboard revision so a discarded event cannot be
         // re-evaluated (and possibly persisted) by the second caller.
         let backend = Arc::new(FakeClipboardBackend::new());
-        // Two clipboard reads: the first write is recorded by the
-        // "loop-side" watcher, the second read attempts to re-record
-        // the same content from the "command-side" watcher. Both
-        // handles share the same `Arc<CaptureWatcherInner>` so the
-        // second call sees the previous hash and returns Unchanged.
-        backend.push_read(Ok(Some("duplicate payload".into())));
-        backend.push_read(Ok(Some("duplicate payload".into())));
+        // Two observations at the same revision (R1) with the same
+        // payload: the first is recorded, the second must collapse to
+        // `Unchanged` regardless of which handle does the read.
+        script_revisions(
+            &backend,
+            &[
+                (Some("duplicate payload"), 1),
+                (Some("duplicate payload"), 1),
+            ],
+        );
         let context = bootstrap_default();
         let loop_watcher = CaptureWatcher::new(backend.clone(), Duration::from_millis(10));
         let tick_watcher = loop_watcher.clone();
@@ -742,7 +939,7 @@ mod tests {
         assert_eq!(
             tick_outcome,
             WatchTickOutcome::Unchanged,
-            "second caller must observe the loop's last_hash"
+            "second caller must observe the loop's last_revision"
         );
     }
 
@@ -758,5 +955,227 @@ mod tests {
         let clone = watcher.clone();
         assert_eq!(watcher.interval(), configured);
         assert_eq!(clone.interval(), configured);
+    }
+
+    #[test]
+    fn baseline_dedupe_state_marks_current_revision() {
+        // Regression: after a destructive operation the watcher must
+        // stamp the current revision as the new baseline WITHOUT
+        // creating a row. A subsequent poll at the same revision
+        // returns `Unchanged`; a subsequent poll at a new revision
+        // routes the payload to persistence.
+        //
+        // The script is:
+        //   tick   #1: revision R1, payload "recaptured"  → Stored(id_1)
+        //   tick   #2: revision R1, payload "recaptured"  → Unchanged (same revision)
+        //   baseline_dedupe_state()                       → Rebaselined { revision: R1 }
+        //   tick   #3: revision R1, payload "recaptured"  → Unchanged (same revision as baseline)
+        //   tick   #4: revision R2, payload "recaptured"  → reaches persistence (Duplicate / Stored)
+        let backend = Arc::new(FakeClipboardBackend::new());
+        // baseline reads one revision + one payload through the
+        // default `revision()` impl (which calls `read_observation()`),
+        // so the script must include a payload slot for the baseline
+        // call too.
+        script_revisions(
+            &backend,
+            &[
+                (Some("recaptured"), 1),
+                (Some("recaptured"), 1),
+                (Some("recaptured"), 1),
+                (Some("recaptured"), 1),
+                (Some("recaptured"), 2),
+            ],
+        );
+        let context = bootstrap_default();
+        let watcher = CaptureWatcher::new(backend, Duration::from_millis(10));
+
+        let first = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert!(matches!(
+            first,
+            WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
+        ));
+
+        // Same revision (R1) collapses to `Unchanged` even before any
+        // destructive operation runs.
+        let suppressed = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert_eq!(suppressed, WatchTickOutcome::Unchanged);
+
+        // Rebaseline against the current revision (R1) — the next
+        // observation at R1 MUST collapse.
+        let outcome = watcher.baseline_dedupe_state();
+        assert!(matches!(
+            outcome,
+            BaselineOutcome::Rebaselined { revision } if revision == ClipboardRevision::new(1)
+        ));
+
+        let after_baseline = watcher.tick(&context, None, AttemptOrigin::ManualTick);
+        assert_eq!(
+            after_baseline,
+            WatchTickOutcome::Unchanged,
+            "post-baseline tick at the same revision MUST be Unchanged"
+        );
+
+        // A new revision MUST route the payload to persistence.
+        let recaptured = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert!(
+            matches!(
+                recaptured,
+                WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
+                    | WatchTickOutcome::Captured(HistoryOutcome::Duplicate { .. })
+            ),
+            "post-revision-change tick must reach persistence, got {recaptured:?}"
+        );
+    }
+
+    #[test]
+    fn baseline_dedupe_state_keeps_unchanged_at_same_revision() {
+        // The destructive contract: after the management service
+        // removes a row the watcher rebaselines against the current
+        // revision. The very next poll, which observes the same
+        // revision, MUST return `Unchanged` — the user did not copy
+        // anything new, the clipboard just hasn't changed.
+        let backend = Arc::new(FakeClipboardBackend::new());
+        script_revisions(
+            &backend,
+            &[
+                (Some("alpha"), 1),
+                (Some("alpha"), 1),
+                (Some("alpha"), 1),
+                (Some("alpha"), 1),
+            ],
+        );
+        let context = bootstrap_default();
+        let watcher = CaptureWatcher::new(backend, Duration::from_millis(10));
+
+        let first = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert!(matches!(
+            first,
+            WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
+        ));
+
+        // Same revision (R1) → `Unchanged` even without rebaseline.
+        let suppressed = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert_eq!(suppressed, WatchTickOutcome::Unchanged);
+
+        // The destructive path rebaselines against the current
+        // revision (R1). The next observation at R1 MUST collapse.
+        let outcome = watcher.baseline_dedupe_state();
+        assert!(
+            matches!(outcome, BaselineOutcome::Rebaselined { revision } if revision == ClipboardRevision::new(1))
+        );
+
+        let after = watcher.tick(&context, None, AttemptOrigin::ManualTick);
+        assert_eq!(
+            after,
+            WatchTickOutcome::Unchanged,
+            "post-baseline tick at the same revision MUST be Unchanged"
+        );
+    }
+
+    #[test]
+    fn baseline_dedupe_state_is_visible_to_every_clone() {
+        // The shared-watcher invariant: the destructive command and
+        // the manual `Tick capture` command both clone the same inner
+        // state. A baseline applied through one handle MUST be
+        // observable from the other.
+        let backend = Arc::new(FakeClipboardBackend::new());
+        script_revisions(
+            &backend,
+            &[
+                (Some("shared payload"), 1),
+                (Some("shared payload"), 1),
+                (Some("shared payload"), 1),
+            ],
+        );
+        let context = bootstrap_default();
+        let loop_watcher = CaptureWatcher::new(backend, Duration::from_millis(10));
+        let tick_watcher = loop_watcher.clone();
+
+        let loop_outcome = loop_watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert!(matches!(
+            loop_outcome,
+            WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
+        ));
+
+        // Rebaseline through the loop-side handle. The baseline reads
+        // the next revision from the script (R1) and stamps it as the
+        // new dedupe state.
+        let outcome = loop_watcher.baseline_dedupe_state();
+        assert!(matches!(
+            outcome,
+            BaselineOutcome::Rebaselined { revision } if revision == ClipboardRevision::new(1)
+        ));
+
+        // The command-side handle observes the same baseline and the
+        // very next observation at the same revision returns
+        // `Unchanged`.
+        let after = tick_watcher.tick(&context, None, AttemptOrigin::ManualTick);
+        assert_eq!(
+            after,
+            WatchTickOutcome::Unchanged,
+            "clone must observe the baseline the other handle applied"
+        );
+    }
+
+    #[test]
+    fn baseline_dedupe_state_reports_unavailable_when_revision_is_unknown() {
+        // A backend that cannot report a stable revision (the
+        // `UNKNOWN` marker) MUST NOT silently rebaseline: the watcher
+        // keeps its previous state so a missing revision never creates
+        // a fresh capture.
+        struct UnknownBackend;
+
+        impl ClipboardBackend for UnknownBackend {
+            fn read_text(&self) -> Result<Option<String>, ClipboardBackendError> {
+                Ok(None)
+            }
+            fn write_text(&self, _text: &str) -> Result<(), ClipboardBackendError> {
+                Ok(())
+            }
+            fn revision(&self) -> ClipboardRevision {
+                ClipboardRevision::UNKNOWN
+            }
+            fn read_observation(&self) -> Result<ClipboardObservation, ClipboardBackendError> {
+                Ok(ClipboardObservation::empty(ClipboardRevision::UNKNOWN))
+            }
+            fn name(&self) -> &'static str {
+                "unknown-revision"
+            }
+        }
+
+        let backend = Arc::new(UnknownBackend);
+        let _context = bootstrap_default();
+        let watcher = CaptureWatcher::new(backend, Duration::from_millis(10));
+        let outcome = watcher.baseline_dedupe_state();
+        assert_eq!(outcome, BaselineOutcome::Unavailable);
+    }
+
+    #[test]
+    fn tick_reports_unchanged_for_same_revision_different_payload() {
+        // The contract corner case: a host that exposes a stable
+        // revision counter is the source of truth for "the clipboard
+        // changed". Two consecutive polls at the same revision MUST
+        // both return `Unchanged`, even when the payload differs — a
+        // platform that cannot distinguish a pasteboard rewrite from
+        // a stale observation should never recreate the previous
+        // payload.
+        let backend = Arc::new(FakeClipboardBackend::new());
+        script_revisions(&backend, &[(Some("first"), 1), (Some("second"), 1)]);
+        let context = bootstrap_default();
+        let watcher = CaptureWatcher::new(backend, Duration::from_millis(10));
+
+        let first = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert!(matches!(
+            first,
+            WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
+        ));
+
+        // Same revision (1), different payload: still `Unchanged`.
+        let second = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert_eq!(
+            second,
+            WatchTickOutcome::Unchanged,
+            "same revision must collapse regardless of payload"
+        );
     }
 }

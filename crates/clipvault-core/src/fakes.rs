@@ -14,10 +14,10 @@ use parking_lot::Mutex;
 use clipvault_platform::{
     ActiveAppError, ActiveApplication, ActiveApplicationProbe, ApplicationMetadata,
     ApplicationMetadataError, ApplicationMetadataProvider, ClipboardBackend, ClipboardBackendError,
-    ClipboardImage, HotkeyBinding, HotkeyError, HotkeyManager, HotkeyOutcome, IconDiagnostics,
-    MatchStrategy, PasteController, PasteError, PlatformSettingsTarget, RichTextPayload,
-    SettingsNavigator, SettingsOpenOutcome, TrayAction, TrayController, TrayEntry, TrayError,
-    TrayHandle, TrayOutcome,
+    ClipboardImage, ClipboardObservation, ClipboardRevision, HotkeyBinding, HotkeyError,
+    HotkeyManager, HotkeyOutcome, IconDiagnostics, MatchStrategy, PasteController, PasteError,
+    PlatformSettingsTarget, RichTextPayload, SettingsNavigator, SettingsOpenOutcome, TrayAction,
+    TrayController, TrayEntry, TrayError, TrayHandle, TrayOutcome,
 };
 
 /// Programmable clipboard backend for tests.
@@ -40,6 +40,13 @@ use clipvault_platform::{
 /// every payload `write_rich` received. The support flags are also
 /// off by default so the rich-text behaviour is exercised only by tests
 /// that opt in.
+///
+/// The revision counter is metadata-only and configurable so tests can
+/// script the exact observation sequence the watcher must reason about
+/// (same payload + same revision vs. same payload + new revision vs.
+/// different payload). Call [`FakeClipboardBackend::push_revision`] to
+/// queue a revision; [`FakeClipboardBackend::next_revision`] returns
+/// the next queued value or the current monotonic counter as a default.
 #[derive(Debug, Default)]
 pub struct FakeClipboardBackend {
     reads: Mutex<Vec<Result<Option<String>, ClipboardBackendError>>>,
@@ -58,6 +65,16 @@ pub struct FakeClipboardBackend {
     rich_write_error: Mutex<Option<ClipboardBackendError>>,
     supports_rich_read: Mutex<bool>,
     supports_rich_write: Mutex<bool>,
+    /// Revision the fake will return for the next `revision()` /
+    /// `read_observation()` call. Tests queue revisions through
+    /// [`Self::push_revision`] to model a real clipboard that
+    /// increments on every write.
+    revisions: Mutex<Vec<ClipboardRevision>>,
+    /// Monotonic counter used as the default revision when the queue
+    /// is empty. Starts at zero and increments on every
+    /// `read_observation` so a test that never queues revisions
+    /// observes a fresh event on every call.
+    revision_counter: Mutex<u64>,
 }
 
 impl FakeClipboardBackend {
@@ -98,6 +115,15 @@ impl FakeClipboardBackend {
     /// Each call consumes one entry; remaining calls return `Ok(None)`.
     pub fn push_rich_read(&self, response: Result<Option<RichTextPayload>, ClipboardBackendError>) {
         self.rich_reads.lock().push(response);
+    }
+
+    /// Queue the revision the next `read_observation` / `revision`
+    /// call must return. The fake pops one revision per call. When the
+    /// queue is empty the fake falls back to a monotonic counter that
+    /// increments on every observation so a naive test still sees a
+    /// fresh event each time.
+    pub fn push_revision(&self, revision: ClipboardRevision) {
+        self.revisions.lock().push(revision);
     }
 
     /// Model a session that supports only some image directions.
@@ -154,6 +180,20 @@ impl FakeClipboardBackend {
     /// Snapshot of every rich-text payload received by `write_rich`.
     pub fn written_rich_text(&self) -> Vec<RichTextPayload> {
         self.rich_writes.lock().clone()
+    }
+
+    /// Resolve the next revision the fake will report. Tests call this
+    /// from inside `push_revision` scripts; the default falls back to
+    /// the monotonic counter so a test that never queues revisions
+    /// still sees fresh events.
+    fn next_revision(&self) -> ClipboardRevision {
+        if let Some(revision) = self.revisions.lock().pop() {
+            return revision;
+        }
+        let mut counter = self.revision_counter.lock();
+        let current = *counter;
+        *counter = counter.saturating_add(1);
+        ClipboardRevision::new(current)
     }
 }
 
@@ -249,6 +289,16 @@ impl ClipboardBackend for FakeClipboardBackend {
 
     fn name(&self) -> &'static str {
         "fake"
+    }
+
+    fn revision(&self) -> ClipboardRevision {
+        self.next_revision()
+    }
+
+    fn read_observation(&self) -> Result<ClipboardObservation, ClipboardBackendError> {
+        let payload = self.read_payload()?;
+        let revision = self.next_revision();
+        Ok(ClipboardObservation { payload, revision })
     }
 }
 

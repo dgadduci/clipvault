@@ -60,7 +60,8 @@
 use std::sync::Arc;
 
 use crate::clipboard::{
-    ClipboardBackend, ClipboardBackendError, ClipboardImage, ClipboardPayload, RichTextPayload,
+    ClipboardBackend, ClipboardBackendError, ClipboardImage, ClipboardObservation,
+    ClipboardPayload, RichTextPayload,
 };
 
 /// Composite backend that dispatches each [`ClipboardBackend`]
@@ -434,12 +435,36 @@ impl ClipboardBackend for CompositeClipboard {
         // changes the surface surfaces here.
         "composite"
     }
+
+    /// Atomic snapshot. On macOS the rich adapter exposes
+    /// `NSPasteboard.changeCount` through its `read_observation`
+    /// override; on Linux the rich adapter is the same `arboard`
+    /// instance the plain adapter uses, so the revision stays
+    /// consistent across both legs. When the rich adapter cannot
+    /// report a revision the composite falls back to the plain
+    /// adapter's revision; if neither side has a usable revision the
+    /// composite returns [`ClipboardRevision::UNKNOWN`] so the watcher
+    /// preserves its previous state.
+    fn read_observation(&self) -> Result<ClipboardObservation, ClipboardBackendError> {
+        let payload = self.read_payload()?;
+        // Prefer the rich adapter's revision: on macOS this is
+        // `NSPasteboard.changeCount` and it covers every flavour the
+        // composite surfaces; on Linux it is the textual diff counter
+        // and matches the plain adapter.
+        let rich_revision = self.rich.revision();
+        let revision = if rich_revision.is_unknown() {
+            self.plain.revision()
+        } else {
+            rich_revision
+        };
+        Ok(ClipboardObservation { payload, revision })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clipboard::{ClipboardBackendError, RichTextPayload};
+    use crate::clipboard::{ClipboardBackendError, ClipboardRevision, RichTextPayload};
     use parking_lot::Mutex;
 
     /// Minimal text-only fake used to prove the composite
@@ -473,6 +498,9 @@ mod tests {
         }
         fn supports_image_write(&self) -> bool {
             true
+        }
+        fn revision(&self) -> ClipboardRevision {
+            ClipboardRevision::UNKNOWN
         }
         fn name(&self) -> &'static str {
             "plain-fake"
@@ -546,6 +574,9 @@ mod tests {
         }
         fn supports_image_write(&self) -> bool {
             false
+        }
+        fn revision(&self) -> ClipboardRevision {
+            ClipboardRevision::UNKNOWN
         }
         fn name(&self) -> &'static str {
             "rich-fake"

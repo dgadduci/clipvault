@@ -702,17 +702,108 @@ impl ClipboardBackendError {
     }
 }
 
+/// Metadata-only clipboard revision counter.
+///
+/// The watcher treats a poll as a fresh observation only when the
+/// revision the platform layer reports differs from the revision
+/// recorded for the previous observation. The struct deliberately
+/// wraps a single `u64` so the value is comparable, `Copy` and
+/// metadata-only: it never carries content, snippets, hashes or paths,
+/// and its `Debug` impl prints `revision=<value>` without any payload.
+///
+/// Different platforms surface different signals:
+///
+/// - macOS exposes `NSPasteboard.changeCount`, a monotonic `NSInteger`
+///   that Apple documents as the canonical "new owner / new content"
+///   marker.
+/// - Linux X11 uses `XFixesSetSelectionOwnerNotifyMask` for the
+///   `CLIPBOARD` selection. The event increments even if the new owner
+///   publishes identical text.
+/// - The current Linux Wayland text adapter uses XWayland; the same XFixes
+///   monitor observes the bridge's ownership stream when `$DISPLAY` is
+///   available.
+/// - A host without a usable ownership-event stream returns
+///   [`ClipboardRevision::UNKNOWN`] for the metadata-only accessor. It may
+///   still use payload comparison to avoid redundant ordinary polls, but it
+///   never claims that a second identical payload was a new copy.
+///
+/// When a platform cannot guarantee the distinction the adapter MUST
+/// return [`ClipboardRevision::UNKNOWN`] and the watcher MUST keep its
+/// previous state — the limitation is documented in OpenSpec instead of
+/// being silently simulated.
+#[derive(Copy, Clone, PartialEq, Eq, Default)]
+pub struct ClipboardRevision(u64);
+
+impl ClipboardRevision {
+    /// Marker value used when the platform layer cannot report a
+    /// stable revision. The watcher compares against this value and
+    /// refuses to silently treat a missing revision as a change.
+    pub const UNKNOWN: ClipboardRevision = ClipboardRevision(u64::MAX);
+
+    /// Build a revision from a platform-supplied counter. The value is
+    /// metadata-only; backends MUST NOT encode content, hashes or
+    /// identifiers into it.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Return the underlying counter.
+    pub fn value(self) -> u64 {
+        self.0
+    }
+
+    /// `true` when the revision cannot be trusted (the platform did not
+    /// report a usable value).
+    pub fn is_unknown(self) -> bool {
+        self.0 == u64::MAX
+    }
+}
+
+impl fmt::Debug for ClipboardRevision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_unknown() {
+            f.debug_struct("ClipboardRevision")
+                .field("unknown", &true)
+                .finish()
+        } else {
+            f.debug_struct("ClipboardRevision")
+                .field("value", &self.0)
+                .finish()
+        }
+    }
+}
+
+/// Result of reading the clipboard atomically: the payload the watcher
+/// should consider, paired with the revision the platform layer
+/// observed at the exact same instant. Pairing the two values inside
+/// the same struct guarantees the watcher cannot race a payload read
+/// against a stale revision read.
+#[derive(Debug, Clone)]
+pub struct ClipboardObservation {
+    pub payload: Option<ClipboardPayload>,
+    pub revision: ClipboardRevision,
+}
+
+impl ClipboardObservation {
+    pub fn empty(revision: ClipboardRevision) -> Self {
+        Self {
+            payload: None,
+            revision,
+        }
+    }
+}
+
 /// Minimal trait every clipboard backend must implement.
 ///
 /// The trait is `Send + Sync` so a single backend instance can be shared
 /// across threads (capture thread + paste thread) via `Arc<dyn ...>`.
 ///
-/// Only [`Self::read_text`], [`Self::write_text`] and [`Self::name`]
-/// are required. The image and rich-text methods have conservative
-/// defaults so a text-only backend (the no-op adapter, a legacy fake,
-/// a future platform without rich or image transport) keeps compiling
-/// and reports the matching capability as unavailable instead of
-/// pretending to support it.
+/// Only [`Self::read_text`], [`Self::write_text`], [`Self::revision`]
+/// and [`Self::name`] are required. The image and rich-text methods
+/// have conservative defaults so a text-only backend (the no-op adapter,
+/// a legacy fake, a future platform without rich or image transport)
+/// keeps compiling and reports the matching capability as unavailable
+/// instead of pretending to support it.
 pub trait ClipboardBackend: Send + Sync {
     /// Returns the current clipboard contents if they are textual.
     ///
@@ -925,6 +1016,45 @@ pub trait ClipboardBackend: Send + Sync {
             Err(error) if error.is_soft() => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// Metadata-only clipboard revision counter.
+    ///
+    /// The value MUST be obtained from the same backend snapshot the
+    /// payload read observes; otherwise the watcher cannot correlate
+    /// "same revision" with "same payload". Implementations that can
+    /// provide an atomic snapshot SHOULD override
+    /// [`Self::read_observation`] as well.
+    ///
+    /// The default returns [`ClipboardRevision::UNKNOWN`] so legacy
+    /// text-only backends remain safe and do not recurse through the
+    /// default [`Self::read_observation`] implementation. The watcher
+    /// treats the unknown marker as "trust the previous state" rather
+    /// than fabricating a new observation, so a missing revision never
+    /// recreates a deleted capture.
+    fn revision(&self) -> ClipboardRevision {
+        ClipboardRevision::UNKNOWN
+    }
+
+    /// Atomically read the current clipboard payload **and** the
+    /// metadata-only revision counter the platform layer observed at
+    /// the same instant. Pairing the two values inside one struct is
+    /// what lets the watcher distinguish "the clipboard still holds
+    /// the same text" from "the user copied the same text again".
+    ///
+    /// The default implementation calls [`Self::read_payload`] and
+    /// [`Self::revision`]; backends with native access to both values
+    /// (for example macOS, which can read both inside the same
+    /// `NSPasteboard` snapshot) SHOULD override this method so the
+    /// payload and the revision belong to the same observation.
+    ///
+    /// The error path is metadata-only: backends MUST NOT return a
+    /// revision-derived value while surfacing an error. The watcher
+    /// translates a hard error into [`WatchTickOutcome::Failed`].
+    fn read_observation(&self) -> Result<ClipboardObservation, ClipboardBackendError> {
+        let payload = self.read_payload()?;
+        let revision = self.revision();
+        Ok(ClipboardObservation { payload, revision })
     }
 
     /// Write a payload back to the clipboard, dispatching on its
@@ -1291,6 +1421,19 @@ mod tests {
             let backend = TextOnlyBackend { text };
             assert!(backend.read_payload().expect("read").is_none());
         }
+    }
+
+    #[test]
+    fn default_observation_uses_unknown_revision_without_recursing() {
+        let backend = TextOnlyBackend {
+            text: Some("hello".into()),
+        };
+        let observation = backend.read_observation().expect("read");
+        assert!(matches!(
+            observation.payload,
+            Some(ClipboardPayload::Text(ref text)) if text == "hello"
+        ));
+        assert_eq!(observation.revision, ClipboardRevision::UNKNOWN);
     }
 
     #[test]

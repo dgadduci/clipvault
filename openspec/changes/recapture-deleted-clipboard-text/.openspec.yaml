@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-14
+goal: Una captura eliminada deja de ser candidata a deduplicación y la siguiente
+  captura del mismo texto crea una nueva fila.

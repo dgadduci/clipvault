@@ -156,6 +156,18 @@ pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         CaptureWatcher::default_interval(),
     ));
 
+    // Wire the watcher handle into the management service so a
+    // successful destructive command (clipvault_delete_entry,
+    // clipvault_clear_history, retention, …) invalidates the
+    // shared in-memory dedupe state. Doing this on the same
+    // `Arc<CaptureWatcher>` the background loop and the manual
+    // `Tick capture` command already share guarantees the recapture
+    // contract holds across every entry point. The shell stays a
+    // thin adapter: it never inspects clipboard content, hashes or
+    // payload metadata; the management service only invokes the
+    // metadata-only `invalidate_dedupe_state` trait method.
+    context.attach_capture_watcher(Arc::clone(&watcher));
+
     // The refresher is wired after `context` exists so the cache and
     // the diagnostics state are observable through it. The handle is
     // `None` until the very end of `build_state`; populating it
@@ -1835,10 +1847,15 @@ mod tests {
         // Two reads of the same payload let the watcher's dedupe
         // state prove the helper is using the SAME state across
         // iterations: the first iteration consumes the payload,
-        // the second must observe the cached hash and return
-        // `Unchanged`.
+        // the second must observe the cached revision and return
+        // `Unchanged`. We pair both reads with the same metadata-only
+        // clipboard revision so the watcher's revision-based dedupe
+        // state collapses the second observation without going
+        // through SQLite.
         fake_clipboard.push_read(Ok(Some("cv-shell-loop-payload".into())));
         fake_clipboard.push_read(Ok(Some("cv-shell-loop-payload".into())));
+        fake_clipboard.push_revision(clipvault_platform::ClipboardRevision::new(1));
+        fake_clipboard.push_revision(clipvault_platform::ClipboardRevision::new(1));
 
         let watcher = build_watcher_for_context(&context);
         // Iteration 1 — first read of the new payload.
@@ -1851,11 +1868,11 @@ mod tests {
             "first iteration must record the change, got {first:?}"
         );
 
-        // Iteration 2 — same payload, same watcher. The dedupe
-        // state must recognise the hash and return `Unchanged`.
-        // Two independent watchers would each see `last_hash =
-        // None` on their first read and produce a second
-        // `Captured`. This contract is the regression pin.
+        // Iteration 2 — same payload, same revision, same watcher.
+        // The dedupe state must recognise the revision and return
+        // `Unchanged`. Two independent watchers would each see
+        // `last_revision = None` on their first read and produce a
+        // second `Captured`. This contract is the regression pin.
         let second = capture_loop_tick(&watcher, &context);
         assert_eq!(
             second,
@@ -2182,10 +2199,15 @@ mod tests {
         // Drive the watcher like the loop does and confirm the
         // shared dedupe state still sees the discarded payload as
         // Unchanged on the next iteration. Both ticks read the same
-        // payload so the watcher's `last_hash` dedupe fires on the
-        // second iteration.
+        // payload AND the same metadata-only clipboard revision so
+        // the watcher's revision-based dedupe fires on the second
+        // iteration (the `recapture-deleted-clipboard-text` change
+        // replaced the payload-hash dedupe with revision-based
+        // dedupe).
         fake_clipboard.push_read(Ok(Some("cv-shell-loop-discard-payload".into())));
         fake_clipboard.push_read(Ok(Some("cv-shell-loop-discard-payload".into())));
+        fake_clipboard.push_revision(clipvault_platform::ClipboardRevision::new(1));
+        fake_clipboard.push_revision(clipvault_platform::ClipboardRevision::new(1));
         let watcher = build_watcher_for_context(&context);
         let first = capture_loop_tick(&watcher, &context);
         assert!(

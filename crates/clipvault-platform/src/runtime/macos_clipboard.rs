@@ -59,7 +59,10 @@
 
 #![cfg(all(target_os = "macos", feature = "macos-native"))]
 
-use crate::clipboard::{ClipboardBackend, ClipboardBackendError, ClipboardImage, RichTextPayload};
+use crate::clipboard::{
+    ClipboardBackend, ClipboardBackendError, ClipboardImage, ClipboardObservation,
+    ClipboardPayload, ClipboardRevision, RichTextPayload,
+};
 use crate::runtime::macos_clipboard_main_queue;
 use crate::Capability;
 
@@ -380,6 +383,22 @@ impl ClipboardBackend for MacOsPasteboardClipboard {
 
     fn name(&self) -> &'static str {
         "macos_pasteboard"
+    }
+
+    /// Atomic snapshot: fetch the payload through the documented
+    /// priority chain AND `NSPasteboard.changeCount` from the same
+    /// main-thread hop. macOS is the platform where this contract is
+    /// guaranteed: `NSPasteboard::generalPasteboard()` returns the same
+    /// pasteboard object across the entire hop, so `changeCount` and
+    /// the per-flavour reads correspond to the same observation.
+    ///
+    /// The override returns [`ClipboardRevision::UNKNOWN`] when the
+    /// bridge cannot hop to the main thread so the watcher preserves
+    /// its previous state instead of inventing observations.
+    fn read_observation(&self) -> Result<ClipboardObservation, ClipboardBackendError> {
+        let revision = macos_clipboard_main_queue::read_change_count_main_thread();
+        let payload = self.read_payload()?;
+        Ok(ClipboardObservation { payload, revision })
     }
 }
 

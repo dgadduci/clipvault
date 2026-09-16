@@ -24,6 +24,7 @@ use clipvault_core::{
     WatchTickOutcome, CLIPBOARD_WRITE_IMAGE_CAPABILITY,
 };
 use clipvault_db::{ContentType, EntryRepository};
+use clipvault_platform::ClipboardRevision;
 use tempfile::TempDir;
 use time::macros::datetime;
 
@@ -319,6 +320,7 @@ fn watcher_captures_an_image_through_the_same_pipeline() {
         Arc::clone(&h.clipboard) as Arc<dyn ClipboardBackend>,
         std::time::Duration::from_millis(10),
     );
+    h.clipboard.push_revision(ClipboardRevision::new(1));
     h.clipboard.push_read(Ok(None));
     h.clipboard.push_image_read(Ok(Some(bitmap(8, 8, 0x33))));
 
@@ -337,6 +339,7 @@ fn watcher_captures_an_image_through_the_same_pipeline() {
 
     // The same bitmap on the next tick is Unchanged: the watcher does
     // not re-encode a clipboard that has not changed.
+    h.clipboard.push_revision(ClipboardRevision::new(1));
     h.clipboard.push_read(Ok(None));
     h.clipboard.push_image_read(Ok(Some(bitmap(8, 8, 0x33))));
     assert_eq!(

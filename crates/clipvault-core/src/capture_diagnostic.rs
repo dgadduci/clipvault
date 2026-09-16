@@ -1916,8 +1916,14 @@ mod capture_pipeline_tests {
         let harness = bootstrap_with_sink(sink.clone());
         let context = harness.context.clone();
         let fake = harness.fake_clipboard.clone();
+        // Same payload, same revision: the watcher MUST collapse the
+        // second observation to `Unchanged` without going through
+        // SQLite. This pins the metadata-only change detector the
+        // `recapture-deleted-clipboard-text` change introduced.
         fake.push_read(Ok(Some("cv-dup".into())));
         fake.push_read(Ok(Some("cv-dup".into())));
+        fake.push_revision(clipvault_platform::ClipboardRevision::new(1));
+        fake.push_revision(clipvault_platform::ClipboardRevision::new(1));
         let watcher = CaptureWatcher::new(
             context.platform_adapters().clipboard(),
             Duration::from_millis(10),

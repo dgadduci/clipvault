@@ -317,6 +317,52 @@ pub struct HistoryManagementService {
     /// Local rich-text asset store. Mirrors the image store: tests
     /// that only exercise row-level behaviour leave it `None`.
     rich_asset_store: Option<RichTextAssetStore>,
+    /// Optional handle to the capture watcher the management layer
+    /// rebaselines after a successful destructive operation. The trait
+    /// is narrow on purpose: the management layer must never read
+    /// content, hashes, `asset_ref` values or source identifiers from
+    /// the watcher, only stamp the current clipboard revision as the
+    /// new baseline.
+    ///
+    /// `None` in unit tests that do not exercise the capture flow;
+    /// the Tauri shell wires the shared watcher through
+    /// [`crate::bootstrap::AppContext::attach_capture_watcher`] at
+    /// startup so every destructive command rebaselines the same
+    /// dedupe state the background loop and the manual `Tick
+    /// capture` command observe.
+    watcher_invalidator: Arc<
+        Mutex<
+            Option<Arc<dyn CaptureWatcherInvalidator<Baseline = crate::watcher::BaselineOutcome>>>,
+        >,
+    >,
+}
+
+/// Narrow abstraction the management layer invokes on the capture
+/// watcher after a successful destructive operation. Keeping the
+/// trait minimal prevents the management service from reading
+/// clipboard content, hashes, payload sizes or `asset_ref` values
+/// from the watcher; the only capability is "rebaseline the in-memory
+/// change-detection state against the current clipboard revision".
+///
+/// Implemented for [`crate::watcher::CaptureWatcher`] so the Tauri
+/// shell can hand the watcher handle to the management service
+/// without making the management crate depend on the watcher's
+/// concrete type.
+pub trait CaptureWatcherInvalidator: Send + Sync {
+    /// Re-export of [`crate::watcher::BaselineOutcome`] so management
+    /// callers do not need to depend on the watcher module.
+    type Baseline: std::fmt::Debug + PartialEq + Eq + Send + Sync;
+
+    /// Stamp the current clipboard revision as the new baseline so
+    /// the next poll that observes the same revision returns
+    /// `Unchanged` instead of recreating a deleted capture.
+    ///
+    /// Returns the [`BaselineOutcome::Rebaselined`] branch when the
+    /// platform reported a usable revision; the
+    /// [`BaselineOutcome::Unavailable`] branch when the platform layer
+    /// could not surface a stable revision (in which case the watcher
+    /// preserves its previous state).
+    fn baseline_dedupe_state(&self) -> Self::Baseline;
 }
 
 impl HistoryManagementService {
@@ -326,6 +372,7 @@ impl HistoryManagementService {
             retention_lock: Arc::new(Mutex::new(())),
             asset_store: None,
             rich_asset_store: None,
+            watcher_invalidator: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -341,6 +388,41 @@ impl HistoryManagementService {
     pub fn with_rich_asset_store(mut self, store: RichTextAssetStore) -> Self {
         self.rich_asset_store = Some(store);
         self
+    }
+
+    /// Wire the capture watcher the destructive operations rebaseline
+    /// after a successful row removal. The trait object keeps the
+    /// management crate independent of the watcher's concrete type
+    /// while still letting the shell reuse the same
+    /// `Arc<CaptureWatcher>` instance the background loop and the
+    /// manual `Tick capture` command observe.
+    ///
+    /// The setter is idempotent: the latest wired handle wins so a
+    /// test that re-bootstraps the context can replace the previous
+    /// watcher without leaking the previous state.
+    pub fn set_capture_watcher_invalidator(
+        &self,
+        invalidator: Arc<dyn CaptureWatcherInvalidator<Baseline = crate::watcher::BaselineOutcome>>,
+    ) {
+        *self.watcher_invalidator.lock() = Some(invalidator);
+    }
+
+    /// Forward `removed_rows` to the wired invalidator when `removed_rows > 0`.
+    /// The helper centralises the "only rebaseline when an actual
+    /// deletion happened" rule the spec pins: a delete that targets a
+    /// missing id, a `confirm: false` call or a mass-delete that
+    /// removed zero rows must NOT reset the dedupe state. The watcher
+    /// rebaselines against the current platform revision; the next
+    /// poll at the same revision returns `Unchanged` without
+    /// recreating a deleted capture.
+    fn notify_destructive_change(&self, removed_rows: usize) {
+        if removed_rows == 0 {
+            return;
+        }
+        let invalidator = self.watcher_invalidator.lock().clone();
+        if let Some(handle) = invalidator {
+            let _ = handle.baseline_dedupe_state();
+        }
     }
 
     /// Reclaim every payload asset that no remaining history row
@@ -473,7 +555,11 @@ impl HistoryManagementService {
     ///
     /// When the row is removed the payload asset it referenced becomes
     /// eligible for cleanup; the collector runs afterwards and skips
-    /// any asset another row still references.
+    /// any asset another row still references. The shared capture
+    /// watcher's in-memory dedupe state is invalidated only when the
+    /// row removal was effective — a missing id or a `confirm: false`
+    /// call leaves the watcher alone so a follow-up tick is still
+    /// classified correctly against the live history.
     pub fn delete_entry(
         &self,
         context: &AppContext,
@@ -492,13 +578,17 @@ impl HistoryManagementService {
             Ok(DeleteOutcome::NotFound)
         } else {
             self.collect_unreferenced_assets(context);
+            self.notify_destructive_change(removed);
             Ok(DeleteOutcome::Removed { removed })
         }
     }
 
     /// Remove every non-favorite entry. Requires `confirm: true`.
     ///
-    /// Favorites and the assets they reference are preserved.
+    /// Favorites and the assets they reference are preserved. The
+    /// shared capture watcher's dedupe state is invalidated only
+    /// when at least one row was removed; an empty-history call
+    /// (e.g. clearing favorites only) is a no-op for the watcher.
     pub fn clear_non_favorites(
         &self,
         context: &AppContext,
@@ -513,6 +603,7 @@ impl HistoryManagementService {
             repo.clear_non_favorites()?
         };
         self.collect_unreferenced_assets(context);
+        self.notify_destructive_change(removed);
         Ok(ClearOutcome::Removed { removed })
     }
 
@@ -540,7 +631,8 @@ impl HistoryManagementService {
     /// helper the frontend uses for the individual `Delete` button).
     /// The deletion runs in a single transaction and the asset
     /// collector reclaims every payload file the removed rows used
-    /// to reference.
+    /// to reference. The shared capture watcher is invalidated only
+    /// when at least one row was removed.
     pub fn clear_unorganized_history(
         &self,
         context: &AppContext,
@@ -555,6 +647,7 @@ impl HistoryManagementService {
             repo.clear_unorganized_history()?
         };
         self.collect_unreferenced_assets(context);
+        self.notify_destructive_change(removed);
         Ok(ClearOutcome::Removed { removed })
     }
 
@@ -564,7 +657,11 @@ impl HistoryManagementService {
     /// a race.
     ///
     /// Favorite entries — including favorite images and their assets —
-    /// are never removed regardless of age.
+    /// are never removed regardless of age. The shared capture
+    /// watcher's dedupe state is invalidated only when at least one
+    /// non-favorite row was purged; an empty purge (for example on
+    /// startup when nothing is stale yet, or on the `Forever`
+    /// policy) leaves the watcher alone.
     pub fn apply_retention(
         &self,
         context: &AppContext,
@@ -584,6 +681,7 @@ impl HistoryManagementService {
         // Always run the collector, even for a zero-row purge: it also
         // reclaims assets orphaned by an earlier interrupted capture.
         self.collect_unreferenced_assets(context);
+        self.notify_destructive_change(removed);
         Ok(RetentionOutcome { policy, removed })
     }
 
@@ -822,6 +920,472 @@ mod tests {
             repo.count().expect("count")
         };
         assert_eq!(count, expected);
+    }
+
+    /// Shared, scripted clipboard backend: every test queues the
+    /// exact sequence of reads it expects the watcher to consume. The
+    /// backend also queues a metadata-only revision counter so the
+    /// watcher can tell apart "same payload, same revision" from "same
+    /// payload, new revision".
+    struct ScriptedBackend {
+        reads: Mutex<Vec<Result<Option<String>, clipvault_platform::ClipboardBackendError>>>,
+        revisions: Mutex<Vec<clipvault_platform::ClipboardRevision>>,
+        monotonic: Mutex<u64>,
+    }
+
+    impl ScriptedBackend {
+        fn new(
+            reads: Vec<Result<Option<String>, clipvault_platform::ClipboardBackendError>>,
+            revisions: Vec<clipvault_platform::ClipboardRevision>,
+        ) -> Self {
+            Self {
+                // `reads` / `revisions` are passed in the same order
+                // they will be popped. The queue is LIFO, so the
+                // helper above pushes each plan entry in reverse
+                // order: the first plan entry becomes the last pushed
+                // value and therefore the first popped.
+                reads: Mutex::new(reads),
+                revisions: Mutex::new(revisions),
+                monotonic: Mutex::new(0),
+            }
+        }
+
+        /// Pop the next queued revision, or fall back to a monotonic
+        /// counter when the queue is empty (so a naive test still
+        /// observes fresh revisions on every observation).
+        fn next_revision(&self) -> clipvault_platform::ClipboardRevision {
+            if let Some(revision) = self.revisions.lock().pop() {
+                return revision;
+            }
+            let mut counter = self.monotonic.lock();
+            let value = *counter;
+            *counter = counter.saturating_add(1);
+            clipvault_platform::ClipboardRevision::new(value)
+        }
+    }
+
+    impl clipvault_platform::ClipboardBackend for ScriptedBackend {
+        fn read_text(&self) -> Result<Option<String>, clipvault_platform::ClipboardBackendError> {
+            self.reads.lock().pop().unwrap_or(Ok(None))
+        }
+        fn write_text(&self, _text: &str) -> Result<(), clipvault_platform::ClipboardBackendError> {
+            Ok(())
+        }
+        fn revision(&self) -> clipvault_platform::ClipboardRevision {
+            self.next_revision()
+        }
+        fn read_observation(
+            &self,
+        ) -> Result<
+            clipvault_platform::ClipboardObservation,
+            clipvault_platform::ClipboardBackendError,
+        > {
+            let payload = self.read_payload()?;
+            Ok(clipvault_platform::ClipboardObservation {
+                payload,
+                revision: self.next_revision(),
+            })
+        }
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+    }
+
+    /// Build an [`AppContext`] plus a freshly-built
+    /// [`CaptureWatcher`] wired into the management service through
+    /// the same `attach_capture_watcher` accessor the Tauri shell
+    /// uses. The watcher shares its clipboard backend with the
+    /// caller-supplied scripted backend so the test controls every
+    /// payload the watcher observes.
+    ///
+    /// The `plan` is a list of `(payload, revision)` pairs that the
+    /// helper queues into the [`ScriptedBackend`]. Each `tick` /
+    /// `baseline_dedupe_state` call consumes one entry; when the queue
+    /// runs dry the backend falls back to a monotonic counter so a
+    /// naive test still observes fresh revisions on every
+    /// observation.
+    fn build_context_with_watcher(
+        plan: &[(Option<&str>, u64)],
+    ) -> (
+        tempfile::TempDir,
+        AppContext,
+        std::sync::Arc<crate::watcher::CaptureWatcher>,
+    ) {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = clipvault_db::Database::open(dir.path().join("clipvault.db")).expect("open");
+        let mut db = db;
+        db.run_migrations(&clipvault_db::builtin_migrations())
+            .expect("migrate");
+        // ScriptedBackend queues are LIFO (`Vec::push` + `Vec::pop`),
+        // so iterating the plan in reverse order makes the first
+        // entry the first one popped.
+        let reads: Vec<_> = plan
+            .iter()
+            .rev()
+            .map(|(payload, _)| Ok(payload.map(|value| value.to_string())))
+            .collect();
+        let revisions: Vec<_> = plan
+            .iter()
+            .rev()
+            .map(|(_, revision)| clipvault_platform::ClipboardRevision::new(*revision))
+            .collect();
+        let scripted = Arc::new(ScriptedBackend::new(reads, revisions));
+        let adapters = crate::platform_adapters::PlatformAdapters::new(
+            scripted.clone(),
+            Arc::new(crate::fakes::FakeHotkeyManager::new()),
+            Arc::new(crate::fakes::FakeActiveApplication::new()),
+            Arc::new(crate::fakes::FakePasteController::new()),
+            Arc::new(crate::fakes::FakeTrayController::new()),
+            Arc::new(crate::fakes::FakeSettingsNavigator::new()),
+            Arc::new(clipvault_platform::NoopApplicationMetadataProvider {}),
+            clipvault_platform::Capabilities::ALL_AVAILABLE,
+            clipvault_platform::PlatformInfo {
+                home_dir: dir.path().to_path_buf(),
+                data_dir: dir.path().join("data"),
+                os_family: clipvault_platform::OsFamily::Macos,
+                display_server: clipvault_platform::DisplayServer::Unknown,
+            },
+        );
+        let bootstrap = AppBootstrap::new()
+            .with_clock(Arc::new(StaticClock::new(time::OffsetDateTime::UNIX_EPOCH)))
+            .with_clipboard(Arc::new(crate::clipboard::FakeClipboard::new()))
+            .with_platform_adapters(adapters);
+        let context = bootstrap
+            .bootstrap_with_database(db, dir.path().join("clipvault.db"))
+            .expect("bootstrap");
+        let watcher = Arc::new(crate::watcher::CaptureWatcher::new(
+            scripted,
+            std::time::Duration::from_millis(10),
+        ));
+        context.attach_capture_watcher(Arc::clone(&watcher));
+        (dir, context, watcher)
+    }
+
+    #[test]
+    fn recapture_after_delete_creates_a_new_row() {
+        // End-to-end regression for the
+        // `recapture-deleted-clipboard-text` OpenSpec change.
+        //
+        // Scenario:
+        //   1. The user copies `A` (revision R1); the watcher observes
+        //      it and persists a row with id_1.
+        //   2. The user deletes the row through the management
+        //      service (`clipvault_delete_entry`). The management
+        //      service rebaselines the watcher against revision R1.
+        //   3. The clipboard still holds `A` at revision R1.
+        //   4. The watcher ticks again. With the new contract the
+        //      watcher MUST return `Unchanged` because the revision
+        //      matches the baseline — the deleted capture MUST NOT be
+        //      recreated.
+        //   5. The user copies `A` again (revision R2). The watcher
+        //      detects the new revision, reaches persistence and
+        //      SQLite creates a fresh row with id_2 != id_1.
+        use crate::capture_diagnostic::AttemptOrigin;
+        use crate::watcher::WatchTickOutcome;
+
+        let (_dir, context, watcher) = build_context_with_watcher(&[
+            (Some("A"), 1),
+            (Some("A"), 1),
+            (Some("A"), 1),
+            (Some("A"), 2),
+        ]);
+
+        // Step 1: first tick captures `A` at revision R1.
+        let first = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        let first_id = match first {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { id }) => id,
+            other => panic!("first tick must persist A as Stored, got {other:?}"),
+        };
+
+        // Step 2: the user deletes the row through the destructive
+        // command. The management service rebaselines the watcher
+        // against the current revision (R1).
+        let outcome = context
+            .management()
+            .delete_entry(&context, first_id, true)
+            .expect("delete_entry");
+        assert!(matches!(outcome, DeleteOutcome::Removed { removed: 1 }));
+
+        // Step 3: the clipboard still holds `A` at the same revision
+        // (R1). The next tick MUST return `Unchanged`; the deleted
+        // row MUST NOT be recreated.
+        let suppressed = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert_eq!(
+            suppressed,
+            WatchTickOutcome::Unchanged,
+            "post-delete tick at the same revision MUST be Unchanged (no auto-recapture)"
+        );
+
+        // Step 5: the user copies `A` again at a new revision (R2).
+        // The watcher routes the payload through persistence and
+        // SQLite mints a fresh row id.
+        let recaptured = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        let recaptured_id = match recaptured {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { id }) => id,
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Duplicate { .. }) => {
+                panic!("recapture must NOT collapse onto the deleted row")
+            }
+            other => panic!(
+                "post-invalidation tick must persist A as Stored with a new id, got {other:?}"
+            ),
+        };
+        assert_ne!(
+            recaptured_id, first_id,
+            "the recapture must mint a fresh opaque identifier"
+        );
+        assert_eq!(
+            context.history().history_count(&context).unwrap(),
+            1,
+            "exactly one row (the recapture) must remain after the deletion"
+        );
+    }
+
+    #[test]
+    fn confirmation_required_and_missing_id_do_not_invalidate() {
+        // The destructive contract: a missing id and a `confirm: false`
+        // call must NOT alter the watcher's baseline, otherwise a
+        // stray click would silently re-evaluate every captured
+        // payload on the next tick. The watcher MUST still collapse
+        // the next observation at the same revision to `Unchanged`.
+        use crate::capture_diagnostic::AttemptOrigin;
+        use crate::watcher::WatchTickOutcome;
+
+        let (_dir, context, watcher) = build_context_with_watcher(&[
+            (Some("confirm-test"), 1),
+            (Some("confirm-test"), 1),
+            (Some("confirm-test"), 1),
+            (Some("confirm-test"), 1),
+        ]);
+
+        // First tick creates the row.
+        let first_id = match watcher.tick(&context, None, AttemptOrigin::BackgroundLoop) {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { id }) => id,
+            other => panic!("first tick must persist `confirm-test` as Stored, got {other:?}"),
+        };
+
+        // `confirm: false` is a no-op and MUST NOT invalidate.
+        let needs_confirmation = context
+            .management()
+            .delete_entry(&context, first_id, false)
+            .expect("delete_entry confirmation");
+        assert!(matches!(
+            needs_confirmation,
+            DeleteOutcome::ConfirmationRequired
+        ));
+        let unchanged = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert_eq!(
+            unchanged,
+            WatchTickOutcome::Unchanged,
+            "confirmation-required path must leave the watcher alone"
+        );
+
+        // Deleting a missing id is idempotent and MUST NOT
+        // invalidate either.
+        let missing = context
+            .management()
+            .delete_entry(&context, first_id + 9_999, true)
+            .expect("delete_entry missing");
+        assert!(matches!(missing, DeleteOutcome::NotFound));
+        let still_unchanged = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert_eq!(
+            still_unchanged,
+            WatchTickOutcome::Unchanged,
+            "missing-id path must leave the watcher alone"
+        );
+    }
+
+    #[test]
+    fn clearing_non_favorites_invalidates_and_preserves_favorites() {
+        // The mass-delete variant: clearing the non-favorite history
+        // rebaselines the watcher against the current revision. A
+        // later poll at the same revision returns `Unchanged` (no
+        // auto-recapture); a poll at a new revision stores a fresh
+        // row. The pinned entry stays alive and untouched.
+        use crate::capture_diagnostic::AttemptOrigin;
+        use crate::watcher::WatchTickOutcome;
+
+        let (_dir, context, watcher) = build_context_with_watcher(&[
+            (Some("clear-drop"), 1),
+            (Some("clear-pinned"), 2),
+            (Some("clear-drop"), 2),
+            (Some("clear-drop"), 2),
+            (Some("clear-drop"), 3),
+        ]);
+
+        // Capture both rows through the watcher; mark the pinned
+        // one as a favorite so the clear must preserve it.
+        let drop_id = match watcher.tick(&context, None, AttemptOrigin::BackgroundLoop) {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { id }) => id,
+            other => panic!("first tick must persist `clear-drop`, got {other:?}"),
+        };
+        let pinned_id = match watcher.tick(&context, None, AttemptOrigin::BackgroundLoop) {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { id }) => id,
+            other => panic!("second tick must persist `clear-pinned`, got {other:?}"),
+        };
+        context
+            .management()
+            .set_favorite(&context, pinned_id, true)
+            .expect("favorite");
+
+        // Clear non-favorites: only `clear-drop` is removed;
+        // `clear-pinned` stays. The watcher rebaselines against the
+        // current revision (R2).
+        let outcome = context
+            .management()
+            .clear_non_favorites(&context, true)
+            .expect("clear");
+        match outcome {
+            ClearOutcome::Removed { removed } => assert_eq!(removed, 1),
+            other => panic!("expected Removed(1), got {other:?}"),
+        }
+
+        let still_pinned = {
+            let mut db = context.database().lock();
+            let repo = clipvault_db::EntryRepository::new(db.connection_mut());
+            repo.find_by_id(pinned_id)
+                .expect("find pinned")
+                .expect("pinned must survive the clear")
+        };
+        assert_eq!(still_pinned.content, "clear-pinned");
+        assert!(still_pinned.is_pinned);
+
+        // Tick at the same revision (R2) → `Unchanged` (the destructive
+        // path rebaselined the watcher against R2). The deleted text
+        // MUST NOT be recreated.
+        let suppressed = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert_eq!(
+            suppressed,
+            WatchTickOutcome::Unchanged,
+            "post-clear tick at the same revision MUST be Unchanged"
+        );
+
+        // Tick at a new revision (R3) → SQLite creates a fresh row
+        // because the original `clear-drop` row is gone.
+        let recaptured = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        match recaptured {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { id }) => {
+                assert_ne!(id, drop_id, "recapture must mint a fresh id");
+                assert_ne!(
+                    id, pinned_id,
+                    "recapture must NOT collapse onto the pinned row"
+                );
+            }
+            other => panic!("recapture must persist `clear-drop` again, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deleting_unrelated_entry_does_not_duplicate_live_row() {
+        // Persistence-layer safety: when the watcher rebaselines for
+        // an unrelated entry, the persistence layer MUST recognise
+        // the live row by its hash and report `Duplicate` instead of
+        // creating a second row. SQLite is the source of truth for
+        // the live-row invariant.
+        use crate::capture_diagnostic::AttemptOrigin;
+        use crate::watcher::WatchTickOutcome;
+
+        // Script:
+        //   tick   #1: `live` at R1       → Stored(live_id)
+        //   tick   #2: `unrelated` at R2  → Stored(unrelated_id)
+        //   delete unrelated (baseline)   → rebaselined against R3
+        //                                  (consumes one payload+revision)
+        //   tick   #3: `live` at R4       → Duplicate(live_id) (live row still alive, new revision)
+        //   tick   #4: `live` at R4       → Unchanged (same revision as tick #3)
+        let (_dir, context, watcher) = build_context_with_watcher(&[
+            (Some("live"), 1),
+            (Some("unrelated"), 2),
+            (Some("live"), 3),
+            (Some("live"), 4),
+            (Some("live"), 4),
+        ]);
+
+        let live_id = match watcher.tick(&context, None, AttemptOrigin::BackgroundLoop) {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { id }) => id,
+            other => panic!("first tick must persist `live` as Stored, got {other:?}"),
+        };
+        let unrelated_id = match watcher.tick(&context, None, AttemptOrigin::BackgroundLoop) {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { id }) => id,
+            other => panic!("second tick must persist `unrelated` as Stored, got {other:?}"),
+        };
+
+        // Delete the unrelated entry. The management service
+        // rebaselines the watcher against the current revision (R2).
+        let outcome = context
+            .management()
+            .delete_entry(&context, unrelated_id, true)
+            .expect("delete");
+        assert!(matches!(outcome, DeleteOutcome::Removed { removed: 1 }));
+
+        // The clipboard holds `live` at a new revision (R3). The
+        // watcher routes the payload through persistence. SQLite
+        // recognises the live row by its hash and reports `Duplicate`,
+        // never creating a second row.
+        let outcome = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        match outcome {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Duplicate { id }) => {
+                assert_eq!(
+                    id, live_id,
+                    "Duplicate must reference the existing live row"
+                );
+            }
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { .. }) => {
+                panic!("deleting an unrelated entry must NOT create a duplicate of the live row")
+            }
+            other => panic!("expected Duplicate after unrelated delete, got {other:?}"),
+        }
+
+        // Re-asserting the payload at the same revision collapses to
+        // `Unchanged` because both layers (revision + SQLite live
+        // row) now agree again.
+        let still_unchanged = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert_eq!(still_unchanged, WatchTickOutcome::Unchanged);
+    }
+
+    #[test]
+    fn duplicate_with_live_row_keeps_existing_id() {
+        // Regression guard: copying the same text while its row is
+        // still alive MUST NOT create a second row and MUST NOT
+        // mint a new id. The watcher's revision comparison prevents
+        // the persistence layer from being called for an identical
+        // follow-up poll at the same revision; for a new revision
+        // the persistence layer's own dedupe (`insert_or_touch`) is
+        // what guarantees the unique-row invariant.
+        use crate::capture_diagnostic::AttemptOrigin;
+        use crate::watcher::WatchTickOutcome;
+
+        let (_dir, context, watcher) =
+            build_context_with_watcher(&[(Some("keep"), 1), (Some("other"), 2), (Some("keep"), 3)]);
+
+        let first_id = match watcher.tick(&context, None, AttemptOrigin::BackgroundLoop) {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { id }) => id,
+            other => panic!("first tick must persist `keep`, got {other:?}"),
+        };
+        // A distinct payload forces the watcher to route through
+        // persistence; the row for `keep` is still alive at this
+        // point.
+        let _ = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+
+        // Returning to `keep` at a new revision MUST collapse onto
+        // the existing row via `Duplicate`, never mint a fresh id.
+        let outcome = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        match outcome {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Duplicate { id }) => {
+                assert_eq!(
+                    id, first_id,
+                    "duplicate copy of a still-live row must reuse the existing id"
+                );
+            }
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { .. }) => {
+                panic!("repeated copy of a live row must NOT mint a new id")
+            }
+            other => panic!("expected Duplicate, got {other:?}"),
+        }
+        assert_eq!(
+            context.history().history_count(&context).unwrap(),
+            2,
+            "exactly the two distinct rows (one for each unique payload) must remain"
+        );
     }
 
     // --- helpers below -------------------------------------------------

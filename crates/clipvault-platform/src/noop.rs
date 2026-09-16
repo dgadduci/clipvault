@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use crate::active_app::{
     ActiveAppBackendKind, ActiveAppError, ActiveApplication, ActiveApplicationProbe,
 };
-use crate::clipboard::{ClipboardBackend, ClipboardBackendError};
+use crate::clipboard::{ClipboardBackend, ClipboardBackendError, ClipboardRevision};
 use crate::guidance::{SettingsNavigator, SettingsOpenOutcome};
 use crate::hotkey::{HotkeyBinding, HotkeyError, HotkeyManager, HotkeyOutcome};
 use crate::paste::{PasteController, PasteError};
@@ -33,6 +33,13 @@ impl ClipboardBackend for NoopClipboardBackend {
         Err(ClipboardBackendError::Unavailable {
             capability: crate::Capability::ClipboardWrite,
         })
+    }
+
+    /// The no-op backend cannot reach a real clipboard; it returns the
+    /// `UNKNOWN` marker so the watcher preserves its previous state
+    /// instead of fabricating observations.
+    fn revision(&self) -> ClipboardRevision {
+        ClipboardRevision::UNKNOWN
     }
 
     fn name(&self) -> &'static str {

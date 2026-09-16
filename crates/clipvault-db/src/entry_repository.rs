@@ -1398,6 +1398,46 @@ mod tests {
     }
 
     #[test]
+    fn insert_or_touch_dedupes_only_against_live_rows() {
+        // Bug regression: the recapture-after-delete contract depends
+        // on `insert_or_touch` matching the content hash against
+        // **live** rows only. Once a row is removed the deleted hash
+        // must not block a fresh insert; otherwise a recapture would
+        // either fail the unique index or get silently coalesced
+        // onto the deleted row's id.
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let first = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_entry("recapture me", when))
+                .expect("first insert")
+                .record()
+                .id
+        };
+        {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            assert_eq!(
+                repo.delete_entry(first).expect("delete"),
+                1,
+                "the row must be removable before the recapture"
+            );
+        }
+        let second = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let outcome = repo
+                .insert_or_touch(new_entry("recapture me", when))
+                .expect("recapture must succeed");
+            outcome.record().id
+        };
+        assert_ne!(
+            second, first,
+            "the recapture must mint a new id; the deleted hash must not be reused"
+        );
+        let repo = EntryRepository::new(db.connection_mut());
+        assert_eq!(repo.count().unwrap(), 1, "only the recaptured row remains");
+    }
+
+    #[test]
     fn clear_non_favorites_preserves_pinned_entries() {
         let (_dir, mut db) = open_temp_db();
         let when = datetime!(2026-01-02 03:04:05 UTC);
