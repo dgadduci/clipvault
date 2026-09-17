@@ -208,6 +208,7 @@ fn main() {
             #[cfg(target_os = "linux")]
             commands::clipvault_ignored_app_linux_add,
             commands::clipvault_set_entry_title,
+            commands::clipvault_update_text_entry,
             commands::clipvault_source_app_icon,
             commands::clipvault_clipboard_asset,
             commands::clipvault_rich_text_preview,

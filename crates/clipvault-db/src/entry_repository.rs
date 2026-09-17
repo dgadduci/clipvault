@@ -93,6 +93,31 @@ pub struct SetSourceAppMetadataOutcome {
     pub updated: Option<EntryRecord>,
 }
 
+/// Result of [`EntryRepository::update_text`]. The discriminated
+/// union mirrors every terminal state the user-visible edit flow
+/// can reach:
+/// - `Updated`: the textual payload was replaced in place; the
+///   row keeps its identifier, its metadata and its membership.
+/// - `Noop`: the submitted text was byte-for-byte equal to the
+///   persisted content; no mutation happened and no event will be
+///   emitted upstream.
+/// - `NotFound`: the target id does not exist.
+/// - `NotEditable`: the row is an image or carries rich-text
+///   metadata that the editor must never touch.
+/// - `EmptyContent`: the trimmed input is empty.
+/// - `DuplicateContent`: another live row already owns the
+///   canonical hash the new text would produce; the operation
+///   refuses to merge or rewrite the existing entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateTextOutcome {
+    Updated { record: EntryRecord },
+    Noop { record: EntryRecord },
+    NotFound,
+    NotEditable,
+    EmptyContent,
+    DuplicateContent,
+}
+
 /// Single distinct source-application entry the combobox query
 /// returns. `source_app` is the stable identifier; `display_name`
 /// is the most recently persisted user-visible label; `icon_ref`
@@ -834,6 +859,140 @@ impl<'a> EntryRepository<'a> {
         };
         tx.commit()?;
         Ok(SetSourceAppMetadataOutcome { updated: record })
+    }
+
+    /// Replace the textual payload of an existing history entry in
+    /// place. The whole operation runs inside a single transaction so
+    /// any validation failure rolls the change back without leaving
+    /// the row in an inconsistent state.
+    ///
+    /// The function enforces every contract the user-visible edit
+    /// flow exposes:
+    ///
+    /// - the entry must exist; otherwise the result is `NotFound`;
+    /// - the entry must be a textual row (`content_type` is one of
+    ///   the textual variants) and must not carry any image or
+    ///   rich-text metadata; otherwise the result is `NotEditable`;
+    /// - the trimmed input must be non-empty; otherwise the result
+    ///   is `EmptyContent`;
+    /// - the canonical `content_hash` derived from the new text must
+    ///   not be owned by another live row; otherwise the result is
+    ///   `DuplicateContent` and the transaction is rolled back;
+    /// - when the new content is byte-for-byte equal to the
+    ///   persisted one, the function returns `Noop` and never
+    ///   touches `updated_at`;
+    /// - on the happy path the row is rewritten with the new
+    ///   `content`, `content_type`, `content_size`, `content_hash`
+    ///   and `updated_at`. The id, the creation / last-seen
+    ///   timestamps, the title, the favorite flag, the
+    ///   source-application fields, the tags, the collection
+    ///   memberships and every asset / rich-text reference stay
+    ///   intact.
+    ///
+    /// The caller (the core service) is responsible for computing
+    /// the deterministic `content_hash`, `content_size` and
+    /// `content_type` values with the same helpers the capture
+    /// pipeline uses; the repository treats them as opaque
+    /// inputs and trusts the caller to have validated the input
+    /// shape.
+    pub fn update_text(
+        &mut self,
+        id: i64,
+        new_content: &str,
+        new_content_hash: &str,
+        new_content_type: ContentType,
+        new_content_size: i64,
+        now: OffsetDateTime,
+    ) -> Result<UpdateTextOutcome, EntryRepositoryError> {
+        let tx = self.conn.transaction()?;
+
+        let existing = match fetch_by_id(&tx, id)? {
+            Some(record) => record,
+            None => {
+                // No mutation has been issued yet so a commit is
+                // unnecessary; the temporary transaction is
+                // dropped when `_tx` goes out of scope and the
+                // helper returns. Rolling back is a no-op so the
+                // explicit `rollback` would be purely cosmetic.
+                tx.rollback()?;
+                return Ok(UpdateTextOutcome::NotFound);
+            }
+        };
+
+        if !existing.content_type.is_textual()
+            || existing.asset_ref.is_some()
+            || existing.mime_type.is_some()
+            || existing.payload_width.is_some()
+            || existing.payload_height.is_some()
+            || existing.rich_text_hash.is_some()
+            || existing.rich_html_ref.is_some()
+            || existing.rich_rtf_ref.is_some()
+            || existing.rich_preview_ref.is_some()
+        {
+            tx.rollback()?;
+            return Ok(UpdateTextOutcome::NotEditable);
+        }
+
+        if new_content.is_empty() {
+            tx.rollback()?;
+            return Ok(UpdateTextOutcome::EmptyContent);
+        }
+
+        if existing.content_hash == new_content_hash {
+            // The new text is byte-for-byte identical to the
+            // persisted one. Drop the transaction and surface a
+            // no-op so the shell does not emit a content mutation
+            // event for a refresh the user did not actually
+            // perform.
+            tx.rollback()?;
+            return Ok(UpdateTextOutcome::Noop { record: existing });
+        }
+
+        // Reject the edit when another live row already owns the
+        // canonical hash. The lookup is intentionally NOT scoped to
+        // the same id; an edit that would silently merge two
+        // distinct history rows into one is forbidden.
+        if let Some(conflict) = tx
+            .query_row(
+                "SELECT id FROM clipboard_entries
+                  WHERE content_hash = ?1
+                    AND id <> ?2
+                  LIMIT 1",
+                params![new_content_hash, id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            // The `conflict` id is intentionally discarded so the
+            // discriminated union never carries another row's id
+            // outside the repository. The frontend only needs the
+            // category to render the matching copy.
+            let _ = conflict;
+            tx.rollback()?;
+            return Ok(UpdateTextOutcome::DuplicateContent);
+        }
+
+        let now_str = format_timestamp(now);
+        tx.execute(
+            "UPDATE clipboard_entries
+                SET content = ?1,
+                    content_type = ?2,
+                    content_size = ?3,
+                    content_hash = ?4,
+                    updated_at = ?5
+              WHERE id = ?6",
+            params![
+                new_content,
+                new_content_type.as_str(),
+                new_content_size,
+                new_content_hash,
+                now_str,
+                id,
+            ],
+        )?;
+        let record = fetch_by_id(&tx, id)?.expect("row updated above must still exist");
+        tx.commit()?;
+        Ok(UpdateTextOutcome::Updated { record })
     }
 
     /// Delete a single entry by id. Returns the number of rows removed
@@ -3871,5 +4030,506 @@ mod tests {
         let filtered_ids: Vec<i64> = filtered.iter().map(|r| r.id).collect();
         assert_eq!(unfiltered_ids, filtered_ids);
         assert!(unfiltered_ids.contains(&text_id));
+    }
+
+    // -----------------------------------------------------------------
+    // `editable-text-captures` regression coverage.
+    //
+    // The repository operation replaces the textual payload of an
+    // existing history row in place. The contracts being pinned:
+    //
+    //   - the identifier, the creation / last-seen timestamps, the
+    //     title, the favorite flag, the source-application
+    //     metadata, the tags, the collection memberships, the asset
+    //     references and every rich-text reference survive the
+    //     mutation untouched;
+    //   - `content_hash`, `content_size`, `content_type` and
+    //     `updated_at` reflect the new text using the same
+    //     deterministic helpers the capture pipeline uses;
+    //   - an empty input, a missing id, an image row, a rich-text
+    //     row and a hash collision all return the matching typed
+    //     outcome without touching the database;
+    //   - an identical edit returns `Noop` and never refreshes
+    //     `updated_at`;
+    //   - a failed validation rolls the transaction back so the
+    //     row stays exactly as it was.
+    // -----------------------------------------------------------------
+
+    fn compute_text_metadata(text: &str) -> (String, i64) {
+        let size = text.len() as i64;
+        let hash = format!("hash::editable::{text}");
+        (hash, size)
+    }
+
+    #[test]
+    fn update_text_persists_new_payload_and_metadata() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let later = datetime!(2026-01-02 03:10:00 UTC);
+        let id = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_entry("first note", when))
+                .expect("insert")
+                .record()
+                .id
+        };
+
+        let (new_hash, new_size) = compute_text_metadata("first note - edited");
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.update_text(
+                id,
+                "first note - edited",
+                &new_hash,
+                ContentType::Text,
+                new_size,
+                later,
+            )
+            .expect("update_text")
+        };
+        match outcome {
+            UpdateTextOutcome::Updated { record } => {
+                assert_eq!(record.id, id);
+                assert_eq!(record.content, "first note - edited");
+                assert_eq!(record.content_hash, new_hash);
+                assert_eq!(record.content_size, new_size);
+                assert_eq!(record.content_type, ContentType::Text);
+                assert_eq!(record.updated_at, format_timestamp(later));
+                assert_eq!(record.created_at, format_timestamp(when));
+                assert_eq!(record.last_seen_at, format_timestamp(when));
+            }
+            other => panic!("expected Updated, got {other:?}"),
+        }
+
+        let stored = {
+            let repo = EntryRepository::new(db.connection_mut());
+            repo.find_by_id(id).unwrap().unwrap()
+        };
+        assert_eq!(stored.content, "first note - edited");
+        assert_eq!(stored.content_hash, new_hash);
+        assert_eq!(stored.content_size, new_size);
+        assert_eq!(stored.content_type, ContentType::Text);
+        assert_eq!(stored.updated_at, format_timestamp(later));
+    }
+
+    #[test]
+    fn update_text_reclassifies_content_type() {
+        // An edit that turns plain prose into a JSON document must
+        // re-classify the row without creating a second entry.
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let later = datetime!(2026-01-02 03:10:00 UTC);
+        let id = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_entry("hello world", when))
+                .expect("insert")
+                .record()
+                .id
+        };
+
+        let new_text = r#"{"hello":"world"}"#;
+        let (new_hash, new_size) = compute_text_metadata(new_text);
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.update_text(id, new_text, &new_hash, ContentType::Json, new_size, later)
+                .expect("update_text")
+        };
+        match outcome {
+            UpdateTextOutcome::Updated { record } => {
+                assert_eq!(record.content_type, ContentType::Json);
+                assert_eq!(record.content, new_text);
+            }
+            other => panic!("expected Updated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_text_returns_noop_for_identical_input() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let later = datetime!(2026-01-02 03:10:00 UTC);
+        let id = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_entry("unchanged", when))
+                .expect("insert")
+                .record()
+                .id
+        };
+
+        let stored_before = {
+            let repo = EntryRepository::new(db.connection_mut());
+            repo.find_by_id(id).unwrap().unwrap()
+        };
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.update_text(
+                id,
+                "unchanged",
+                &stored_before.content_hash,
+                ContentType::Text,
+                stored_before.content_size,
+                later,
+            )
+            .expect("update_text")
+        };
+        assert!(matches!(outcome, UpdateTextOutcome::Noop { .. }));
+
+        let stored_after = {
+            let repo = EntryRepository::new(db.connection_mut());
+            repo.find_by_id(id).unwrap().unwrap()
+        };
+        assert_eq!(stored_after.updated_at, stored_before.updated_at);
+        assert_eq!(stored_after.content, "unchanged");
+    }
+
+    #[test]
+    fn update_text_rejects_empty_input() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let id = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_entry("kept", when))
+                .expect("insert")
+                .record()
+                .id
+        };
+
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.update_text(id, "", "hash::editable::", ContentType::Text, 0, when)
+                .expect("update_text")
+        };
+        assert!(matches!(outcome, UpdateTextOutcome::EmptyContent));
+
+        let stored = {
+            let repo = EntryRepository::new(db.connection_mut());
+            repo.find_by_id(id).unwrap().unwrap()
+        };
+        assert_eq!(stored.content, "kept");
+    }
+
+    #[test]
+    fn update_text_returns_not_found_for_missing_id() {
+        let (_dir, mut db) = open_temp_db();
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.update_text(
+                9999,
+                "anything",
+                "hash::editable::anything",
+                ContentType::Text,
+                8,
+                datetime!(2026-01-02 03:04:05 UTC),
+            )
+            .expect("update_text")
+        };
+        assert!(matches!(outcome, UpdateTextOutcome::NotFound));
+    }
+
+    #[test]
+    fn update_text_rejects_image_row() {
+        // The repository is the second line of defence: even if a
+        // stale frontend forwards an edit for an image entry, the
+        // storage layer must refuse without touching the row.
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let later = datetime!(2026-01-02 03:10:00 UTC);
+        let image_id = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let hash = "ee".repeat(32);
+            repo.insert_or_touch(new_image_entry(&hash, 16, 16, when))
+                .expect("image")
+                .record()
+                .id
+        };
+
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.update_text(
+                image_id,
+                "anything",
+                "hash::editable::anything",
+                ContentType::Text,
+                8,
+                later,
+            )
+            .expect("update_text")
+        };
+        assert!(matches!(outcome, UpdateTextOutcome::NotEditable));
+
+        let stored = {
+            let repo = EntryRepository::new(db.connection_mut());
+            repo.find_by_id(image_id).unwrap().unwrap()
+        };
+        assert_eq!(stored.content_type, ContentType::Image);
+        assert!(stored.is_renderable_image());
+    }
+
+    #[test]
+    fn update_text_rejects_rich_text_row() {
+        // A row carrying rich-text metadata must stay locked
+        // behind `NotEditable`: the editor would otherwise lose the
+        // sanitised preview and the original HTML / RTF
+        // representations the rich paste action consumes.
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let later = datetime!(2026-01-02 03:10:00 UTC);
+        let rich_id = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_rich_entry(
+                "styled text",
+                "rich-hash-edit",
+                Some("<b>styled text</b>"),
+                None,
+                when,
+            ))
+            .expect("rich")
+            .record()
+            .id
+        };
+
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.update_text(
+                rich_id,
+                "styled text - edited",
+                "hash::editable::styled text - edited",
+                ContentType::Text,
+                20,
+                later,
+            )
+            .expect("update_text")
+        };
+        assert!(matches!(outcome, UpdateTextOutcome::NotEditable));
+
+        let stored = {
+            let repo = EntryRepository::new(db.connection_mut());
+            repo.find_by_id(rich_id).unwrap().unwrap()
+        };
+        assert_eq!(stored.content, "styled text");
+        assert!(stored.has_rich_text());
+    }
+
+    #[test]
+    fn update_text_rejects_hash_collision() {
+        // The repository must refuse an edit that would silently
+        // merge two distinct history rows by assigning the same
+        // canonical hash to a different identifier.
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let later = datetime!(2026-01-02 03:10:00 UTC);
+        let (first_id, second_id) = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let first = repo
+                .insert_or_touch(new_entry("alpha", when))
+                .expect("alpha")
+                .record()
+                .id;
+            let second = repo
+                .insert_or_touch(new_entry("bravo", when))
+                .expect("bravo")
+                .record()
+                .id;
+            (first, second)
+        };
+
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            // Reuse the first row's hash for the second row's edit:
+            // the repository must refuse to silently merge them.
+            let stored = repo.find_by_id(first_id).unwrap().unwrap();
+            repo.update_text(
+                second_id,
+                stored.content.as_str(),
+                &stored.content_hash,
+                stored.content_type,
+                stored.content_size,
+                later,
+            )
+            .expect("update_text")
+        };
+        assert!(matches!(outcome, UpdateTextOutcome::DuplicateContent));
+
+        let stored_second = {
+            let repo = EntryRepository::new(db.connection_mut());
+            repo.find_by_id(second_id).unwrap().unwrap()
+        };
+        assert_eq!(stored_second.content, "bravo");
+        assert_ne!(stored_second.content_hash, stored_second.id.to_string());
+    }
+
+    #[test]
+    fn update_text_preserves_metadata_and_memberships() {
+        // The mutation must never touch the metadata columns that
+        // belong to organisation, source-application presentation
+        // and persistence: the row keeps its id, the title, the
+        // favorite flag, the source-application fields, the
+        // creation / last-seen timestamps, the rich references and
+        // the collection / tag associations.
+        let (_dir, mut db) = open_temp_db();
+        let captured_at = datetime!(2026-01-02 03:04:05 UTC);
+        let later = datetime!(2026-01-02 03:10:00 UTC);
+        let entry_id = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let id = repo
+                .insert_or_touch(new_entry("metadatas", captured_at))
+                .expect("insert")
+                .record()
+                .id;
+            repo.set_title(id, Some("Custom title"), captured_at)
+                .expect("title");
+            repo.set_favorite(id, true, captured_at).expect("favorite");
+            repo.set_source_app_metadata(
+                id,
+                Some("Terminal"),
+                Some("application-icons/com.apple.terminal.png"),
+                captured_at,
+            )
+            .expect("source-app");
+            id
+        };
+        let (collection_id, tag_id) = {
+            let mut org = crate::OrganizationRepository::new(db.connection_mut());
+            let collection = org
+                .create_user_collection("Trabajo", "#1565c0", captured_at)
+                .expect("create collection")
+                .id;
+            let tag = org.upsert_tag("draft", captured_at).expect("tag").id;
+            org.replace_entry_collections(entry_id, &[collection], captured_at)
+                .expect("attach collection");
+            org.replace_entry_tags(entry_id, &[tag], captured_at)
+                .expect("attach tag");
+            (collection, tag)
+        };
+
+        let (new_hash, new_size) = compute_text_metadata("metadatas - v2");
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.update_text(
+                entry_id,
+                "metadatas - v2",
+                &new_hash,
+                ContentType::Text,
+                new_size,
+                later,
+            )
+            .expect("update_text")
+        };
+        match outcome {
+            UpdateTextOutcome::Updated { record } => {
+                assert_eq!(record.id, entry_id);
+                assert_eq!(record.title.as_deref(), Some("Custom title"));
+                assert!(record.is_pinned);
+                assert_eq!(record.source_app_name.as_deref(), Some("Terminal"));
+                assert_eq!(
+                    record.source_app_icon_ref.as_deref(),
+                    Some("application-icons/com.apple.terminal.png")
+                );
+                assert_eq!(record.created_at, format_timestamp(captured_at));
+                assert_eq!(record.last_seen_at, format_timestamp(captured_at));
+                assert_eq!(record.updated_at, format_timestamp(later));
+            }
+            other => panic!("expected Updated, got {other:?}"),
+        }
+
+        let org_repo = crate::OrganizationRepository::new(db.connection_mut());
+        let attached = org_repo
+            .entry_collection_ids(entry_id)
+            .expect("entry collections");
+        assert!(attached.contains(&collection_id));
+        let tags = org_repo.entry_tag_ids(entry_id).expect("entry tags");
+        assert!(tags.contains(&tag_id));
+    }
+
+    #[test]
+    fn update_text_rollback_leaves_row_intact() {
+        // The repository surfaces `NotEditable` after rolling the
+        // transaction back so a stale frontend never produces a
+        // partial write when it forwards an image id to the
+        // editor. The row's content, hash and timestamps must
+        // remain exactly as they were before the failed call.
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let later = datetime!(2026-01-02 03:10:00 UTC);
+        let image_id = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let hash = "cc".repeat(32);
+            repo.insert_or_touch(new_image_entry(&hash, 8, 8, when))
+                .expect("image")
+                .record()
+                .id
+        };
+
+        let stored_before = {
+            let repo = EntryRepository::new(db.connection_mut());
+            repo.find_by_id(image_id).unwrap().unwrap()
+        };
+
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.update_text(
+                image_id,
+                "anything",
+                "hash::editable::anything",
+                ContentType::Text,
+                8,
+                later,
+            )
+            .expect("update_text")
+        };
+        assert!(matches!(outcome, UpdateTextOutcome::NotEditable));
+
+        let stored_after = {
+            let repo = EntryRepository::new(db.connection_mut());
+            repo.find_by_id(image_id).unwrap().unwrap()
+        };
+        assert_eq!(stored_after.content, stored_before.content);
+        assert_eq!(stored_after.content_hash, stored_before.content_hash);
+        assert_eq!(stored_after.content_size, stored_before.content_size);
+        assert_eq!(stored_after.updated_at, stored_before.updated_at);
+    }
+
+    #[test]
+    fn update_text_survives_restart() {
+        // The persisted mutation must round-trip through a
+        // SQLite close / reopen cycle so the user can keep
+        // editing the same entry after restarting the app.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("clipvault.db");
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let later = datetime!(2026-01-02 03:10:00 UTC);
+        let id;
+        {
+            let mut db = crate::Database::open(&db_path).expect("open");
+            db.run_migrations(&crate::builtin_migrations())
+                .expect("migrate");
+            let mut repo = EntryRepository::new(db.connection_mut());
+            id = repo
+                .insert_or_touch(new_entry("before restart", when))
+                .expect("insert")
+                .record()
+                .id;
+        }
+        {
+            let mut db = reopen_db(&db_path);
+            let (new_hash, new_size) = compute_text_metadata("after restart");
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let outcome = repo
+                .update_text(
+                    id,
+                    "after restart",
+                    &new_hash,
+                    ContentType::Text,
+                    new_size,
+                    later,
+                )
+                .expect("update_text");
+            assert!(matches!(outcome, UpdateTextOutcome::Updated { .. }));
+        }
+        let mut db = reopen_db(&db_path);
+        let repo = EntryRepository::new(db.connection_mut());
+        let stored = repo.find_by_id(id).unwrap().unwrap();
+        assert_eq!(stored.content, "after restart");
+        assert_eq!(stored.updated_at, format_timestamp(later));
     }
 }

@@ -24,7 +24,7 @@ pub use entry::{ContentType, EntryRecord, NewEntry, IMAGE_CONTENT_SENTINEL, IMAG
 pub use entry_repository::{
     AggregatedSourceApp, AggregatedSourceApps, EntryOutcome, EntryRepository, EntryRepositoryError,
     SetCodeLanguageOutcome, SetFavoriteOutcome, SetSourceAppMetadataOutcome, SetTitleOutcome,
-    TEXTUAL_CONTENT_TYPES,
+    UpdateTextOutcome, TEXTUAL_CONTENT_TYPES,
 };
 pub use error::{DbError, DbResult};
 pub use ignored_apps::{IgnoredApp, IgnoredAppRepository, IgnoredAppsError};

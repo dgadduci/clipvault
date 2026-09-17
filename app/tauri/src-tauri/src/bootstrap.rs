@@ -88,7 +88,11 @@ const ACTIVE_APP_REFRESH_WAIT: Duration = Duration::from_millis(500);
 /// The payload is `null` — the frontend re-reads the recent entries
 /// after receiving the event so the notification never carries
 /// clipboard content, snippets, hashes or source identifiers.
-const HISTORY_UPDATED_EVENT: &str = "clipvault://history-updated";
+/// Stable event identifier the shell emits after every successful
+/// capture, organization mutation or text edit. The constant lives
+/// here so the bootstrap, the Tauri commands and the regression
+/// tests share the same identifier without re-declaring it.
+pub const HISTORY_UPDATED_EVENT: &str = "clipvault://history-updated";
 
 /// Detect platform and build every adapter.
 pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {

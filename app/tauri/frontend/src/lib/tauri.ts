@@ -37,6 +37,7 @@ import type {
   SourceAppFilter,
   SourceApplicationsSnapshot,
   Tag,
+  UpdateTextEntryResponse,
   WatchTickResponse,
 } from "../types.ts";
 
@@ -438,6 +439,22 @@ export const setEntryTitleCommand: ClipvaultCommandArg<
     title: args.title,
   });
 
+/**
+ * Replace the textual payload of an existing history entry in
+ * place. The bridge only carries the user-entered draft the editor
+ * needs to persist; the response and the metadata-only
+ * `clipvault://history-updated` event the shell emits after a
+ * successful commit are both payload-free.
+ */
+export const updateTextEntryCommand: ClipvaultCommandArg<
+  UpdateTextEntryResponse,
+  { id: number; content: string }
+> = (args) =>
+  invoke<UpdateTextEntryResponse>("clipvault_update_text_entry", {
+    entryId: args.id,
+    content: args.content,
+  });
+
 // ---------------------------------------------------------------------------
 // `tags-and-collections` command surface.
 // ---------------------------------------------------------------------------
@@ -655,5 +672,8 @@ export type {
   SourceApplicationsScope,
   SourceApplicationsSnapshot,
   Tag,
+  UpdateTextEntryResponse,
   WatchTickResponse,
 } from "../types";
+
+export { isEditableTextEntry } from "../types";

@@ -107,7 +107,7 @@ pub use gnome_integration::{
 };
 pub use history::{
     hash_content, HistoryOutcome, HistoryServiceError, SetTitleOutcome, TextHistoryService,
-    TitleValidationError, MAX_TITLE_LENGTH,
+    TitleValidationError, UpdateTextHistoryOutcome, MAX_TITLE_LENGTH,
 };
 pub use ignored_apps::{normalize_identifier, IgnoredAppEntry, IgnoredAppError, PickAndAddOutcome};
 pub use ignored_apps_service::{IgnoredAppsService, IgnoredAppsServiceError};

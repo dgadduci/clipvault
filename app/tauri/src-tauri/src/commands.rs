@@ -10,7 +10,7 @@ use clipvault_core::{
     PlatformSettingsTarget, RetentionOutcome, RetentionPolicy, RetentionPreview,
     RichTextAssetStore, SetFavoriteResult, SetTitleOutcome, Settings, SettingsNavigator,
     SettingsOpenOutcome, SettingsServiceError, SettingsUpdate, TitleValidationError,
-    ValidationCode, ValidationError, WatchTickOutcome,
+    UpdateTextHistoryOutcome, ValidationCode, ValidationError, WatchTickOutcome,
 };
 use clipvault_platform::{
     read_icon_bytes, read_source_app_icon_bytes, ActiveAppError, IconReadError,
@@ -1558,6 +1558,101 @@ pub fn clipvault_set_entry_title_for_test(
             )) => CommandError::new("title_too_long", format!("exceeds {max} characters")),
             other => CommandError::new("history_error", other.to_string()),
         })?;
+    Ok(outcome.into())
+}
+
+// ---------------------------------------------------------------------------
+// `editable-text-captures` capability commands.
+//
+// The `clipvault_update_text_entry` command is the single bridge the
+// desktop editor uses to overwrite the textual payload of an
+// existing history entry in place. The command is a thin adapter
+// over [`clipvault_core::TextHistoryService::update_text`]; no
+// payload bytes, hashes or snippets ever leave the persistence
+// layer through the response or any emitted event.
+// ------------------------------------------------------------------------
+
+/// Response of [`clipvault_update_text_entry`]. The discriminator
+/// lets the GUI branch on `kind` without parsing free-form strings;
+/// every variant other than the persistence-failure branches carries
+/// the refreshed record (when relevant) so the rail can update its
+/// state in one round-trip.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
+pub enum UpdateTextEntryResponse {
+    Updated { entry: clipvault_db::EntryRecord },
+    Noop { entry: clipvault_db::EntryRecord },
+    NotFound,
+    NotEditable,
+    EmptyContent,
+    DuplicateContent,
+}
+
+impl From<UpdateTextHistoryOutcome> for UpdateTextEntryResponse {
+    fn from(outcome: UpdateTextHistoryOutcome) -> Self {
+        match outcome {
+            UpdateTextHistoryOutcome::Updated { record } => {
+                UpdateTextEntryResponse::Updated { entry: record }
+            }
+            UpdateTextHistoryOutcome::Noop { record } => {
+                UpdateTextEntryResponse::Noop { entry: record }
+            }
+            UpdateTextHistoryOutcome::NotFound => UpdateTextEntryResponse::NotFound,
+            UpdateTextHistoryOutcome::NotEditable => UpdateTextEntryResponse::NotEditable,
+            UpdateTextHistoryOutcome::EmptyContent => UpdateTextEntryResponse::EmptyContent,
+            UpdateTextHistoryOutcome::DuplicateContent => UpdateTextEntryResponse::DuplicateContent,
+        }
+    }
+}
+
+/// Replace the textual payload of an existing history entry in
+/// place. The command is a thin adapter over
+/// [`clipvault_core::TextHistoryService::update_text`] and emits the
+/// metadata-only `clipvault://history-updated` event after a
+/// successful commit so the rail, search and Quick Paste refresh
+/// from the same source of truth the persistence layer just
+/// updated.
+///
+/// The command carries **only** the user-entered draft because the
+/// edit requires it; the response and the emitted event stay
+/// metadata-only — clipboard content, content hashes and snippets
+/// never cross the bridge.
+#[tauri::command]
+pub fn clipvault_update_text_entry(
+    state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
+    entry_id: i64,
+    content: String,
+) -> Result<UpdateTextEntryResponse, CommandError> {
+    let outcome = state
+        .context()
+        .history()
+        .update_text(state.context(), entry_id, content)
+        .map_err(|err| CommandError::new("history_error", err.to_string()))?;
+    if matches!(outcome, UpdateTextHistoryOutcome::Updated { .. }) {
+        if let Err(error) = handle.emit(crate::bootstrap::HISTORY_UPDATED_EVENT, ()) {
+            warn!(error = %error, "failed to emit history-updated event");
+        }
+    }
+    Ok(outcome.into())
+}
+
+/// Test-friendly handle for [`clipvault_update_text_entry`] so the
+/// integration suite can exercise the validation pipeline without
+/// standing up a Tauri runtime. The helper does NOT emit the
+/// metadata-only refresh event because the test runs outside the
+/// shell; production callers must use the Tauri command.
+#[allow(dead_code)]
+pub fn clipvault_update_text_entry_for_test(
+    context: &clipvault_core::AppContext,
+    entry_id: i64,
+    content: String,
+) -> Result<UpdateTextEntryResponse, CommandError> {
+    let outcome = context
+        .history()
+        .update_text(context, entry_id, content)
+        .map_err(|err| CommandError::new("history_error", err.to_string()))?;
     Ok(outcome.into())
 }
 

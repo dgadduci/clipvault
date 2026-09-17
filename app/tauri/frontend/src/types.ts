@@ -323,9 +323,59 @@ export interface EntrySummary {
   updated_at: string;
 }
 
+/**
+ * Whether a textual history entry is eligible for the
+ * `Editar captura` flow. Mirrors the backend predicate:
+ * `content_type` is one of the textual variants and the row does
+ * not carry image / rich-text metadata that the editor would otherwise
+ * destroy. Used by the ellipsis menu to gate the action and by the
+ * `EntryTextEditorModal` to fail fast when the entry is stale.
+ */
+export function isEditableTextEntry(entry: EntryRecord): boolean {
+  if (entry.content_type === "image") return false;
+  if (entry.asset_ref != null || entry.mime_type != null) return false;
+  if (entry.payload_width != null || entry.payload_height != null) {
+    return false;
+  }
+  if (entry.rich_text_hash != null) return false;
+  if (entry.rich_html_ref != null) return false;
+  if (entry.rich_rtf_ref != null) return false;
+  if (entry.rich_preview_ref != null) return false;
+  return true;
+}
+
 export type SetFavoriteResponse =
   | { kind: "updated"; entry: EntrySummary }
   | { kind: "not_found" };
+
+/**
+ * Discriminated response of [`updateTextEntryCommand`].
+ *
+ * - `updated`: the row was rewritten in place. The bridge returns the
+ *   refreshed record so the rail can patch its in-memory list.
+ * - `noop`: the submitted text was byte-for-byte equal to the
+ *   persisted one. The frontend receives the previous record and
+ *   can keep the visible card as it was.
+ * - `not_found`: the entry disappeared between the rail read and
+ *   the edit request.
+ * - `not_editable`: the entry is an image or carries rich-text
+ *   metadata the editor must not touch.
+ * - `empty_content`: the trimmed input is empty.
+ * - `duplicate_content`: another live row already owns the canonical
+ *   hash the new text would produce. The previous entry stays
+ *   untouched.
+ *
+ * The bridge never carries clipboard content, hashes, snippets or
+ * asset references in either direction; only the typed `kind` and
+ * the refreshed record travel across the IPC.
+ */
+export type UpdateTextEntryResponse =
+  | { kind: "updated"; entry: EntryRecord }
+  | { kind: "noop"; entry: EntryRecord }
+  | { kind: "not_found" }
+  | { kind: "not_editable" }
+  | { kind: "empty_content" }
+  | { kind: "duplicate_content" };
 
 export type DeleteResponse =
   | { kind: "removed"; removed: number }

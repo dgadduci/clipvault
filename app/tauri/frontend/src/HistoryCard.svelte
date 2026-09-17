@@ -102,6 +102,8 @@
   import TagSelectorModal from "./TagSelectorModal.svelte";
   import CollectionSelectorModal from "./CollectionSelectorModal.svelte";
   import CollectionMembershipModal from "./CollectionMembershipModal.svelte";
+  import EntryTextEditorModal from "./EntryTextEditorModal.svelte";
+  import { isEditableTextEntry } from "./types";
 
   export let entry: EntryRecord;
   export let onTogglePin: (entry: EntryRecord) => void = () => {};
@@ -519,6 +521,14 @@
   // ---------------------------------------------------------------
 
   $: isRich = hasRenderableRichText(entry);
+  /**
+   * Whether the card exposes the `Editar captura` action. The
+   * predicate mirrors the backend guard so a stale frontend
+   * cannot surface the action for an image or rich-text entry —
+   * the storage layer will refuse the call anyway, but keeping
+   * the menu honest avoids a misleading affordance.
+   */
+  $: canEditText = isEditableTextEntry(entry);
 
   // ---------------------------------------------------------------
   // Paste menu actions.
@@ -830,6 +840,13 @@
    */
   let membershipModalOpen = false;
   /**
+   * Whether the inline text editor modal is open. The flag lives
+   * on the card so the menu trigger can flip it through a single
+   * `dispatch` path; the rail and the App stay free of per-card
+   * editor state.
+   */
+  let textEditorOpen = false;
+  /**
    * DOM handle on the inline collection chip row. The
    * `ResizeObserver` the card installs during `onMount` reads
    * `clientWidth` against this element so the overflow icon only
@@ -1082,6 +1099,69 @@
     tagSelectorOpen = false;
     orgError = null;
     closeMenuAfterAction();
+  }
+
+  /**
+   * Open the text editor modal. The guard rejects ineligible
+   * entries so a stale foreground cannot open the editor for an
+   * image or a rich-text row even if the menu somehow exposes the
+   * action; the storage layer is the second line of defence.
+   */
+  function openTextEditor(): void {
+    if (!canEditText) return;
+    textEditorOpen = true;
+    closeMenuAfterAction();
+  }
+
+  /**
+   * `Ctrl+E` shortcut that opens the same modal as the menu item.
+   *
+   * The matcher accepts `Ctrl+E` on every platform: the rail is the
+   * single source of truth for the shortcut, and macOS users that
+   * press `Cmd+E` already have the `Editar captura` menu available
+   * through the platform-native menu bar. The shortcut MUST:
+   *
+   *   - be a no-op when the card is not eligible (`canEditText`)
+   *     so an image or rich-text row never opens the editor;
+   *   - be a no-op when the keyboard event target is itself an
+   *     interactive surface (input, textarea, select, button,
+   *     contenteditable, the ellipsis menu, the editor modal or the
+   *     `+N` overflow chip) so the user can keep typing inside
+   *     those controls without the card intercepting the key;
+   *   - never reach into the singleton pointer drag controller
+   *     or document / window: the matcher is wired on the card's
+   *     own `<article>` keyboard handler so the existing
+   *     `onCardKeydown` entry point already runs first and the
+   *     `isInteractiveTarget` guard already excludes every drag
+   *     surface;
+   *   - never start a drag, flip the selection or change the
+   *     focus while the shortcut opens the editor (the helper
+   *     delegates to `openTextEditor`, which is the single menu
+   *     entry point).
+   *
+   * `preventDefault` runs only when the shortcut is accepted so
+   * typing `e` inside the search box (or anywhere else outside the
+   * card) keeps its native behaviour.
+   */
+  const EDIT_TEXT_SHORTCUT_KEY = "e";
+  const EDIT_TEXT_SHORTCUT_LABEL = "Ctrl+E";
+  const EDIT_TEXT_SHORTCUT_KEY_ATTR = "Control+E";
+  const EDIT_TEXT_SHORTCUT_TESTID = "history-card-edit-text-shortcut";
+  /**
+   * Whether the focused card has a parent dialog/modal so the
+   * matcher can ignore the shortcut while the user is interacting
+   * with the editor itself. `closest('[role="dialog"]')` also
+   * catches future modals without needing per-modal wiring.
+   */
+  function isInsideModalTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false;
+    if (target.closest('[role="dialog"]')) return true;
+    return false;
+  }
+  function matchesEditTextShortcut(event: KeyboardEvent): boolean {
+    if (event.key !== EDIT_TEXT_SHORTCUT_KEY) return false;
+    if (!event.ctrlKey || event.altKey || event.metaKey) return false;
+    return true;
   }
 
   async function handleTagsSave(
@@ -1379,8 +1459,22 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   }
 
   function onCardKeydown(event: KeyboardEvent): void {
-    if (!previewMatcher) return;
     if (isInteractiveTarget(event.target)) return;
+    if (matchesEditTextShortcut(event)) {
+      // The shortcut only opens the editor for an eligible entry,
+      // when the focus is on the card surface itself (not on an
+      // interactive child, the menu, the editor modal or another
+      // dialog). `preventDefault` runs only inside this branch so
+      // typing `e` outside the card keeps its native behaviour and
+      // the shortcut never races the existing `Escape` /
+      // `Cmd/Ctrl+Enter` flows.
+      if (!canEditText) return;
+      if (isInsideModalTarget(event.target)) return;
+      event.preventDefault();
+      openTextEditor();
+      return;
+    }
+    if (!previewMatcher) return;
     if (event.key === "Escape") {
       // Escape clears the selection only when the rail has focus
       // (the document-level listener the rail installs also routes
@@ -2105,6 +2199,28 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       >
         Restaurar título
       </button>
+      {#if canEditText}
+        <button
+          type="button"
+          role="menuitem"
+          class="menu-item"
+          data-testid="history-card-edit-text"
+          aria-label={`Editar captura ${displayTitle}`}
+          aria-keyshortcuts={EDIT_TEXT_SHORTCUT_KEY_ATTR}
+          title="Editar el contenido de la captura"
+          on:click={openTextEditor}
+          disabled={titleBusy}
+        >
+          <span class="menu-item-label">Editar captura</span>
+          <span
+            class="menu-item-shortcut"
+            data-testid={EDIT_TEXT_SHORTCUT_TESTID}
+            aria-hidden="true"
+          >
+            {EDIT_TEXT_SHORTCUT_LABEL}
+          </span>
+        </button>
+      {/if}
       <button
         type="button"
         role="menuitem"
@@ -2229,6 +2345,14 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   assignedCollections={assignedCollections}
   returnFocusTo={collectionOverflowEl}
   on:close={() => { membershipModalOpen = false; }}
+/>
+
+<EntryTextEditorModal
+  open={textEditorOpen}
+  {entry}
+  {displayTitle}
+  returnFocusTo={menuTriggerEl}
+  on:close={() => { textEditorOpen = false; }}
 />
 
 {@html CONTENT_TYPE_ICON_SPRITE}
@@ -2837,6 +2961,26 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   .menu-item:disabled {
     color: #94a3b8;
     cursor: not-allowed;
+  }
+
+  /*
+   * Layout for menu items that surface a label + a keyboard shortcut
+   * hint (currently the `Editar captura` and `Previsualizar` items).
+   * The container turns into a flex row so the hint sits flush on
+   * the right edge of the popover; the shortcut span keeps the
+   * monospace treatment the rest of the desktop uses for keyboard
+   * hints so the typography is consistent with the `preview-hint`
+   * chrome the card already paints when the user picks a row.
+   */
+  .menu-item-label {
+    flex: 1 1 auto;
+  }
+  .menu-item-shortcut {
+    flex: 0 0 auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: var(--cv-meta, 0.7rem);
+    color: var(--cv-fg-muted, #94a3b8);
+    padding-left: 0.75rem;
   }
 
   .tag-chips {

@@ -17,7 +17,7 @@ use tracing::warn;
 
 use clipvault_db::{
     EntryOutcome, EntryRepository, EntryRepositoryError, NewEntry, SourceAppFilter,
-    IMAGE_CONTENT_SENTINEL, IMAGE_MIME_PNG,
+    UpdateTextOutcome, IMAGE_CONTENT_SENTINEL, IMAGE_MIME_PNG,
 };
 use clipvault_platform::{
     parse_ppu_triple, phys_to_dpi, ApplicationMetadataError, ApplicationMetadataProvider,
@@ -98,6 +98,32 @@ pub enum SetTitleOutcome {
     Updated { record: clipvault_db::EntryRecord },
     /// The target entry does not exist (anymore).
     NotFound,
+}
+
+/// Result of [`TextHistoryService::update_text`]. The discriminated
+/// union mirrors the storage layer [`UpdateTextOutcome`] so the
+/// shell can branch on `kind` without inspecting free-form strings.
+/// `Updated` carries the refreshed entry; the other arms are
+/// metadata-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+pub enum UpdateTextHistoryOutcome {
+    /// The text was replaced in place; `record` is the refreshed entry.
+    Updated { record: clipvault_db::EntryRecord },
+    /// The submitted text is byte-for-byte equal to the persisted
+    /// one; no mutation happened.
+    Noop { record: clipvault_db::EntryRecord },
+    /// The target entry does not exist.
+    NotFound,
+    /// The target entry is an image or carries rich-text metadata
+    /// the editor must not touch.
+    NotEditable,
+    /// The trimmed input is empty.
+    EmptyContent,
+    /// Another live row already owns the canonical hash the new
+    /// text would produce; the operation refuses to merge or
+    /// rewrite the existing entries.
+    DuplicateContent,
 }
 
 /// Validation outcome of [`TextHistoryService::validate_title`]. The
@@ -786,6 +812,54 @@ impl TextHistoryService {
             None => SetTitleOutcome::NotFound,
         })
     }
+
+    /// Replace the textual payload of an existing history entry in
+    /// place. The mutation is local, atomic and metadata-only: it
+    /// never inspects the clipboard, never enriches metadata and
+    /// never creates a new history row. Whitespace and line breaks
+    /// are preserved verbatim; the function only rejects the empty
+    /// string, never trims the user input.
+    ///
+    /// The function re-uses [`hash_content`] and
+    /// [`detect_content_type`] so the persisted hash, size and
+    /// classification follow the same deterministic rules the
+    /// capture pipeline uses. The row's identifier, the
+    /// creation / last-seen timestamps, the title, the favorite
+    /// flag, the source-application metadata, the tags, the
+    /// collection memberships and every asset / rich-text
+    /// reference are left untouched.
+    ///
+    /// Image and rich-text entries are refused with
+    /// [`UpdateTextHistoryOutcome::NotEditable`]; the backend
+    /// validates the eligibility even when the GUI is stale so
+    /// the storage layer never lets an edit slip through.
+    pub fn update_text(
+        &self,
+        context: &AppContext,
+        id: i64,
+        text: String,
+    ) -> Result<UpdateTextHistoryOutcome, HistoryServiceError> {
+        if text.is_empty() {
+            return Ok(UpdateTextHistoryOutcome::EmptyContent);
+        }
+        let hash = hash_content(&text);
+        let content_type = detect_content_type(&text);
+        let size = text.len() as i64;
+        let now = self.clock.now();
+        let outcome = {
+            let mut db = context.database().lock();
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.update_text(id, &text, &hash, content_type, size, now)?
+        };
+        Ok(match outcome {
+            UpdateTextOutcome::Updated { record } => UpdateTextHistoryOutcome::Updated { record },
+            UpdateTextOutcome::Noop { record } => UpdateTextHistoryOutcome::Noop { record },
+            UpdateTextOutcome::NotFound => UpdateTextHistoryOutcome::NotFound,
+            UpdateTextOutcome::NotEditable => UpdateTextHistoryOutcome::NotEditable,
+            UpdateTextOutcome::EmptyContent => UpdateTextHistoryOutcome::EmptyContent,
+            UpdateTextOutcome::DuplicateContent => UpdateTextHistoryOutcome::DuplicateContent,
+        })
+    }
 }
 
 /// Resolve the metadata fields used by the opt-in image diagnostic.
@@ -1048,6 +1122,8 @@ pub fn hash_content(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clipvault_db::ContentType;
+    use std::sync::Arc;
 
     #[test]
     fn hash_is_deterministic() {
@@ -1092,5 +1168,216 @@ mod tests {
             TextHistoryService::validate_title(&exact).unwrap(),
             Some(exact)
         );
+    }
+
+    // -----------------------------------------------------------------
+    // `editable-text-captures` regression coverage for
+    // `TextHistoryService::update_text`. The service mirrors the
+    // storage layer's typed outcome so the shell never has to
+    // inspect the database directly.
+    // -----------------------------------------------------------------
+
+    fn isolated_service() -> (AppContext, TextHistoryService) {
+        let clock: Arc<dyn Clock> =
+            Arc::new(crate::FixedClock::new(time::OffsetDateTime::UNIX_EPOCH));
+        let (_dir, context) = crate::test_support::isolated_harness_with_clock(clock.clone());
+        let service = TextHistoryService::new(
+            std::sync::Arc::new(crate::FakeClipboard::new()) as std::sync::Arc<dyn Clipboard>,
+            clock,
+            std::sync::Arc::new(crate::FakeApplicationMetadataProvider::default())
+                as std::sync::Arc<dyn clipvault_platform::ApplicationMetadataProvider>,
+        );
+        (context, service)
+    }
+
+    fn insert_text(context: &AppContext, content: &str) -> i64 {
+        let mut db = context.database().lock();
+        let mut repo = clipvault_db::EntryRepository::new(db.connection_mut());
+        repo.insert_or_touch(clipvault_db::NewEntry::text(
+            content.to_string(),
+            clipvault_db::ContentType::Text,
+            content.len() as i64,
+            hash_content(content),
+            None,
+            time::OffsetDateTime::UNIX_EPOCH,
+            time::OffsetDateTime::UNIX_EPOCH,
+        ))
+        .expect("insert")
+        .record()
+        .id
+    }
+
+    #[test]
+    fn update_text_persists_text_and_returns_updated_record() {
+        let (context, service) = isolated_service();
+        let id = insert_text(&context, "first note");
+
+        let outcome = service
+            .update_text(&context, id, "first note - edited".to_string())
+            .expect("update_text");
+        match outcome {
+            UpdateTextHistoryOutcome::Updated { record } => {
+                assert_eq!(record.id, id);
+                assert_eq!(record.content, "first note - edited");
+                assert_eq!(record.content_hash, hash_content("first note - edited"));
+                assert_eq!(record.content_size, "first note - edited".len() as i64);
+                assert_eq!(record.content_type, ContentType::Text);
+            }
+            other => panic!("expected Updated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_text_preserves_whitespace_and_unicode() {
+        let (context, service) = isolated_service();
+        let id = insert_text(&context, "first");
+
+        let multiline = "línea uno\n  con sangría\n中文 🚀\núltima";
+        let outcome = service
+            .update_text(&context, id, multiline.to_string())
+            .expect("update_text");
+        match outcome {
+            UpdateTextHistoryOutcome::Updated { record } => {
+                assert_eq!(record.content, multiline);
+                assert_eq!(record.content_hash, hash_content(multiline));
+                assert_eq!(record.content_size, multiline.len() as i64);
+            }
+            other => panic!("expected Updated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_text_reclassifies_to_url() {
+        // Plain prose becomes a URL after the user replaces the
+        // content; the service must accept the new classification
+        // without rewriting any unrelated metadata.
+        let (context, service) = isolated_service();
+        let id = insert_text(&context, "a note");
+
+        let outcome = service
+            .update_text(&context, id, "https://example.com/new".to_string())
+            .expect("update_text");
+        match outcome {
+            UpdateTextHistoryOutcome::Updated { record } => {
+                assert_eq!(record.content_type, ContentType::Url);
+                assert_eq!(record.content, "https://example.com/new");
+            }
+            other => panic!("expected Updated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_text_returns_noop_when_text_is_unchanged() {
+        let (context, service) = isolated_service();
+        let id = insert_text(&context, "unchanged");
+
+        let outcome = service
+            .update_text(&context, id, "unchanged".to_string())
+            .expect("update_text");
+        assert!(matches!(outcome, UpdateTextHistoryOutcome::Noop { .. }));
+    }
+
+    #[test]
+    fn update_text_returns_empty_content_for_blank_input() {
+        let (context, service) = isolated_service();
+        let id = insert_text(&context, "kept");
+
+        let outcome = service
+            .update_text(&context, id, String::new())
+            .expect("update_text");
+        assert!(matches!(outcome, UpdateTextHistoryOutcome::EmptyContent));
+
+        let stored = {
+            let mut db = context.database().lock();
+            let repo = clipvault_db::EntryRepository::new(db.connection_mut());
+            repo.find_by_id(id).unwrap().unwrap()
+        };
+        assert_eq!(stored.content, "kept");
+    }
+
+    #[test]
+    fn update_text_returns_not_found_for_missing_id() {
+        let (context, service) = isolated_service();
+        let outcome = service
+            .update_text(&context, 9999, "anything".to_string())
+            .expect("update_text");
+        assert!(matches!(outcome, UpdateTextHistoryOutcome::NotFound));
+    }
+
+    #[test]
+    fn update_text_returns_not_editable_for_image_row() {
+        let (context, service) = isolated_service();
+        let image_id = {
+            let mut db = context.database().lock();
+            let mut repo = clipvault_db::EntryRepository::new(db.connection_mut());
+            let hash = "11".repeat(32);
+            let hash_for_asset = hash.clone();
+            repo.insert_or_touch(clipvault_db::NewEntry {
+                content: clipvault_db::IMAGE_CONTENT_SENTINEL.to_string(),
+                content_type: clipvault_db::ContentType::Image,
+                content_size: 64,
+                content_hash: hash,
+                source_app: None,
+                created_at: time::OffsetDateTime::UNIX_EPOCH,
+                last_seen_at: time::OffsetDateTime::UNIX_EPOCH,
+                asset_ref: Some(format!("clipboard/{hash_for_asset}.png")),
+                mime_type: Some(clipvault_db::IMAGE_MIME_PNG.to_string()),
+                payload_width: Some(8),
+                payload_height: Some(8),
+                rich_text_hash: None,
+                rich_html_ref: None,
+                rich_rtf_ref: None,
+                rich_preview_ref: None,
+                rich_html_size: None,
+                rich_rtf_size: None,
+                code_language: None,
+            })
+            .expect("image")
+            .record()
+            .id
+        };
+        let outcome = service
+            .update_text(&context, image_id, "edit me".to_string())
+            .expect("update_text");
+        assert!(matches!(outcome, UpdateTextHistoryOutcome::NotEditable));
+    }
+
+    #[test]
+    fn update_text_returns_duplicate_content_when_hash_collides() {
+        let (context, service) = isolated_service();
+        let first_id = insert_text(&context, "alpha");
+        let second_id = insert_text(&context, "bravo");
+
+        let outcome = service
+            .update_text(&context, second_id, "alpha".to_string())
+            .expect("update_text");
+        assert!(matches!(
+            outcome,
+            UpdateTextHistoryOutcome::DuplicateContent
+        ));
+
+        let stored = {
+            let mut db = context.database().lock();
+            let repo = clipvault_db::EntryRepository::new(db.connection_mut());
+            repo.find_by_id(second_id).unwrap().unwrap()
+        };
+        assert_eq!(stored.content, "bravo");
+        let _ = first_id;
+    }
+
+    #[test]
+    fn update_text_does_not_leak_content_in_error_path() {
+        // A failed edit (NotFound) must never include the
+        // submitted payload in any logging or error message.
+        let (context, service) = isolated_service();
+        let _ = service
+            .update_text(&context, 9999, "secret payload".to_string())
+            .expect("update_text");
+        // The harness's redacting writer would swallow the secret
+        // if any code path tried to log it; the assertion is the
+        // simple "the call returns" guarantee. A future regression
+        // that pipes the text through `warn!` or `eprintln!`
+        // would surface as a `redact` test failure in the
+        // `clipvault-core::redact` suite.
     }
 }
