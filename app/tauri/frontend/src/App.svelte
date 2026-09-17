@@ -83,6 +83,13 @@
     matchesPreviewShortcut,
     previewShortcutPlatform,
   } from "./lib/clipboardPreview";
+  import {
+    editTextShortcutPlatform,
+    matchesEditTextShortcut,
+    resolveEditTextShortcutEntryId as resolveEditTextShortcutTargetId,
+    type EditTextShortcutPlatform,
+  } from "./lib/editTextShortcut";
+  import { isEditableTextEntry } from "./types";
   import { visualTokenCss } from "./lib/visualTokens";
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
   import HistoryCardRail from "./HistoryCardRail.svelte";
@@ -150,10 +157,22 @@
    */
   let shortcutPlatform: ReturnType<typeof searchShortcutPlatform> =
     "other";
+  /**
+   * Platform the shared edit-text shortcut listener matches against.
+   * The desktop shell owns the platform resolution (the per-card
+   * matcher cannot read the diagnostics payload directly) so the
+   * listener, the menu hint and the `aria-keyshortcuts` attribute all
+   * consult the same value.
+   */
+  let editTextShortcut: EditTextShortcutPlatform = "other";
   let pendingConfirmation:
     | { kind: "delete"; id: number; label: string }
     | { kind: "clear"; count: number }
     | null = null;
+  let nonEditableTextNotice: {
+    contentType: EntryRecord["content_type"];
+  } | null = null;
+  let nonEditableTextNoticeReturnFocus: HTMLElement | null = null;
   let openModal: ModalId = null;
   let modalReturnFocus: HTMLElement | null = null;
   /**
@@ -300,6 +319,9 @@
   $: isFiltering = searchQuery.trim().length > 0;
   $: if (diagnostics) {
     shortcutPlatform = searchShortcutPlatform(diagnostics.platform_os);
+  }
+  $: if (diagnostics) {
+    editTextShortcut = editTextShortcutPlatform(diagnostics.platform_os);
   }
   $: searchShortcutLabelText = searchShortcutLabel(shortcutPlatform);
   $: searchShortcutAccessibleText =
@@ -1241,7 +1263,124 @@
           ? document.activeElement
           : null;
       requestPreview(targetEntry, focusTarget);
+      return;
     }
+    // Desktop-level `Cmd/Ctrl+E` matcher. The shortcut opens the
+    // existing text editor for the card the user either focused (DOM
+    // active element walks to a `[data-testid="history-card"]`
+    // ancestor) or selected through the rail (`railSelectedEntryId`).
+    // The matcher is delegated to `matchesEditTextShortcut` so the
+    // modifier table stays in lockstep with the per-card fallback
+    // matcher the previous change installs and with the menu hint
+    // `HistoryCard.svelte` renders.
+    if (matchesEditTextShortcut(event, editTextShortcut)) {
+      if (
+        openModal !== null ||
+        guidance !== null ||
+        nonEditableTextNotice !== null
+      ) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        // Typing surfaces keep focus and the typed character; the
+        // shortcut MUST NOT steal them.
+        return;
+      }
+      if (target instanceof HTMLElement) {
+        // The shortcut MUST NOT fire when the focus is inside a
+        // menu, the title editor, a tag / collection selector, a
+        // chip row or a confirmation dialog. The card-level handler
+        // already guards against these targets; the document-level
+        // listener mirrors the check so the rail-wide keyboard
+        // matcher behaves the same.
+        if (
+          target.closest("[role='menu']") ||
+          target.closest("[role='menuitem']") ||
+          target.closest(".menu") ||
+          target.closest(".title-input") ||
+          target.closest(".collection-chips") ||
+          target.closest("[role='dialog']") ||
+          target.closest("[data-testid='confirm-dialog']")
+        ) {
+          return;
+        }
+      }
+      const targetEntryId = resolveEditTextShortcutEntryId(target);
+      if (targetEntryId === null) return;
+      const targetEntry = visibleEntries.find(
+        (entry) => entry.id === targetEntryId,
+      ) ?? entries.find((entry) => entry.id === targetEntryId);
+      if (!targetEntry) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!isEditableTextEntry(targetEntry)) {
+        nonEditableTextNoticeReturnFocus = findHistoryCardElement(targetEntryId);
+        nonEditableTextNotice = {
+          contentType: targetEntry.content_type,
+        };
+        return;
+      }
+      document.dispatchEvent(
+        new CustomEvent("clipvault:edit-text-shortcut", {
+          detail: { entryId: targetEntryId },
+        }),
+      );
+    }
+  }
+
+  /**
+   * Resolve the entry id the edit-text shortcut should target. The
+   * rail-owned selection is authoritative after a pointer selection:
+   * browser focus can remain on the card that previously opened the
+   * editor, so using focus first would reopen the stale capture. When
+   * there is no selection, the focused card remains a keyboard-friendly
+   * fallback for users that tab directly into a card.
+   */
+  function resolveEditTextShortcutEntryId(
+    target: EventTarget | null,
+  ): number | null {
+    let focusedCardEntryId: number | null = null;
+    if (target instanceof HTMLElement) {
+      const cardEl = target.closest('[data-testid="history-card"]');
+      if (cardEl) {
+        const raw = cardEl.getAttribute("data-entry-id");
+        if (raw !== null) {
+          const parsed = Number.parseInt(raw, 10);
+          if (Number.isFinite(parsed)) focusedCardEntryId = parsed;
+        }
+      }
+    }
+    return resolveEditTextShortcutTargetId(
+      railSelectedEntryId,
+      focusedCardEntryId,
+    );
+  }
+
+  function findHistoryCardElement(entryId: number): HTMLElement | null {
+    const cards = document.querySelectorAll<HTMLElement>(
+      '[data-testid="history-card"]',
+    );
+    return (
+      Array.from(cards).find(
+        (card) => card.getAttribute("data-entry-id") === String(entryId),
+      ) ?? null
+    );
+  }
+
+  function closeNonEditableTextNotice(): void {
+    const returnFocusTo = nonEditableTextNoticeReturnFocus;
+    nonEditableTextNotice = null;
+    queueMicrotask(() => {
+      if (returnFocusTo && document.contains(returnFocusTo)) {
+        returnFocusTo.focus();
+      }
+      nonEditableTextNoticeReturnFocus = null;
+    });
   }
 
   let detachSearchShortcut: (() => void) | null = null;
@@ -1711,6 +1850,32 @@
   testIdPrefix="history-card-preview"
   onClose={closePreview}
 />
+
+<Modal
+  open={nonEditableTextNotice !== null}
+  titleId="non-editable-text-notice-title"
+  title="Captura no editable"
+  returnFocusTo={nonEditableTextNoticeReturnFocus}
+  onClose={closeNonEditableTextNotice}
+>
+  <p data-testid="non-editable-text-notice-message">
+    {#if nonEditableTextNotice?.contentType === "image"}
+      Esta captura es una imagen y no se puede editar.
+    {:else}
+      Esta captura es texto enriquecido y no se puede editar.
+    {/if}
+  </p>
+  <div class="row">
+    <button
+      type="button"
+      class="primary"
+      data-testid="non-editable-text-notice-close"
+      on:click={closeNonEditableTextNotice}
+    >
+      Cerrar
+    </button>
+  </div>
+</Modal>
 
 {#if pendingConfirmation}
   {@const confirmation = pendingConfirmation}

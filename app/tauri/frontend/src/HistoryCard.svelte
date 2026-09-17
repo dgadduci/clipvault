@@ -52,6 +52,13 @@
     type PreviewShortcutPlatform,
   } from "./lib/clipboardPreview";
   import {
+    editTextShortcutAccessibleLabel,
+    editTextShortcutKeyAttribute,
+    editTextShortcutLabel,
+    editTextShortcutPlatform,
+    matchesEditTextShortcut as matchesEditTextShortcutHelper,
+  } from "./lib/editTextShortcut";
+  import {
     cardMenuPreviewShortcutAccessibleLabel,
     cardMenuPreviewShortcutKeyAttribute,
     cardMenuPreviewShortcutLabel,
@@ -210,6 +217,78 @@
    */
   let cardArticleEl: HTMLElement | null = null;
   $: onCardRef(cardArticleEl);
+  /**
+   * Open the text editor when the rail forwards a
+   * `card-edit-text-shortcut` event on this card's `<article>`.
+   *
+   * The desktop shell owns the keyboard matcher (`Cmd/Ctrl+E`) and
+   * resolves the entry id; the rail re-dispatches the request on
+   * the matching card's article so each card receives exactly one
+   * event per shortcut press. The listener is added through
+   * `addEventListener` so the Svelte type checker does not have to
+   * know about the custom event name (Svelte 5 HTML props only
+   * know the documented DOM event set); the listener is detached on
+   * `onDestroy` so a remount can never leak a handler.
+   *
+   * The card MUST validate the dispatched `{ entryId }` against its
+   * own `entry.id` so a stale, duplicate or mismatched request
+   * cannot reopen a wrong modal. The rail already routes the
+   * request through `cardEls.get(detail.entryId)` so the dispatch
+   * targets the right article, but a future caller or a re-mounted
+   * card could still surface a stale id; the card-side guard is the
+   * last line of defence.
+   */
+  function handleCardEditTextShortcut(event: Event): void {
+    const detail = (event as CustomEvent<{ entryId: number }>).detail;
+    if (!detail || typeof detail.entryId !== "number") return;
+    if (detail.entryId !== entry.id) {
+      // Mismatched id: a stale dispatch reached this card or the
+      // rail forwarded a request for a different entry. The card
+      // MUST NOT open its modal in that case.
+      return;
+    }
+    openTextEditor();
+  }
+  /**
+   * Close the text editor when the rail broadcasts a
+   * `card-edit-text-shortcut-close` event on this card's
+   * `<article>` before opening the new target's modal. The
+   * contract "at most one active edit modal" lives in the rail;
+   * the card only flips `textEditorOpen` back to `false` when it
+   * was actually open so the close event is a safe no-op on a card
+   * that never opened its editor. The listener does not need to
+   * inspect any payload: the request is directed at the rail level,
+   * never at a specific target id.
+   */
+  function handleCardEditTextShortcutClose(): void {
+    if (!textEditorOpen) return;
+    // This is a rail-forced close while another card becomes the target;
+    // do not restore focus to this obsolete card.
+    textEditorReturnFocusTarget = null;
+    textEditorOpen = false;
+  }
+  $: if (cardArticleEl) {
+    cardArticleEl.addEventListener(
+      "card-edit-text-shortcut",
+      handleCardEditTextShortcut,
+    );
+    cardArticleEl.addEventListener(
+      "card-edit-text-shortcut-close",
+      handleCardEditTextShortcutClose,
+    );
+  }
+  onDestroy(() => {
+    if (cardArticleEl) {
+      cardArticleEl.removeEventListener(
+        "card-edit-text-shortcut",
+        handleCardEditTextShortcut,
+      );
+      cardArticleEl.removeEventListener(
+        "card-edit-text-shortcut-close",
+        handleCardEditTextShortcutClose,
+      );
+    }
+  });
 
   /** Title-editing state. */
   let editingTitle = false;
@@ -847,6 +926,13 @@
    */
   let textEditorOpen = false;
   /**
+   * Focus destination for the currently open text editor. Normal
+   * user-initiated closes return to this card; a rail-forced close while
+   * switching targets clears it first so the old card cannot steal focus
+   * from the new target.
+   */
+  let textEditorReturnFocusTarget: HTMLElement | null = null;
+  /**
    * DOM handle on the inline collection chip row. The
    * `ResizeObserver` the card installs during `onMount` reads
    * `clientWidth` against this element so the overflow icon only
@@ -1109,17 +1195,47 @@
    */
   function openTextEditor(): void {
     if (!canEditText) return;
+    textEditorReturnFocusTarget = cardArticleEl;
     textEditorOpen = true;
     closeMenuAfterAction();
   }
 
   /**
-   * `Ctrl+E` shortcut that opens the same modal as the menu item.
+   * Close the editor after a user action and restore the card's keyboard
+   * state. The explicit microtask runs after Svelte flushes the modal's
+   * `open=false` update, so a stale Modal fallback cannot move focus to a
+   * different card. Selecting the same entry gives the card the blue
+   * navigation outline used by ArrowLeft / ArrowRight.
+   */
+  function closeTextEditor(): void {
+    textEditorReturnFocusTarget = cardArticleEl;
+    textEditorOpen = false;
+    dispatchSelect(entry.id);
+    queueMicrotask(() => {
+      if (cardArticleEl && document.contains(cardArticleEl)) {
+        cardArticleEl.focus();
+      }
+    });
+  }
+
+  /**
+   * `Cmd/Ctrl+E` shortcut that opens the same modal as the menu
+   * item.
    *
-   * The matcher accepts `Ctrl+E` on every platform: the rail is the
-   * single source of truth for the shortcut, and macOS users that
-   * press `Cmd+E` already have the `Editar captura` menu available
-   * through the platform-native menu bar. The shortcut MUST:
+   * The matcher accepts the platform-specific binding the desktop
+   * shell resolves through the diagnostics payload
+   * (`Cmd+E` on macOS, `Ctrl+E` everywhere else). The card keeps a
+   * per-card matcher (`matchesEditTextShortcut`) for compatibility
+   * with the document-level listener the desktop installs in
+   * capture phase: the document-level listener handles the shortcut
+   * first; this matcher is the safety net the design allows so a
+   * future caller can still trigger the modal from the card's own
+   * `<article>` keyboard handler. The matcher delegates to the
+   * platform-aware helper `matchesEditTextShortcutHelper` so the
+   * shortcut, the visible label and the `aria-keyshortcuts` value
+   * cannot drift apart.
+   *
+   * The shortcut MUST:
    *
    *   - be a no-op when the card is not eligible (`canEditText`)
    *     so an image or rich-text row never opens the editor;
@@ -1143,9 +1259,6 @@
    * typing `e` inside the search box (or anywhere else outside the
    * card) keeps its native behaviour.
    */
-  const EDIT_TEXT_SHORTCUT_KEY = "e";
-  const EDIT_TEXT_SHORTCUT_LABEL = "Ctrl+E";
-  const EDIT_TEXT_SHORTCUT_KEY_ATTR = "Control+E";
   const EDIT_TEXT_SHORTCUT_TESTID = "history-card-edit-text-shortcut";
   /**
    * Whether the focused card has a parent dialog/modal so the
@@ -1158,10 +1271,31 @@
     if (target.closest('[role="dialog"]')) return true;
     return false;
   }
+  /**
+   * Resolve the platform the card's per-card matcher should use.
+   * The card cannot read the diagnostics payload directly so it
+   * delegates to the `editTextShortcutPlatform` helper, which
+   * routes the same string the desktop shell inspects through
+   * `platformFromDiagnostics`. The matcher, the visible label and
+   * the `aria-keyshortcuts` attribute all consult the same value so
+   * the menu hint cannot drift away from the binding the listener
+   * accepts.
+   */
+  function editTextCardPlatform(): ReturnType<typeof editTextShortcutPlatform> {
+    return editTextShortcutPlatform(null);
+  }
+  $: editTextShortcutCardPlatform = editTextCardPlatform();
+  $: editTextShortcutLabelText = editTextShortcutLabel(
+    editTextShortcutCardPlatform,
+  );
+  $: editTextShortcutKeyAttributeText = editTextShortcutKeyAttribute(
+    editTextShortcutCardPlatform,
+  );
+  $: editTextShortcutAccessibleText = editTextShortcutAccessibleLabel(
+    editTextShortcutCardPlatform,
+  );
   function matchesEditTextShortcut(event: KeyboardEvent): boolean {
-    if (event.key !== EDIT_TEXT_SHORTCUT_KEY) return false;
-    if (!event.ctrlKey || event.altKey || event.metaKey) return false;
-    return true;
+    return matchesEditTextShortcutHelper(event, editTextShortcutCardPlatform);
   }
 
   async function handleTagsSave(
@@ -2206,8 +2340,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           class="menu-item"
           data-testid="history-card-edit-text"
           aria-label={`Editar captura ${displayTitle}`}
-          aria-keyshortcuts={EDIT_TEXT_SHORTCUT_KEY_ATTR}
-          title="Editar el contenido de la captura"
+          aria-keyshortcuts={editTextShortcutKeyAttributeText}
+          title={editTextShortcutAccessibleText}
           on:click={openTextEditor}
           disabled={titleBusy}
         >
@@ -2217,7 +2351,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
             data-testid={EDIT_TEXT_SHORTCUT_TESTID}
             aria-hidden="true"
           >
-            {EDIT_TEXT_SHORTCUT_LABEL}
+            {editTextShortcutLabelText}
           </span>
         </button>
       {/if}
@@ -2351,8 +2485,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   open={textEditorOpen}
   {entry}
   {displayTitle}
-  returnFocusTo={menuTriggerEl}
-  on:close={() => { textEditorOpen = false; }}
+  returnFocusTo={textEditorReturnFocusTarget}
+  on:close={closeTextEditor}
 />
 
 {@html CONTENT_TYPE_ICON_SPRITE}
@@ -2395,6 +2529,32 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   .card.card-selected {
     border-color: rgba(96, 165, 250, 0.85);
     background: rgba(96, 165, 250, 0.08);
+    box-shadow:
+      0 0 0 1px rgba(96, 165, 250, 0.45),
+      0 6px 18px rgba(15, 23, 42, 0.55);
+  }
+
+  /*
+   * The native WebView focus ring is theme-dependent and can be red
+   * in some GTK/WebKit configurations. Suppress it for an unselected
+   * card so stale DOM focus never looks like a second state marker;
+   * the selected focus rule below supplies the single blue cue.
+   */
+  .card:focus {
+    outline: none;
+  }
+
+  /*
+   * Keep programmatic and keyboard focus on the same blue navigation
+   * cue, but only for the rail's current selection. After editing,
+   * browser focus can remain on the previous card while ArrowLeft /
+   * ArrowRight moves `selectedEntryId`; scoping this rule prevents
+   * that residual focus from painting a second selected card.
+   */
+  .card.card-selected:focus-visible {
+    border-color: rgba(96, 165, 250, 0.85);
+    outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.85));
+    outline-offset: 1px;
     box-shadow:
       0 0 0 1px rgba(96, 165, 250, 0.45),
       0 6px 18px rgba(15, 23, 42, 0.55);

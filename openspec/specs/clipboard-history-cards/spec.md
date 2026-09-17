@@ -827,3 +827,223 @@ that opens a read-only modal containing every assigned collection, including
 - **WHEN** an association cannot be hydrated or a legacy color is invalid
 - **THEN** the card remains rendered with a safe visual fallback
 - **AND** the card does not expose raw IDs, paths, hashes or clipboard content
+
+### Requirement: Open the text editor from an eligible card
+
+Each eligible textual history card SHALL expose an accessible `Editar captura`
+action through its existing card menu. Image and rich-text cards SHALL NOT
+expose this action. Opening the editor SHALL not select the card or start a
+drag operation.
+
+#### Scenario: Open editor from the card menu
+
+- **WHEN** the user opens the menu of an eligible text card and chooses
+  `Editar captura`
+- **THEN** a modal opens with the current content loaded into a native
+  `textarea`
+- **AND** focus moves to the editor
+- **AND** the card keeps its fixed geometry and existing actions
+
+#### Scenario: Edit modal is accessible and cancellable
+
+- **WHEN** the text editor modal is open
+- **THEN** it has an accessible title, labelled editor, Guardar and Cancelar
+  controls, visible validation errors and a single submit path
+- **AND** Escape, backdrop, close button or Cancelar closes it without saving
+- **AND** focus returns to the menu trigger
+
+#### Scenario: Successful card edit refreshes the card
+
+- **WHEN** the user saves valid text
+- **THEN** the card renders the updated preview and metadata returned by the
+  backend
+- **AND** tags, collections, title, favorite state and source-app presentation
+  remain unchanged
+- **AND** the updated entry is available to search and Quick Paste
+
+#### Scenario: Editor controls do not affect card interactions
+
+- **WHEN** the user types, selects text, presses a key or clicks inside the
+  editor
+- **THEN** the card surface does not change selection and the drag controller
+  does not start
+- **AND** the protected card attributes and opaque drag payload remain intact
+
+#### Scenario: Reopen the editor on the same card after closing
+
+- **WHEN** the user closes the editor through Guardar, Cancelar, Escape,
+  backdrop or the close button
+- **AND** then reopens `Editar captura` on the same card
+- **THEN** the modal opens with a draft re-seeded from the persisted entry
+- **AND** focus moves into the editor and returns to the menu trigger when the
+  modal closes again
+- **AND** the open / close / open cycle does not require re-mounting the card
+
+### Requirement: Identify the capture in the editor and expose its shortcut
+
+The text editor modal SHALL use the card's resolved capture title as its
+visible dialog title, including the existing fallback when the capture has no
+custom title. It SHALL NOT show the generic `Editar captura` as the dialog
+title or the existing explanatory summary below the editor. An eligible text
+card SHALL support `Ctrl+E` as a card-level shortcut and SHALL show `Ctrl+E`
+next to the `Editar captura` menu action.
+
+#### Scenario: Editor title is the capture title
+
+- **WHEN** the user opens the text editor for a capture with resolved title
+  `Mi captura`
+- **THEN** the dialog heading is `Mi captura`
+- **AND** the editor remains associated with that heading through
+  `aria-labelledby`
+- **AND** the removed explanatory summary is not rendered
+
+#### Scenario: Ctrl+E opens editing for an eligible card
+
+- **WHEN** an eligible text card has keyboard focus and the user presses
+  `Ctrl+E`
+- **THEN** the editor opens with the current capture content
+- **AND** the card/menu interaction is not treated as a drag
+- **AND** the `Editar captura` menu action visibly presents `Ctrl+E` and
+  exposes `aria-keyshortcuts="Control+E"`
+
+#### Scenario: Ctrl+E is ignored in ineligible or interactive contexts
+
+- **WHEN** the focused card is an image/rich-text card, or the event target is
+  an input, textarea, select, button, menu, contenteditable element or the
+  editor modal
+- **THEN** `Ctrl+E` does not open the text editor and does not interfere with
+  the focused control's normal behavior
+
+### Requirement: Open text editing with the platform shortcut
+
+An eligible textual history card SHALL open the existing text editor through
+`Ctrl+E` on Linux, including Wayland and X11, and through `Cmd+E` on macOS.
+The shortcut SHALL work when the eligible card is focused and when the rail's
+current selection identifies the eligible card without requiring the card's
+`article` element to receive the event directly.
+
+#### Scenario: Linux opens editing with Ctrl+E
+
+- **WHEN** an eligible text capture is focused or selected in the desktop rail
+  on Linux
+- **AND** the user presses `Ctrl+E`
+- **THEN** the existing `EntryTextEditorModal` opens for that capture
+- **AND** the current persisted content is loaded into the editor
+- **AND** the shortcut is consumed exactly once
+
+#### Scenario: macOS opens editing with Cmd+E
+
+- **WHEN** an eligible text capture is focused or selected in the desktop rail
+  on macOS
+- **AND** the user presses `Cmd+E`
+- **THEN** the existing `EntryTextEditorModal` opens for that capture
+- **AND** the current persisted content is loaded into the editor
+- **AND** the shortcut is consumed exactly once
+
+#### Scenario: Menu hint matches the platform
+
+- **WHEN** the `Editar captura` action is rendered for an eligible capture
+- **THEN** Linux displays `Ctrl+E` and exposes `aria-keyshortcuts="Control+E"`
+- **AND** macOS displays `⌘E` and exposes `aria-keyshortcuts="Meta+E"`
+- **AND** both labels and the matcher use the same platform resolution
+
+#### Scenario: Shortcut does not steal interactive input
+
+- **WHEN** the event target is an input, textarea, select, contenteditable,
+  button, menu, menuitem, title editor, selector, chip, dialog or another
+  protected interactive control
+- **THEN** the editor does not open
+- **AND** the event's normal behavior is preserved
+- **AND** no card selection or drag operation is started
+
+#### Scenario: Ineligible entries show an informational notice
+
+- **WHEN** the focused or selected entry is an image/rich-text capture
+- **AND** the user presses the valid platform edit shortcut
+- **THEN** the text editor does not open
+- **AND** the shortcut is consumed so a stale card-level handler cannot open
+  the last edited capture
+- **AND** an informational dialog tells the user that this capture is not
+  editable
+- **AND** closing the dialog does not issue a backend command or mutate the
+  capture
+
+#### Scenario: Invalid modifiers and missing targets are ignored
+
+- **WHEN** no eligible entry is selected, or the user presses the wrong
+  platform modifier, `Alt`, or `Shift`
+- **THEN** the text editor does not open
+- **AND** no backend command or state mutation is issued
+
+#### Scenario: Existing card and drag baselines remain intact
+
+- **WHEN** the shortcut listener is mounted, used, unmounted and mounted again
+- **THEN** only one shared listener handles the shortcut
+- **AND** `data-testid="history-card"`, `data-entry-id`,
+  `draggable="false"`, pointer capture, mouse fallback, cancellation and the
+  opaque ID-only drag payload remain unchanged
+
+### Requirement: Route each shortcut to the requested capture
+
+The edit shortcut SHALL preserve the identity of the requested entry from the
+desktop listener through the rail and into `EntryTextEditorModal`. A later
+shortcut for another eligible capture SHALL never reuse the first capture's
+entry, title, draft or baseline.
+
+#### Scenario: Switching from capture A to capture B
+
+- **WHEN** the user opens editing for eligible capture A with the platform
+  shortcut, closes or replaces that editor, selects eligible capture B and
+  invokes the platform shortcut again
+- **THEN** the modal is bound to capture B's `entry.id`
+- **AND** its title, draft and baseline content come from B
+- **AND** saving updates B only
+- **AND** capture A's content and modal state are not reused
+
+#### Scenario: A shortcut request carries an exact target identity
+
+- **WHEN** the shared listener emits a shortcut request with `entryId`
+- **THEN** the rail forwards it only to the mounted card with the same
+  `data-entry-id`
+- **AND** the receiving card validates the ID before opening its modal
+- **AND** an absent, stale or mismatched ID is ignored
+- **AND** the request contains no capture content or other sensitive payload
+
+#### Scenario: Current selection wins over stale card focus
+
+- **WHEN** the DOM focus remains on capture A after its editor was closed, but
+  the rail's current selection is capture B
+- **AND** the user invokes the platform edit shortcut
+- **THEN** the shortcut request targets B
+- **AND** the focused-card fallback for A is not used while a current rail
+  selection exists
+
+#### Scenario: Repeated target changes reset editor state
+
+- **WHEN** the target changes from one entry to another while the editor flow
+  is being reopened or replaced
+- **THEN** `draft`, `baselineEntry`, accessible title IDs and return-focus
+  target correspond to the new entry
+- **AND** no text from the previous entry is submitted for the new target
+- **AND** at most one text editor modal remains active
+
+#### Scenario: Closing the editor restores focus to the current card
+
+- **WHEN** the user closes, cancels, escapes from, or completes editing a
+  textual capture
+- **THEN** focus returns to the `<article>` of the card for that same capture
+- **AND** the rail selection identifies that same capture
+- **AND** the card uses the blue keyboard-navigation outline rather than a
+  focus/error style from another card
+- **AND** the card remains keyboard-focusable for the next interaction
+
+#### Scenario: A stale focus does not create a second selected card
+
+- **WHEN** the editor closes and focus returns to card A
+- **AND** the user changes the rail selection to card B with `ArrowLeft` or
+  `ArrowRight`
+- **THEN** only card B is visually marked as the current selection
+- **AND** card A loses the blue keyboard-navigation outline even if its DOM
+  element still retains focus
+- **AND** the WebView's native focus ring does not replace that outline with a
+  second red or otherwise non-selection marker

@@ -481,8 +481,28 @@ test("card listens to the close dispatcher and owns the textEditorOpen flag", ()
   const body = modalMount?.[0] ?? "";
   assert.match(
     body,
-    /on:close=\{[^}]*textEditorOpen\s*=\s*false[^}]*\}/,
-    "the card must wire on:close to textEditorOpen = false",
+    /on:close=\{closeTextEditor\}/,
+    "the card must route editor close through its focus-restoring handler",
+  );
+  assert.match(
+    cardSource,
+    /function closeTextEditor\(\):\s*void\s*\{[\s\S]*?dispatchSelect\(entry\.id\)[\s\S]*?cardArticleEl\.focus\(\)/,
+    "closing the editor must select and refocus the edited card",
+  );
+  assert.match(
+    cardSource,
+    /\.card\.card-selected:focus-visible\s*\{[\s\S]*?outline:\s*2px\s+solid\s+var\(--cv-focus-ring/,
+    "only the selected focused card must use the blue keyboard-navigation cue",
+  );
+  assert.doesNotMatch(
+    cardSource,
+    /\.card:focus-visible\s*\{/,
+    "an unscoped focus rule must not leave a stale edited card highlighted after selection changes",
+  );
+  assert.match(
+    cardSource,
+    /\.card:focus\s*\{[\s\S]*?outline:\s*none/,
+    "the native focus ring must not create a second non-blue marker on an unselected card",
   );
   assert.doesNotMatch(
     body,
@@ -578,12 +598,17 @@ test("modal preserves accessibility, focus return and the busy lock across cycle
   assert.match(
     modalSource,
     /returnFocusTo/,
-    "the modal must keep `returnFocusTo` so focus returns to the menu trigger",
+    "the modal must keep `returnFocusTo` so focus returns to the card",
   );
   assert.match(
     cardSource,
-    /returnFocusTo=\{menuTriggerEl\}/,
-    "HistoryCard must forward the menu trigger as returnFocusTo",
+    /returnFocusTo=\{textEditorReturnFocusTarget\}/,
+    "HistoryCard must forward the controlled focus target to the editor",
+  );
+  assert.match(
+    cardSource,
+    /textEditorReturnFocusTarget\s*=\s*cardArticleEl/,
+    "the controlled focus target must resolve to the current card",
   );
   assert.match(
     modalSource,
@@ -782,11 +807,15 @@ test("modal keeps aria-labelledby, textarea label and accessible error surface",
   );
 });
 
-test("card menu item exposes Ctrl+E alongside Editar captura with aria-keyshortcuts", () => {
+test("card menu item exposes the platform-aware shortcut hint with aria-keyshortcuts", () => {
   // The shortcut hint must live inside the menu item block (so it
   // is part of the same click target as the action) and must carry
   // the documented testid / aria attribute pair so screen readers
-  // announce the keyboard shortcut.
+  // announce the keyboard shortcut. The visible label and the
+  // `aria-keyshortcuts` value are now platform-aware (the previous
+  // change pinned a Linux-only literal) and routed through the
+  // shared `editTextShortcut*` helpers so the matcher, the visible
+  // hint and the accessible attribute cannot drift apart.
   const itemMatch = cardSource.match(
     /<button\s[\s\S]*?data-testid="history-card-edit-text"[\s\S]*?<\/button>/,
   );
@@ -794,8 +823,8 @@ test("card menu item exposes Ctrl+E alongside Editar captura with aria-keyshortc
   const itemBody = itemMatch?.[0] ?? "";
   assert.match(
     itemBody,
-    /aria-keyshortcuts=\{EDIT_TEXT_SHORTCUT_KEY_ATTR\}/,
-    "the menu item must expose aria-keyshortcuts bound to the Ctrl+E constant",
+    /aria-keyshortcuts=\{editTextShortcutKeyAttributeText\}/,
+    "the menu item must expose aria-keyshortcuts bound to the platform-aware helper",
   );
   // The shortcut testid is bound to a constant so the visible
   // affordance and the aria attribute cannot drift.
@@ -804,27 +833,26 @@ test("card menu item exposes Ctrl+E alongside Editar captura with aria-keyshortc
     /data-testid=\{EDIT_TEXT_SHORTCUT_TESTID\}/,
     "the menu item must bind data-testid to the shortcut testid constant",
   );
-  // The hint copy must read the `EDIT_TEXT_SHORTCUT_LABEL` constant
-  // so the visual affordance and the aria attribute agree.
-  const shortcutSpan = cardSource.match(
-    /EDIT_TEXT_SHORTCUT_TESTID[\s\S]*?\{EDIT_TEXT_SHORTCUT_LABEL\}/,
-  );
-  assert.notEqual(
-    shortcutSpan,
-    null,
-    "the shortcut hint must render the EDIT_TEXT_SHORTCUT_LABEL constant",
-  );
-  // The `Ctrl+E` literal must be defined as a constant so the
-  // visible copy and the aria attribute cannot drift.
+  // The hint copy must render through the platform-aware
+  // `editTextShortcutLabelText` value so the visible affordance
+  // and the matcher agree on every host.
   assert.match(
+    itemBody,
+    /\{editTextShortcutLabelText\}/,
+    "the shortcut hint must render through the platform-aware label value",
+  );
+  // The card must NOT carry a Linux-only literal any more: the
+  // `Ctrl+E` / `Control+E` constants were replaced by helpers that
+  // resolve the platform from the diagnostics payload.
+  assert.doesNotMatch(
     cardSource,
     /EDIT_TEXT_SHORTCUT_LABEL\s*=\s*"Ctrl\+E"/,
-    "the card must declare the Ctrl+E label constant",
+    "the card must not pin a Linux-only label literal",
   );
-  assert.match(
+  assert.doesNotMatch(
     cardSource,
     /EDIT_TEXT_SHORTCUT_KEY_ATTR\s*=\s*"Control\+E"/,
-    "the card must declare the aria-keyshortcuts value constant",
+    "the card must not pin a Linux-only aria-keyshortcuts literal",
   );
   assert.match(
     cardSource,

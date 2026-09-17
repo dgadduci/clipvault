@@ -193,6 +193,80 @@
     selectedEntryId = event.detail.id;
   }
 
+  /**
+   * Forward the edit-text shortcut request the desktop shell
+   * dispatches on `document` to the matching card's `<article>`.
+   *
+   * The shell resolves the target entry id from the focused card or
+   * the rail-owned `selectedEntryId`, validates the eligibility
+   * predicate and then dispatches `clipvault:edit-text-shortcut` on
+   * the document. The rail is the single forwarder so the card
+   * itself never registers a document / window listener; the rail
+   * already owns a `cardEls` registry keyed by entry id and walks
+   * it to find the matching `<article>` before re-dispatching the
+   * event on the card surface (`card-edit-text-shortcut`).
+   *
+   * Identity contract:
+   *
+   *   - the request payload is `{ entryId }` and ONLY that — the
+   *     shell never carries capture content, snippets or asset
+   *     references in either direction;
+   *   - the per-card event carries the same `{ entryId }` payload
+   *     so the receiving card can validate it against its own
+   *     `entry.id` and discard a stale, duplicate or mismatched
+   *     dispatch without ever opening a wrong modal;
+   *   - before opening the new modal, the rail dispatches a
+   *     `card-edit-text-shortcut-close` event on every OTHER
+   *     mounted card so the contract "at most one active edit
+   *     modal" is enforced centrally without the rail having to
+   *     track per-card modal state — the receiving card checks its
+   *     own `textEditorOpen` flag and only closes when it was
+   *     actually open.
+   *
+   * If the entry id no longer maps to a mounted element (the card
+   * was just unmounted because the visible scope shrank) the rail
+   * silently drops the request so a stale id never reopens the
+   * editor. The rail also drops requests while its own menu or
+   * selection is in flight: a typing surface (`<input>`, `<textarea>`,
+   * `contenteditable`) is the only legitimate target, but the shell
+   * already short-circuits before reaching the rail so this guard
+   * is purely defensive against a future caller.
+   */
+  function handleEditTextShortcutRequest(
+    event: Event,
+  ): void {
+    const detail = (event as CustomEvent<{ entryId: number }>).detail;
+    if (!detail || typeof detail.entryId !== "number") return;
+    const card = cardEls.get(detail.entryId);
+    if (!card) return;
+    // Step 1 — close every other card's edit modal so a request for
+    // entry B cannot leave entry A's modal open. The receiving card
+    // checks its own `textEditorOpen` flag and ignores the close
+    // request when it never opened its editor; the rail therefore
+    // does not need to track per-card modal state. The close event
+    // travels without a payload so a wrong target cannot leak any
+    // capture content to a non-target card.
+    for (const [mountedId, mountedCard] of cardEls) {
+      if (mountedId === detail.entryId) continue;
+      mountedCard.dispatchEvent(
+        new CustomEvent("card-edit-text-shortcut-close", {
+          bubbles: false,
+        }),
+      );
+    }
+    // Step 2 — open the target modal by re-dispatching on the
+    // matching card's article with an explicit `{ entryId }`
+    // payload. The receiving card validates the id against its own
+    // `entry.id` so a stale or mismatched dispatch cannot leak
+    // into a wrong modal.
+    card.dispatchEvent(
+      new CustomEvent("card-edit-text-shortcut", {
+        bubbles: false,
+        detail: { entryId: detail.entryId },
+      }),
+    );
+  }
+
   function closeAllMenus(): void {
     openCardId = null;
   }
@@ -346,12 +420,22 @@
     document.addEventListener("click", onWindowClick, true);
     document.addEventListener("keydown", onWindowKeydown, true);
     document.addEventListener("keydown", onRailHorizontalKeydown, true);
+    document.addEventListener(
+      "clipvault:edit-text-shortcut",
+      handleEditTextShortcutRequest,
+      true,
+    );
     detachWindow = () => {
       document.removeEventListener("click", onWindowClick, true);
       document.removeEventListener("keydown", onWindowKeydown, true);
       document.removeEventListener(
         "keydown",
         onRailHorizontalKeydown,
+        true,
+      );
+      document.removeEventListener(
+        "clipvault:edit-text-shortcut",
+        handleEditTextShortcutRequest,
         true,
       );
     };

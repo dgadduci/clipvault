@@ -38,8 +38,8 @@
    * The shared shell refuses to close on Escape / backdrop while the
    * mutation is in flight (`busy=true`). When the shell closes, the
    * component drops the draft and returns focus to the element the
-   * parent supplied through `returnFocusTo` so the card menu trigger
-   * recovers focus.
+   * parent supplied through `returnFocusTo` so the card that launched
+   * the editor recovers focus.
    */
   import { createEventDispatcher, tick } from "svelte";
 
@@ -117,10 +117,21 @@
   $: isEligible = isEditableTextEntry(entry);
 
   /**
-   * Seed the draft only when the modal transitions from closed to
-   * open. The reactive block intentionally does NOT refresh the
-   * draft on every entry change because the user may have started
-   * editing an existing draft and we must not clobber it.
+   * Idempotency stamp that records the entry id the modal last
+   * opened with. The reactive block below uses the stamp to detect
+   * the two legitimate transitions the shortcut can produce:
+   *
+   *   - closed → open: seed the draft from `entry.content` so the
+   *     first paint shows the persisted text;
+   *   - target change (open + entry.id changes): reset the draft
+   *     and the baseline from the new entry so a request for
+   *     entry B never inherits the draft or the baseline the
+   *     previous capture had on screen.
+   *
+   * The block intentionally does NOT refresh the draft on every
+   * `entry.content` change while the entry id stays the same —
+   * the user may have started editing an existing draft and we
+   * must not clobber it.
    */
   let lastOpenedEntryId: number | null = null;
   $: if (open && entry && lastOpenedEntryId !== entry.id) {
@@ -249,7 +260,8 @@
    * Close the modal without persisting the draft. The action
    * signals the parent through the `close` dispatcher so
    * `HistoryCard` flips its canonical `textEditorOpen` flag and
-   * the shared `Modal` shell restores focus to `returnFocusTo`.
+   * the shared `Modal` shell restores focus to the card through
+   * `returnFocusTo`.
    * The shell intercepts Escape / backdrop / close while a save
    * is in flight so the user cannot race a pending mutation. The
    * dispatcher route is the only way `open` becomes `false` from
