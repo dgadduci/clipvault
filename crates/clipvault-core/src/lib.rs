@@ -121,7 +121,8 @@ pub use management::{
     RetentionPreview, SetFavoriteResult, SettingsReader, DEFAULT_RETENTION, RETENTION_SETTING_KEY,
 };
 pub use organization::{
-    OrganizationService, OrganizationServiceError, OrganizationSidebarSnapshot,
+    CollectionColorRng, OrganizationService, OrganizationServiceError, OrganizationSidebarSnapshot,
+    SystemCollectionColorRng,
 };
 pub use paste::{
     CopyOutcome, PasteMode, PasteOutcome, PasteService, PasteServiceError,

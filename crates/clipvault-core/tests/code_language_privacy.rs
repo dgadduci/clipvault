@@ -235,7 +235,10 @@ fn image_assets_survive_the_new_column() {
 #[test]
 fn migration_chain_is_consistent() {
     // The migration list MUST stay unique, monotonic and end at
-    // version 11 (the new column).
+    // version 12 (the latest column the registry ships; the
+    // `collection-colors-and-card-collection-labels` change
+    // appends the new `color_hex` column after the `code_language`
+    // migration).
     let migrations = builtin_migrations();
     let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
     let mut sorted = versions.clone();
@@ -244,7 +247,7 @@ fn migration_chain_is_consistent() {
     let mut unique = versions.clone();
     unique.dedup();
     assert_eq!(unique.len(), versions.len());
-    assert_eq!(versions.last().copied(), Some(11));
+    assert_eq!(versions.last().copied(), Some(12));
 }
 
 #[test]

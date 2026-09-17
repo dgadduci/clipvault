@@ -215,6 +215,7 @@ fn main() {
             commands::clipvault_collections_create,
             commands::clipvault_collections_rename,
             commands::clipvault_collections_delete,
+            commands::clipvault_collections_set_color,
             commands::clipvault_tags_create,
             commands::clipvault_tags_rename,
             commands::clipvault_tags_delete,

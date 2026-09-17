@@ -115,5 +115,7 @@ Wayland.
 La validación manual ocurre en Ubuntu: primero se obtiene la traza del
 arranque invisible; después de la corrección demostrada se confirma primer
 inicio visible, ocultar, restaurar desde tray, cierre sin proceso residual y
-reinicio. Después se hace un smoke test X11. Una corrección funcional
-incrementa una sola vez el patch; este plan no cambia versión.
+reinicio. Después se hace un smoke test X11 y una comprobación de no regresión
+en macOS. La prueba manual final se reporta aprobada en Ubuntu GNOME Wayland,
+Ubuntu X11 y macOS. Una corrección funcional incrementa una sola vez el patch;
+este plan no cambia versión.

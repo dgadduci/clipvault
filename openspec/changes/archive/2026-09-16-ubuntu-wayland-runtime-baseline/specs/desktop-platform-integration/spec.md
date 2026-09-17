@@ -67,6 +67,13 @@ drag and drop.
 - THEN no cambia SQLite, `EntryRecord`, assets de clipboard ni el controlador
   de drag and drop
 
+#### Scenario: Validación manual multiplataforma
+
+- GIVEN la build actual con la corrección del runtime Wayland
+- WHEN se ejecuta la prueba manual en Ubuntu GNOME Wayland, Ubuntu X11 y macOS
+- THEN el flujo manual correspondiente a cada plataforma queda aprobado
+- AND la validación de una plataforma no se infiere a partir de otra
+
 ### Requirement: El handshake Wayland no bloquea el setup del shell
 
 El adaptador nativo Wayland MUST tener un plazo acotado durante su handshake

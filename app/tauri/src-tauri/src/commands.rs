@@ -1722,6 +1722,9 @@ fn organization_command_error(error: OrganizationServiceError) -> CommandError {
             clipvault_db::OrganizationError::SystemCollectionProtected(_) => {
                 "system_collection_protected"
             }
+            clipvault_db::OrganizationError::InvalidCollectionColor(_) => {
+                "invalid_collection_color"
+            }
         },
     };
     CommandError::new(kind, error.to_string())
@@ -1779,6 +1782,31 @@ pub fn clipvault_collections_delete(
         .map_err(organization_command_error)?;
     emit_organization_updated(&handle);
     Ok(removed)
+}
+
+/// Update the persistent `#rrggbb` colour of any collection (system or
+/// user). The command is a thin adapter over
+/// [`clipvault_core::OrganizationService::set_collection_color`]:
+/// it validates the value through the repository, refreshes the
+/// returned row and emits the existing metadata-only
+/// `clipvault://organization-updated` event so the sidebar and every
+/// visible card re-render. The command never touches clipboard
+/// content, snippets, hashes or asset references and never echoes
+/// the value back through the error channel.
+#[tauri::command]
+pub fn clipvault_collections_set_color(
+    state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
+    collection_id: i64,
+    color_hex: String,
+) -> Result<Collection, CommandError> {
+    let collection = state
+        .context()
+        .organization()
+        .set_collection_color(state.context(), collection_id, &color_hex)
+        .map_err(organization_command_error)?;
+    emit_organization_updated(&handle);
+    Ok(collection)
 }
 
 #[tauri::command]

@@ -1458,7 +1458,7 @@ mod tests {
             let mut db = context.database().lock();
             let mut org = clipvault_db::OrganizationRepository::new(db.connection_mut());
             let work = org
-                .create_user_collection("Trabajo", when)
+                .create_user_collection("Trabajo", "#1565c0", when)
                 .expect("create")
                 .id;
             org.replace_entry_collections(secondary, &[work], when)

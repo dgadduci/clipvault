@@ -27,6 +27,7 @@ const INTERACTIVE_SELECTORS = [
   "[data-testid='history-card-menu']",
   "[data-testid='history-card-menu-trigger']",
   "[data-testid='history-card-pin']",
+  "[data-testid='history-card-collections-overflow']",
   "[role='button']",
   "[role='menuitem']",
   "input",

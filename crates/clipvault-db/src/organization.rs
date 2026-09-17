@@ -40,6 +40,27 @@ pub const HISTORY_DISPLAY_NAME: &str = "Historial";
 /// GUI and the SQLite constraint agree.
 pub const MAX_ORGANIZATION_NAME_CHARS: usize = 80;
 
+/// Canonical HEX colour assigned to the system `Historial` collection
+/// when it predates colour support and as the default every new
+/// `Historial`-only base is seeded with after the colour migration.
+/// Hexadecimal form `#rrggbb` (lowercase) is the only accepted wire
+/// format; `set_collection_color` rejects anything else so the rest of
+/// the codebase never has to defend against invalid values.
+pub const HISTORY_DEFAULT_COLOR_HEX: &str = "#1565c0";
+
+/// Base palette the backend uses when it has to pick an initial colour
+/// for a new user collection. The selection is random but biased
+/// towards variety so two adjacent collections in the sidebar do not
+/// blend together. The picker only consumes this list; the modal lets
+/// the user pick any opaque RGB colour afterwards, so the palette is
+/// a seed, not a constraint.
+pub const DEFAULT_COLLECTION_PALETTE: &[&str] = &[
+    "#c62828", // rojo
+    "#a16207", // amarillo
+    "#2e7d32", // verde
+    "#1565c0", // azul
+];
+
 #[derive(Debug, Error)]
 pub enum OrganizationError {
     #[error("sqlite error: {0}")]
@@ -64,18 +85,29 @@ pub enum OrganizationError {
     EntryNotFound(i64),
     #[error("system collection '{0}' is protected and cannot be modified")]
     SystemCollectionProtected(&'static str),
+    #[error("collection colour '{0}' is not a valid opaque #rrggbb hex value")]
+    InvalidCollectionColor(String),
 }
 
 /// Row stored in the `collections` table. The `stable_key` is `None`
 /// for user-defined collections; system collections always carry the
 /// stable key the migration seeded (`"history"`). `kind` mirrors the
 /// `kind` column (`"system"` or `"user"`).
+///
+/// `color_hex` is the canonical `#rrggbb` representation the
+/// repository persists: lowercase, opaque, no alpha. The migration
+/// that introduced the column assigned `HISTORY_DEFAULT_COLOR_HEX`
+/// to every pre-existing row so the field is always present.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Collection {
     pub id: i64,
     pub stable_key: Option<String>,
     pub name: String,
     pub kind: CollectionKind,
+    /// Normalised `#rrggbb` colour the sidebar square and the card
+    /// labels render. The repository refuses any other value at write
+    /// time so every consumer can trust the format.
+    pub color_hex: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -156,7 +188,7 @@ impl<'a> OrganizationRepository<'a> {
     /// deterministic case-insensitive order.
     pub fn list_collections(&self) -> Result<Vec<Collection>, OrganizationError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, stable_key, name, kind, created_at, updated_at
+            "SELECT id, stable_key, name, kind, color_hex, created_at, updated_at
              FROM collections
              ORDER BY CASE WHEN kind = 'system' THEN 0 ELSE 1 END,
                       name COLLATE NOCASE ASC",
@@ -176,7 +208,7 @@ impl<'a> OrganizationRepository<'a> {
         let record = self
             .conn
             .query_row(
-                "SELECT id, stable_key, name, kind, created_at, updated_at
+                "SELECT id, stable_key, name, kind, color_hex, created_at, updated_at
                  FROM collections WHERE id = ?1",
                 params![id],
                 row_to_collection,
@@ -191,18 +223,20 @@ impl<'a> OrganizationRepository<'a> {
     pub fn create_user_collection(
         &mut self,
         name: &str,
+        color_hex: &str,
         now: OffsetDateTime,
     ) -> Result<Collection, OrganizationError> {
         let trimmed = validate_user_collection_name(name)?;
+        let normalised = validate_collection_color(color_hex)?;
         if self.collection_name_exists(&trimmed)? {
             return Err(OrganizationError::CollectionNameTaken(trimmed));
         }
         let ts = format_timestamp(now);
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO collections (stable_key, name, kind, created_at, updated_at)
-             VALUES (?1, ?2, 'user', ?3, ?3)",
-            params![Option::<String>::None, trimmed, ts],
+            "INSERT INTO collections (stable_key, name, kind, color_hex, created_at, updated_at)
+             VALUES (?1, ?2, 'user', ?3, ?4, ?4)",
+            params![Option::<String>::None, trimmed, normalised, ts],
         )?;
         let id = tx.last_insert_rowid();
         tx.commit()?;
@@ -211,8 +245,50 @@ impl<'a> OrganizationRepository<'a> {
             stable_key: None,
             name: trimmed,
             kind: CollectionKind::User,
+            color_hex: normalised,
             created_at: ts.clone(),
             updated_at: ts,
+        })
+    }
+
+    /// Update the `color_hex` of any collection (system or user) to a
+    /// normalised `#rrggbb` value. Returns the refreshed row. The
+    /// repository never touches `entry_collections`, `entry_tags`,
+    /// clipboard entries, asset references or the source-app metadata;
+    /// only the colour and `updated_at` change.
+    ///
+    /// Renaming and deleting `Historial` remain protected by
+    /// [`OrganizationError::SystemCollectionProtected`]; the colour
+    /// path explicitly bypasses that guard so the user can tune
+    /// `Historial` to match their sidebar palette without losing the
+    /// stable identity the rest of the capability depends on.
+    pub fn set_collection_color(
+        &mut self,
+        id: i64,
+        color_hex: &str,
+        now: OffsetDateTime,
+    ) -> Result<Collection, OrganizationError> {
+        let normalised = validate_collection_color(color_hex)?;
+        let current = self
+            .find_collection(id)?
+            .ok_or(OrganizationError::CollectionNotFound(id))?;
+        if current.color_hex == normalised {
+            return Ok(current);
+        }
+        let ts = format_timestamp(now);
+        let tx = self.conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE collections SET color_hex = ?1, updated_at = ?2 WHERE id = ?3",
+            params![normalised, ts, id],
+        )?;
+        if updated == 0 {
+            return Err(OrganizationError::CollectionNotFound(id));
+        }
+        tx.commit()?;
+        Ok(Collection {
+            color_hex: normalised,
+            updated_at: ts,
+            ..current
         })
     }
 
@@ -723,8 +799,9 @@ fn row_to_collection(row: &rusqlite::Row<'_>) -> rusqlite::Result<Collection> {
         stable_key: row.get(1)?,
         name: row.get(2)?,
         kind,
-        created_at: row.get(4)?,
-        updated_at: row.get(5)?,
+        color_hex: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
@@ -771,6 +848,30 @@ pub fn validate_user_collection_name(name: &str) -> Result<String, OrganizationE
         ));
     }
     Ok(trimmed.to_string())
+}
+
+/// Validate and normalise an opaque RGB colour expressed as a
+/// `#rrggbb` hex string. The function refuses alpha (`#rrggbbaa`),
+/// short forms (`#fff`), named colours (`red`) and `currentColor`;
+/// only the canonical form the wire contract documents survives.
+/// The canonical form is lowercased so the repository can persist it
+/// verbatim and the frontend can compare it without an extra pass.
+pub fn validate_collection_color(value: &str) -> Result<String, OrganizationError> {
+    let trimmed = value.trim();
+    let body = trimmed
+        .strip_prefix('#')
+        .ok_or_else(|| OrganizationError::InvalidCollectionColor(trimmed.to_string()))?;
+    if body.len() != 6 {
+        return Err(OrganizationError::InvalidCollectionColor(
+            trimmed.to_string(),
+        ));
+    }
+    if !body.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(OrganizationError::InvalidCollectionColor(
+            trimmed.to_string(),
+        ));
+    }
+    Ok(format!("#{}", body.to_ascii_lowercase()))
 }
 
 /// Normalise a tag identity: trim, collapse internal whitespace and
@@ -863,6 +964,114 @@ mod tests {
             validate_user_collection_name("   "),
             Err(OrganizationError::EmptyCollectionName)
         ));
+    }
+
+    #[test]
+    fn validate_collection_color_accepts_canonical_hex() {
+        assert_eq!(validate_collection_color("#1565c0").unwrap(), "#1565c0");
+        assert_eq!(validate_collection_color("  #C62828  ").unwrap(), "#c62828");
+        assert_eq!(validate_collection_color("#2e7d32").unwrap(), "#2e7d32");
+    }
+
+    #[test]
+    fn validate_collection_color_rejects_short_and_alpha_forms() {
+        for bad in [
+            "",
+            "red",
+            "aabbcc",
+            "#abc",
+            "#aabb",
+            "#aabbc",
+            "#aabbccdd",
+            "#xyzxyz",
+            "#gggggg",
+            "##aabbcc",
+            "#12345",
+        ] {
+            assert!(
+                matches!(
+                    validate_collection_color(bad),
+                    Err(OrganizationError::InvalidCollectionColor(_))
+                ),
+                "{bad:?} must be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn create_user_collection_persists_provided_color() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let mut repo = OrganizationRepository::new(db.connection_mut());
+        let created = repo
+            .create_user_collection("Trabajo", "#aabbcc", when)
+            .expect("create");
+        assert_eq!(created.color_hex, "#aabbcc");
+        let fetched = repo
+            .find_collection(created.id)
+            .expect("find")
+            .expect("row");
+        assert_eq!(fetched.color_hex, "#aabbcc");
+    }
+
+    #[test]
+    fn create_user_collection_rejects_invalid_color() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let mut repo = OrganizationRepository::new(db.connection_mut());
+        let error = repo
+            .create_user_collection("Trabajo", "red", when)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OrganizationError::InvalidCollectionColor(_)
+        ));
+        assert!(
+            repo.list_collections().expect("list").len() == 1,
+            "no user collection must be persisted when colour is invalid",
+        );
+    }
+
+    #[test]
+    fn set_collection_color_normalises_and_persists() {
+        let (_dir, mut db) = open_temp_db();
+        let later = datetime!(2026-01-02 03:09:00 UTC);
+        let mut repo = OrganizationRepository::new(db.connection_mut());
+        let updated = repo
+            .set_collection_color(1, "#FF00AA", later)
+            .expect("set color");
+        assert_eq!(updated.color_hex, "#ff00aa");
+        let fetched = repo.find_collection(1).expect("find").expect("row");
+        assert_eq!(fetched.color_hex, "#ff00aa");
+        assert_eq!(fetched.updated_at, "2026-01-02T03:09:00Z");
+    }
+
+    #[test]
+    fn set_collection_color_rejects_unknown_id() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let mut repo = OrganizationRepository::new(db.connection_mut());
+        let error = repo
+            .set_collection_color(9_999, "#1565c0", when)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OrganizationError::CollectionNotFound(9_999)
+        ));
+    }
+
+    #[test]
+    fn set_collection_color_is_idempotent() {
+        let (_dir, mut db) = open_temp_db();
+        let later = datetime!(2026-01-02 03:09:00 UTC);
+        let mut repo = OrganizationRepository::new(db.connection_mut());
+        let first = repo
+            .set_collection_color(1, "#1565c0", later)
+            .expect("first");
+        let second = repo
+            .set_collection_color(1, "#1565c0", later)
+            .expect("second");
+        assert_eq!(first.updated_at, second.updated_at);
     }
 
     #[test]

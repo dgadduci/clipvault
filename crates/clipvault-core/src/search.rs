@@ -352,7 +352,9 @@ mod tests {
         let now = datetime!(2026-01-02 03:04:05 UTC);
         let mut db = context.database().lock();
         let mut repo = OrganizationRepository::new(db.connection_mut());
-        let collection = repo.create_user_collection(name, now).expect("collection");
+        let collection = repo
+            .create_user_collection(name, "#1565c0", now)
+            .expect("collection");
         collection.id
     }
 

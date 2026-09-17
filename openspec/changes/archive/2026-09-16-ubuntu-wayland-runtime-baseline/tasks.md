@@ -14,11 +14,13 @@
 
 - [x] 2.1 Ejecutar `CARGO_BUILD_JOBS=1 cargo tauri dev` desde `app/tauri`, sin
   `GDK_BACKEND` ni features GNOME.
-- [ ] 2.2 Verificar visualmente la ventana `main`; no usar `wmctrl` como prueba
+- [x] 2.2 Verificar visualmente la ventana `main`; no usar `wmctrl` como prueba
   de ausencia de una superficie Wayland nativa.
   - Regresión reabierta el 2026-09-13: el binario inicia en GNOME Wayland y
     registra `no primary monitor reported; keeping conf defaults`, pero no
     aparece el desktop. La marca previa no representa el estado actual.
+  - El baseline invisible se reprodujo y se diagnosticó antes de aplicar la
+    corrección del handshake Wayland.
 - [x] 2.3 Ocultar la ventana y verificar que Open ClipVault del tray la restaura.
 - [x] 2.4 Cerrar la aplicación, confirmar que no queda proceso del workspace y
   repetir el arranque una vez.
@@ -58,15 +60,17 @@
 
 ## 5. Verificación y cierre
 
-- [ ] 5.1 En Ubuntu GNOME Wayland verificar inicio, ocultar, tray y reinicio.
-  - El inicio corregido llegó a `runtime_ready`, `moved`, `resized` y
-    `focused` con `visible = true`; quedan por repetir ocultar, tray y reinicio.
-- [ ] 5.2 En Ubuntu X11 ejecutar un smoke test de arranque y restauración.
-- [x] 5.3 Ejecutar fmt, tests Rust relevantes y frontend check/build/test con
+- [x] 5.1 En Ubuntu GNOME Wayland verificar inicio, ocultar, tray y reinicio.
+  - Verificación manual reportada el 2026-09-16: aprobada.
+- [x] 5.2 En Ubuntu X11 ejecutar un smoke test de arranque y restauración.
+  - Verificación manual reportada el 2026-09-16: aprobada.
+- [x] 5.3 En macOS ejecutar una comprobación manual de no regresión del desktop.
+  - Verificación manual reportada el 2026-09-16: aprobada.
+- [x] 5.4 Ejecutar fmt, tests Rust relevantes y frontend check/build/test con
   Node 20.
-- [x] 5.4 Verificar sin regresiones de imágenes, SQLite, organización, Quick
+- [x] 5.5 Verificar sin regresiones de imágenes, SQLite, organización, Quick
   Paste, búsqueda y drag and drop.
-- [x] 5.5 Validar OpenSpec, revisar `git diff --check` y no archivar/sincronizar
+- [x] 5.6 Validar OpenSpec, revisar `git diff --check` y no archivar/sincronizar
   hasta que Ubuntu confirme una ventana visible.
   - `openspec validate ubuntu-wayland-runtime-baseline --strict --type change`
     pasó con OpenSpec 1.13.0; la prueba manual Wayland ya había confirmado una

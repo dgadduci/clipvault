@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-16
+goal: Permitir asignar, editar y persistir colores de colecciones y mostrar
+  todas las colecciones de cada captura en sus cards.

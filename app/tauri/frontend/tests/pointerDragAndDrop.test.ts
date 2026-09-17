@@ -38,6 +38,7 @@ function makeCollection(): Collection {
     stable_key: null,
     name: "Trabajo",
     kind: "user",
+    color_hex: "#1565c0",
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
   };
@@ -860,6 +861,54 @@ test("pointer and mouse paths ignore interactive card controls", { concurrency: 
       button: 0,
     });
     button.dispatchEvent(mouseDown);
+
+    assert.equal(pointerDown.defaultPrevented, false);
+    assert.equal(mouseDown.defaultPrevented, false);
+    assert.equal(isPointerDragActive(), false);
+    assert.equal(hasActiveDragSession(), false);
+    cleanup();
+  } finally {
+    restore();
+  }
+});
+
+test("pointer and mouse paths ignore the collection overflow icon", { concurrency: false }, () => {
+  // The membership-overflow icon is a `<button>` the
+  // `clipboard-history-cards` change adds. The singleton pointer
+  // drag controller must treat it as an interactive surface so a
+  // click on the icon never starts a drag session and never
+  // selects the card.
+  const { document, restore } = installDomPolyfill();
+  try {
+    __resetDragSessionForTests();
+    __resetPointerDragForTests();
+    const card = document.createElement("article");
+    card.setAttribute("data-testid", "history-card");
+    card.setAttribute("data-entry-id", "117");
+    const overflowButton = document.createElement("button");
+    overflowButton.setAttribute(
+      "data-testid",
+      "history-card-collections-overflow",
+    );
+    overflowButton.setAttribute("data-entry-id", "117");
+    card.appendChild(overflowButton);
+    document.body.appendChild(card);
+    const cleanup = installPointerDragController(
+      document as unknown as Document,
+    );
+
+    const pointerDown = new PointerEventImpl("pointerdown", {
+      bubbles: true,
+      cancelable: true,
+      pointerId: 41,
+    });
+    overflowButton.dispatchEvent(pointerDown);
+    const mouseDown = new MouseEventImpl("mousedown", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    overflowButton.dispatchEvent(mouseDown);
 
     assert.equal(pointerDown.defaultPrevented, false);
     assert.equal(mouseDown.defaultPrevented, false);

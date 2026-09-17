@@ -1615,7 +1615,7 @@ mod tests {
         let work_id = {
             let mut repo = crate::OrganizationRepository::new(db.connection_mut());
             let work = repo
-                .create_user_collection("Trabajo", when)
+                .create_user_collection("Trabajo", "#1565c0", when)
                 .expect("create")
                 .id;
             repo.replace_entry_collections(secondary, &[work], when)
@@ -1663,11 +1663,11 @@ mod tests {
         let (work, personal) = {
             let mut repo = crate::OrganizationRepository::new(db.connection_mut());
             let work = repo
-                .create_user_collection("Trabajo", when)
+                .create_user_collection("Trabajo", "#1565c0", when)
                 .expect("create")
                 .id;
             let personal = repo
-                .create_user_collection("Personal", when)
+                .create_user_collection("Personal", "#1565c0", when)
                 .expect("create personal")
                 .id;
             // `secondary` only lives in `Trabajo`.
@@ -1699,7 +1699,7 @@ mod tests {
         let when = datetime!(2026-01-02 03:04:05 UTC);
         let work_id = {
             let mut repo = crate::OrganizationRepository::new(db.connection_mut());
-            repo.create_user_collection("Trabajo", when)
+            repo.create_user_collection("Trabajo", "#1565c0", when)
                 .expect("create")
                 .id
         };
@@ -2291,7 +2291,7 @@ mod tests {
         };
         let collection_id = {
             let mut repo = crate::OrganizationRepository::new(db.connection_mut());
-            repo.create_user_collection("Trabajo", when)
+            repo.create_user_collection("Trabajo", "#1565c0", when)
                 .expect("create")
                 .id
         };
@@ -2427,7 +2427,7 @@ mod tests {
         let when = datetime!(2026-01-02 03:04:05 UTC);
         let trabajo_id = {
             let mut repo = crate::OrganizationRepository::new(db.connection_mut());
-            repo.create_user_collection("Trabajo", when)
+            repo.create_user_collection("Trabajo", "#1565c0", when)
                 .expect("create")
                 .id
         };
@@ -2955,9 +2955,13 @@ mod tests {
                 .expect("migrate");
             trabajo_id = {
                 let mut repo = crate::OrganizationRepository::new(db.connection_mut());
-                repo.create_user_collection("Trabajo", datetime!(2026-01-02 03:04:05 UTC))
-                    .expect("create")
-                    .id
+                repo.create_user_collection(
+                    "Trabajo",
+                    "#1565c0",
+                    datetime!(2026-01-02 03:04:05 UTC),
+                )
+                .expect("create")
+                .id
             };
             image_id = {
                 let mut repo = EntryRepository::new(db.connection_mut());
@@ -3340,7 +3344,7 @@ mod tests {
         let t2 = datetime!(2026-05-01 10:00:00 UTC);
         let work_id = {
             let mut repo = crate::OrganizationRepository::new(db.connection_mut());
-            repo.create_user_collection("Trabajo", t1)
+            repo.create_user_collection("Trabajo", "#1565c0", t1)
                 .expect("create")
                 .id
         };
@@ -3468,7 +3472,7 @@ mod tests {
         let t_image = datetime!(2026-05-01 11:00:00 UTC);
         let work_id = {
             let mut repo = crate::OrganizationRepository::new(db.connection_mut());
-            repo.create_user_collection("Trabajo", t_text)
+            repo.create_user_collection("Trabajo", "#1565c0", t_text)
                 .expect("create")
                 .id
         };
@@ -3661,7 +3665,7 @@ mod tests {
         let t2 = datetime!(2026-05-01 09:00:00 UTC);
         let trabajo_id = {
             let mut org = crate::OrganizationRepository::new(db.connection_mut());
-            org.create_user_collection("Trabajo", t1)
+            org.create_user_collection("Trabajo", "#1565c0", t1)
                 .expect("create")
                 .id
         };
@@ -3786,7 +3790,7 @@ mod tests {
         let t2 = datetime!(2026-05-01 09:00:00 UTC);
         let trabajo_id = {
             let mut org = crate::OrganizationRepository::new(db.connection_mut());
-            org.create_user_collection("Trabajo", t1)
+            org.create_user_collection("Trabajo", "#1565c0", t1)
                 .expect("create")
                 .id
         };

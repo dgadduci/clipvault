@@ -591,6 +591,14 @@ export interface Collection {
   stable_key: string | null;
   name: string;
   kind: CollectionKind;
+  /**
+   * Normalised opaque RGB colour the sidebar square and the
+   * per-card collection labels render. The backend rejects any
+   * value that does not match `#rrggbb`; the frontend therefore
+   * treats the string as metadata-only and never inspects its
+   * bytes to drive accessibility or styling decisions.
+   */
+  color_hex: string;
   created_at: string;
   updated_at: string;
 }

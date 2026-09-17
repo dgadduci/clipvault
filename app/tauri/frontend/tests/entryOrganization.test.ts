@@ -79,6 +79,7 @@ function makeCollection(overrides: Partial<Collection> = {}): Collection {
     stable_key: "history",
     name: "Historial",
     kind: "system",
+    color_hex: "#1565c0",
     created_at: "2026-01-02T03:04:05Z",
     updated_at: "2026-01-02T03:04:05Z",
     ...overrides,

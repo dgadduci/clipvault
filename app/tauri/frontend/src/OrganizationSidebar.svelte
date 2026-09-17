@@ -29,6 +29,7 @@
   import { endDragSession, isDropTarget } from "./lib/dragAndDrop";
   import { POINTER_DRAG_END_EVENT } from "./lib/pointerDragAndDrop";
   import Modal from "./Modal.svelte";
+  import CollectionColorModal from "./CollectionColorModal.svelte";
 
   export let collections: Collection[] = [];
   export let activeCollectionId: number | null = null;
@@ -39,6 +40,7 @@
     rename: { collectionId: number; name: string };
     delete: { collectionId: number };
     "card-drop": { entryId: number; collectionId: number };
+    "set-color": { collectionId: number; colorHex: string };
   };
   const dispatch = createEventDispatcher<DispatchEvents>();
 
@@ -56,6 +58,13 @@
   let pendingDeleteTrigger: HTMLElement | null = null;
   let lastDeleteError: string | null = null;
   /**
+   * Modal state for the colour editor. The sidebar owns the
+   * triggering row (the colour square) so the modal can re-focus
+   * the square on close and the picker never drifts out of sync.
+   */
+  let pendingColorCollection: Collection | null = null;
+  let lastColorError: string | null = null;
+  /**
    * Id of the collection row currently receiving a drag. The visual
    * feedback is purely decorative: the helper clears the highlight
    * on `dragleave`, `drop`, `dragend` and the `pointercancel`
@@ -71,6 +80,9 @@
     if (creating) {
       cancelCreate();
     }
+    if (pendingColorCollection !== null) {
+      cancelColorEdit();
+    }
     dispatch("select", { collectionId: id });
   }
 
@@ -80,6 +92,9 @@
     }
     if (pendingDelete !== null) {
       cancelDelete();
+    }
+    if (pendingColorCollection !== null) {
+      cancelColorEdit();
     }
     creating = true;
     newCollectionName = "";
@@ -109,6 +124,9 @@
     }
     if (pendingDelete !== null) {
       cancelDelete();
+    }
+    if (pendingColorCollection !== null) {
+      cancelColorEdit();
     }
     renamingId = collection.id;
     renameDraft = collection.name;
@@ -177,6 +195,45 @@
     pendingDeleteTrigger = null;
   }
 
+  /**
+   * Open the colour-editor modal against the supplied collection.
+   * The square's parent button is captured so the modal can restore
+   * focus when the user closes the picker without saving.
+   *
+   * The square is the only interactive surface the row offers for
+   * this flow; a single click on a collection row must NOT
+   * accidentally open the picker (the row's own click selects the
+   * collection), so the helper is wired to the dedicated `dblclick`
+   * and `keydown` paths the square installs below.
+   */
+  function askEditColor(
+    collection: Collection,
+    event: MouseEvent | KeyboardEvent,
+  ): void {
+    if (renamingId !== null) {
+      cancelRename();
+    }
+    if (pendingDelete !== null) {
+      cancelDelete();
+    }
+    pendingColorCollection = collection;
+    lastColorError = null;
+    void event;
+  }
+
+  function cancelColorEdit(): void {
+    pendingColorCollection = null;
+    lastColorError = null;
+  }
+
+  function commitColorEdit(colorHex: string): void {
+    if (pendingColorCollection === null) return;
+    const collectionId = pendingColorCollection.id;
+    dispatch("set-color", { collectionId, colorHex });
+    pendingColorCollection = null;
+    lastColorError = null;
+  }
+
   function isActive(id: number | null): boolean {
     return activeCollectionId === id;
   }
@@ -205,6 +262,28 @@
     }
     if (event.key === "F2") {
       event.preventDefault();
+    }
+  }
+
+  /**
+   * Square keyboard handling. Enter and Space open the picker;
+   * single click must NOT change the active collection, so the
+   * pointer has its own branch. Escape lets the user back out
+   * without opening the modal.
+   */
+  function onColorSquareKeydown(
+    event: KeyboardEvent,
+    collection: Collection,
+  ): void {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      event.stopPropagation();
+      askEditColor(collection, event);
+      return;
+    }
+    if (event.key === "Escape" && pendingColorCollection !== null) {
+      event.preventDefault();
+      cancelColorEdit();
     }
   }
 
@@ -547,6 +626,19 @@
               </span>
             {/if}
           </button>
+          <button
+            type="button"
+            class="color-square"
+            aria-label={`Cambiar color de ${collection.name}`}
+            title={`Cambiar color de ${collection.name} (doble clic o Enter)`}
+            data-testid="sidebar-collection-color"
+            data-collection-id={collection.id}
+            data-color={collection.color_hex}
+            style="background-color: {collection.color_hex};"
+            on:dblclick|stopPropagation={(event) =>
+              askEditColor(collection, event)}
+            on:keydown={(event) => onColorSquareKeydown(event, collection)}
+          ></button>
           {#if collection.kind === "user"}
             <button
               type="button"
@@ -635,6 +727,23 @@
     </div>
   </div>
 </Modal>
+
+<CollectionColorModal
+  open={pendingColorCollection !== null}
+  collection={pendingColorCollection}
+  on:save={(event) => commitColorEdit(event.detail.colorHex)}
+  on:cancel={cancelColorEdit}
+/>
+
+{#if lastColorError}
+  <p
+    class="sidebar-color-error"
+    role="alert"
+    data-testid="sidebar-color-error"
+  >
+    {lastColorError}
+  </p>
+{/if}
 
 <style>
   .sidebar {
@@ -800,6 +909,27 @@
     border: 1px solid #30363d;
     text-transform: lowercase;
   }
+  .color-square {
+    flex: 0 0 auto;
+    width: 1.1rem;
+    height: 1.1rem;
+    border-radius: 4px;
+    border: 1px solid var(--cv-border, #30363d);
+    cursor: pointer;
+    padding: 0;
+    background-clip: padding-box;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+    transition:
+      outline-color 0.15s ease-out,
+      transform 0.15s ease-out;
+  }
+  .color-square:hover {
+    transform: scale(1.08);
+  }
+  .color-square:focus-visible {
+    outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.85));
+    outline-offset: 1px;
+  }
   .icon-only {
     flex: 0 0 auto;
     background: transparent;
@@ -944,5 +1074,15 @@
   :global(.modal-action:focus-visible) {
     outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.45));
     outline-offset: 2px;
+  }
+  .sidebar-color-error {
+    margin: 0;
+    padding: 0.45rem 0.55rem;
+    border-radius: var(--cv-radius-sm, 6px);
+    background: rgba(248, 113, 113, 0.12);
+    border: 1px solid rgba(248, 113, 113, 0.45);
+    color: #fee2e2;
+    font-size: 0.75rem;
+    flex: 0 0 auto;
   }
 </style>

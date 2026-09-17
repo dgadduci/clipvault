@@ -435,6 +435,7 @@ function collection(id: number, name: string): Collection {
     stable_key: null,
     name,
     kind: "user",
+    color_hex: "#1565c0",
     created_at: "2026-01-02T03:04:05Z",
     updated_at: "2026-01-02T03:04:05Z",
   };

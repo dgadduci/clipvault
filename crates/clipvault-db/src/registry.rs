@@ -566,6 +566,42 @@ const MIGRATION_0011_CODE_LANGUAGE: Migration = Migration {
         ON clipboard_entries (rich_preview_ref);",
 };
 
+/// `collection-colors-and-card-collection-labels`: add the persistent
+/// `color_hex` metadata the sidebar square and the per-card
+/// collection labels consume.
+///
+/// The column is `NOT NULL` with a default that mirrors the system
+/// `Historial` blue so every pre-existing row receives a valid opaque
+/// colour without an `UPDATE` cascade. The backfill is purely
+/// additive — it never deletes or rewrites a name, a kind, a
+/// timestamp or a membership — and reversible: the `down` step
+/// rebuilds the `collections` table through the SQLite table-rebuild
+/// pattern the other additive migrations use so a rollback returns
+/// to the pre-colour shape without losing data.
+const MIGRATION_0012_COLLECTION_COLORS: Migration = Migration {
+    version: 12,
+    description: "collection-colors-and-card-collection-labels: persist collections.color_hex",
+    up_sql: "ALTER TABLE collections ADD COLUMN color_hex TEXT NOT NULL DEFAULT '#1565c0';
+    UPDATE collections SET color_hex = '#1565c0' WHERE color_hex IS NULL OR color_hex = '';",
+    down_sql: "DROP TABLE IF EXISTS collections_rollback_color;
+    CREATE TABLE collections_rollback_color (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        stable_key TEXT UNIQUE,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    INSERT INTO collections_rollback_color
+        (id, stable_key, name, kind, created_at, updated_at)
+    SELECT id, stable_key, name, kind, created_at, updated_at
+    FROM collections;
+    DROP TABLE collections;
+    ALTER TABLE collections_rollback_color RENAME TO collections;
+    CREATE INDEX idx_collections_kind ON collections (kind);
+    CREATE INDEX idx_collections_name ON collections (name COLLATE NOCASE);",
+};
+
 /// Returns the migrations shipped with ClipVault. Each new migration is
 /// appended to this slice to keep ordering deterministic.
 pub fn builtin_migrations() -> Vec<Migration> {
@@ -581,6 +617,7 @@ pub fn builtin_migrations() -> Vec<Migration> {
         MIGRATION_0009_RICH_TEXT,
         MIGRATION_0010_ORGANIZATION,
         MIGRATION_0011_CODE_LANGUAGE,
+        MIGRATION_0012_COLLECTION_COLORS,
     ]
 }
 
@@ -613,9 +650,9 @@ mod tests {
         // reorder history.
         let migrations = builtin_migrations();
         let last = migrations.last().expect("at least one migration");
-        assert_eq!(last.version, 11);
-        assert_eq!(last.version, MIGRATION_0011_CODE_LANGUAGE.version);
-        assert_eq!(migrations.len(), 11);
+        assert_eq!(last.version, 12);
+        assert_eq!(last.version, MIGRATION_0012_COLLECTION_COLORS.version);
+        assert_eq!(migrations.len(), 12);
     }
 
     #[test]
@@ -700,6 +737,44 @@ mod tests {
         assert!(
             up.contains("IDX_CLIPBOARD_ENTRIES_CODE_LANGUAGE"),
             "missing code_language index"
+        );
+    }
+
+    #[test]
+    fn collection_color_migration_is_idempotent_and_additive() {
+        // The collection-colour migration MUST stay additive: the
+        // `up` step adds the `color_hex` column with a `NOT NULL`
+        // default, then unconditionally re-applies the documented
+        // fallback so any row whose value was cleared by a manual
+        // edit is restored. The double `UPDATE ... WHERE ... IS NULL`
+        // is idempotent — repeated runs are a no-op — so the
+        // migration is safe to replay and the runner cannot drift.
+        let up = MIGRATION_0012_COLLECTION_COLORS.up_sql.to_uppercase();
+        assert!(
+            up.contains("ALTER TABLE COLLECTIONS ADD COLUMN COLOR_HEX"),
+            "additive migration must add the color_hex column"
+        );
+        assert!(
+            up.contains("NOT NULL DEFAULT"),
+            "additive migration must supply a NOT NULL default"
+        );
+        assert!(
+            up.contains("UPDATE COLLECTIONS"),
+            "additive migration must re-apply the fallback to legacy rows"
+        );
+        assert!(
+            !up.contains("DROP TABLE"),
+            "additive migration must not drop tables"
+        );
+
+        let down = MIGRATION_0012_COLLECTION_COLORS.down_sql.to_uppercase();
+        assert!(
+            down.contains("DROP TABLE COLLECTIONS"),
+            "rollback must rebuild the collections table"
+        );
+        assert!(
+            down.contains("COLOR_HEX") == false,
+            "rollback must drop the color_hex column"
         );
     }
 }

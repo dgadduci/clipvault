@@ -27,7 +27,8 @@ use serde::Serialize;
 use thiserror::Error;
 
 use clipvault_db::{
-    Collection, CollectionKind, OrganizationError, OrganizationRepository, Tag, HISTORY_STABLE_KEY,
+    Collection, CollectionKind, OrganizationError, OrganizationRepository, Tag,
+    DEFAULT_COLLECTION_PALETTE, HISTORY_STABLE_KEY,
 };
 
 use crate::bootstrap::AppContext;
@@ -54,21 +55,79 @@ impl OrganizationServiceError {
                 OrganizationError::TagNotFound(_) => "tag_not_found",
                 OrganizationError::EntryNotFound(_) => "entry_not_found",
                 OrganizationError::SystemCollectionProtected(_) => "system_collection_protected",
+                OrganizationError::InvalidCollectionColor(_) => "invalid_collection_color",
             },
         }
     }
 }
 
+/// Source of the random palette index the service draws for every
+/// new user collection. Production shells rely on the system source
+/// backed by a non-cryptographic PRNG; tests inject a deterministic
+/// implementation so the resulting collection colour is predictable.
+pub trait CollectionColorRng {
+    fn next_palette_index(&self, palette_len: usize) -> usize;
+}
+
+/// Default PRNG the production [`OrganizationService`] uses. The
+/// implementation is intentionally non-cryptographic: the palette
+/// index is metadata used only for visual variety in the sidebar, so
+/// pulling in a heavy RNG crate would be unjustified. The state is
+/// thread-local so the random draw is process-wide.
+pub struct SystemCollectionColorRng;
+
+impl CollectionColorRng for SystemCollectionColorRng {
+    fn next_palette_index(&self, palette_len: usize) -> usize {
+        use std::cell::Cell;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        thread_local! {
+            static STATE: Cell<u64> = const { Cell::new(0) };
+        }
+        STATE.with(|state| {
+            let mut current = state.get();
+            if current == 0 {
+                let nanos = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos() as u64)
+                    .unwrap_or(1);
+                current = nanos.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            }
+            // xorshift64* — non-cryptographic, deterministic per call
+            // site without external dependencies.
+            current ^= current >> 12;
+            current ^= current << 25;
+            current ^= current >> 27;
+            let value = current.wrapping_mul(0x2545_F491_4F6C_DD1D);
+            state.set(current);
+            (value as usize) % palette_len.max(1)
+        })
+    }
+}
+
 /// Concrete organization service the shell calls. Cheap to clone:
-/// the only state is the [`Clock`] handle.
+/// the only state is the [`Clock`] handle and the random source used
+/// to pick a starting colour for new user collections.
 #[derive(Clone)]
 pub struct OrganizationService {
     clock: Arc<dyn Clock>,
+    rng: Arc<dyn CollectionColorRng + Send + Sync>,
 }
 
 impl OrganizationService {
     pub fn new(clock: Arc<dyn Clock>) -> Self {
-        Self { clock }
+        Self {
+            clock,
+            rng: Arc::new(SystemCollectionColorRng),
+        }
+    }
+
+    /// Build a service that uses a caller-supplied RNG. Tests inject
+    /// a deterministic source so the palette selection is stable;
+    /// production shells use the system source backed by a
+    /// non-cryptographic PRNG.
+    pub fn with_rng(clock: Arc<dyn Clock>, rng: Arc<dyn CollectionColorRng + Send + Sync>) -> Self {
+        Self { clock, rng }
     }
 
     pub fn list_collections(
@@ -114,7 +173,11 @@ impl OrganizationService {
         let now = self.clock.now();
         let mut db = context.database().lock();
         let mut repo = OrganizationRepository::new(db.connection_mut());
-        Ok(repo.create_user_collection(name, now)?)
+        let seed = self
+            .rng
+            .next_palette_index(DEFAULT_COLLECTION_PALETTE.len());
+        let color_hex = DEFAULT_COLLECTION_PALETTE[seed];
+        Ok(repo.create_user_collection(name, color_hex, now)?)
     }
 
     pub fn rename_collection(
@@ -137,6 +200,24 @@ impl OrganizationService {
         let mut db = context.database().lock();
         let mut repo = OrganizationRepository::new(db.connection_mut());
         Ok(repo.delete_collection(id)?)
+    }
+
+    /// Update the `color_hex` of any collection (system or user) to a
+    /// normalised `#rrggbb` value. The repository validates the value
+    /// before touching the row and rejects the change when the
+    /// collection id does not exist; no association or entry row is
+    /// touched. `Historial` is not protected against colour updates
+    /// (its rename / delete guards remain unchanged).
+    pub fn set_collection_color(
+        &self,
+        context: &AppContext,
+        id: i64,
+        color_hex: &str,
+    ) -> Result<Collection, OrganizationServiceError> {
+        let now = self.clock.now();
+        let mut db = context.database().lock();
+        let mut repo = OrganizationRepository::new(db.connection_mut());
+        Ok(repo.set_collection_color(id, color_hex, now)?)
     }
 
     /// Create a tag or reuse an existing row whose normalised

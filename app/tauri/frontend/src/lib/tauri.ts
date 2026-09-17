@@ -468,6 +468,15 @@ export const collectionsDeleteCommand: ClipvaultCommandArg<
     collectionId: args.collectionId,
   });
 
+export const collectionsSetColorCommand: ClipvaultCommandArg<
+  Collection,
+  { collectionId: number; colorHex: string }
+> = (args) =>
+  invoke<Collection>("clipvault_collections_set_color", {
+    collectionId: args.collectionId,
+    colorHex: args.colorHex,
+  });
+
 export const tagsCreateCommand: ClipvaultCommandArg<Tag, { name: string }> =
   (args) => invoke<Tag>("clipvault_tags_create", { name: args.name });
 

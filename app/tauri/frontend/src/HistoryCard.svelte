@@ -92,8 +92,16 @@
     setEntryTitleCommand,
     sourceAppIconCommand,
   } from "./lib/tauri";
+  import { collectionColor } from "./lib/collectionColor";
+  import {
+    COLLECTION_OVERFLOW_TOLERANCE_PX,
+    computeOverflowCount,
+    computeVisibleCollections,
+    intrinsicCollectionRowWidth,
+  } from "./lib/collectionChipLayout";
   import TagSelectorModal from "./TagSelectorModal.svelte";
   import CollectionSelectorModal from "./CollectionSelectorModal.svelte";
+  import CollectionMembershipModal from "./CollectionMembershipModal.svelte";
 
   export let entry: EntryRecord;
   export let onTogglePin: (entry: EntryRecord) => void = () => {};
@@ -783,6 +791,25 @@
 
   $: assignedTagIds = assignedTags.map((tag) => tag.id);
   $: assignedCollectionIds = assignedCollections.map((c) => c.id);
+  /**
+   * User-collection chips the card renders inline below the tag
+   * row. The protected `Historial` system collection is excluded
+   * from this list so the inline chips never duplicate the
+   * sidebar's `Historial` row; the membership modal surfaces the
+   * complete set, including `Historial`, so the user can still see
+   * every assignment in one place.
+   */
+  $: userCollections = assignedCollections.filter(
+    (c) => c.kind !== "system",
+  );
+  /**
+   * Whether the card has at least one inline-eligible chip. When
+   * the entry only belongs to `Historial` the card MUST NOT
+   * render the collection row or the overflow icon; the predicate
+   * drives both branches so the empty-state stays consistent with
+   * the spec.
+   */
+  $: hasInlineCollections = userCollections.length > 0;
   $: activeCollectionContext = (() => {
     if (activeCollectionId === null) return null;
     if (allCollections.length === 0) return null;
@@ -793,8 +820,255 @@
 
   let tagSelectorOpen = false;
   let collectionSelectorOpen = false;
+  /**
+   * Membership-modal state the overflow icon opens. The button is
+   * the only entry point; the modal closes on Escape, backdrop
+   * click, the close button or a programmatic `close` event the
+   * shared `Modal` shell dispatches. The trigger element is
+   * captured through `bind:this` and forwarded as `returnFocusTo`
+   * so the focus returns to the icon when the dialog dismisses.
+   */
+  let membershipModalOpen = false;
+  /**
+   * DOM handle on the inline collection chip row. The
+   * `ResizeObserver` the card installs during `onMount` reads
+   * `clientWidth` against this element so the overflow icon only
+   * appears when the chips genuinely cannot be rendered inside the
+   * card width. The visible row alone is not a sufficient
+   * measurement source: once the row paints the trimmed subset, its
+   * `scrollWidth` collapses to the trimmed width and the predicate
+   * would never converge on the original overflow decision. The
+   * hidden strip below is the authoritative geometry source.
+   */
+  let collectionChipsEl: HTMLDivElement | null = null;
+  /**
+   * DOM handle on the hidden measurement strip the card mounts
+   * once per hydration. The strip is a *sibling* of the painted
+   * `.collection-chips` row, not a descendant, so `bind:this`
+   * captures it independently and the measurement pass queries
+   * `[data-collection-chip-measure-item]` /
+   * `[data-collection-overflow-measure-item]` against this
+   * element directly. The previous implementation queried
+   * `collectionChipsEl.querySelector("[data-collection-chip-measure]")`,
+   * but the only element that carried that attribute was the
+   * visible row itself, so the lookup collapsed to the visible
+   * row and never reached the actual measurement spans.
+   */
+  let collectionMeasureStripEl: HTMLDivElement | null = null;
+  /**
+   * DOM handle on the overflow button itself. Forwarded to the
+   * membership modal as `returnFocusTo` so the modal restores
+   * focus on close. The card also reads it inside
+   * `isInteractiveTarget` so the click never reaches the card
+   * surface selection handler.
+   */
+  let collectionOverflowEl: HTMLButtonElement | null = null;
+  /**
+   * Cached per-chip intrinsic widths measured from a hidden
+   * measurement strip the card mounts once during `onMount`.
+   * Storing the values reactively lets Svelte recompute the
+   * visible subset whenever the membership set changes; the strip
+   * itself is rendered off-screen so it never affects the card
+   * layout.
+   */
+  let collectionChipWidths: number[] = [];
+  /**
+   * Whether the inline chip row currently overflows its container.
+   * `false` means every chip fits and the card MUST NOT render the
+   * overflow button. `true` means at least one chip was clipped
+   * and the card renders the visible subset plus the button.
+   */
+  let collectionOverflow = false;
+  /**
+   * Visible subset of `userCollections` the chip row paints. When
+   * `collectionOverflow` is `false` the slice mirrors the full set
+   * so the user sees every membership; when it is `true` the
+   * slice is trimmed from the end so each visible chip plus the
+   * overflow chip fits inside the card. The helper receives the
+   * measured intrinsic width of the overflow chip so the last
+   * visible chip never overlaps the `+N` indicator.
+   */
+  $: visibleUserCollections = computeVisibleCollections(
+    userCollections,
+    collectionChipWidths,
+    collectionRowWidth,
+    collectionOverflow,
+    collectionOverflowChipWidth,
+  );
+  /**
+   * Number of user collections the overflow chip hides at the
+   * current visible subset. The count drives the chip text and
+   * the membership modal description so the inline label and the
+   * modal agree on the same number.
+   */
+  $: collectionOverflowCount = computeOverflowCount(
+    userCollections,
+    visibleUserCollections,
+  );
+  /**
+   * Text rendered inside the overflow chip. The leading `+`
+   * matches the documented `+N` indicator so the affordance reads
+   * exactly the same as the `tag-chip.more` counter the card
+   * already exposes for tags.
+   */
+  $: collectionOverflowLabel = `+${collectionOverflowCount}`;
+  /**
+   * Cached `clientWidth` of the chip row. Updated by the
+   * `ResizeObserver` so the visible-subset recomputation has a
+   * stable container width to size against — the row itself is
+   * wrapped in `overflow: hidden`, so `scrollWidth` is the
+   * intrinsic width of the content while `clientWidth` is the
+   * available painting area.
+   */
+  let collectionRowWidth = 0;
+  /**
+   * Cached intrinsic width of the `+N` overflow chip. The value
+   * comes from the hidden measurement strip the card mounts
+   * during `onMount`, which renders the chip with the worst-case
+   * text (`+{userCollections.length}`) so the reservation tracks
+   * every realistic scenario. The width feeds `computeVisibleCollections`
+   * directly so the responsive subset accounts for the actual
+   * chip geometry instead of a fixed reservation.
+   */
+  let collectionOverflowChipWidth = 0;
   let orgBusy = false;
   let orgError: string | null = null;
+
+  /**
+   * Read each chip's intrinsic width from the hidden measurement
+   * strip the card mounts during `onMount`. The strip is the
+   * authoritative geometry source: it renders the chips with the
+   * same CSS class so font, padding, border and gap match the
+   * visible row, and only the position differs (`position:
+   * absolute; visibility: hidden; pointer-events: none`).
+   *
+   * The strip is a sibling of the visible row, not a descendant,
+   * so the lookup runs against `collectionMeasureStripEl`
+   * directly — `collectionChipsEl.querySelector(...)` would only
+   * ever find descendants of the painted row and would miss the
+   * measurement spans. The previous implementation relied on that
+   * wrong selector and silently produced an empty `chipWidths`
+   * array, which is what hid the `+N` chip in the manual tests.
+   */
+  function readCollectionChipWidths(): void {
+    if (!collectionMeasureStripEl) {
+      collectionChipWidths = [];
+      return;
+    }
+    const items = collectionMeasureStripEl.querySelectorAll<HTMLElement>(
+      "[data-collection-chip-measure-item]",
+    );
+    collectionChipWidths = Array.from(items).map(
+      (item) => item.getBoundingClientRect().width,
+    );
+    const overflowItem = collectionMeasureStripEl.querySelector<HTMLElement>(
+      "[data-collection-overflow-measure-item]",
+    );
+    collectionOverflowChipWidth = overflowItem?.getBoundingClientRect().width ?? 0;
+  }
+
+  /**
+   * Read the chip row's `clientWidth` and decide whether the row
+   * currently overflows. The predicate compares the *intrinsic*
+   * total of the full user-collection set against the available
+   * card width — never the `scrollWidth` of a row that has
+   * already been trimmed, because a trimmed subset cannot reveal
+   * the original overflow decision.
+   *
+   * The intrinsic total is computed by `intrinsicCollectionRowWidth`
+   * from the per-chip widths measured by `readCollectionChipWidths`
+   * plus the reserved width of the overflow chip itself. If the
+   * measurement strip has not yet reported a width (a race the
+   * first paint can land in under WebKit/Tauri) the helper falls
+   * back to `COLLECTION_OVERFLOW_BUTTON_PX` so the predicate stays
+   * deterministic and the chip row still converges on the very
+   * first render.
+   */
+  function detectCollectionOverflow(): void {
+    if (!collectionChipsEl) {
+      collectionRowWidth = 0;
+      collectionOverflow = false;
+      return;
+    }
+    collectionRowWidth = collectionChipsEl.clientWidth;
+    if (!entryOrganizationLoaded || userCollections.length === 0) {
+      collectionOverflow = false;
+      return;
+    }
+    // When the measurement strip has not yet produced a width for
+    // every chip (e.g. the first render before `ResizeObserver`
+    // fires) the helper cannot compute a reliable intrinsic total
+    // and the predicate must stay neutral. The next measurement
+    // pass after the strip reports its first width resolves the
+    // flag and the reactive block converges.
+    if (collectionChipWidths.length !== userCollections.length) {
+      collectionOverflow = false;
+      return;
+    }
+    const intrinsicTotal = intrinsicCollectionRowWidth(
+      collectionChipWidths,
+      collectionOverflowChipWidth,
+    );
+    collectionOverflow =
+      intrinsicTotal > collectionRowWidth + COLLECTION_OVERFLOW_TOLERANCE_PX;
+  }
+
+  /**
+   * Recompute widths and overflow in sequence. The width pass MUST
+   * run first so the visible-subset computation has the freshest
+   * per-chip widths available when `visibleUserCollections` is
+   * derived from `userCollections`, `collectionChipWidths` and
+   * `collectionRowWidth`.
+   */
+  function recomputeCollectionLayout(): void {
+    readCollectionChipWidths();
+    detectCollectionOverflow();
+  }
+
+  /**
+   * `ResizeObserver` the card installs while it is mounted. The
+   * observer runs whenever the chip row resizes (a viewport
+   * change, a font swap, a card-size token override) and the
+   * `recomputeCollectionLayout` helper reacts so the visible
+   * subset and the overflow flag stay in lock-step with the
+   * current layout.
+   *
+   * The observer is detached on `onDestroy` and never reaches
+   * into the singleton pointer drag controller or the document
+   * event surface, so it cannot race the drag flow.
+   */
+  let collectionResizeObserver: ResizeObserver | null = null;
+
+  function ensureCollectionResizeObserver(): void {
+    if (typeof ResizeObserver === "undefined") return;
+    if (collectionResizeObserver) return;
+    collectionResizeObserver = new ResizeObserver(() => {
+      recomputeCollectionLayout();
+    });
+  }
+
+  function attachCollectionResizeObserver(): void {
+    if (!collectionChipsEl) return;
+    ensureCollectionResizeObserver();
+    collectionResizeObserver?.observe(collectionChipsEl);
+  }
+
+  function detachCollectionResizeObserver(): void {
+    if (!collectionResizeObserver) return;
+    collectionResizeObserver.disconnect();
+    collectionResizeObserver = null;
+  }
+
+  /**
+   * Open the membership modal from the overflow button. The helper
+   * is the single click target so future changes (a long-press
+   * gesture, a programmatic open) cannot race the focus
+   * bookkeeping. The modal stores the trigger through `bind:this`
+   * above and returns focus to it on close.
+   */
+  function openMembershipModal(): void {
+    membershipModalOpen = true;
+  }
 
   function openTagSelector(): void {
     tagSelectorOpen = true;
@@ -1077,6 +1351,14 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     void import("./lib/clipboardPreview.ts").then(({ matchesPreviewShortcut }) => {
       previewMatcher = matchesPreviewShortcut;
     });
+    // Recompute the inline chip widths and the overflow flag once
+    // the DOM has settled, then start the ResizeObserver so the
+    // card stays responsive to layout changes (window resize, font
+    // swap, accessibility-driven scale changes). The observer is
+    // detached on `onDestroy` so the card cannot leak a handler
+    // across remounts.
+    recomputeCollectionLayout();
+    attachCollectionResizeObserver();
   });
 
   function isInteractiveTarget(target: EventTarget | null): boolean {
@@ -1089,6 +1371,10 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     if (target.closest("[role='menuitem']")) return true;
     if (target.closest(".menu")) return true;
     if (target.closest(".title-input")) return true;
+    if (target.closest("[data-testid='history-card-collections-overflow']")) {
+      return true;
+    }
+    if (target.closest(".collection-chips")) return true;
     return false;
   }
 
@@ -1153,6 +1439,10 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     if (lastIconRef) {
       iconResolver.releaseFor(lastIconRef);
     }
+    // Detach the ResizeObserver the card installed during
+    // `onMount`; otherwise the observer would keep firing against
+    // a detached DOM node and leak the closure.
+    detachCollectionResizeObserver();
     // Revoke every blob URL the card minted for its payload assets
     // (image only — rich preview is no longer rendered) so a
     // long-lived rail does not leak memory as the user scrolls.
@@ -1559,6 +1849,111 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     </ul>
   {/if}
 
+  {#if entryOrganizationLoaded && hasInlineCollections}
+    <!--
+      Hidden measurement strip used by the responsive overflow pass.
+      Renders every user collection as a chip with the same CSS
+      class the visible row uses so font, padding and border match
+      the painted output. The strip is positioned off-screen with
+      `pointer-events: none` so it never interacts with the user,
+      never participates in the singleton drag controller's hit
+      tests (it carries no `data-testid="history-card"` ancestor)
+      and never grows the card geometry. The trailing
+      `data-collection-overflow-measure-item` span paints the
+      overflow chip with the worst-case text (`+{userCollections.length}`)
+      so the helper can read its real width instead of using a
+      fixed reservation — this is what makes the subset
+      computation converge to the canonical `+N` value.
+
+      The strip is a *sibling* of the visible row, not a
+      descendant, and the card binds it through
+      `bind:this={collectionMeasureStripEl}` so the measurement
+      pass queries the spans directly. The previous implementation
+      tried to reach the strip from the visible row via
+      `querySelector("[data-collection-chip-measure]")`, but the
+      attribute only landed on the visible row itself — the
+      lookup silently collapsed to the visible row and produced an
+      empty widths array, which is what hid the `+N` chip in the
+      manual tests.
+    -->
+    <div
+      class="collection-chips-measure"
+      data-testid="history-card-collection-chips-measure"
+      data-collection-chip-strip={entry.id}
+      aria-hidden="true"
+      bind:this={collectionMeasureStripEl}
+    >
+      {#each userCollections as collection (collection.id)}
+        <span
+          class="collection-chip-measure"
+          data-collection-chip-measure-item={collection.id}
+        >
+          {collection.name}
+        </span>
+      {/each}
+      <span
+        class="collection-overflow-measure"
+        data-collection-overflow-measure-item={userCollections.length}
+      >
+        +{userCollections.length}
+      </span>
+    </div>
+    <div
+      class="collection-chips"
+      data-testid="history-card-collection-chips"
+      data-entry-id={entry.id}
+      aria-label={assignedCollections.map((c) => c.name).join(", ")}
+      bind:this={collectionChipsEl}
+    >
+      {#each visibleUserCollections as collection (collection.id)}
+        {@const labelColor = collectionColor(collection.color_hex)}
+        <span
+          class="collection-chip"
+          data-testid="history-card-collection-chip"
+          data-collection-id={collection.id}
+          data-color={collection.color_hex}
+          style="color: {labelColor};"
+          title={collection.name}
+        >
+          {collection.name}
+        </span>
+      {/each}
+      {#if collectionOverflow && collectionOverflowCount > 0}
+        <!--
+          Overflow chip rendered with the documented `+N` indicator.
+          The chip reuses the same visual treatment as the
+          `tag-chip.more` (`+N`) affordance the card already paints
+          for tags and follows the same padding / radius / border
+          contract the rest of the row enforces. The chip is the
+          only interactive surface in the row and is the entry point
+          the `CollectionMembershipModal` reads to render the full
+          membership list, including `Historial`.
+
+          The chip's intrinsic width feeds back into the visible
+          subset computation through `collectionOverflowChipWidth`
+          so the `+N` value tracks the actual row width after each
+          resize instead of being driven by a fixed number of
+          memberships.
+        -->
+        <button
+          type="button"
+          class="tag-chip more collection-overflow"
+          data-testid="history-card-collections-overflow"
+          data-entry-id={entry.id}
+          data-overflow-count={collectionOverflowCount}
+          aria-haspopup="dialog"
+          aria-label={`Ver las ${assignedCollections.length} colecciones de la captura`}
+          aria-expanded={membershipModalOpen}
+          title="Ver todas las colecciones"
+          bind:this={collectionOverflowEl}
+          on:click={openMembershipModal}
+        >
+          {collectionOverflowLabel}
+        </button>
+      {/if}
+    </div>
+  {/if}
+
   {#if orgError}
     <p
       class="org-error"
@@ -1825,6 +2220,15 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   loaded={entryOrganizationLoaded}
   on:save={handleCollectionsSave}
   on:cancel={handleCancelSelector}
+/>
+
+<CollectionMembershipModal
+  open={membershipModalOpen}
+  entryId={entry.id}
+  displayTitle={displayTitle}
+  assignedCollections={assignedCollections}
+  returnFocusTo={collectionOverflowEl}
+  on:close={() => { membershipModalOpen = false; }}
 />
 
 {@html CONTENT_TYPE_ICON_SPRITE}
@@ -2460,6 +2864,160 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   .tag-chip.more {
     background: rgba(255, 255, 255, 0.06);
     color: #cbd5f5;
+  }
+  /*
+   * Collection chip row the `clipboard-history-cards` spec
+   * requires. The row sits directly below the tag chips and
+   * renders every assigned user collection using the
+   * collection's persisted `color_hex` as its text colour; the
+   * protected `Historial` system row is excluded from this row
+   * and is only surfaced through the membership modal so the
+   * inline chips never duplicate the sidebar's `Historial` row.
+   * The fallback helper `collectionColor` guarantees a valid
+   * value even for legacy rows that pre-date the colour
+   * migration.
+   *
+   * The row never wraps: every chip is rendered with `flex: 0 0
+   * auto` and the parent uses `overflow: hidden` so the visible
+   * subset painted by `visibleUserCollections` is the canonical
+   * surface. The full label list is exposed through the
+   * `aria-label` attribute so assistive technology can announce
+   * every membership name in spite of the visual clip.
+   *
+   * When the chips cannot all fit, the row paints the
+   * `.collection-overflow` button the card binds to
+   * `collectionOverflowEl`. The button is the only interactive
+   * surface in the row; the chips themselves remain decorative
+   * (`pointer-events: none`) so the card's existing
+   * drag-and-drop, pin, paste and ellipsis-menu flows are
+   * unaffected.
+   */
+  .collection-chips {
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.25rem;
+    overflow: hidden;
+    max-width: 100%;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .collection-chip {
+    flex: 0 0 auto;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 999px;
+    padding: 0.05rem 0.45rem;
+    font-size: var(--cv-tag, 0.65rem);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    line-height: 1.1;
+    max-width: 7rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    /* The chip itself is decorative; only the overflow button is
+     * interactive. Routing the pointer through to the chip would
+     * race the drag controller and re-emit selection clicks. */
+    pointer-events: none;
+  }
+  /*
+   * Overflow chip rendered with the documented `+N` indicator
+   * the responsive subset computation produces. The chip reuses
+   * the `.tag-chip.more` rule the card already exposes for tag
+   * chips so the two indicators read as the same affordance; the
+   * extra `.collection-overflow` selector only contributes the
+   * interactive surface (cursor, focus ring, hover) and the
+   * button reset the row needs. Padding, border, radius and
+   * typography all come from `.tag-chip.more`.
+   */
+  .collection-overflow {
+    flex: 0 0 auto;
+    font-family: inherit;
+    line-height: 1.1;
+    text-align: center;
+    cursor: pointer;
+    transition:
+      background-color 0.15s ease-out,
+      border-color 0.15s ease-out,
+      color 0.15s ease-out;
+  }
+  .collection-overflow:hover {
+    background: rgba(148, 163, 184, 0.2);
+    color: #f0f4f8;
+    border-color: rgba(148, 163, 184, 0.55);
+  }
+  .collection-overflow:focus-visible {
+    outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.45));
+    outline-offset: 1px;
+  }
+  /*
+   * Hidden measurement strip the responsive overflow pass
+   * consults. The strip is positioned absolutely off-screen and
+   * carries `aria-hidden="true"` so it never reaches assistive
+   * technology; the `pointer-events: none` rule guarantees the
+   * pointer drag controller's hit-tests never land on the
+   * measurement rows. The chips inside the strip share the
+   * `.collection-chip-measure` class so the offsetWidth the
+   * helper measures mirrors the painted chip's geometry. The
+   * trailing `.collection-overflow-measure` span mirrors the
+   * `.tag-chip.more` chrome so its measured width matches the
+   * painted overflow chip.
+   */
+  .collection-chips-measure {
+    position: absolute;
+    top: -9999px;
+    left: -9999px;
+    visibility: hidden;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-select: none;
+    /* The measurement strip renders the chips with the same
+     * flex layout the visible row uses so the cached widths
+     * match the painted chips. We deliberately avoid
+     * `display: none` so the chips keep their offsetWidth. */
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.25rem;
+  }
+  .collection-chip-measure {
+    flex: 0 0 auto;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 999px;
+    padding: 0.05rem 0.45rem;
+    font-size: var(--cv-tag, 0.65rem);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    line-height: 1.1;
+    max-width: 7rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /*
+   * Mirror of the painted overflow chip inside the measurement
+   * strip. The same `.tag-chip.more` styling applies so the
+   * measured width is the actual painted width. The row reads it
+   * through `data-collection-overflow-measure-item` so the
+   * `computeVisibleCollections` helper can use the real
+   * reservation instead of a fixed fallback.
+   */
+  .collection-overflow-measure {
+    flex: 0 0 auto;
+    background: rgba(255, 255, 255, 0.06);
+    color: #cbd5f5;
+    border: 1px solid #30363d;
+    border-radius: 999px;
+    padding: 0.05rem 0.45rem;
+    font-size: var(--cv-tag, 0.65rem);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    line-height: 1.1;
+    white-space: nowrap;
   }
   .org-error {
     margin: 0;

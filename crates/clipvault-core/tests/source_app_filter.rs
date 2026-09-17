@@ -138,7 +138,7 @@ fn source_applications_query_respects_collection_scope() {
     let trabajo_id = {
         let mut db = context.database().lock();
         let mut org = OrganizationRepository::new(db.connection_mut());
-        org.create_user_collection("Trabajo", t1)
+        org.create_user_collection("Trabajo", "#1565c0", t1)
             .expect("create")
             .id
     };
@@ -269,7 +269,7 @@ fn recent_entries_with_filter_combines_source_app_with_collection() {
     let trabajo_id = {
         let mut db = context.database().lock();
         let mut org = OrganizationRepository::new(db.connection_mut());
-        org.create_user_collection("Trabajo", t1)
+        org.create_user_collection("Trabajo", "#1565c0", t1)
             .expect("create")
             .id
     };

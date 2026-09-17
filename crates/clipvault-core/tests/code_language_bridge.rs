@@ -229,6 +229,7 @@ fn bridge_response_carries_only_metadata() {
     assert_eq!(record.id, id);
     assert_eq!(record.content_type, ContentType::Code);
     // Smoke-test: builtin_migrations still pin the version chain
-    // the change depends on.
-    assert_eq!(builtin_migrations().last().unwrap().version, 11);
+    // the change depends on. The `collection-colors` change appends
+    // its migration after this one, so the last version is now 12.
+    assert_eq!(builtin_migrations().last().unwrap().version, 12);
 }

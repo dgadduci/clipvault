@@ -28,6 +28,7 @@
     collectionsCreateCommand,
     collectionsDeleteCommand,
     collectionsRenameCommand,
+    collectionsSetColorCommand,
     deleteEntryCommand,
     diagnosticsCommand,
     entryCollectionsCommand,
@@ -889,6 +890,30 @@
     }
   }
 
+  /**
+   * Persist a new `#rrggbb` colour for an arbitrary collection
+   * (system or user). The sidebar dispatches the event with the
+   * modal's normalised value; the parent awaits the Tauri command,
+   * refreshes the snapshot and lets the metadata-only event the
+   * shell emits drive the per-entry cache. A backend failure keeps
+   * the previous colour in the sidebar and the cards; the modal
+   * stays open so the user can decide whether to retry.
+   */
+  async function handleSetCollectionColor(
+    event: CustomEvent<{ collectionId: number; colorHex: string }>,
+  ): Promise<void> {
+    try {
+      await collectionsSetColorCommand({
+        collectionId: event.detail.collectionId,
+        colorHex: event.detail.colorHex,
+      });
+      await refreshOrganization();
+    } catch (err) {
+      organizationError =
+        err instanceof Error ? err.message : String(err);
+    }
+  }
+
   async function handleAssignTags(
     entry: EntryRecord,
     tagIds: number[],
@@ -1610,6 +1635,7 @@
         on:rename={(e) => handleRenameCollection(e)}
         on:delete={(e) => handleDeleteCollection(e)}
         on:card-drop={(e) => handleCardDrop(e)}
+        on:set-color={(e) => handleSetCollectionColor(e)}
       />
       <div class="layout-main" data-testid="layout-main">
         <DesktopToolbar
