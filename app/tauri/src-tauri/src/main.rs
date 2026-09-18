@@ -236,6 +236,10 @@ fn main() {
             commands::clipvault_gnome_integration_retry,
             commands::clipvault_local_peer_profile_get,
             commands::clipvault_local_peer_profile_update,
+            commands::clipvault_peer_sharing_toggle_get,
+            commands::clipvault_peer_sharing_toggle_set,
+            commands::clipvault_peer_snapshot,
+            commands::clipvault_peer_sharing_refresh_identity,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ClipVault")

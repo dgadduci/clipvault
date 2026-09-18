@@ -1,0 +1,1439 @@
+//! Local peer discovery: opt-in mDNS browse + metadata-only merge.
+//!
+//! The `local-peer-discovery` change introduces a continuous
+//! `_clipvault._tcp.local` browser that records every other
+//! ClipVault installation visible on the same link. The discovery
+//! surface is metadata-only by construction:
+//!
+//! - TXT records carry `peer_id`, public key fingerprint, display
+//!   name, protocol major version and capability. They NEVER
+//!   carry clipboard content, previews, hashes, source
+//!   identifiers, file paths or secrets.
+//! - SQLite persists the validated metadata in `known_peers`. IP
+//!   addresses and ports are deliberately absent: an endpoint is a
+//!   runtime detail the discovery event surface carries for the
+//!   current browser session and never promotes to identity.
+//! - The `Equipos` view renders the persisted metadata plus the
+//!   presence state the runtime derives from events. Pairing /
+//!   trust / history remain in later changes.
+//!
+//! ## Architecture
+//!
+//! - [`PeerDiscoveryAdapter`] is the platform-neutral trait the core
+//!   uses to receive events. The production adapter is the
+//!   `mdns-sd`-backed implementation in `clipvault-platform`
+//!   (`mdns::MdnsPeerDiscoveryAdapter`); tests inject an in-process
+//!   fake.
+//! - [`PeerDiscoveryRuntime`] is the in-process state machine the
+//!   shell drives: it owns the `PeerDiscoveryAdapter`, deduplicates
+//!   events, validates identity records, applies self-filtering and
+//!   persists validated observations through
+//!   [`crate::peer_discovery::core`].
+//! - [`PeerObservationValidator`] is the single point that
+//!   sanitises an event payload and surfaces the typed
+//!   [`PersistenceError`] variants. Validation MUST be deterministic
+//!   and conservative — the spec scenario "Malformed or conflicting
+//!   announcement" pins the ignore-safely contract.
+//! - A single worker thread (spawned on `start`, joined on `stop`)
+//!   drains the event queue and persists observations through the
+//!   `apply_observation` closure the bootstrap installs. The worker
+//!   is the only consumer of the queue; the production adapter
+//!   pushes metadata-only events through [`DiscoverySink`].
+//!
+//! The shell holds the `PeerDiscoveryRuntime` behind an `Arc`, calls
+//! `start` / `stop` idempotently and surfaces a metadata-only
+//! snapshot through the Tauri commands the `clipvault-peer-sharing-*`
+//! bridge exposes.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use time::OffsetDateTime;
+use tracing::{debug, warn};
+
+use clipvault_db::{KnownPeer, PeerObservation, UpsertObservationOutcome};
+pub use clipvault_platform::peer_discovery::{
+    AdapterError, DiscoveryAdvertisement, DiscoveryEvent, DiscoverySink, PeerDiscoveryAdapter,
+};
+use clipvault_platform::peer_identity::{PeerFingerprint, PeerId};
+
+/// TTL after which a previously-observed peer is treated as
+/// `No disponible` even if the runtime never received a removal
+/// event. The value mirrors RFC 6762's recommended one-minute
+/// TTL (`last_discovered_at + TTL`) and is intentionally generous
+/// enough to absorb transient mDNS hiccups without flipping the UI
+/// between states on every browser iteration.
+pub const PRESENCE_TTL: Duration = Duration::from_secs(120);
+
+/// Maximum length of the validated visible name the TXT record
+/// publishes. Mirrors `MAX_PEER_DISPLAY_NAME_LENGTH` from the
+/// settings layer so the value cannot blow up the mDNS payload.
+pub const MAX_PEER_DISPLAY_NAME_LENGTH: usize = 64;
+
+/// Current wire-protocol major version. The runtime only persists
+/// observations whose `protocol_major` matches `PROTOCOL_MAJOR` so
+/// the `Equipos` view never surfaces an incompatible peer.
+pub const PROTOCOL_MAJOR: i64 = 1;
+
+/// Capability advertised in every TXT record this change owns.
+/// The `local-peer-mutual-pairing` change will replace this string
+/// with `pairing` once the listener ships; the discovery-only
+/// capability stays valid for any pair that does not yet trust the
+/// remote peer.
+pub const DISCOVERY_ONLY_CAPABILITY: &str = "discovery_only";
+
+/// Service type the runtime browses / registers. The trailing dot
+/// is intentional: `mdns-sd` treats it as a fully-qualified name
+/// (RFC 6762 §3).
+pub const SERVICE_TYPE: &str = "_clipvault._tcp.local.";
+
+/// Number of lowercase hex characters the `peer_id` MUST carry.
+/// Mirrors the private `PEER_ID_HEX_CHARS` constant the platform
+/// identity module uses; the discovery runtime duplicates the
+/// value here so it can validate TXT records without exposing the
+/// platform-internal constant.
+pub const PEER_ID_HEX_CHARS: usize = 32;
+
+/// Identifier of the local peer the runtime must filter out before
+/// persisting. The runtime compares the TXT `peer_id` against this
+/// value and silently ignores a self-match so the local row never
+/// appears in its own `Equipos` snapshot.
+///
+/// The snapshot also carries the trimmed visible name the runtime
+/// publishes in its own TXT record so the discovery adapter does
+/// not have to re-resolve the identity foundation at `start` time.
+/// The runtime rejects an empty / over-long name at construction
+/// time so the adapter cannot accidentally publish an invalid
+/// record.
+#[derive(Debug, Clone)]
+pub struct LocalPeerIdentitySnapshot {
+    pub peer_id: PeerId,
+    pub fingerprint: PeerFingerprint,
+    pub display_name: String,
+}
+
+impl LocalPeerIdentitySnapshot {
+    /// Build a snapshot from the platform-neutral identity the
+    /// identity foundation mints. Tests construct one directly
+    /// when they bypass the secure store.
+    pub fn new(peer_id: PeerId, fingerprint: PeerFingerprint, display_name: String) -> Self {
+        Self {
+            peer_id,
+            fingerprint,
+            display_name,
+        }
+    }
+}
+
+impl LocalPeerIdentitySnapshot {
+    /// Returns `true` when the supplied observation matches the
+    /// local identity. The runtime uses the helper as a
+    /// `self-filter`: a service record that claims our own
+    /// `peer_id` (a) is the local announcement and (b) is ignored
+    /// before reaching persistence. The comparison is exact on
+    /// `peer_id` and `fingerprint` so a peer reusing an existing
+    /// `peer_id` with a different fingerprint still reaches the
+    /// conflict-detection branch.
+    pub fn matches(&self, observation: &PeerObservationRecord) -> bool {
+        observation.peer_id == self.peer_id.as_str()
+            && observation.public_key_fingerprint == self.fingerprint.as_str()
+    }
+}
+
+/// Validated, runtime-shaped observation the [`PeerDiscoveryRuntime`]
+/// builds from a raw event before persisting. The struct mirrors
+/// [`PeerObservation`] but stays typed at the `peer_id` /
+/// `fingerprint` level and carries the observation timestamp so the
+/// presence TTL can be evaluated without a second database read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerObservationRecord {
+    pub peer_id: String,
+    pub public_key_fingerprint: String,
+    pub display_name: String,
+    pub protocol_major: i64,
+    pub capability: String,
+    pub observed_at: OffsetDateTime,
+}
+
+impl PeerObservationRecord {
+    /// Validate a raw TXT-record payload against the contract the
+    /// design pins. Returns either the canonicalised observation or
+    /// a typed [`PeerRecordValidationError`] so the runtime can
+    /// branch on the reason without inspecting the rejected bytes.
+    pub fn from_txt_record(raw: &TxtRecord) -> Result<Self, PeerRecordValidationError> {
+        if raw.peer_id.is_empty() {
+            return Err(PeerRecordValidationError::MissingPeerId);
+        }
+        if raw.peer_id.len() != PEER_ID_HEX_CHARS {
+            return Err(PeerRecordValidationError::MalformedPeerId);
+        }
+        if !raw
+            .peer_id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            return Err(PeerRecordValidationError::MalformedPeerId);
+        }
+        if raw.public_key_fingerprint.is_empty() {
+            return Err(PeerRecordValidationError::MissingFingerprint);
+        }
+        if !raw
+            .public_key_fingerprint
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            return Err(PeerRecordValidationError::MalformedFingerprint);
+        }
+        let display_name = raw.display_name.trim().to_string();
+        if display_name.is_empty() {
+            return Err(PeerRecordValidationError::MissingDisplayName);
+        }
+        if display_name.chars().any(is_invalid_display_char) {
+            return Err(PeerRecordValidationError::InvalidDisplayName);
+        }
+        if display_name.chars().count() > MAX_PEER_DISPLAY_NAME_LENGTH {
+            return Err(PeerRecordValidationError::DisplayNameTooLong);
+        }
+        if raw.protocol_major != PROTOCOL_MAJOR {
+            return Err(PeerRecordValidationError::IncompatibleProtocol {
+                observed: raw.protocol_major,
+            });
+        }
+        if raw.capability != DISCOVERY_ONLY_CAPABILITY {
+            return Err(PeerRecordValidationError::UnsupportedCapability {
+                capability: raw.capability.clone(),
+            });
+        }
+        Ok(Self {
+            peer_id: raw.peer_id.clone(),
+            public_key_fingerprint: raw.public_key_fingerprint.clone(),
+            display_name,
+            protocol_major: raw.protocol_major,
+            capability: raw.capability.clone(),
+            observed_at: raw.observed_at,
+        })
+    }
+
+    /// Convert into the database-shaped [`PeerObservation`]. The
+    /// runtime calls this immediately before persistence so the
+    /// repository never sees unvalidated bytes.
+    pub fn into_persistence(self) -> PeerObservation {
+        PeerObservation {
+            peer_id: self.peer_id,
+            public_key_fingerprint: self.public_key_fingerprint,
+            display_name: self.display_name,
+            protocol_major: self.protocol_major,
+            capability: self.capability,
+            observed_at: self.observed_at,
+        }
+    }
+}
+
+/// Raw TXT record payload the runtime receives from the platform
+/// adapter. Re-exported from [`clipvault_platform::peer_discovery::TxtRecord`]
+/// so the core can rely on the metadata-only contract without
+/// duplicating the shape — the adapter pushes these records into
+/// the runtime through a [`DiscoverySink`].
+pub type TxtRecord = clipvault_platform::peer_discovery::TxtRecord;
+
+/// Typed validation errors the runtime classifies before
+/// discarding a malformed / conflicting announcement. The variants
+/// are stable identifiers the bridge / frontend surfaces; the
+/// messages never carry clipboard content, hashes or other
+/// payload-shaped data.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum PeerRecordValidationError {
+    #[error("TXT record is missing peer_id")]
+    MissingPeerId,
+    #[error("TXT record peer_id is malformed")]
+    MalformedPeerId,
+    #[error("TXT record is missing fingerprint")]
+    MissingFingerprint,
+    #[error("TXT record fingerprint is malformed")]
+    MalformedFingerprint,
+    #[error("TXT record is missing display_name")]
+    MissingDisplayName,
+    #[error("TXT record display_name contains invalid characters")]
+    InvalidDisplayName,
+    #[error("TXT record display_name exceeds the published length")]
+    DisplayNameTooLong,
+    #[error("TXT record protocol major {observed} is incompatible with PROTOCOL_MAJOR")]
+    IncompatibleProtocol { observed: i64 },
+    #[error("TXT record capability {capability:?} is not supported by this build")]
+    UnsupportedCapability { capability: String },
+}
+
+fn is_invalid_display_char(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}')
+}
+
+/// Outcome of a single observation event. The runtime returns one
+/// of these variants to the platform adapter / the test suite so
+/// callers can branch on the reason without inspecting free-form
+/// strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObservationOutcome {
+    /// The observation was self-filtered because the TXT record
+    /// matched the local identity. Persisted state is unchanged.
+    SelfFiltered,
+    /// The observation passed validation but the repository
+    /// rejected it as a conflict (different fingerprint / display
+    /// name / protocol / capability reusing the same `peer_id`).
+    /// The persisted row stays untouched.
+    Conflict(KnownPeer),
+    /// The observation was persisted (new row or merge).
+    Stored(KnownPeer),
+    /// The TXT record failed validation. Persisted state is
+    /// unchanged. The variant carries the typed reason the
+    /// runtime / diagnostics surface.
+    Rejected(PeerRecordValidationError),
+}
+
+/// Snapshot of the persisted peer list merged with the in-memory
+/// presence state the runtime derives from mDNS events. The struct
+/// is the metadata-only DTO the `Equipos` view renders; it never
+/// carries the TXT payload, the runtime identity or the local
+/// identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PeerSnapshotEntry {
+    pub peer_id: String,
+    pub public_key_fingerprint: String,
+    pub display_name: String,
+    pub protocol_major: i64,
+    pub capability: String,
+    pub first_seen_at: String,
+    pub last_discovered_at: String,
+    /// `true` when the runtime observed the peer inside the
+    /// [`PRESENCE_TTL`] window. `false` otherwise.
+    pub is_present: bool,
+    /// Stable discriminator the UI branches on. Mirrors
+    /// [`PeerPresence::as_str`] so the frontend can render the
+    /// matching copy without parsing free-form strings.
+    pub presence: PeerPresence,
+}
+
+impl PeerSnapshotEntry {
+    fn from_row(row: KnownPeer, is_present: bool) -> Self {
+        let presence = if is_present {
+            PeerPresence::Detected
+        } else {
+            PeerPresence::NotAvailable
+        };
+        Self {
+            peer_id: row.peer_id,
+            public_key_fingerprint: row.public_key_fingerprint,
+            display_name: row.display_name,
+            protocol_major: row.protocol_major,
+            capability: row.capability,
+            first_seen_at: row.first_seen_at,
+            last_discovered_at: row.last_discovered_at,
+            is_present,
+            presence,
+        }
+    }
+}
+
+/// Presence discriminator the UI renders in the `Equipos` view.
+/// `Unverified` is reserved for future pairing states; the
+/// discovery surface only mints `Detected` and `NotAvailable`
+/// today, but the enum stays open so the next change does not have
+/// to refactor the wire contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerPresence {
+    /// The runtime received an observation inside the [`PRESENCE_TTL`]
+    /// window. The frontend MUST offer only "Vincular" — never
+    /// "Ver historial" until the pairing change lands.
+    Detected,
+    /// Persisted historically but not visible right now. The UI
+    /// renders the peer but disables every action: there is no
+    /// reachable identity to verify.
+    NotAvailable,
+    /// Reserved for the future pairing change. Today the runtime
+    /// never emits it; the variant exists so the wire contract
+    /// stays stable across changes.
+    Unverified,
+}
+
+impl PeerPresence {
+    /// Stable snake_case string the bridge / frontend uses as a
+    /// discriminator. The value MUST stay in sync with
+    /// `frontend/src/types.ts`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PeerPresence::Detected => "detected",
+            PeerPresence::NotAvailable => "not_available",
+            PeerPresence::Unverified => "unverified",
+        }
+    }
+}
+
+/// Outcome of [`PeerDiscoveryRuntime::snapshot`]. The variant is
+/// the wire contract the `clipvault_peer_snapshot` command
+/// returns: the frontend never has to inspect the inner list
+/// without first confirming the typed state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PeerSnapshot {
+    pub entries: Vec<PeerSnapshotEntry>,
+    /// Whether the runtime is currently browsing the LAN. The
+    /// frontend reads the flag to decide whether the toggle is
+    /// visually "active".
+    pub sharing_active: bool,
+    /// Free-form reason the runtime is not browsing. The string
+    /// never carries platform detail (no keychain / D-Bus
+    /// messages); only the documented `identity_unavailable`,
+    /// `runtime_stopped`, `disabled` values the bridge can branch
+    /// on.
+    pub sharing_inactive_reason: Option<String>,
+}
+
+impl PeerSnapshot {
+    /// Convenience used by tests to build an `active` snapshot.
+    pub fn active(entries: Vec<PeerSnapshotEntry>) -> Self {
+        Self {
+            entries,
+            sharing_active: true,
+            sharing_inactive_reason: None,
+        }
+    }
+
+    /// Convenience used by tests to build an inactive snapshot.
+    pub fn inactive(reason: impl Into<String>) -> Self {
+        Self {
+            entries: Vec::new(),
+            sharing_active: false,
+            sharing_inactive_reason: Some(reason.into()),
+        }
+    }
+}
+
+/// Reason the runtime is currently inactive. The string is part of
+/// the wire contract the `Equipos` view branches on.
+pub const RUNTIME_INACTIVE_REASON_IDENTITY_UNAVAILABLE: &str = "identity_unavailable";
+pub const RUNTIME_INACTIVE_REASON_RUNTIME_STOPPED: &str = "runtime_stopped";
+pub const RUNTIME_INACTIVE_REASON_DISABLED: &str = "disabled";
+
+/// Outcome of a single browse iteration the adapter delivers. The
+/// runtime receives both shapes through the same callback so the
+/// browser can stay in one place. The shape is re-exported from
+/// `clipvault_platform::peer_discovery::DiscoveryEvent` (see the
+/// file-level `pub use` above).
+///
+/// Snapshot of the in-memory presence the runtime maintains per
+/// peer. The runtime owns this table behind an `RwLock` so the
+/// `Equipos` snapshot can read it without serialising against the
+/// event pump.
+#[derive(Debug, Clone, Default)]
+struct PresenceTable {
+    inner: HashMap<String, Instant>,
+}
+
+impl PresenceTable {
+    fn record(&mut self, peer_id: &str, at: Instant) {
+        self.inner.insert(peer_id.to_string(), at);
+    }
+
+    fn remove(&mut self, peer_id: &str) {
+        self.inner.remove(peer_id);
+    }
+
+    fn is_present(&self, peer_id: &str, now: Instant) -> bool {
+        self.inner
+            .get(peer_id)
+            .map(|last| now.duration_since(*last) <= PRESENCE_TTL)
+            .unwrap_or(false)
+    }
+
+    fn purge_expired(&mut self, now: Instant) -> Vec<String> {
+        let expired: Vec<String> = self
+            .inner
+            .iter()
+            .filter_map(|(peer_id, last)| {
+                if now.duration_since(*last) > PRESENCE_TTL {
+                    Some(peer_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for peer_id in &expired {
+            self.inner.remove(peer_id);
+        }
+        expired
+    }
+}
+
+/// `DiscoverySink` the runtime exposes to the platform adapter.
+/// The adapter pushes events from a background thread; the sink
+/// simply forwards them into the queue the worker drains.
+struct RuntimeSink {
+    queue: Arc<Mutex<Vec<DiscoveryEvent>>>,
+}
+
+impl DiscoverySink for RuntimeSink {
+    fn push(&self, event: DiscoveryEvent) {
+        self.queue.lock().expect("queue lock").push(event);
+    }
+}
+
+/// Cadence the worker drains the event queue. The value is short
+/// enough to feel responsive in the UI but generous enough that
+/// a slow persistence call (e.g. the first `INSERT` after a
+/// migration) does not starve the loop.
+const WORKER_TICK: Duration = Duration::from_millis(250);
+
+/// Persistence closure the bootstrap installs before `start`.
+/// The worker passes every validated observation through it;
+/// the closure is the only place where the runtime touches the
+/// `KnownPeerRepository`, keeping the persistence call site in
+/// one place.
+type PersistenceFn = dyn Fn(&PeerObservation) -> UpsertObservationOutcome + Send + Sync;
+
+/// Inner fields the worker thread reaches through an `Arc` so
+/// the runtime can drop its own handles on `stop` without
+/// invalidating the in-flight `drain` call.
+#[derive(Clone)]
+struct WorkerHandles {
+    queue: Arc<Mutex<Vec<DiscoveryEvent>>>,
+    local_identity: Arc<RwLock<Option<LocalPeerIdentitySnapshot>>>,
+    presence: Arc<RwLock<PresenceTable>>,
+    cancel: Arc<AtomicBool>,
+    persist: Arc<PersistenceFn>,
+}
+
+/// Central state machine the shell drives. The runtime owns the
+/// adapter, the presence table, the in-memory event queue and
+/// the worker thread the lifecycle spins up on `start`. The
+/// production adapter pushes events through the [`RuntimeSink`]
+/// the runtime hands it at `start` time; the worker drains the
+/// queue and persists observations through the closure the
+/// bootstrap installs via [`Self::set_persistence`].
+///
+/// `PeerDiscoveryRuntime` is cheap to clone: every field is
+/// either `Arc` or already shareable across threads.
+#[derive(Clone)]
+pub struct PeerDiscoveryRuntime {
+    adapter: Arc<dyn PeerDiscoveryAdapter>,
+    presence: Arc<RwLock<PresenceTable>>,
+    events: Arc<Mutex<Vec<DiscoveryEvent>>>,
+    local_identity: Arc<RwLock<Option<LocalPeerIdentitySnapshot>>>,
+    /// Tracks the running state the runtime last observed so the
+    /// shell can render the `active` indicator without polling the
+    /// adapter on every snapshot.
+    running: Arc<RwLock<bool>>,
+    /// Handle to the worker thread the lifecycle spawns on `start`
+    /// and joins on `stop`. The handle stays `None` while the
+    /// runtime is stopped.
+    worker: Arc<RwLock<Option<WorkerHandle>>>,
+    /// Persistence closure the bootstrap installs. The runtime
+    /// holds it behind an `Option` so tests can exercise the
+    /// adapter / sink contract without standing up a database.
+    persistence: Arc<RwLock<Option<Arc<PersistenceFn>>>>,
+}
+
+struct WorkerHandle {
+    cancel: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl PeerDiscoveryRuntime {
+    /// Build a runtime around an arbitrary adapter. The local
+    /// identity is set later via [`Self::set_local_identity`] so
+    /// the shell can wire the identity foundation independently
+    /// from the discovery bootstrap. The persistence closure is
+    /// installed via [`Self::set_persistence`] before the first
+    /// `start` call.
+    pub fn new(adapter: Arc<dyn PeerDiscoveryAdapter>) -> Self {
+        Self {
+            adapter,
+            presence: Arc::new(RwLock::new(PresenceTable::default())),
+            events: Arc::new(Mutex::new(Vec::new())),
+            local_identity: Arc::new(RwLock::new(None)),
+            running: Arc::new(RwLock::new(false)),
+            worker: Arc::new(RwLock::new(None)),
+            persistence: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Inject the local identity the runtime must self-filter
+    /// against. A `None` value disables sharing: the runtime
+    /// refuses to start until the foundation is reachable.
+    pub fn set_local_identity(&self, identity: Option<LocalPeerIdentitySnapshot>) {
+        *self.local_identity.write() = identity;
+    }
+
+    /// Install the persistence closure the worker thread calls
+    /// on every drained observation. The bootstrap wires the
+    /// `KnownPeerRepository::upsert_observation` call here; tests
+    /// install an in-memory closure that mirrors the upsert
+    /// contract without standing up a database.
+    pub fn set_persistence(&self, closure: Arc<PersistenceFn>) {
+        *self.persistence.write() = Some(closure);
+    }
+
+    /// Start the adapter. Returns the typed reason the runtime
+    /// refused to start when an identity is not yet available, and
+    /// propagates the adapter error otherwise. Calling `start`
+    /// while the runtime is already running is a no-op: the
+    /// adapter's own idempotency guarantee plus the running flag
+    /// keep the call site contract symmetric.
+    pub fn start(&self) -> Result<(), StartError> {
+        let identity = self.local_identity.read().clone();
+        let Some(identity) = identity else {
+            return Err(StartError::IdentityUnavailable);
+        };
+        let persistence = self.persistence.read().clone();
+        let Some(persistence) = persistence else {
+            return Err(StartError::PersistenceMissing);
+        };
+        if *self.running.read() {
+            return Ok(());
+        }
+        let advertisement = DiscoveryAdvertisement::new(
+            identity.peer_id.as_str(),
+            identity.fingerprint.as_str(),
+            identity.display_name.as_str(),
+            PROTOCOL_MAJOR,
+            DISCOVERY_ONLY_CAPABILITY,
+        );
+        let sink: Arc<dyn DiscoverySink> = Arc::new(RuntimeSink {
+            queue: Arc::clone(&self.events),
+        });
+        self.adapter
+            .start(&advertisement, sink)
+            .map_err(StartError::Adapter)?;
+        *self.running.write() = true;
+        // Spawn the worker thread last so a failed `adapter.start`
+        // does not leak a half-started background task.
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker = spawn_worker(WorkerHandles {
+            queue: Arc::clone(&self.events),
+            local_identity: Arc::clone(&self.local_identity),
+            presence: Arc::clone(&self.presence),
+            cancel: Arc::clone(&cancel),
+            persist: persistence,
+        });
+        *self.worker.write() = Some(WorkerHandle {
+            cancel,
+            join: Some(worker),
+        });
+        Ok(())
+    }
+
+    /// Stop the adapter. Idempotent: a second call after the
+    /// adapter has already been stopped is a no-op. The runtime
+    /// keeps the in-memory presence table across stop / start so
+    /// a transient shutdown does not erase the known peers.
+    pub fn stop(&self) -> Result<(), AdapterError> {
+        if !*self.running.read() {
+            return Ok(());
+        }
+        self.adapter.stop()?;
+        *self.running.write() = false;
+        // Signal the worker to exit, then drain any leftover
+        // events so a subsequent snapshot does not surface a
+        // stale "Detected" state for a peer that has already
+        // gone away.
+        if let Some(mut handle) = self.worker.write().take() {
+            handle.cancel.store(true, Ordering::Release);
+            if let Some(join) = handle.join.take() {
+                if let Err(error) = join.join() {
+                    warn!("peer discovery worker thread panicked");
+                    let _ = error;
+                }
+            }
+        }
+        self.events.lock().expect("events lock").clear();
+        Ok(())
+    }
+
+    /// Whether the runtime is currently browsing the LAN.
+    pub fn is_running(&self) -> bool {
+        *self.running.read()
+    }
+
+    /// Push an event the adapter emitted into the queue. Tests use
+    /// this to feed scripted events; the production adapter has
+    /// its own queue that the runtime drains through this method.
+    pub fn enqueue(&self, event: DiscoveryEvent) {
+        self.events.lock().expect("events lock").push(event);
+    }
+
+    /// Drain every queued event, returning the outcomes the runtime
+    /// computed (self-filtered, conflict, stored, rejected). The
+    /// runtime also updates the presence table on the way out so
+    /// the snapshot is always in sync with the database.
+    ///
+    /// `apply_observation` is the closure the runtime uses to
+    /// persist a validated observation. Tests pass a closure that
+    /// delegates to a [`clipvault_db::KnownPeerRepository`];
+    /// production wires the repository through the [`AppContext`].
+    pub fn drain<F>(&self, now: Instant, mut apply_observation: F) -> Vec<ObservationOutcome>
+    where
+        F: FnMut(&PeerObservation) -> UpsertObservationOutcome,
+    {
+        let drained: Vec<DiscoveryEvent> = {
+            let mut queue = self.events.lock().expect("events lock");
+            std::mem::take(&mut *queue)
+        };
+        let mut outcomes = Vec::with_capacity(drained.len());
+        let local = self.local_identity.read().clone();
+        for event in drained {
+            match event {
+                DiscoveryEvent::Observed(record) => {
+                    let validated = PeerObservationRecord::from_txt_record(&record);
+                    let outcome = match validated {
+                        Ok(observation) => {
+                            if let Some(local) = local.as_ref() {
+                                if local.matches(&observation) {
+                                    self.presence.write().record(&observation.peer_id, now);
+                                    ObservationOutcome::SelfFiltered
+                                } else {
+                                    self.persist_and_record(
+                                        observation,
+                                        now,
+                                        &mut apply_observation,
+                                    )
+                                }
+                            } else {
+                                ObservationOutcome::Rejected(
+                                    PeerRecordValidationError::MissingPeerId,
+                                )
+                            }
+                        }
+                        Err(error) => ObservationOutcome::Rejected(error),
+                    };
+                    outcomes.push(outcome);
+                }
+                DiscoveryEvent::Removed { peer_id } => {
+                    self.presence.write().remove(&peer_id);
+                    outcomes.push(ObservationOutcome::SelfFiltered);
+                }
+            }
+        }
+        outcomes
+    }
+
+    fn persist_and_record<F>(
+        &self,
+        observation: PeerObservationRecord,
+        now: Instant,
+        apply_observation: &mut F,
+    ) -> ObservationOutcome
+    where
+        F: FnMut(&PeerObservation) -> UpsertObservationOutcome,
+    {
+        let persisted = apply_observation(&PeerObservation {
+            peer_id: observation.peer_id.clone(),
+            public_key_fingerprint: observation.public_key_fingerprint.clone(),
+            display_name: observation.display_name.clone(),
+            protocol_major: observation.protocol_major,
+            capability: observation.capability.clone(),
+            observed_at: observation.observed_at,
+        });
+        self.presence.write().record(&observation.peer_id, now);
+        match persisted {
+            UpsertObservationOutcome::Stored(row) => ObservationOutcome::Stored(row),
+            UpsertObservationOutcome::Conflict(row) => ObservationOutcome::Conflict(row),
+        }
+    }
+
+    /// Reap entries whose presence TTL expired and return the
+    /// affected peer ids. The runtime relies on the shell to call
+    /// this on every snapshot so the `Equipos` view can render
+    /// `No disponible` without keeping a separate timer thread.
+    pub fn reap_expired(&self, now: Instant) -> Vec<String> {
+        self.presence.write().purge_expired(now)
+    }
+
+    /// Build a metadata-only snapshot the bridge surfaces. The
+    /// runtime reads every persisted peer through `read_persisted`
+    /// so the snapshot is in sync with the database and the
+    /// presence table.
+    pub fn snapshot<F>(&self, read_persisted: F, now: Instant) -> PeerSnapshot
+    where
+        F: FnOnce() -> Vec<KnownPeer>,
+    {
+        if !self.is_running() {
+            // The runtime refuses to start without an identity;
+            // when the runtime is not running, the snapshot reports
+            // `runtime_stopped` so the UI can render the toggle in
+            // the off state. The runtime can also be running while
+            // the local identity has not been wired yet; that arm
+            // is reported as `identity_unavailable` separately.
+            let reason = match self.local_identity.read().clone() {
+                Some(_) => RUNTIME_INACTIVE_REASON_RUNTIME_STOPPED,
+                None => RUNTIME_INACTIVE_REASON_IDENTITY_UNAVAILABLE,
+            };
+            return PeerSnapshot::inactive(reason);
+        }
+        let rows = read_persisted();
+        let presence = self.presence.read();
+        let entries: Vec<PeerSnapshotEntry> = rows
+            .into_iter()
+            .map(|row| {
+                let is_present = presence.is_present(&row.peer_id, now);
+                PeerSnapshotEntry::from_row(row, is_present)
+            })
+            .collect();
+        PeerSnapshot::active(entries)
+    }
+}
+
+/// Spawn the single worker thread that drains the event queue
+/// and persists observations through the closure the bootstrap
+/// installs. The worker exits when `cancel` flips to `true`,
+/// which the runtime's `stop` does after `adapter.stop`. The
+/// thread is the only consumer of the queue; nothing else
+/// reaches into `WorkerHandles::queue` for draining.
+fn spawn_worker(handles: WorkerHandles) -> JoinHandle<()> {
+    thread::Builder::new()
+        .name("clipvault-peer-discovery-worker".to_string())
+        .spawn(move || {
+            while !handles.cancel.load(Ordering::Acquire) {
+                let drained = {
+                    let mut queue = handles.queue.lock().expect("queue lock");
+                    std::mem::take(&mut *queue)
+                };
+                if drained.is_empty() {
+                    // No events to process: sleep until the next
+                    // tick or the cancel flag flips.
+                    thread::park_timeout(WORKER_TICK);
+                    continue;
+                }
+                // Process each event inline; the persistence
+                // closure is allowed to take its time (a slow
+                // SQLite write should not block the queue) but
+                // we do not spawn an unbounded number of helper
+                // threads. The next tick drains whatever the
+                // adapter pushed while we were persisting.
+                for event in drained {
+                    apply_event(&handles, event);
+                }
+            }
+        })
+        .expect("spawn peer discovery worker")
+}
+
+/// Apply a single event the adapter pushed: validates an
+/// observation, self-filters, persists through the closure and
+/// updates the presence table. The function lives outside the
+/// runtime so the worker's loop body stays short and the
+/// per-event error handling stays in one place.
+fn apply_event(handles: &WorkerHandles, event: DiscoveryEvent) {
+    let now = Instant::now();
+    match event {
+        DiscoveryEvent::Observed(record) => {
+            let validated = PeerObservationRecord::from_txt_record(&record);
+            let local = handles.local_identity.read().clone();
+            match validated {
+                Ok(observation) => {
+                    let is_self = local
+                        .as_ref()
+                        .map(|local| local.matches(&observation))
+                        .unwrap_or(false);
+                    if is_self {
+                        // Self-observation: record presence so the
+                        // UI reflects "we are here" but skip
+                        // persistence.
+                        handles.presence.write().record(&observation.peer_id, now);
+                    } else {
+                        let persisted = (handles.persist)(&PeerObservation {
+                            peer_id: observation.peer_id.clone(),
+                            public_key_fingerprint: observation.public_key_fingerprint.clone(),
+                            display_name: observation.display_name.clone(),
+                            protocol_major: observation.protocol_major,
+                            capability: observation.capability.clone(),
+                            observed_at: observation.observed_at,
+                        });
+                        handles.presence.write().record(&observation.peer_id, now);
+                        match persisted {
+                            UpsertObservationOutcome::Stored(_) => {
+                                debug!(peer_id = %observation.peer_id, "peer stored");
+                            }
+                            UpsertObservationOutcome::Conflict(_) => {
+                                debug!(
+                                    peer_id = %observation.peer_id,
+                                    "peer announcement conflicted with persisted row"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    debug!(?error, "rejected malformed peer announcement");
+                }
+            }
+        }
+        DiscoveryEvent::Removed { peer_id } => {
+            handles.presence.write().remove(&peer_id);
+        }
+    }
+}
+
+/// Typed error the runtime returns from `start`. The shell maps
+/// this to a stable `sharing_inactive_reason` value so the
+/// frontend can render the matching copy.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum StartError {
+    #[error("local peer identity is not available on this session")]
+    IdentityUnavailable,
+    #[error("peer discovery persistence closure has not been installed")]
+    PersistenceMissing,
+    #[error("discovery adapter refused to start: {0}")]
+    Adapter(AdapterError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clipvault_platform::peer_identity::{PeerFingerprint, PeerId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use time::macros::datetime;
+
+    fn local_identity(peer_id: &str, fingerprint: &str) -> LocalPeerIdentitySnapshot {
+        let pid = PeerId::from_public_key(peer_id.as_bytes());
+        let fp = PeerFingerprint::from_public_key(fingerprint.as_bytes());
+        LocalPeerIdentitySnapshot::new(pid, fp, "Test".to_string())
+    }
+
+    fn txt(peer_id: &str, fingerprint: &str, name: &str) -> TxtRecord {
+        TxtRecord::new(
+            peer_id,
+            fingerprint,
+            name,
+            PROTOCOL_MAJOR,
+            DISCOVERY_ONLY_CAPABILITY,
+            datetime!(2026-01-02 03:04:05 UTC),
+        )
+    }
+
+    /// Test-only adapter that records every `start` / `stop` call
+    /// and lets the test queue events the runtime drains.
+    #[derive(Debug)]
+    struct ScriptedAdapter {
+        running: AtomicUsize,
+        start_calls: AtomicUsize,
+        stop_calls: AtomicUsize,
+        start_outcome: Mutex<Result<(), AdapterError>>,
+    }
+
+    impl ScriptedAdapter {
+        fn new() -> Self {
+            Self {
+                running: AtomicUsize::new(0),
+                start_calls: AtomicUsize::new(0),
+                stop_calls: AtomicUsize::new(0),
+                start_outcome: Mutex::new(Ok(())),
+            }
+        }
+
+        fn start_calls(&self) -> usize {
+            self.start_calls.load(Ordering::Acquire)
+        }
+
+        fn stop_calls(&self) -> usize {
+            self.stop_calls.load(Ordering::Acquire)
+        }
+
+        fn running_calls(&self) -> usize {
+            self.running.load(Ordering::Acquire)
+        }
+    }
+
+    impl PeerDiscoveryAdapter for ScriptedAdapter {
+        fn start(
+            &self,
+            _advertisement: &DiscoveryAdvertisement,
+            _sink: Arc<dyn DiscoverySink>,
+        ) -> Result<(), AdapterError> {
+            self.start_calls.fetch_add(1, Ordering::AcqRel);
+            if self.running_calls() > 0 {
+                return Err(AdapterError::AlreadyRunning);
+            }
+            let outcome = self.start_outcome.lock().expect("start outcome").clone();
+            if outcome.is_ok() {
+                self.running.fetch_add(1, Ordering::AcqRel);
+            }
+            outcome
+        }
+
+        fn stop(&self) -> Result<(), AdapterError> {
+            self.stop_calls.fetch_add(1, Ordering::AcqRel);
+            if self.running_calls() == 0 {
+                return Ok(());
+            }
+            self.running.fetch_sub(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        fn is_running(&self) -> bool {
+            self.running_calls() > 0
+        }
+    }
+
+    fn apply_in_memory(
+        storage: std::sync::Arc<std::sync::Mutex<Vec<KnownPeer>>>,
+    ) -> Arc<PersistenceFn> {
+        Arc::new(move |observation: &PeerObservation| {
+            let mut guard = storage.lock().expect("storage");
+            let stamp = observation
+                .observed_at
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into());
+            let idx = guard
+                .iter()
+                .position(|existing| existing.peer_id == observation.peer_id);
+            match idx {
+                Some(idx) => {
+                    let existing = guard.remove(idx);
+                    if existing.public_key_fingerprint == observation.public_key_fingerprint
+                        && existing.display_name == observation.display_name
+                        && existing.protocol_major == observation.protocol_major
+                        && existing.capability == observation.capability
+                    {
+                        let refreshed = KnownPeer {
+                            peer_id: observation.peer_id.clone(),
+                            public_key_fingerprint: observation.public_key_fingerprint.clone(),
+                            display_name: observation.display_name.clone(),
+                            protocol_major: observation.protocol_major,
+                            capability: observation.capability.clone(),
+                            first_seen_at: existing.first_seen_at.clone(),
+                            last_discovered_at: stamp.clone(),
+                            updated_at: stamp.clone(),
+                        };
+                        guard.push(refreshed.clone());
+                        UpsertObservationOutcome::Stored(refreshed)
+                    } else {
+                        guard.push(existing.clone());
+                        UpsertObservationOutcome::Conflict(existing)
+                    }
+                }
+                None => {
+                    let row = KnownPeer {
+                        peer_id: observation.peer_id.clone(),
+                        public_key_fingerprint: observation.public_key_fingerprint.clone(),
+                        display_name: observation.display_name.clone(),
+                        protocol_major: observation.protocol_major,
+                        capability: observation.capability.clone(),
+                        first_seen_at: stamp.clone(),
+                        last_discovered_at: stamp.clone(),
+                        updated_at: stamp,
+                    };
+                    guard.push(row.clone());
+                    UpsertObservationOutcome::Stored(row)
+                }
+            }
+        })
+    }
+
+    /// Seed the in-memory storage with a single `KnownPeer` row.
+    /// The drain test helper treats every `peer_id` collision as
+    /// a merge / conflict branch, so a test that wants to exercise
+    /// the conflict path primes the storage with a row first.
+    fn seed_in_memory(storage: &std::sync::Arc<std::sync::Mutex<Vec<KnownPeer>>>, row: KnownPeer) {
+        storage.lock().expect("storage").push(row);
+    }
+
+    #[test]
+    fn validation_accepts_a_well_formed_txt_record() {
+        let raw = txt(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            "Studio",
+        );
+        let validated = PeerObservationRecord::from_txt_record(&raw).expect("valid");
+        assert_eq!(validated.peer_id, raw.peer_id);
+        assert_eq!(validated.display_name, "Studio");
+        assert_eq!(validated.protocol_major, PROTOCOL_MAJOR);
+        assert_eq!(validated.capability, DISCOVERY_ONLY_CAPABILITY);
+    }
+
+    #[test]
+    fn validation_rejects_malformed_peer_id() {
+        for bad in [
+            "",
+            "deadbeef",
+            "DEADBEEFDEADBEEFDEADBEEFDEADBEEF",
+            "0123456789abcdef0123456789abcde!",
+            "0123456789abcdef0123456789abcdeg",
+        ] {
+            let raw = TxtRecord {
+                peer_id: bad.to_string(),
+                ..txt("0123456789abcdef", "0123456789abcdef", "Studio")
+            };
+            let err = PeerObservationRecord::from_txt_record(&raw)
+                .expect_err("malformed peer_id must fail");
+            assert!(matches!(
+                err,
+                PeerRecordValidationError::MissingPeerId
+                    | PeerRecordValidationError::MalformedPeerId
+            ));
+        }
+    }
+
+    #[test]
+    fn validation_rejects_invalid_display_name() {
+        for bad in [
+            "",
+            "   ",
+            "with\u{200B}zwsp",
+            "\u{0001}ctrl",
+            &"a".repeat(MAX_PEER_DISPLAY_NAME_LENGTH + 1),
+        ] {
+            let raw = TxtRecord {
+                display_name: bad.to_string(),
+                ..txt(
+                    "0123456789abcdef0123456789abcdef",
+                    "0123456789abcdef",
+                    "placeholder",
+                )
+            };
+            let err =
+                PeerObservationRecord::from_txt_record(&raw).expect_err("invalid name must fail");
+            assert!(matches!(
+                err,
+                PeerRecordValidationError::MissingDisplayName
+                    | PeerRecordValidationError::InvalidDisplayName
+                    | PeerRecordValidationError::DisplayNameTooLong
+            ));
+        }
+    }
+
+    #[test]
+    fn validation_rejects_incompatible_protocol_major() {
+        let raw = TxtRecord {
+            protocol_major: PROTOCOL_MAJOR + 1,
+            ..txt(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+                "Studio",
+            )
+        };
+        let err = PeerObservationRecord::from_txt_record(&raw)
+            .expect_err("incompatible protocol must fail");
+        assert!(matches!(
+            err,
+            PeerRecordValidationError::IncompatibleProtocol { observed } if observed == PROTOCOL_MAJOR + 1
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_unsupported_capability() {
+        let raw = TxtRecord {
+            capability: "pairing".into(),
+            ..txt(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+                "Studio",
+            )
+        };
+        let err = PeerObservationRecord::from_txt_record(&raw)
+            .expect_err("unsupported capability must fail");
+        assert!(matches!(
+            err,
+            PeerRecordValidationError::UnsupportedCapability { ref capability } if capability == "pairing"
+        ));
+    }
+
+    #[test]
+    fn start_requires_local_identity() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let runtime = PeerDiscoveryRuntime::new(adapter.clone());
+        let err = runtime.start().expect_err("identity unavailable");
+        assert!(matches!(err, StartError::IdentityUnavailable));
+        // The runtime short-circuits before touching the adapter
+        // when the identity foundation is missing — no spurious
+        // start request reaches the platform layer.
+        assert_eq!(adapter.start_calls(), 0);
+        assert!(!runtime.is_running());
+    }
+
+    /// Spawn a runtime wired to an in-memory storage that mirrors
+    /// the production `KnownPeerRepository::upsert_observation`
+    /// contract. The runtime's worker thread is started so the
+    /// tests observe the real persistence call site, not the
+    /// private `drain` helper.
+    fn runtime_with_storage(
+        adapter: Arc<ScriptedAdapter>,
+        storage: std::sync::Arc<std::sync::Mutex<Vec<KnownPeer>>>,
+    ) -> PeerDiscoveryRuntime {
+        let runtime = PeerDiscoveryRuntime::new(adapter);
+        runtime.set_persistence(apply_in_memory(std::sync::Arc::clone(&storage)));
+        runtime
+    }
+
+    /// Wait until the worker has drained every queued event the
+    /// test pushed. The runtime's worker polls every
+    /// [`WORKER_TICK`] ms; the helper bounds the wait so a hung
+    /// worker fails the test fast instead of stalling forever.
+    fn wait_for_drain(runtime: &PeerDiscoveryRuntime, timeout_ms: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        while std::time::Instant::now() < deadline {
+            if runtime.events.lock().expect("events lock").is_empty() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn start_is_idempotent_while_running() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime = runtime_with_storage(adapter.clone(), storage);
+        runtime.set_local_identity(Some(local_identity(
+            "00000000000000000000000000000000",
+            "ffffffffffffffff",
+        )));
+        runtime.set_persistence(apply_in_memory(std::sync::Arc::new(std::sync::Mutex::new(
+            Vec::new(),
+        ))));
+        runtime.start().expect("first start");
+        runtime.start().expect("second start is a no-op");
+        // The adapter sees exactly one start call so the runtime
+        // short-circuits without forwarding a redundant call.
+        assert_eq!(adapter.start_calls(), 1);
+        // The runtime marks itself running after the first call;
+        // the second call is a no-op.
+        assert!(runtime.is_running());
+        runtime.stop().expect("stop");
+    }
+
+    #[test]
+    fn stop_is_idempotent_when_not_running() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime = runtime_with_storage(adapter.clone(), storage);
+        runtime.stop().expect("first stop is a no-op");
+        runtime.stop().expect("second stop is a no-op");
+        // The runtime short-circuits before touching the adapter
+        // when it is already stopped.
+        assert_eq!(adapter.stop_calls(), 0);
+    }
+
+    #[test]
+    fn drain_self_filters_the_local_identity() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime = runtime_with_storage(adapter, std::sync::Arc::clone(&storage));
+        let local = local_identity("0123456789abcdef0123456789abcdef", "0123456789abcdef");
+        runtime.set_local_identity(Some(local.clone()));
+        runtime.start().expect("start");
+        runtime.enqueue(DiscoveryEvent::Observed(txt(
+            local.peer_id.as_str(),
+            local.fingerprint.as_str(),
+            "Myself",
+        )));
+        wait_for_drain(&runtime, 2_000);
+        assert!(storage.lock().expect("storage").is_empty());
+        runtime.stop().expect("stop");
+    }
+
+    #[test]
+    fn drain_persists_a_new_observation() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime = runtime_with_storage(adapter, std::sync::Arc::clone(&storage));
+        runtime.set_local_identity(Some(local_identity(
+            "00000000000000000000000000000000",
+            "ffffffffffffffff",
+        )));
+        runtime.start().expect("start");
+        runtime.enqueue(DiscoveryEvent::Observed(txt(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            "Studio",
+        )));
+        wait_for_drain(&runtime, 2_000);
+        let rows = storage.lock().expect("storage");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.peer_id, "0123456789abcdef0123456789abcdef");
+        assert_eq!(row.display_name, "Studio");
+        drop(rows);
+        runtime.stop().expect("stop");
+    }
+
+    #[test]
+    fn drain_reports_a_conflict_without_overwriting() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime = runtime_with_storage(adapter, std::sync::Arc::clone(&storage));
+        runtime.set_local_identity(Some(local_identity(
+            "00000000000000000000000000000000",
+            "ffffffffffffffff",
+        )));
+        // Seed the in-memory store with a known row.
+        seed_in_memory(
+            &storage,
+            KnownPeer {
+                peer_id: "0123456789abcdef0123456789abcdef".to_string(),
+                public_key_fingerprint: "aaaaaaaaaaaaaaaa".to_string(),
+                display_name: "Original".to_string(),
+                protocol_major: PROTOCOL_MAJOR,
+                capability: DISCOVERY_ONLY_CAPABILITY.to_string(),
+                first_seen_at: "2026-01-01T00:00:00Z".to_string(),
+                last_discovered_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+        );
+        runtime.start().expect("start");
+
+        runtime.enqueue(DiscoveryEvent::Observed(TxtRecord {
+            peer_id: "0123456789abcdef0123456789abcdef".to_string(),
+            public_key_fingerprint: "bbbbbbbbbbbbbbbb".to_string(),
+            display_name: "Impostor".to_string(),
+            protocol_major: PROTOCOL_MAJOR,
+            capability: DISCOVERY_ONLY_CAPABILITY.to_string(),
+            observed_at: datetime!(2026-01-02 03:04:05 UTC),
+        }));
+        wait_for_drain(&runtime, 2_000);
+        // The persisted row stays untouched.
+        let rows = storage.lock().expect("storage");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].public_key_fingerprint, "aaaaaaaaaaaaaaaa");
+        drop(rows);
+        runtime.stop().expect("stop");
+    }
+
+    #[test]
+    fn drain_reports_rejected_for_a_malformed_announcement() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime = runtime_with_storage(adapter, std::sync::Arc::clone(&storage));
+        runtime.set_local_identity(Some(local_identity(
+            "00000000000000000000000000000000",
+            "ffffffffffffffff",
+        )));
+        runtime.start().expect("start");
+        runtime.enqueue(DiscoveryEvent::Observed(TxtRecord {
+            peer_id: "not-a-hex-peer-id".to_string(),
+            public_key_fingerprint: "0123456789abcdef".to_string(),
+            display_name: "Studio".to_string(),
+            protocol_major: PROTOCOL_MAJOR,
+            capability: DISCOVERY_ONLY_CAPABILITY.to_string(),
+            observed_at: datetime!(2026-01-02 03:04:05 UTC),
+        }));
+        wait_for_drain(&runtime, 2_000);
+        assert!(storage.lock().expect("storage").is_empty());
+        runtime.stop().expect("stop");
+    }
+
+    #[test]
+    fn presence_table_ttl_flips_peer_to_not_available() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime = runtime_with_storage(adapter, std::sync::Arc::clone(&storage));
+        runtime.set_local_identity(Some(local_identity(
+            "00000000000000000000000000000000",
+            "ffffffffffffffff",
+        )));
+        runtime.start().expect("start");
+
+        runtime.enqueue(DiscoveryEvent::Observed(txt(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            "Studio",
+        )));
+        wait_for_drain(&runtime, 2_000);
+        let now = Instant::now();
+        let snapshot = runtime.snapshot(|| storage.lock().expect("storage").clone(), now);
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].presence, PeerPresence::Detected);
+
+        // Reap expired entries after `PRESENCE_TTL + 1s` — the
+        // presence table drops the row and the snapshot flips to
+        // `NotAvailable`.
+        let later = now + PRESENCE_TTL + Duration::from_secs(1);
+        let purged = runtime.reap_expired(later);
+        assert_eq!(purged, vec!["0123456789abcdef0123456789abcdef".to_string()]);
+        let snapshot = runtime.snapshot(|| storage.lock().expect("storage").clone(), later);
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].presence, PeerPresence::NotAvailable);
+    }
+
+    /// The runtime must flip a previously-detected peer to
+    /// `NotAvailable` as soon as it processes a `Removed` event,
+    /// independent of the presence TTL. The adapter now emits the
+    /// real `peer_id` on `Removed` (it used to derive it from the
+    /// visible instance name), so this test exercises the runtime
+    /// side of that contract: the snapshot flips immediately and
+    /// the persisted row keeps its first/last-seen metadata.
+    #[test]
+    fn removed_event_flips_presence_to_not_available_immediately() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime = runtime_with_storage(adapter, std::sync::Arc::clone(&storage));
+        runtime.set_local_identity(Some(local_identity(
+            "00000000000000000000000000000000",
+            "ffffffffffffffff",
+        )));
+        runtime.start().expect("start");
+
+        runtime.enqueue(DiscoveryEvent::Observed(txt(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            "Studio",
+        )));
+        wait_for_drain(&runtime, 2_000);
+        let now = Instant::now();
+        let snapshot = runtime.snapshot(|| storage.lock().expect("storage").clone(), now);
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].presence, PeerPresence::Detected);
+
+        // Removal happens well before the presence TTL would
+        // expire; the snapshot must already report
+        // `NotAvailable`.
+        runtime.enqueue(DiscoveryEvent::Removed {
+            peer_id: "0123456789abcdef0123456789abcdef".to_string(),
+        });
+        wait_for_drain(&runtime, 2_000);
+        let snapshot = runtime.snapshot(|| storage.lock().expect("storage").clone(), now);
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].presence, PeerPresence::NotAvailable);
+        // The persisted row stays in the known-peer list so the
+        // shell can re-detect the same peer without losing its
+        // history.
+        let rows = storage.lock().expect("storage");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].peer_id, "0123456789abcdef0123456789abcdef");
+        runtime.stop().expect("stop");
+    }
+
+    #[test]
+    fn snapshot_reports_inactive_when_runtime_is_stopped() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let runtime = PeerDiscoveryRuntime::new(adapter);
+        runtime.set_local_identity(Some(local_identity(
+            "00000000000000000000000000000000",
+            "ffffffffffffffff",
+        )));
+        let snapshot = runtime.snapshot(Vec::new, Instant::now());
+        assert!(!snapshot.sharing_active);
+        assert_eq!(
+            snapshot.sharing_inactive_reason.as_deref(),
+            Some(RUNTIME_INACTIVE_REASON_RUNTIME_STOPPED)
+        );
+    }
+
+    #[test]
+    fn snapshot_reports_identity_unavailable_when_missing() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let runtime = PeerDiscoveryRuntime::new(adapter);
+        let snapshot = runtime.snapshot(Vec::new, Instant::now());
+        assert!(!snapshot.sharing_active);
+        assert_eq!(
+            snapshot.sharing_inactive_reason.as_deref(),
+            Some(RUNTIME_INACTIVE_REASON_IDENTITY_UNAVAILABLE)
+        );
+    }
+}

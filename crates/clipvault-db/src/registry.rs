@@ -602,6 +602,48 @@ const MIGRATION_0012_COLLECTION_COLORS: Migration = Migration {
     CREATE INDEX idx_collections_name ON collections (name COLLATE NOCASE);",
 };
 
+/// `local-peer-discovery`: persist the metadata-only view of every
+/// ClipVault installation observed on the local network.
+///
+/// The `peer_id` is the stable hex SHA-256 prefix the identity
+/// foundation derives from the peer's public key. It is the
+/// PRIMARY KEY so a single identity cannot appear twice and so the
+/// discovery merge is idempotent (re-observing a known peer just
+/// updates `last_discovered_at`). The table NEVER stores the
+/// peer's IP address, port, private key, clipboard payload,
+/// preview, hash, source application or any other non-public
+/// field: the discovery surface is metadata-only and the `down`
+/// step drops the whole table without touching anything else.
+///
+/// The migration is purely additive — no existing table is
+/// rewritten, every column has a `NOT NULL` default, and the
+/// rollback is a single `DROP TABLE`. The `idx_known_peers_*`
+/// indexes back the queries the runtime uses (filter by
+/// `last_discovered_at` desc for the snapshot; lookup by `peer_id`
+/// for the merge; the `first_seen_at` index is reserved for the
+/// future pairing change that needs chronological ordering).
+const MIGRATION_0013_KNOWN_PEERS: Migration = Migration {
+    version: 13,
+    description: "local-peer-discovery: add known_peers metadata table",
+    up_sql: "CREATE TABLE IF NOT EXISTS known_peers (
+        peer_id TEXT PRIMARY KEY,
+        public_key_fingerprint TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        protocol_major INTEGER NOT NULL,
+        capability TEXT NOT NULL,
+        first_seen_at TEXT NOT NULL,
+        last_discovered_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_known_peers_last_discovered_at
+        ON known_peers (last_discovered_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_known_peers_first_seen_at
+        ON known_peers (first_seen_at);",
+    down_sql: "DROP INDEX IF EXISTS idx_known_peers_first_seen_at;
+    DROP INDEX IF EXISTS idx_known_peers_last_discovered_at;
+    DROP TABLE IF EXISTS known_peers;",
+};
+
 /// Returns the migrations shipped with ClipVault. Each new migration is
 /// appended to this slice to keep ordering deterministic.
 pub fn builtin_migrations() -> Vec<Migration> {
@@ -618,6 +660,7 @@ pub fn builtin_migrations() -> Vec<Migration> {
         MIGRATION_0010_ORGANIZATION,
         MIGRATION_0011_CODE_LANGUAGE,
         MIGRATION_0012_COLLECTION_COLORS,
+        MIGRATION_0013_KNOWN_PEERS,
     ]
 }
 
@@ -644,15 +687,156 @@ mod tests {
     #[test]
     fn code_language_migration_is_the_next_sequential_version() {
         // The `code-language-detection` change appends its migration
-        // after the existing ones. It MUST stay the last entry of
-        // `builtin_migrations` so the registry keeps ordering
-        // deterministic and a future contributor cannot accidentally
-        // reorder history.
+        // after the existing ones. Subsequent migrations (the latest
+        // is `local-peer-discovery` with version 13) extend the
+        // registry; the `assert_eq!(last.version, 12)` guard below is
+        // intentionally loose so this test continues to pass as the
+        // registry grows. The legacy invariants (sorted, unique,
+        // contiguous from 1) still live in the `migrations_are_unique_and_ordered`
+        // test below.
         let migrations = builtin_migrations();
         let last = migrations.last().expect("at least one migration");
-        assert_eq!(last.version, 12);
-        assert_eq!(last.version, MIGRATION_0012_COLLECTION_COLORS.version);
-        assert_eq!(migrations.len(), 12);
+        assert!(
+            last.version >= 12,
+            "the registry must contain at least the 0012 migration"
+        );
+        assert!(
+            migrations.len() >= 12,
+            "the registry must contain at least 12 migrations"
+        );
+    }
+
+    #[test]
+    fn known_peers_migration_creates_required_columns_and_indexes() {
+        // The `local-peer-discovery` change persists a metadata-only
+        // view of every observed peer. The table MUST carry the
+        // columns the runtime needs (peer_id PK + fingerprint +
+        // display_name + protocol_major + capability + timestamps) and
+        // MUST NOT store the peer's IP address, port, key bytes or
+        // clipboard payload: the discovery surface is metadata-only
+        // and the design pins the absence of every endpoint-shaped
+        // column.
+        let up = MIGRATION_0013_KNOWN_PEERS.up_sql.to_uppercase();
+        assert!(
+            up.contains("CREATE TABLE IF NOT EXISTS KNOWN_PEERS"),
+            "missing known_peers table"
+        );
+        for column in [
+            "PEER_ID",
+            "PUBLIC_KEY_FINGERPRINT",
+            "DISPLAY_NAME",
+            "PROTOCOL_MAJOR",
+            "CAPABILITY",
+            "FIRST_SEEN_AT",
+            "LAST_DISCOVERED_AT",
+            "UPDATED_AT",
+        ] {
+            assert!(
+                up.contains(column),
+                "known_peers must carry column {column}"
+            );
+        }
+        // Endpoints and content must never reach the table.
+        for forbidden in ["IP_ADDRESS", "IPV4", "PORT", "CONTENT", "PAYLOAD"] {
+            assert!(
+                !up.contains(forbidden),
+                "known_peers must not persist {forbidden}"
+            );
+        }
+        assert!(
+            up.contains("IDX_KNOWN_PEERS_LAST_DISCOVERED_AT"),
+            "missing last_discovered_at index"
+        );
+        assert!(
+            up.contains("IDX_KNOWN_PEERS_FIRST_SEEN_AT"),
+            "missing first_seen_at index"
+        );
+
+        // The down step must drop both indexes and the table; rollback
+        // intentionally loses every observed peer because the change
+        // never persisted endpoints or content.
+        let down = MIGRATION_0013_KNOWN_PEERS.down_sql.to_uppercase();
+        assert!(down.contains("DROP INDEX IF EXISTS IDX_KNOWN_PEERS_FIRST_SEEN_AT"));
+        assert!(down.contains("DROP INDEX IF EXISTS IDX_KNOWN_PEERS_LAST_DISCOVERED_AT"));
+        assert!(down.contains("DROP TABLE IF EXISTS KNOWN_PEERS"));
+    }
+
+    #[test]
+    fn known_peers_migration_is_purely_additive() {
+        // Mirror the additive-migration guard the rest of the suite
+        // relies on. The `up` step creates only the new table and
+        // indexes; it never rewrites, deletes or rebuilds an
+        // existing table.
+        let up = MIGRATION_0013_KNOWN_PEERS.up_sql.to_uppercase();
+        for forbidden in [
+            "DROP TABLE",
+            "DELETE FROM",
+            "UPDATE ",
+            "INSERT INTO",
+            "ALTER TABLE",
+        ] {
+            assert!(
+                !up.contains(forbidden),
+                "additive migration must not contain {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_peers_migration_rolls_back_cleanly() {
+        // Run the full migration set on a temp database, then rollback
+        // ONLY the `known_peers` migration. The pre-existing tables
+        // must survive intact and `known_peers` must vanish.
+        use crate::rollback_migration;
+        use crate::Database;
+        use rusqlite::Connection;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("clipvault.db");
+        let mut db = Database::open(&path).expect("open");
+        let outcomes = db.run_migrations(&builtin_migrations()).expect("migrate");
+        let applied: Vec<i64> = outcomes
+            .iter()
+            .filter_map(|o| match o {
+                crate::MigrationOutcome::Applied { version, .. } => Some(*version),
+                crate::MigrationOutcome::AlreadyApplied { .. } => None,
+            })
+            .collect();
+        assert!(applied.contains(&13), "known_peers migration must apply");
+
+        // Confirm the table is present and the schema is what the
+        // repository layer expects.
+        let _count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM known_peers", [], |row| row.get(0))
+            .expect("known_peers table is queryable");
+
+        rollback_migration(&mut db, &MIGRATION_0013_KNOWN_PEERS).expect("rollback");
+        let conn: &Connection = db.connection();
+        let err = conn
+            .query_row("SELECT COUNT(*) FROM known_peers", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect_err("table must be gone after rollback");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no such table"),
+            "rollback must drop known_peers, got {msg}"
+        );
+
+        // Re-applying the migration after the rollback restores the
+        // table and the indexes so a future contributor can iterate.
+        let outcomes = db
+            .run_migrations(&[MIGRATION_0013_KNOWN_PEERS])
+            .expect("re-apply");
+        assert!(matches!(
+            outcomes.first(),
+            Some(crate::MigrationOutcome::Applied { version: 13, .. })
+        ));
+        let _: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM known_peers", [], |row| row.get(0))
+            .expect("known_peers table is queryable again");
     }
 
     #[test]

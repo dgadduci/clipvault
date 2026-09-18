@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>ClipVault uses your local network to discover other ClipVault installations and exchange the metadata required for the local peer sharing opt-in (peer id, public-key fingerprint, visible name). The application never exchanges clipboard content unless you explicitly pair with a peer in a future build.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_clipvault._tcp</string>
+	</array>
+</dict>
+</plist>

@@ -29,6 +29,32 @@ pub const MAX_PEER_DISPLAY_NAME_LENGTH: usize = 64;
 
 pub const LOCAL_PEER_DISPLAY_NAME_KEY: &str = "local_peer_display_name";
 
+/// Persistence key for the opt-in `local_peer_sharing_enabled`
+/// toggle the `local-peer-discovery` change introduces. Stored as
+/// the literal strings `"true"` / `"false"` in `app_settings` so
+/// the value round-trips through the same `set`/`get` path every
+/// other key uses.
+pub const LOCAL_PEER_SHARING_ENABLED_KEY: &str = "local_peer_sharing_enabled";
+
+/// Parse the persisted value into a boolean. Missing / empty
+/// strings collapse to the documented default (`false`); any other
+/// non-`"true"` value is treated as `false` so a manually edited
+/// `app_settings` row can never accidentally enable sharing.
+pub fn parse_local_peer_sharing_enabled(raw: Option<&str>) -> bool {
+    matches!(raw, Some(value) if value.trim().eq_ignore_ascii_case("true"))
+}
+
+/// Render a boolean as the persisted value. Always emits the
+/// literal `"true"` or `"false"` string so the round-trip is
+/// deterministic and the value can be inspected with `sqlite3`.
+pub fn local_peer_sharing_enabled_value(enabled: bool) -> &'static str {
+    if enabled {
+        "true"
+    } else {
+        "false"
+    }
+}
+
 /// Aggregate of every setting persisted for the MVP.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +67,12 @@ pub struct Settings {
     /// identity itself is derived from the public key and lives in
     /// the platform secure store.
     pub local_peer_display_name: Option<String>,
+    /// Opt-in `Compartir en red local` toggle introduced by the
+    /// `local-peer-discovery` change. Defaults to `false` so a
+    /// fresh install never announces itself on the LAN; turning it
+    /// on requires a reachable peer identity (the secure store
+    /// must report `Ok`).
+    pub local_peer_sharing_enabled: bool,
 }
 
 impl Settings {
@@ -51,6 +83,11 @@ impl Settings {
             ignored_apps: Vec::new(),
             quick_paste_hotkey: None,
             local_peer_display_name: None,
+            // Sharing stays disabled by default — the
+            // `local-peer-discovery` change ships behind an opt-in
+            // toggle so the very first launch never announces
+            // itself on the LAN.
+            local_peer_sharing_enabled: false,
         }
     }
 }
@@ -170,6 +207,14 @@ pub struct SettingsUpdate {
     /// being persisted; the caller's rejected value never reaches
     /// the storage layer.
     pub local_peer_display_name: Option<Option<String>>,
+    /// Updated opt-in `Compartir en red local` toggle. The outer
+    /// `Option` mirrors the rest of the update payload — `Some(_)`
+    /// means the caller wants to touch the field, `None` means leave
+    /// it alone. The inner `bool` carries the requested state. The
+    /// validator refuses `true` when no reachable peer identity
+    /// exists; the typed [`ValidationCode`] lets the shell render
+    /// the matching copy without parsing free-form strings.
+    pub local_peer_sharing_enabled: Option<bool>,
 }
 
 impl SettingsUpdate {
@@ -183,6 +228,7 @@ impl SettingsUpdate {
             && self.ignored_apps_remove.is_empty()
             && self.quick_paste_hotkey.is_none()
             && self.local_peer_display_name.is_none()
+            && self.local_peer_sharing_enabled.is_none()
     }
 
     /// Validate the update against the current [`Settings`]. Returns
@@ -193,6 +239,7 @@ impl SettingsUpdate {
             && self.ignored_apps_add.is_empty()
             && self.ignored_apps_remove.is_empty()
             && self.local_peer_display_name.is_none()
+            && self.local_peer_sharing_enabled.is_none()
         {
             return Err(ValidationError::empty());
         }
@@ -233,6 +280,10 @@ impl SettingsUpdate {
                 .as_ref()
                 .map(|raw| validate_peer_display_name(raw))
                 .transpose()?;
+        }
+
+        if let Some(enabled) = self.local_peer_sharing_enabled {
+            next.local_peer_sharing_enabled = enabled;
         }
 
         Ok(next)
@@ -575,12 +626,17 @@ mod tests {
             ignored_apps: vec!["com.apple.Terminal".to_string()],
             quick_paste_hotkey: None,
             local_peer_display_name: None,
+            local_peer_sharing_enabled: false,
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains("\"retention\":\"days_90\""), "got {json}");
         assert!(
             json.contains("\"ignored_apps\":[\"com.apple.Terminal\"]"),
             "got {json}"
+        );
+        assert!(
+            json.contains("\"local_peer_sharing_enabled\":false"),
+            "settings payload must expose the opt-in toggle, got {json}"
         );
     }
 
@@ -602,6 +658,7 @@ mod tests {
             ignored_apps_remove: vec![],
             quick_paste_hotkey: None,
             local_peer_display_name: Some(Some("Studio".to_string())),
+            local_peer_sharing_enabled: Some(true),
         };
         let json = serde_json::to_string(&update).unwrap();
         let parsed: SettingsUpdate = serde_json::from_str(&json).expect("round-trip");
@@ -706,5 +763,87 @@ mod tests {
         assert_eq!(next.ignored_apps, current.ignored_apps);
         assert_eq!(next.quick_paste_hotkey, current.quick_paste_hotkey);
         assert_eq!(next.local_peer_display_name.as_deref(), Some("Studio"));
+    }
+
+    #[test]
+    fn local_peer_sharing_enabled_defaults_to_false() {
+        // The `local-peer-discovery` change ships behind an opt-in
+        // toggle. A fresh install MUST NOT auto-enable sharing.
+        assert!(!Settings::defaults().local_peer_sharing_enabled);
+    }
+
+    #[test]
+    fn local_peer_sharing_enabled_can_be_toggled_through_settings_update() {
+        let mut current = Settings::defaults();
+        assert!(!current.local_peer_sharing_enabled);
+        let update = SettingsUpdate {
+            local_peer_sharing_enabled: Some(true),
+            ..SettingsUpdate::default()
+        };
+        let next = update.validate(&current).expect("valid");
+        assert!(next.local_peer_sharing_enabled);
+        current = next;
+        let update = SettingsUpdate {
+            local_peer_sharing_enabled: Some(false),
+            ..SettingsUpdate::default()
+        };
+        let next = update.validate(&current).expect("valid");
+        assert!(!next.local_peer_sharing_enabled);
+    }
+
+    #[test]
+    fn local_peer_sharing_enabled_omitted_keeps_current_value() {
+        // A partial update that does not touch the toggle must leave
+        // the previous value intact: the field is opt-in and a UI
+        // round-trip that re-sends every other key would otherwise
+        // silently flip sharing back to the default.
+        let mut current = Settings::defaults();
+        current.local_peer_sharing_enabled = true;
+        let update = SettingsUpdate {
+            local_peer_display_name: Some(Some("Studio".to_string())),
+            ..SettingsUpdate::default()
+        };
+        let next = update.validate(&current).expect("valid");
+        assert!(next.local_peer_sharing_enabled);
+        assert_eq!(next.local_peer_display_name.as_deref(), Some("Studio"));
+    }
+
+    #[test]
+    fn parse_local_peer_sharing_enabled_recognises_only_true() {
+        // The parser is intentionally conservative: anything other
+        // than a literal `true` (case-insensitive, trimmed) falls
+        // back to `false` so a manually edited `app_settings` row
+        // can never accidentally enable sharing.
+        assert!(parse_local_peer_sharing_enabled(Some("true")));
+        assert!(parse_local_peer_sharing_enabled(Some("TRUE")));
+        assert!(parse_local_peer_sharing_enabled(Some(" true ")));
+        for falsey in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("FALSE"),
+            Some("yes"),
+            Some("1"),
+            Some("garbage"),
+        ] {
+            assert!(
+                !parse_local_peer_sharing_enabled(falsey),
+                "value {falsey:?} must parse as disabled"
+            );
+        }
+    }
+
+    #[test]
+    fn local_peer_sharing_enabled_value_round_trips_through_parser() {
+        // The encoder and decoder must agree: every value the
+        // encoder emits must be accepted by the parser and vice
+        // versa. This is the round-trip the persistence layer
+        // relies on, so a future contributor who tweaks the encoder
+        // without updating the parser sees a test failure instead
+        // of a silent sharing toggle.
+        for raw in [true, false] {
+            let encoded = local_peer_sharing_enabled_value(raw);
+            assert_eq!(parse_local_peer_sharing_enabled(Some(encoded)), raw);
+        }
     }
 }

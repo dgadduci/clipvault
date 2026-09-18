@@ -27,6 +27,15 @@ description = "Business-logic core for ClipVault, free of GUI and Tauri dependen
 # --features macos-native` compilable on macOS, which is the build
 # the regression test in `ignored_apps_service.rs` exercises.
 macos-native = ["clipvault-platform/macos-native"]
+# Forward the `local-peer-discovery-mdns` feature to
+# `clipvault-platform/local-peer-discovery-mdns` so the
+# `cfg(feature = "local-peer-discovery-mdns")` check inside the
+# bootstrap picks the production `MdnsPeerDiscoveryAdapter` over
+# the noop stub. Production shells on macOS / Linux enable this
+# feature on both `clipvault-core` and `clipvault-platform`; the
+# noop fallback stays the safe default for cross-compiles, tests
+# and unsupported targets.
+local-peer-discovery-mdns = ["clipvault-platform/local-peer-discovery-mdns"]
 
 [dependencies]
 clipvault-db = { path = "../clipvault-db" }

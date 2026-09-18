@@ -14,11 +14,15 @@ use thiserror::Error;
 use crate::bootstrap::AppContext;
 use crate::clock::Clock;
 use crate::management::{RetentionPolicy, RETENTION_SETTING_KEY};
-use crate::peer_identity::{LocalPeerProfile, PeerIdentityOutcome, PeerIdentityService};
+use crate::peer_discovery::PeerDiscoveryRuntime;
+use crate::peer_identity::{
+    LocalPeerIdentity, LocalPeerProfile, PeerIdentityOutcome, PeerIdentityService,
+};
 use crate::privacy::PrivacyGate;
 use crate::settings::{
-    HotkeySpec, Settings, SettingsUpdate, ValidationError, HOTKEY_SETTING_STORAGE_KEY,
-    LOCAL_PEER_DISPLAY_NAME_KEY,
+    local_peer_sharing_enabled_value, parse_local_peer_sharing_enabled, HotkeySpec, Settings,
+    SettingsUpdate, ValidationError, HOTKEY_SETTING_STORAGE_KEY, LOCAL_PEER_DISPLAY_NAME_KEY,
+    LOCAL_PEER_SHARING_ENABLED_KEY,
 };
 
 #[derive(Debug, Error)]
@@ -120,6 +124,21 @@ impl SettingsService {
             .as_deref()
             .and_then(|raw| crate::settings::validate_peer_display_name(raw).ok());
 
+        let sharing_enabled_raw = {
+            let repo = AppSettingsRepository::new(db.connection_mut());
+            repo.get(LOCAL_PEER_SHARING_ENABLED_KEY)
+                .ok()
+                .flatten()
+                .map(|s| s.value)
+        };
+        // The parser collapses anything that is not the literal
+        // `true` (case-insensitive, trimmed) to `false` so a
+        // manually edited row can never accidentally enable
+        // sharing — the contract the `local-peer-discovery` spec
+        // pins for the opt-in toggle.
+        settings.local_peer_sharing_enabled =
+            parse_local_peer_sharing_enabled(sharing_enabled_raw.as_deref());
+
         let ignored = {
             let repo = IgnoredAppRepository::new(db.connection_mut());
             repo.list()
@@ -191,6 +210,19 @@ impl SettingsService {
                     repo.set(LOCAL_PEER_DISPLAY_NAME_KEY, "", now)?;
                 }
             }
+        }
+
+        // Local peer sharing toggle.
+        let sharing_enabled_changed =
+            next.local_peer_sharing_enabled != current.local_peer_sharing_enabled;
+        if sharing_enabled_changed {
+            let conn = db.connection_mut();
+            let mut repo = AppSettingsRepository::new(conn);
+            repo.set(
+                LOCAL_PEER_SHARING_ENABLED_KEY,
+                local_peer_sharing_enabled_value(next.local_peer_sharing_enabled),
+                now,
+            )?;
         }
 
         // Ignored apps.
@@ -285,6 +317,82 @@ impl SettingsService {
             ..SettingsUpdate::default()
         };
         self.apply(context, &update)
+    }
+
+    /// Persist the opt-in `Compartir en red local` toggle. The
+    /// shell owns the identity prerequisite check (it surfaces a
+    /// typed `Unavailable` outcome through the existing
+    /// [`Self::local_peer_profile`] helper); the service stays a
+    /// thin validator and never inspects the secure store. A
+    /// `false` value is always accepted: turning sharing off is
+    /// allowed even when the identity foundation is unavailable so
+    /// the user is never trapped behind an opt-in they cannot
+    /// undo.
+    pub fn set_local_peer_sharing_enabled(
+        &self,
+        context: &AppContext,
+        enabled: bool,
+    ) -> Result<Settings, SettingsServiceError> {
+        let update = SettingsUpdate {
+            local_peer_sharing_enabled: Some(enabled),
+            ..SettingsUpdate::default()
+        };
+        self.apply(context, &update)
+    }
+
+    /// Synchronise the runtime with the secure store: the shell
+    /// calls this every time it loads the local profile so the
+    /// runtime can self-filter events with the canonical
+    /// `peer_id` / fingerprint. The runtime's `start` returns
+    /// `IdentityUnavailable` until the foundation is reachable, so
+    /// passing `None` here is always safe — the runtime surfaces
+    /// the typed `runtime_stopped` reason to the UI without
+    /// accepting an observation.
+    pub fn sync_runtime_local_identity(
+        &self,
+        context: &AppContext,
+        identity: Option<&LocalPeerIdentity>,
+    ) {
+        let display_name = context
+            .settings()
+            .load(context)
+            .local_peer_display_name
+            .clone();
+        context.refresh_peer_discovery_local_identity(identity, display_name.as_deref());
+    }
+
+    /// Drive the discovery runtime in lockstep with the persisted
+    /// toggle. The shell calls this after every settings update
+    /// and on bootstrap so the runtime is `running` whenever the
+    /// toggle is on (and an identity is reachable) and stopped
+    /// otherwise. The runtime is idempotent: a redundant `start`
+    /// is a no-op so the shell can call this on every bootstrap
+    /// path without coordinating state.
+    pub fn sync_runtime_with_settings(
+        &self,
+        context: &AppContext,
+        runtime: &PeerDiscoveryRuntime,
+        settings: &Settings,
+    ) {
+        if !settings.local_peer_sharing_enabled {
+            // Best-effort: the noop adapter is a no-op on `stop`,
+            // so a missing mDNS backend never blocks the toggle.
+            let _ = runtime.stop();
+            return;
+        }
+        // Sharing is on: gate the runtime on a reachable identity
+        // so the UI never announces itself with an unverifiable
+        // `peer_id`. `start` is idempotent.
+        if let PeerIdentityOutcome::Ok(identity) = self.peer_identity.load_identity() {
+            context.refresh_peer_discovery_local_identity(
+                Some(&identity),
+                settings.local_peer_display_name.as_deref(),
+            );
+            let _ = runtime.start();
+        } else {
+            context.refresh_peer_discovery_local_identity(None, None);
+            let _ = runtime.stop();
+        }
     }
 
     /// Metadata-only local peer profile merging the cryptographic
@@ -491,5 +599,69 @@ mod tests {
         // mint a peer_id the next boot cannot reload.
         let outcome = service.local_peer_profile(&context);
         assert!(matches!(outcome, PeerIdentityOutcome::Unavailable));
+    }
+
+    /// The opt-in sharing toggle must round-trip through the
+    /// persistence layer: a `true` write is observable on the next
+    /// `load()` and survives a service rebuild, mirroring the
+    /// display-name round-trip the `local-peer-identity-foundation`
+    /// change already pins.
+    #[test]
+    fn set_local_peer_sharing_enabled_round_trips_through_persistence() {
+        use crate::peer_identity::InMemoryPeerIdentityStore;
+        use crate::test_support::isolated_harness;
+        use std::sync::Arc;
+
+        let (_dir, context) = isolated_harness();
+        let clock: Arc<dyn crate::clock::Clock> = Arc::new(crate::clock::SystemClock);
+        let probe = Arc::new(clipvault_platform::NoopActiveApplicationProbe);
+        let matcher = crate::privacy::CoreBlacklistMatcher::with_ignored(probe, vec![]);
+        let gate = crate::privacy::PrivacyGate::new(matcher);
+        let service = SettingsService::new(clock, gate).with_peer_identity_service(
+            crate::peer_identity::PeerIdentityService::new(Arc::new(
+                InMemoryPeerIdentityStore::new(),
+            )),
+        );
+
+        let stored = service
+            .set_local_peer_sharing_enabled(&context, true)
+            .expect("toggle");
+        assert!(stored.local_peer_sharing_enabled);
+
+        let reloaded = service.load(&context);
+        assert!(reloaded.local_peer_sharing_enabled);
+
+        let stored = service
+            .set_local_peer_sharing_enabled(&context, false)
+            .expect("toggle back");
+        assert!(!stored.local_peer_sharing_enabled);
+        let reloaded = service.load(&context);
+        assert!(!reloaded.local_peer_sharing_enabled);
+    }
+
+    /// The toggle MUST stay default-disabled when the row is
+    /// absent from `app_settings`. A missing key collapses to
+    /// `false` so a fresh install never auto-enables sharing.
+    #[test]
+    fn local_peer_sharing_enabled_defaults_to_false_when_missing() {
+        use crate::peer_identity::InMemoryPeerIdentityStore;
+        use crate::test_support::isolated_harness;
+        use std::sync::Arc;
+
+        let (_dir, context) = isolated_harness();
+        let clock: Arc<dyn crate::clock::Clock> = Arc::new(crate::clock::SystemClock);
+        let probe = Arc::new(clipvault_platform::NoopActiveApplicationProbe);
+        let matcher = crate::privacy::CoreBlacklistMatcher::with_ignored(probe, vec![]);
+        let gate = crate::privacy::PrivacyGate::new(matcher);
+        let service = SettingsService::new(clock, gate).with_peer_identity_service(
+            crate::peer_identity::PeerIdentityService::new(Arc::new(
+                InMemoryPeerIdentityStore::new(),
+            )),
+        );
+        let loaded = service.load(&context);
+        assert!(
+            !loaded.local_peer_sharing_enabled,
+            "fresh install must default the toggle to false"
+        );
     }
 }

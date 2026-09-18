@@ -87,6 +87,18 @@ rand_core = { version = "0.6", features = ["std"] }
 # OpenSpec; see the same `design.md` §"Dependencias aprobadas" for
 # the alternatives that were discarded.
 keyring = { version = "3.6", default-features = false, features = ["apple-native", "sync-secret-service"] }
+# Cross-platform DNS-SD/mDNS daemon the `local-peer-discovery`
+# change wraps behind `local-peer-discovery-mdns`. Approved by
+# OpenSpec (`local-peer-discovery/design.md` §"Dependencias
+# aprobadas"): the crate is small, mature, owned by a single
+# maintainer, and offers the multicast + browse + register surface
+# RFC 6762/6763 require. The alternative — Bonjour/Avahi FFI —
+# duplicates platform work and rejects the metadata-only
+# constraint; broadcast/IP-manual scanning is explicitly out of
+# scope. Default features are disabled so the bundle links only the
+# `mio`/`socket2` runtime; the platform crate pulls `tracing` from
+# the workspace for the metadata-only log surface.
+mdns-sd = { version = "0.11", default-features = false }
 
 [profile.release]
 opt-level = "s"

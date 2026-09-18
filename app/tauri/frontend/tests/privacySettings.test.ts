@@ -13,6 +13,10 @@ import {
   ignoredAppsRemoveCommand,
   localPeerProfileGetCommand,
   localPeerProfileUpdateCommand,
+  peerSharingRefreshIdentityCommand,
+  peerSharingToggleGetCommand,
+  peerSharingToggleSetCommand,
+  peerSnapshotCommand,
   refreshActiveAppDiagnosticsCommand,
   settingsGetCommand,
   settingsSetCommand,
@@ -24,6 +28,8 @@ import type {
   LinuxCatalogResponse,
   LinuxPickAndAddResponse,
   LocalPeerProfileResponse,
+  PeerSharingToggleResponse,
+  PeerSnapshot,
   PickAndAddResponse,
   PickErrorReason,
   RetentionPolicy,
@@ -44,6 +50,7 @@ function defaultSettings(): Settings {
     ignored_apps: [],
     quick_paste_hotkey: null,
     local_peer_display_name: null,
+    local_peer_sharing_enabled: false,
   };
 }
 
@@ -790,4 +797,166 @@ test("localPeerProfileUpdateCommand surfaces Unavailable when the secure store i
   assert.equal(result.kind, "unavailable");
   if (result.kind !== "unavailable") return;
   assert.equal(result.reason, "secure identity store unavailable");
+});
+
+// ---------------------------------------------------------------------------
+// `local-peer-discovery` toggle / snapshot / refresh bridge.
+//
+// The new commands surface the opt-in toggle together with the
+// runtime state and a read-only snapshot of the persisted
+// `known_peers` rows. The bridge is metadata-only: no IP, no
+// port, no raw public key, no clipboard content.
+// ---------------------------------------------------------------------------
+
+test("peerSharingToggleGetCommand returns the active state when the runtime is browsing", async () => {
+  installTauriMock(async (cmd) => {
+    assert.equal(cmd, "clipvault_peer_sharing_toggle_get");
+    return { kind: "active", enabled: true } satisfies PeerSharingToggleResponse;
+  });
+  const result = await peerSharingToggleGetCommand();
+  assert.equal(result.kind, "active");
+  if (result.kind !== "active") return;
+  assert.equal(result.enabled, true);
+});
+
+test("peerSharingToggleGetCommand surfaces identity_unavailable without leaking platform detail", async () => {
+  installTauriMock(async (cmd) => {
+    assert.equal(cmd, "clipvault_peer_sharing_toggle_get");
+    return {
+      kind: "identity_unavailable",
+      enabled: true,
+    } satisfies PeerSharingToggleResponse;
+  });
+  const result = await peerSharingToggleGetCommand();
+  assert.equal(result.kind, "identity_unavailable");
+});
+
+test("peerSharingToggleGetCommand surfaces runtime_stopped with the persisted flag", async () => {
+  installTauriMock(async (cmd) => {
+    assert.equal(cmd, "clipvault_peer_sharing_toggle_get");
+    return {
+      kind: "runtime_stopped",
+      enabled: false,
+    } satisfies PeerSharingToggleResponse;
+  });
+  const result = await peerSharingToggleGetCommand();
+  assert.equal(result.kind, "runtime_stopped");
+  if (result.kind !== "runtime_stopped") return;
+  assert.equal(result.enabled, false);
+});
+
+test("peerSharingToggleSetCommand forwards the partial update and returns the new state", async () => {
+  let observed: Record<string, unknown> | undefined;
+  installTauriMock(async (cmd, args) => {
+    assert.equal(cmd, "clipvault_peer_sharing_toggle_set");
+    observed = args;
+    return { kind: "active", enabled: true } satisfies PeerSharingToggleResponse;
+  });
+  const result = await peerSharingToggleSetCommand({ enabled: true });
+  assert.equal(observed?.update, { enabled: true });
+  assert.equal(result.kind, "active");
+  if (result.kind !== "active") return;
+  assert.equal(result.enabled, true);
+});
+
+test("peerSharingToggleSetCommand turning the toggle off is idempotent", async () => {
+  let calls = 0;
+  installTauriMock(async (cmd) => {
+    assert.equal(cmd, "clipvault_peer_sharing_toggle_set");
+    calls += 1;
+    return { kind: "runtime_stopped", enabled: false } satisfies PeerSharingToggleResponse;
+  });
+  await peerSharingToggleSetCommand({ enabled: false });
+  await peerSharingToggleSetCommand({ enabled: false });
+  // The bridge always accepts the toggle; turning it off is never
+  // rejected and the runtime reports `runtime_stopped` so the UI
+  // can render the off state.
+  assert.equal(calls, 2);
+});
+
+test("peerSnapshotCommand returns the metadata-only list of known peers", async () => {
+  const expected: PeerSnapshot = {
+    entries: [
+      {
+        peer_id: "0123456789abcdef0123456789abcdef",
+        public_key_fingerprint: "0123456789abcdef",
+        display_name: "Studio",
+        protocol_major: 1,
+        capability: "discovery_only",
+        first_seen_at: "2026-01-02T03:04:05Z",
+        last_discovered_at: "2026-01-02T04:04:05Z",
+        is_present: true,
+        presence: "detected",
+      },
+      {
+        peer_id: "fedcba9876543210fedcba9876543210",
+        public_key_fingerprint: "fedcba9876543210",
+        display_name: "Laptop",
+        protocol_major: 1,
+        capability: "discovery_only",
+        first_seen_at: "2026-01-01T00:00:00Z",
+        last_discovered_at: "2026-01-02T02:00:00Z",
+        is_present: false,
+        presence: "not_available",
+      },
+    ],
+    sharing_active: true,
+    sharing_inactive_reason: null,
+  };
+  installTauriMock(async (cmd) => {
+    assert.equal(cmd, "clipvault_peer_snapshot");
+    return expected;
+  });
+  const result = await peerSnapshotCommand();
+  assert.equal(result.entries.length, 2);
+  assert.equal(result.entries[0].display_name, "Studio");
+  assert.equal(result.entries[0].presence, "detected");
+  assert.equal(result.entries[1].presence, "not_available");
+  assert.equal(result.sharing_active, true);
+  // The snapshot MUST NOT carry endpoints, content or secrets.
+  for (const entry of result.entries) {
+    assert.equal((entry as unknown as { ip?: unknown }).ip, undefined);
+    assert.equal((entry as unknown as { port?: unknown }).port, undefined);
+    assert.equal((entry as unknown as { content?: unknown }).content, undefined);
+  }
+});
+
+test("peerSnapshotCommand reports an inactive runtime with a typed reason", async () => {
+  installTauriMock(async (cmd) => {
+    assert.equal(cmd, "clipvault_peer_snapshot");
+    return {
+      entries: [],
+      sharing_active: false,
+      sharing_inactive_reason: "runtime_stopped",
+    } satisfies PeerSnapshot;
+  });
+  const result = await peerSnapshotCommand();
+  assert.equal(result.sharing_active, false);
+  assert.equal(result.sharing_inactive_reason, "runtime_stopped");
+  assert.equal(result.entries.length, 0);
+});
+
+test("peerSharingRefreshIdentityCommand forwards the refresh call to the runtime", async () => {
+  installTauriMock(async (cmd) => {
+    assert.equal(cmd, "clipvault_peer_sharing_refresh_identity");
+    return { kind: "active", enabled: true } satisfies PeerSharingToggleResponse;
+  });
+  const result = await peerSharingRefreshIdentityCommand();
+  assert.equal(result.kind, "active");
+});
+
+test("settingsUpdate round-trips local_peer_sharing_enabled", async () => {
+  // The frontend sends `local_peer_sharing_enabled: true`; the
+  // backend must accept the bare boolean and return a refreshed
+  // aggregate. Mirrors the snake_case pattern the rest of the
+  // update payload uses.
+  installTauriMock(async (cmd, args) => {
+    assert.equal(cmd, "clipvault_settings_set");
+    return {
+      ...defaultSettings(),
+      local_peer_sharing_enabled: (args?.update as { local_peer_sharing_enabled: boolean }).local_peer_sharing_enabled,
+    };
+  });
+  const result = await settingsSetCommand({ local_peer_sharing_enabled: true });
+  assert.equal(result.local_peer_sharing_enabled, true);
 });

@@ -23,6 +23,7 @@ default = [
     "linux-gnome-shell-integration",
     "linux-xlib-init",
     "local-peer-identity-keychain",
+    "local-peer-discovery-mdns",
 ]
 custom-protocol = ["tauri/custom-protocol"]
 clipboard-arboard = []
@@ -35,6 +36,13 @@ linux-x11 = []
 # `local-peer-identity-foundation` change promises — the secure
 # store is opt-in by platform capability.
 local-peer-identity-keychain = ["clipvault-platform/local-peer-identity-keychain"]
+# Production mDNS adapter for the `local-peer-discovery` change.
+# Enabled by default so the bootstrap installs the
+# `MdnsPeerDiscoveryAdapter` on macOS / Linux instead of the
+# `NoopPeerDiscoveryAdapter` the platform crate falls back to.
+# Windows builds and cross-compiles opt out so the platform crate
+# still compiles without linking `mdns-sd`.
+local-peer-discovery-mdns = ["clipvault-platform/local-peer-discovery-mdns"]
 # Linux native Wayland active-app detection (`ext-foreign-toplevel-list-v1`
 # with `zwlr_foreign_toplevel_management_unstable_v1` fallback). The
 # feature is opt-in so macOS / non-Linux builds never link the Wayland
@@ -84,12 +92,14 @@ global-hotkey = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 clipvault-core = { path = "../../../crates/clipvault-core", features = [
     "macos-native",
+    "local-peer-discovery-mdns",
 ] }
 clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
     "clipboard-arboard",
     "hotkey-global",
     "macos-native",
     "local-peer-identity-keychain",
+    "local-peer-discovery-mdns",
 ] }
 objc2-foundation = { workspace = true }
 
@@ -103,6 +113,7 @@ clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
     "linux-xlib-init",
     "linux-gnome-shell-integration",
     "local-peer-identity-keychain",
+    "local-peer-discovery-mdns",
 ] }
 
 [dev-dependencies]

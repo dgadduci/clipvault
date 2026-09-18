@@ -74,6 +74,16 @@ linux-svg-raster = ["dep:resvg"]
 # want the real store enable the feature; tests rely on the fake
 # store the core ships.
 local-peer-identity-keychain = ["dep:keyring"]
+# Production mDNS adapter for the `local-peer-discovery` change.
+# Pulls in `mdns-sd` (only behind this feature) so the platform
+# crate still compiles without the multicast backend — tests,
+# cross-compiles to unsupported targets and `cargo check` runs on
+# every host link the noop stub instead. The shell enables this
+# feature on macOS / Linux; the noop remains the fallback for
+# Windows builds and for any host the bootstrap cannot install a
+# real adapter on. The core / db / frontend never depend on this
+# feature; only `clipvault-app` (the Tauri shell) does.
+local-peer-discovery-mdns = ["dep:mdns-sd"]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -81,6 +91,12 @@ tracing = { workspace = true }
 dirs = { workspace = true }
 serde = { workspace = true }
 parking_lot = { workspace = true }
+# `time` types for the metadata-only `TxtRecord` the discovery
+# adapter pushes into the runtime. Already pulled in by
+# `clipvault-core` (and by extension by `clipvault-db`); surfacing
+# it here keeps the platform adapter contract self-contained
+# without forcing the runtime to expose its own time types.
+time = { workspace = true }
 # Pure-Rust PNG decoder used by the macOS `public.png` capture
 # bridge to validate the bytes the pasteboard exposes. The crate is
 # already in the workspace graph through `clipvault-core`'s asset
@@ -138,6 +154,11 @@ block2 = { version = "0.6", optional = true }
 # never references this crate directly — it consumes the trait
 # the platform crate re-exports.
 keyring = { workspace = true, optional = true }
+# Cross-platform DNS-SD/mDNS daemon. Only linked when the
+# `local-peer-discovery-mdns` feature is active on macOS / Linux
+# production builds. The platform layer owns the multicast
+# surface so the core never references the crate directly.
+mdns-sd = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.10"

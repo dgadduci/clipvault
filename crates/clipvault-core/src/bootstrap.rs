@@ -32,7 +32,8 @@ use crate::management::{HistoryManagementService, DEFAULT_RETENTION, RETENTION_S
 use crate::organization::OrganizationService;
 use crate::paste::PasteService;
 use crate::paste_suppression::PasteSuppression;
-use crate::peer_identity::{PeerIdentityService, PeerIdentityStore};
+use crate::peer_discovery::PeerDiscoveryRuntime;
+use crate::peer_identity::{LocalPeerIdentity, PeerIdentityService, PeerIdentityStore};
 use crate::platform_adapters::PlatformAdapters;
 use crate::privacy::{CoreBlacklistMatcher, PrivacyGate};
 use crate::rich_text::RichTextAssetStore;
@@ -116,6 +117,18 @@ pub struct BootstrapOptions {
     /// variant to exercise the happy path without linking the
     /// keychain backend.
     pub peer_identity_store: Option<Arc<dyn PeerIdentityStore>>,
+    /// Optional local peer discovery adapter the bootstrap
+    /// installs. When `None`, the bootstrap builds a
+    /// [`clipvault_platform::NoopPeerDiscoveryAdapter`] so the
+    /// shell can drive the runtime idempotently without a real
+    /// `mdns-sd` backend: the noop reports
+    /// [`crate::peer_discovery::AdapterError::MulticastUnavailable`]
+    /// on `start` and the runtime surfaces a typed
+    /// `runtime_stopped` reason to the UI. Production shells that
+    /// wire the real adapter from the future `clipvault-network`
+    /// crate inject it through
+    /// [`AppBootstrap::with_peer_discovery_adapter`].
+    pub peer_discovery_adapter: Option<Arc<dyn crate::peer_discovery::PeerDiscoveryAdapter>>,
 }
 
 impl Default for BootstrapOptions {
@@ -126,6 +139,7 @@ impl Default for BootstrapOptions {
             platform_adapters: None,
             capture_debug_sink: None,
             peer_identity_store: None,
+            peer_discovery_adapter: None,
         }
     }
 }
@@ -181,6 +195,15 @@ pub struct AppContext {
     /// change during a single boot, so a second emission would only
     /// duplicate the same metadata.
     environment_snapshot_emitted: Arc<AtomicBool>,
+    /// Local peer discovery runtime. The shell drives
+    /// [`PeerDiscoveryRuntime::start`] / [`PeerDiscoveryRuntime::stop`]
+    /// idempotently whenever the `local_peer_sharing_enabled`
+    /// toggle flips, and reads [`PeerDiscoveryRuntime::snapshot`] to
+    /// render the metadata-only `Equipos` view. The runtime owns
+    /// the platform adapter and the presence table; the bootstrap
+    /// only injects the runtime so the shell sees a single
+    /// metadata-only surface.
+    peer_discovery: PeerDiscoveryRuntime,
 }
 
 impl AppContext {
@@ -442,6 +465,49 @@ impl AppContext {
             .store(true, Ordering::Release);
     }
 
+    /// Handle to the local peer discovery runtime. The shell uses
+    /// it to drive `start` / `stop` whenever the toggle flips and
+    /// to render the metadata-only `Equipos` snapshot. The runtime
+    /// outlives the shell: dropping the handle is enough to tear it
+    /// down deterministically.
+    pub fn peer_discovery(&self) -> PeerDiscoveryRuntime {
+        self.peer_discovery.clone()
+    }
+
+    /// Best-effort wire of the local peer identity the runtime
+    /// uses for self-filtering, plus the validated display name
+    /// the runtime publishes in its own TXT record. The shell
+    /// calls this after the secure store reports `Ok`; the
+    /// runtime ignores the call when the secure store is
+    /// unavailable so a temporarily missing keychain does not
+    /// block the user from editing the toggle (the runtime
+    /// reports `identity_unavailable` in that case).
+    ///
+    /// `display_name` is the trimmed, validated value the settings
+    /// service exposes; the runtime rejects an empty string so
+    /// the adapter cannot accidentally publish a record without a
+    /// visible name. When the secure store is unreachable the
+    /// function ignores `identity` and clears the snapshot.
+    pub fn refresh_peer_discovery_local_identity(
+        &self,
+        identity: Option<&LocalPeerIdentity>,
+        display_name: Option<&str>,
+    ) {
+        let snapshot = identity.and_then(|id| {
+            let name = display_name.unwrap_or("").trim();
+            if name.is_empty() {
+                None
+            } else {
+                Some(crate::peer_discovery::LocalPeerIdentitySnapshot::new(
+                    id.peer_id.clone(),
+                    id.fingerprint.clone(),
+                    name.to_string(),
+                ))
+            }
+        });
+        self.peer_discovery.set_local_identity(snapshot);
+    }
+
     /// Wire the shared [`CaptureWatcher`] the destructive operations
     /// rebaseline after a successful row removal. The Tauri shell
     /// calls this once at startup, right after the context and the
@@ -550,6 +616,22 @@ impl AppBootstrap {
     /// would not survive a restart.
     pub fn with_peer_identity_store(mut self, store: Arc<dyn PeerIdentityStore>) -> Self {
         self.options.peer_identity_store = Some(store);
+        self
+    }
+
+    /// Inject the [`PeerDiscoveryAdapter`] the bootstrap hands to
+    /// the runtime. Production shells that wire the future
+    /// `clipvault-network` adapter pass it here; tests pass a fake
+    /// implementation to exercise the start / stop / drain contract
+    /// without standing up mDNS. When omitted the bootstrap
+    /// installs [`clipvault_platform::NoopPeerDiscoveryAdapter`]
+    /// so the runtime reports a typed `runtime_stopped` reason
+    /// without ever touching the network.
+    pub fn with_peer_discovery_adapter(
+        mut self,
+        adapter: Arc<dyn crate::peer_discovery::PeerDiscoveryAdapter>,
+    ) -> Self {
+        self.options.peer_discovery_adapter = Some(adapter);
         self
     }
 
@@ -756,6 +838,64 @@ impl AppBootstrap {
 
         let search = SearchService::new();
 
+        // Build the local peer discovery runtime. The shell drives
+        // start / stop whenever the opt-in toggle flips. Production
+        // hosts on macOS / Linux install the `mdns-sd`-backed
+        // adapter from `clipvault-platform`; cross-compiles and
+        // platforms that do not enable `local-peer-discovery-mdns`
+        // fall back to the noop stub that reports a typed
+        // `runtime_stopped` reason.
+        let peer_discovery_adapter: Arc<dyn crate::peer_discovery::PeerDiscoveryAdapter> = self
+            .options
+            .peer_discovery_adapter
+            .clone()
+            .unwrap_or_else(|| Arc::new(default_peer_discovery_adapter()));
+        let peer_discovery = PeerDiscoveryRuntime::new(peer_discovery_adapter);
+        // The runtime drains events on a worker thread; install the
+        // persistence closure the bootstrap owns. The closure is
+        // the only place where the runtime touches
+        // `known_peers`; keeping the call site in one place makes
+        // the worker lifecycle easy to audit.
+        let persist_closure: Arc<
+            dyn Fn(&clipvault_db::PeerObservation) -> clipvault_db::UpsertObservationOutcome
+                + Send
+                + Sync,
+        > = {
+            let database_handle_for_closure = Arc::clone(&database_handle);
+            Arc::new(move |observation: &clipvault_db::PeerObservation| {
+                let mut db = database_handle_for_closure.lock();
+                let conn = db.connection_mut();
+                let mut repo = clipvault_db::KnownPeerRepository::new(conn);
+                // Persistence failures (sqlite errors) collapse into a
+                // `Conflict` outcome so the worker logs the rejection
+                // without aborting the drain loop. The runtime surfaces
+                // the conflict in the diagnostics endpoint; the user
+                // never sees a raw sqlite message.
+                match repo.upsert_observation(observation) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "known_peers upsert failed; treating as conflict"
+                        );
+                        // Return the last known row as a synthetic
+                        // conflict so the worker keeps draining.
+                        clipvault_db::UpsertObservationOutcome::Conflict(clipvault_db::KnownPeer {
+                            peer_id: observation.peer_id.clone(),
+                            public_key_fingerprint: observation.public_key_fingerprint.clone(),
+                            display_name: observation.display_name.clone(),
+                            protocol_major: observation.protocol_major,
+                            capability: observation.capability.clone(),
+                            first_seen_at: String::new(),
+                            last_discovered_at: String::new(),
+                            updated_at: String::new(),
+                        })
+                    }
+                }
+            })
+        };
+        peer_discovery.set_persistence(persist_closure);
+
         Ok(AppContext {
             database: database_handle,
             platform,
@@ -776,6 +916,7 @@ impl AppBootstrap {
             cached_active_app: cached_probe,
             active_app_diagnostics,
             paste_suppression,
+            peer_discovery,
             // The capture-debug sink is either the caller-supplied
             // handle (tests) or the production wiring that consults
             // `CLIPVAULT_DEBUG_CAPTURE` exactly once at startup. When
@@ -833,6 +974,35 @@ pub fn active_app_backend_kind(
             DisplayServer::Unknown => ActiveAppBackendKind::Unavailable,
         },
         _ => ActiveAppBackendKind::Unavailable,
+    }
+}
+
+/// Resolve the production [`PeerDiscoveryAdapter`] the bootstrap
+/// installs when the caller did not inject one. Production builds
+/// on macOS / Linux link the `mdns-sd`-backed adapter the
+/// `local-peer-discovery` change ships; every other build falls
+/// back to [`NoopPeerDiscoveryAdapter`] so the runtime still
+/// surfaces a typed `runtime_stopped` reason instead of panicking
+/// on a missing backend.
+///
+/// The function inspects the platform target through `cfg` so the
+/// platform crate can keep `mdns-sd` behind an optional feature;
+/// builds compiled without `local-peer-discovery-mdns` never link
+/// the adapter regardless of host.
+fn default_peer_discovery_adapter() -> impl clipvault_platform::PeerDiscoveryAdapter {
+    #[cfg(all(
+        feature = "local-peer-discovery-mdns",
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    {
+        clipvault_platform::MdnsPeerDiscoveryAdapter::new()
+    }
+    #[cfg(not(all(
+        feature = "local-peer-discovery-mdns",
+        any(target_os = "macos", target_os = "linux")
+    )))]
+    {
+        clipvault_platform::NoopPeerDiscoveryAdapter::new()
     }
 }
 

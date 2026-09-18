@@ -11,6 +11,7 @@ mod entry;
 mod entry_repository;
 mod error;
 mod ignored_apps;
+mod known_peers;
 mod migration;
 mod organization;
 mod registry;
@@ -28,6 +29,9 @@ pub use entry_repository::{
 };
 pub use error::{DbError, DbResult};
 pub use ignored_apps::{IgnoredApp, IgnoredAppRepository, IgnoredAppsError};
+pub use known_peers::{
+    KnownPeer, KnownPeerRepository, KnownPeersError, PeerObservation, UpsertObservationOutcome,
+};
 pub use migration::{Migration, MigrationOutcome};
 pub use organization::{
     normalise_tag_identity, validate_collection_color, validate_user_collection_name, Collection,

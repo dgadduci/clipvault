@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-18
+status: proposed
+summary: Descubrir y recordar N pares locales mediante mDNS, sin vincularlos ni exponer contenido.

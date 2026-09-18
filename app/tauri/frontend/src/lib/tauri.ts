@@ -26,6 +26,8 @@ import type {
   MigrationsApplied,
   OrganizationSnapshot,
   PasteResponse,
+  PeerSharingToggleResponse,
+  PeerSnapshot,
   PickAndAddResponse,
   PlatformSettingsTarget,
   RetentionPreview,
@@ -297,6 +299,52 @@ export const localPeerProfileUpdateCommand: ClipvaultCommandArg<
   invoke<LocalPeerProfileResponse>("clipvault_local_peer_profile_update", {
     update: { name: args.name },
   });
+
+/**
+ * Read the persisted `Compartir en red local` toggle together
+ * with the runtime's current state. The response is the typed
+ * union [`PeerSharingToggleResponse`] the Settings panel
+ * branches on. The bridge NEVER carries clipboard content,
+ * addresses, ports or raw public keys.
+ */
+export const peerSharingToggleGetCommand: ClipvaultCommand<PeerSharingToggleResponse> =
+  () => invoke<PeerSharingToggleResponse>("clipvault_peer_sharing_toggle_get");
+
+/**
+ * Persist the opt-in toggle and drive the runtime in lockstep.
+ * The toggle is always accepted: turning it off stops the
+ * runtime unconditionally; turning it on surfaces
+ * `identity_unavailable` when the secure store is unreachable
+ * so the user can retry without losing the persisted `true`.
+ */
+export const peerSharingToggleSetCommand: ClipvaultCommandArg<
+  PeerSharingToggleResponse,
+  { enabled: boolean }
+> = (args) =>
+  invoke<PeerSharingToggleResponse>("clipvault_peer_sharing_toggle_set", {
+    update: { enabled: args.enabled },
+  });
+
+/**
+ * Metadata-only snapshot the `Equipos` view renders. The
+ * response carries only the persisted `known_peers` rows merged
+ * with the in-memory presence state; it NEVER carries IP
+ * addresses, ports, raw public keys or clipboard content.
+ */
+export const peerSnapshotCommand: ClipvaultCommand<PeerSnapshot> = () =>
+  invoke<PeerSnapshot>("clipvault_peer_snapshot");
+
+/**
+ * Trigger an on-demand re-load of the local identity the
+ * runtime uses for self-filtering. The Settings panel calls
+ * this from a `Refrescar` button so the user can recover
+ * without restarting the app when the keychain is temporarily
+ * unavailable. The bridge forwards nothing but the typed
+ * outcome.
+ */
+export const peerSharingRefreshIdentityCommand: ClipvaultCommand<PeerSharingToggleResponse> =
+  () =>
+    invoke<PeerSharingToggleResponse>("clipvault_peer_sharing_refresh_identity");
 
 /**
  * Drive the platform application picker. The command returns a
@@ -667,8 +715,15 @@ export type {
   GnomeIntegrationStatusResponse,
   GnomeTechnicalState,
   IgnoredAppEntry,
+  LocalPeerProfile,
+  LocalPeerProfileResponse,
   OrganizationSnapshot,
   PasteResponse,
+  PeerDisplayNameErrorCode,
+  PeerPresence,
+  PeerSharingToggleResponse,
+  PeerSnapshot,
+  PeerSnapshotEntry,
   PickAndAddResponse,
   PlatformGuidance,
   PlatformSettingsTarget,

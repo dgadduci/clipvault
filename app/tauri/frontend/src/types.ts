@@ -447,11 +447,71 @@ export interface LocalPeerProfile {
  * Discriminated response of `clipvault_local_peer_profile_get`
  * and `clipvault_local_peer_profile_update`. The frontend
  * branches on `kind` to render the right copy (success vs
- * unavailable) without parsing free-form strings.
+ * unavailable) without inspecting free-form strings.
  */
 export type LocalPeerProfileResponse =
   | { kind: "available"; profile: LocalPeerProfile }
   | { kind: "unavailable"; reason: string };
+
+/**
+ * Discriminated response of `clipvault_peer_sharing_toggle_get`
+ * and `clipvault_peer_sharing_toggle_set`. The union keeps the
+ * runtime state and the persisted flag on the same response so
+ * the Settings panel can render the toggle and the status copy
+ * without a follow-up round-trip. The `Equipos` view renders
+ * the `peer_snapshot` shape; this DTO is metadata-only too.
+ *
+ * - `active`: sharing is on AND the runtime is browsing the
+ *   LAN.
+ * - `identity_unavailable`: sharing is on but the secure
+ *   identity store is unreachable on this session.
+ * - `runtime_stopped`: sharing is on but the platform cannot
+ *   expose a multicast / mDNS path right now (firewall,
+ *   router, …). The UI shows the documented degraded copy.
+ */
+export type PeerSharingToggleResponse =
+  | { kind: "active"; enabled: true }
+  | { kind: "identity_unavailable"; enabled: true }
+  | { kind: "runtime_stopped"; enabled: boolean };
+
+/**
+ * Stable presence discriminator the `Equipos` view renders.
+ * Mirrors `clipvault_core::PeerPresence::as_str` so the UI can
+ * branch on the string without parsing free-form text.
+ */
+export type PeerPresence = "detected" | "not_available" | "unverified";
+
+/**
+ * Single metadata-only row the `Equipos` view renders. The
+ * struct never carries IP addresses, ports, raw public keys,
+ * clipboard content, previews, hashes or source identifiers;
+ * only the validated discovery metadata the runtime persists.
+ */
+export interface PeerSnapshotEntry {
+  peer_id: string;
+  public_key_fingerprint: string;
+  display_name: string;
+  protocol_major: number;
+  capability: string;
+  first_seen_at: string;
+  last_discovered_at: string;
+  /** True when the runtime observed the peer inside the presence TTL. */
+  is_present: boolean;
+  presence: PeerPresence;
+}
+
+/**
+ * Response of `clipvault_peer_snapshot`. The runtime reports
+ * `sharing_active = false` whenever it cannot browse; the
+ * `sharing_inactive_reason` string carries one of the
+ * documented values the frontend branches on
+ * (`identity_unavailable`, `runtime_stopped`, `disabled`).
+ */
+export interface PeerSnapshot {
+  entries: PeerSnapshotEntry[];
+  sharing_active: boolean;
+  sharing_inactive_reason: string | null;
+}
 
 /**
  * Stable validation error codes the Identity section reads from

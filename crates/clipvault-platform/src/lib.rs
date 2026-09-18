@@ -24,6 +24,7 @@ mod linux_picker_support;
 mod linux_xlib_init;
 mod noop;
 pub mod paste;
+pub mod peer_discovery;
 pub mod peer_identity;
 pub mod runtime;
 mod stub;
@@ -81,6 +82,12 @@ pub use noop::{
     NoopSettingsNavigator, NoopTrayController, NoopTrayHandle,
 };
 pub use paste::{PasteBackendKind, PasteController, PasteError};
+#[cfg(feature = "local-peer-discovery-mdns")]
+pub use peer_discovery::mdns::{MdnsAdapterError, MdnsPeerDiscoveryAdapter};
+pub use peer_discovery::{
+    AdapterError, DiscoveryAdvertisement, DiscoveryEvent, DiscoverySink, NoopPeerDiscoveryAdapter,
+    PeerDiscoveryAdapter, TxtRecord as DiscoveryTxtRecord,
+};
 #[cfg(feature = "local-peer-identity-keychain")]
 pub use peer_identity::KeychainPeerIdentityStore;
 pub use peer_identity::{

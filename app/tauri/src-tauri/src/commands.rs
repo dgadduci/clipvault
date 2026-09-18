@@ -2560,3 +2560,161 @@ pub fn clipvault_local_peer_profile_update(
     let outcome = context.settings().local_peer_profile(context);
     Ok(LocalPeerProfileResponse::from_outcome(outcome))
 }
+
+// ---------------------------------------------------------------------------
+// `local-peer-discovery` commands.
+//
+// The shell exposes only metadata-only DTOs to the frontend:
+// the toggle, the runtime snapshot, and a read-only refresh hook.
+// The commands never return IP addresses, ports, raw public keys,
+// clipboard content, previews, hashes or any other secret. The
+// runtime itself is platform-agnostic: the production shell wires
+// the future `clipvault-network` adapter; this change ships with
+// a `NoopPeerDiscoveryAdapter` that reports `MulticastUnavailable`
+// so the bootstrap compiles on every host.
+// ---------------------------------------------------------------------------
+
+/// Response of [`clipvault_peer_sharing_toggle_get`] /
+/// [`clipvault_peer_sharing_toggle_set`]. The discriminated union
+/// keeps the wire contract stable across changes: the frontend
+/// branches on `kind` to render the right copy (active / inactive
+/// / identity unavailable / runtime stopped) without parsing
+/// free-form strings.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerSharingToggleResponse {
+    /// The toggle is persisted and the runtime is currently
+    /// browsing. `enabled` mirrors the persisted boolean.
+    Active { enabled: bool },
+    /// The toggle is persisted but the runtime cannot browse
+    /// because the secure identity store is unavailable.
+    IdentityUnavailable { enabled: bool },
+    /// The toggle is persisted but the runtime is stopped
+    /// (mDNS multicast is blocked, the host has no multicast
+    /// path, …). The shell renders the documented degraded copy.
+    RuntimeStopped { enabled: bool },
+}
+
+impl PeerSharingToggleResponse {
+    fn from_runtime(runtime: &clipvault_core::PeerDiscoveryRuntime, enabled: bool) -> Self {
+        if !runtime.is_running() {
+            // Distinguish `identity_unavailable` (the secure store
+            // is unreachable on this session) from `runtime_stopped`
+            // (the store minted an identity but the runtime cannot
+            // start). The runtime's `snapshot` already does this
+            // through `sharing_inactive_reason`.
+            let snapshot = runtime.snapshot(Vec::new, std::time::Instant::now());
+            if !enabled {
+                PeerSharingToggleResponse::RuntimeStopped { enabled }
+            } else if snapshot.sharing_inactive_reason.as_deref()
+                == Some(clipvault_core::RUNTIME_INACTIVE_REASON_IDENTITY_UNAVAILABLE)
+            {
+                PeerSharingToggleResponse::IdentityUnavailable { enabled }
+            } else {
+                PeerSharingToggleResponse::RuntimeStopped { enabled }
+            }
+        } else {
+            PeerSharingToggleResponse::Active { enabled }
+        }
+    }
+}
+
+/// Read the persisted `Compartir en red local` toggle and the
+/// runtime's current state. The response is the typed union
+/// [`PeerSharingToggleResponse`]; the frontend uses it to render
+/// the toggle and the status copy without inspecting free-form
+/// strings.
+#[tauri::command]
+pub fn clipvault_peer_sharing_toggle_get(
+    state: State<'_, SharedState>,
+) -> Result<PeerSharingToggleResponse, CommandError> {
+    let context = state.context();
+    let settings = context.settings().load(context);
+    let runtime = context.peer_discovery();
+    Ok(PeerSharingToggleResponse::from_runtime(
+        &runtime,
+        settings.local_peer_sharing_enabled,
+    ))
+}
+
+/// Persist the opt-in toggle and drive the runtime in lockstep.
+/// Turning the toggle off always succeeds: the runtime stops and
+/// the UI shows the off state immediately. Turning it on is
+/// accepted even when the secure store is unavailable — the
+/// persisted flag flips to `true` and the runtime surfaces
+/// `identity_unavailable` so the user can retry once the
+/// keychain is back.
+#[tauri::command]
+pub fn clipvault_peer_sharing_toggle_set(
+    state: State<'_, SharedState>,
+    enabled: bool,
+) -> Result<PeerSharingToggleResponse, CommandError> {
+    let context = state.context();
+    let settings = context
+        .settings()
+        .set_local_peer_sharing_enabled(context, enabled)?;
+    let runtime = context.peer_discovery();
+    // The runtime is driven in lockstep with the persisted toggle
+    // so the snapshot stays in sync without a follow-up refresh.
+    context
+        .settings()
+        .sync_runtime_with_settings(context, &runtime, &settings);
+    Ok(PeerSharingToggleResponse::from_runtime(
+        &runtime,
+        settings.local_peer_sharing_enabled,
+    ))
+}
+
+/// Metadata-only snapshot the `Equipos` view renders. The
+/// response carries only the persisted `known_peers` rows merged
+/// with the in-memory presence state; it NEVER carries IP
+/// addresses, ports, raw public keys or clipboard content.
+#[tauri::command]
+pub fn clipvault_peer_snapshot(
+    state: State<'_, SharedState>,
+) -> Result<clipvault_core::PeerSnapshot, CommandError> {
+    let context = state.context();
+    let runtime = context.peer_discovery();
+    // The runtime reads every persisted row through the supplied
+    // closure so the snapshot stays in sync with `known_peers`
+    // without holding the database lock across the runtime
+    // callback. The closure maps the database-shaped rows into
+    // the metadata-only DTO the frontend renders.
+    let rows = {
+        let mut db = context.database().lock();
+        let conn = db.connection_mut();
+        let repo = clipvault_db::KnownPeerRepository::new(conn);
+        repo.list().unwrap_or_default()
+    };
+    Ok(runtime.snapshot(move || rows.clone(), std::time::Instant::now()))
+}
+
+/// Trigger an on-demand re-load of the local identity the runtime
+/// uses for self-filtering. The shell calls this from the
+/// `Refrescar` button next to the identity section so the user
+/// can recover without restarting the app when the keychain is
+/// temporarily unavailable.
+#[tauri::command]
+pub fn clipvault_peer_sharing_refresh_identity(
+    state: State<'_, SharedState>,
+) -> Result<PeerSharingToggleResponse, CommandError> {
+    let context = state.context();
+    let runtime = context.peer_discovery();
+    let outcome = context.settings().peer_identity().load_identity();
+    let identity = match outcome {
+        clipvault_core::PeerIdentityOutcome::Ok(identity) => Some(identity),
+        clipvault_core::PeerIdentityOutcome::Unavailable => None,
+    };
+    let settings = context.settings().load(context);
+    context.refresh_peer_discovery_local_identity(
+        identity.as_ref(),
+        settings.local_peer_display_name.as_deref(),
+    );
+    context
+        .settings()
+        .sync_runtime_with_settings(context, &runtime, &settings);
+    Ok(PeerSharingToggleResponse::from_runtime(
+        &runtime,
+        settings.local_peer_sharing_enabled,
+    ))
+}

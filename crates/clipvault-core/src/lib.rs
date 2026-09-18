@@ -28,6 +28,7 @@ pub mod management;
 pub mod organization;
 pub mod paste;
 pub mod paste_suppression;
+pub mod peer_discovery;
 pub mod peer_identity;
 pub mod platform;
 pub mod platform_adapters;
@@ -131,6 +132,14 @@ pub use paste::{
     SYNTHETIC_PASTE_CAPABILITY,
 };
 pub use paste_suppression::{PasteSuppression, SuppressionFingerprint, DEFAULT_SUPPRESSION_TTL};
+pub use peer_discovery::{
+    AdapterError, DiscoveryEvent, LocalPeerIdentitySnapshot, ObservationOutcome,
+    PeerDiscoveryAdapter, PeerDiscoveryRuntime, PeerObservationRecord, PeerPresence,
+    PeerRecordValidationError, PeerSnapshot, PeerSnapshotEntry, StartError, TxtRecord,
+    DISCOVERY_ONLY_CAPABILITY, MAX_PEER_DISPLAY_NAME_LENGTH, PRESENCE_TTL, PROTOCOL_MAJOR,
+    RUNTIME_INACTIVE_REASON_DISABLED, RUNTIME_INACTIVE_REASON_IDENTITY_UNAVAILABLE,
+    RUNTIME_INACTIVE_REASON_RUNTIME_STOPPED, SERVICE_TYPE,
+};
 pub use peer_identity::{
     InMemoryPeerIdentityStore, LocalPeerIdentity, LocalPeerProfile, PeerFingerprint, PeerId,
     PeerIdentityError, PeerIdentityOutcome, PeerIdentityService, PeerIdentityStore,

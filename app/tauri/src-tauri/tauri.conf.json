@@ -52,6 +52,9 @@
     ],
     "icon": [
       "icons/icon.png"
-    ]
+    ],
+    "macOS": {
+      "infoPlist": "macos/Info.plist"
+    }
   }
 }

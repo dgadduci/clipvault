@@ -99,6 +99,7 @@
   import DevelopmentModal from "./DevelopmentModal.svelte";
   import GnomeIntegrationModal from "./GnomeIntegrationModal.svelte";
   import PrivacyModal from "./PrivacyModal.svelte";
+  import PeerSharingModal from "./PeerSharingModal.svelte";
   import RetentionModal from "./RetentionModal.svelte";
   import QuickPasteShortcutModal from "./QuickPasteShortcutModal.svelte";
   import AboutModal from "./AboutModal.svelte";
@@ -123,6 +124,7 @@
     | "development"
     | "gnome_integration"
     | "privacy"
+    | "peer_sharing"
     | "retention"
     | "quick_paste_shortcut"
     | "about";
@@ -1519,6 +1521,10 @@
     openModalWith("privacy", event.currentTarget as HTMLElement | null);
   }
 
+  function onOpenPeerSharing(event: MouseEvent): void {
+    openModalWith("peer_sharing", event.currentTarget as HTMLElement | null);
+  }
+
   function onOpenRetention(event: MouseEvent): void {
     openModalWith("retention", event.currentTarget as HTMLElement | null);
   }
@@ -1790,6 +1796,7 @@
           onSearchInput={handleSearchInput}
           onOpenDevelopment={onOpenDevelopment}
           onOpenPrivacy={onOpenPrivacy}
+          onOpenPeerSharing={onOpenPeerSharing}
           onOpenRetention={onOpenRetention}
           onOpenShortcut={onOpenShortcut}
           onOpenAbout={onOpenAbout}
@@ -1984,6 +1991,16 @@
   onClose={closeModal}
 >
   <PrivacyModal />
+</Modal>
+
+<Modal
+  open={openModal === "peer_sharing"}
+  titleId="peer-sharing-title"
+  title="Compartir en red local"
+  returnFocusTo={modalReturnFocus}
+  onClose={closeModal}
+>
+  <PeerSharingModal />
 </Modal>
 
 <Modal

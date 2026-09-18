@@ -93,6 +93,7 @@
   export let onSearchInput: (value: string) => void = () => {};
   export let onOpenDevelopment: (event: MouseEvent) => void = () => {};
   export let onOpenPrivacy: (event: MouseEvent) => void = () => {};
+  export let onOpenPeerSharing: (event: MouseEvent) => void = () => {};
   export let onOpenRetention: (event: MouseEvent) => void = () => {};
   export let onOpenShortcut: (event: MouseEvent) => void = () => {};
   /**
@@ -314,6 +315,15 @@
               on:click={(event) => selectItem(onOpenPrivacy, event)}
             >
               Privacidad
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              class="menu-item"
+              data-testid="open-peer-sharing"
+              on:click={(event) => selectItem(onOpenPeerSharing, event)}
+            >
+              Compartir en red local
             </button>
             <button
               type="button"
