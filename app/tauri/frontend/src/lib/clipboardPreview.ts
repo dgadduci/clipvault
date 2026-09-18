@@ -108,3 +108,16 @@ export function previewShortcutAccessibleLabel(
     ? "Previsualizar (Comando Enter)"
     : "Previsualizar (Control Enter)";
 }
+
+/**
+ * Stable `aria-keyshortcuts` value the menu item / row shortcut hint
+ * exposes. Mirrors the matcher modifier table so the WAI-ARIA
+ * attribute and the keyboard event matcher cannot drift apart:
+ * `Meta+Enter` on macOS, `Control+Enter` on every other supported
+ * host.
+ */
+export function previewShortcutKeyAttribute(
+  platform: PreviewShortcutPlatform,
+): string {
+  return platform === "macos" ? "Meta+Enter" : "Control+Enter";
+}

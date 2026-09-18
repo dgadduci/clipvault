@@ -7,6 +7,7 @@
     SearchHit,
     SearchResponse,
   } from "./types";
+  import { isEditableTextEntry } from "./types";
   import { visualTokenCss } from "./lib/visualTokens";
   import {
     copyEntryCommand,
@@ -32,6 +33,7 @@
     selectedIndexForClick,
     selectedIndexForEntryId,
     type CopyMode,
+    type QuickPasteMenuAction,
   } from "./lib/quickPasteActions";
   import { listen } from "@tauri-apps/api/event";
   import { contentTypeLabel } from "./lib/contentType";
@@ -53,8 +55,15 @@
   import {
     matchesPreviewShortcut,
     previewShortcutAccessibleLabel,
+    previewShortcutKeyAttribute,
     previewShortcutLabel,
   } from "./lib/clipboardPreview";
+  import {
+    matchesEditTextShortcut,
+    editTextShortcutAccessibleLabel,
+    editTextShortcutLabel,
+    editTextShortcutKeyAttribute,
+  } from "./lib/editTextShortcut";
   import {
     createIconResolver,
     type IconResolver,
@@ -87,9 +96,12 @@
     type QuickPasteTagsCache,
     type QuickPasteTagsHydration,
   } from "./lib/quickPasteTags";
+  import { listenHistoryUpdated } from "./lib/historyUpdates";
   import type { Tag } from "./types";
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
   import ClipboardPreview from "./ClipboardPreview.svelte";
+  import EntryTextEditorModal from "./EntryTextEditorModal.svelte";
+  import Modal from "./Modal.svelte";
 
   /**
    * Single source of truth for the visual tokens. The string is the
@@ -215,6 +227,34 @@
    * animation frame so it never leaks past a single keystroke.
    */
   let suppressNextWindowEscape = false;
+  /**
+   * Whether the persistent text editor modal is open. The Quick Paste
+   * window owns the flag so the menu trigger and the `Cmd/Ctrl+E`
+   * shortcut route through a single source of truth and the
+   * `EntryTextEditorModal.svelte` child never has to mutate the prop
+   * to close itself. The dispatcher `close` the child emits flips
+   * the flag back to `false`; the second click on `Editar captura`
+   * re-asserts `true` and the modal re-mounts with the freshly
+   * persisted content (the same `true -> false -> true` lifecycle the
+   * desktop rail pins).
+   */
+  let quickPasteEditorOpen = false;
+  /**
+   * Snapshot of the entry the editor opened with. The modal seeds
+   * its draft from this record so the first paint always shows the
+   * current persisted text even when the underlying record refreshes
+   * through `clipvault://history-updated` while the modal is open.
+   * `null` means no editor is open.
+   */
+  let quickPasteEditorEntry: EntryRecord | null = null;
+  /**
+   * Stable id of the row the `Captura no editable` dialog should
+   * return focus to when the user dismisses it. The id is captured
+   * at activation time so a `history-updated` round-trip that
+   * lands while the dialog is open cannot land focus on a row that
+   * no longer exists. `null` means no informative dialog is open.
+   */
+  let quickPasteNotEditableDialogEntryId: number | null = null;
   /**
    * Platform the Quick Paste window was opened on. Resolved once
    * from the backend diagnostics so the visible `Cmd/Ctrl+K` hint
@@ -1554,6 +1594,267 @@
   }
 
   /**
+   * Drive the `Editar captura` menu action for a single entry id.
+   * The handler is the single switch the menu item consults so the
+   * Quick Paste window owns the editor lifecycle end-to-end:
+   *
+   *   - resolve the entry by id from the live `recent` / `hits`
+   *     feeds, never from a stale closure;
+   *   - reject the activation when the resolved entry is not eligible
+   *     for the persistent editor (image, rich text, missing row);
+   *   - close the menu popover so the dialog renders on top of an
+   *     empty list rather than stacking on top of the open menu;
+   *   - store the snapshot of the entry the editor will persist so
+   *     the modal can seed its draft even if a refresh lands while
+   *     the dialog is open;
+   *   - flip `quickPasteEditorOpen` so the modal mounts; the modal
+   *     is responsible for the actual editing surface, draft,
+   *     persistence and accessibility.
+   *
+   * The handler never invokes the `updateTextEntryCommand` directly;
+   * that contract belongs to the modal so the double-submit lock,
+   * the error surface and the close dispatcher stay in one place.
+   */
+  function runMenuEditAction(entryId: number): void {
+    if (quickPasteEditorOpen) {
+      // The editor is already open. The menu should have closed when
+      // the editor opened; refusing a second activation avoids
+      // racing a second mount before the first modal finishes its
+      // exit transition.
+      return;
+    }
+    const entry = findEntry(mode, recent, hits, entryId);
+    if (!entry) {
+      // The entry disappeared between the menu render and the
+      // click (a refresh, a delete, a search that dropped the row).
+      // The modal must not mount against an unknown id; bail out
+      // silently so the menu can close and the user can pick a new
+      // row.
+      return;
+    }
+    if (!isEditableTextEntry(entry)) {
+      // `quickPasteMenuActions` already gates the entry shape, but
+      // the predicate is re-evaluated here so a stale menu that
+      // somehow mounted against a rich / image row can never reach
+      // the editor.
+      return;
+    }
+    openMenuEntryId = null;
+    quickPasteEditorEntry = entry;
+    quickPasteEditorOpen = true;
+  }
+
+  /**
+   * Svelte event handler that wraps `closeQuickPasteEditor` so the
+   * `EntryTextEditorModal.svelte` `close` dispatcher can be wired
+   * directly through `on:close`. The dispatcher carries a
+   * `CustomEvent<void>` payload the helper ignores; the actual
+   * refresh is driven by the metadata-only
+   * `clipvault://history-updated` event the backend emits after a
+   * successful commit, so the modal does not need to forward a
+   * success hint.
+   */
+  function handleQuickPasteEditorClose(): void {
+    closeQuickPasteEditor();
+  }
+
+  /**
+   * Close the persistent editor. The `EntryTextEditorModal.svelte`
+   * child signals a close through its `close` dispatcher; the helper
+   * is the single path the Quick Paste window exposes for clearing
+   * the flags so a second `Editar captura` activation reopens the
+   * modal against the freshly persisted content (the same
+   * `true -> false -> true` lifecycle the desktop rail pins).
+   *
+   * The actual refresh of the visible list is driven by the
+   * metadata-only `clipvault://history-updated` event the backend
+   * emits after a successful commit; the helper only clears the
+   * local state so a cancel/Escape path that fires the dispatcher
+   * without a commit never triggers an unnecessary reload. A second
+   * `Editar captura` activation re-asserts `quickPasteEditorOpen`
+   * and the modal re-mounts with the freshly persisted content.
+   *
+   * The Escape keystroke that closed the editor bubbles through
+   * the `<svelte:window>` listener AFTER the modal already
+   * consumed it; the guard consumes that single keystroke so the
+   * window-hide branch cannot race the editor close. The flag is
+   * reset on the next animation frame so a follow-up Escape still
+   * hides the window when no modal is mounted.
+   */
+  function closeQuickPasteEditor(): void {
+    suppressNextWindowEscape = true;
+    quickPasteEditorOpen = false;
+    quickPasteEditorEntry = null;
+    requestAnimationFrame(() => {
+      suppressNextWindowEscape = false;
+    });
+  }
+
+  /**
+   * Visible platform-aware shortcut hint the menu renderer paints
+   * next to each item that has a keyboard shortcut. The string
+   * derives from the shared helpers the desktop rail already
+   * consumes so the Quick Paste palette and the main window cannot
+   * drift apart. Items without a shortcut (`copy`, `copy-rich`,
+   * `copy-plain`) intentionally return `null` so the renderer skips
+   * the second span and the menu stays compact.
+   */
+  function actionShortcutLabel(action: QuickPasteMenuAction): string | null {
+    if (action.kind === "edit") {
+      return editTextShortcutLabel(shortcutPlatform);
+    }
+    if (action.kind === "preview") {
+      return previewShortcutLabel(shortcutPlatform);
+    }
+    return null;
+  }
+
+  /**
+   * Accessible label matching the visible shortcut hint. The string
+   * is rendered as a screen-reader-only span so the assistive layer
+   * still reads the platform-aware wording even though the visible
+   * hint is hidden from the accessibility tree.
+   */
+  function actionShortcutAccessibleLabel(action: QuickPasteMenuAction): string {
+    if (action.kind === "edit") {
+      return editTextShortcutAccessibleLabel(shortcutPlatform);
+    }
+    if (action.kind === "preview") {
+      return previewShortcutAccessibleLabel(shortcutPlatform);
+    }
+    return "";
+  }
+
+  /**
+   * `aria-keyshortcuts` value the menu item exposes. The function
+   * delegates to the shared helpers so the matcher and the menu
+   * attribute stay in lockstep — a future tweak to the platform
+   * table only has to land in `clipboardPreview.ts` /
+   * `editTextShortcut.ts`.
+   */
+  function actionShortcutKeyAttribute(action: QuickPasteMenuAction): string {
+    if (action.kind === "edit") {
+      return editTextShortcutKeyAttribute(shortcutPlatform);
+    }
+    if (action.kind === "preview") {
+      return previewShortcutKeyAttribute(shortcutPlatform);
+    }
+    return "";
+  }
+
+  /**
+   * Stable `data-testid` the visible shortcut hint exposes. The
+   * constant naming follows the rail's
+   * `history-card-edit-text-shortcut` convention so the regression
+   * suite can target the hint directly without sniffing the visible
+   * text.
+   */
+  function actionShortcutTestId(action: QuickPasteMenuAction): string {
+    if (action.kind === "edit") {
+      return "quick-paste-menu-edit-shortcut";
+    }
+    if (action.kind === "preview") {
+      return "quick-paste-menu-preview-shortcut";
+    }
+    return "";
+  }
+
+  /**
+   * Resolve the focus return target the persistent editor should
+   * restore focus to after the user dismisses the dialog. The
+   * helper prefers the menu trigger element when one is still
+   * mounted (the menu was the entry point) and falls back to the
+   * row's `<li>` element when the editor was opened through the
+   * `Cmd/Ctrl+E` shortcut. Both targets carry the stable
+   * `data-entry-id` attribute so the helper can resolve them
+   * without a `querySelector` round-trip.
+   */
+  function resolveQuickPasteEditorFocusTarget(
+    entryId: number,
+  ): HTMLElement | null {
+    const anchor = menuAnchorEls[entryId];
+    if (anchor) return anchor;
+    const row = rowRefs.get(entryId);
+    if (row) return row;
+    return null;
+  }
+
+  /**
+   * Open the informative `Captura no editable` dialog for the entry
+   * the user activated `Cmd/Ctrl+E` against. The dialog is the
+   * single switch the keyboard listener consults when the matcher
+   * resolves to an image / rich-text row so the user gets a clear
+   * explanation without the editor silently mounting against an
+   * ineligible entry (or against a stale row the menu or shortcut
+   * might have left from a previous edit cycle).
+   *
+   * The dialog reuses the shared `Modal.svelte` shell so the focus
+   * trap, the Escape / backdrop contract and the accessible
+   * labelling stay in lockstep with the rest of the Quick Paste
+   * surfaces. The helper never invokes `updateTextEntryCommand`,
+   * never mutates the entry, never creates a new history row and
+   * never changes the `selectedEntryId` — the row the user pressed
+   * `Cmd/Ctrl+E` against stays selected so the dismissal can
+   * return focus to the same element.
+   */
+  function openQuickPasteNotEditableDialogFor(entry: EntryRecord): void {
+    quickPasteNotEditableDialogEntryId = entry.id;
+    openMenuEntryId = null;
+  }
+
+  /**
+   * Close the informative `Captura no editable` dialog. The helper
+   * is the single path the modal `onClose` callback consults so the
+   * dismissal contract stays consistent across the close button,
+   * the backdrop and the Escape keystroke. The focus return target
+   * is resolved from the id captured at activation time; the helper
+   * never falls back to the last-edited entry.
+   */
+  function closeQuickPasteNotEditableDialog(): void {
+    suppressNextWindowEscape = true;
+    quickPasteNotEditableDialogEntryId = null;
+    requestAnimationFrame(() => {
+      suppressNextWindowEscape = false;
+    });
+  }
+
+  /**
+   * Resolve the focus return target the informative dialog should
+   * hand focus to when it closes. The helper mirrors
+   * `resolveQuickPasteEditorFocusTarget` but accepts a `number | null`
+   * so the modal mounting guard can pass through the captured id.
+   */
+  function resolveQuickPasteNotEditableDialogFocusTarget(): HTMLElement | null {
+    const id = quickPasteNotEditableDialogEntryId;
+    if (id === null) return null;
+    const row = rowRefs.get(id);
+    if (row) return row;
+    return null;
+  }
+
+  /**
+   * The informative dialog's localized title. The string is
+   * exposed so the regression suite can assert the wording without
+   * instantiating the Svelte renderer.
+   */
+  const QUICK_PASTE_NOT_EDITABLE_DIALOG_TITLE = "Captura no editable";
+  /**
+   * The informative dialog's localized body. The string mirrors
+   * the WAI-ARIA `aria-describedby` association the modal mounts so
+   * screen readers announce it on open; it explains why the row
+   * cannot be edited and that no entry was modified.
+   */
+  const QUICK_PASTE_NOT_EDITABLE_DIALOG_BODY =
+    "Esta captura no se puede editar porque no es una captura de texto editable.";
+  /**
+   * Localized label for the dialog's only button. The dialog is a
+   * read-only surface with a single dismiss action; the close
+   * button (`×` in the `Modal.svelte` header) is the secondary
+   * affordance.
+   */
+  const QUICK_PASTE_NOT_EDITABLE_DIALOG_CLOSE_LABEL = "Aceptar";
+
+  /**
    * Open the preview overlay for the supplied entry id. The helper is
    * the single switch the menu `Previsualizar` action and the
    * `Cmd/Ctrl+Enter` keyboard shortcut consult so the two surfaces
@@ -1677,6 +1978,90 @@
       }
       return;
     }
+    // `Cmd/Ctrl+E` opens the persistent text editor for the
+    // currently selected entry. The shortcut is gated so it cannot
+    // hijack a keystroke the user intended for an editable surface
+    // (the search field is explicitly allowed because it receives
+    // the initial focus of the window). The matcher is the shared
+    // `matchesEditTextShortcut` helper the desktop rail already
+    // consumes; the Quick Paste window only adds the context guards
+    // and the menu action entry point so the keyboard shortcut and
+    // the menu item can never drift apart.
+    if (matchesEditTextShortcut(event, shortcutPlatform)) {
+      const target = event.target as HTMLElement | null;
+      if (target instanceof HTMLElement) {
+        // The Quick Paste search input is the only `HTMLInputElement`
+        // the shortcut is allowed to fire from because the window
+        // focuses it on open (`Cmd/Ctrl+Shift+V` lands the user on
+        // a typing surface) and the keyboard selection still points
+        // at a row. Other inputs / textareas / selects /
+        // contenteditable surfaces, the menu popover and any
+        // `dialog` MUST keep the keystroke routed to their own
+        // surface so the shortcut cannot race a typed character, a
+        // menu navigation or a modal focus trap.
+        const isQuickPasteSearchInput =
+          target instanceof HTMLInputElement && target === searchInputEl;
+        const isOtherEditableSurface =
+          (target instanceof HTMLInputElement && !isQuickPasteSearchInput) ||
+          target instanceof HTMLTextAreaElement ||
+          target instanceof HTMLSelectElement ||
+          target.isContentEditable;
+        if (isOtherEditableSurface) {
+          return;
+        }
+        if (
+          target.closest('[role="menu"]') ||
+          target.closest('[role="dialog"]')
+        ) {
+          return;
+        }
+      }
+      if (quickPasteEditorOpen) {
+        // The editor is already mounted: refuse to reopen so the
+        // second activation cannot race the first modal's exit
+        // transition or spawn a second editor against the same
+        // entry.
+        event.preventDefault();
+        return;
+      }
+      // Resolve the live selection by entry id. The selection id
+      // is the single source of truth — `resultIds[selectedIndex]`
+      // is re-derived from the id, not the index, so a stale index
+      // from a closure that pre-dates a `refresh` cannot route the
+      // request to the wrong row. The previous "last edited entry"
+      // fallback (`quickPasteEditorEntry` / `quickPasteEditorEntryId`)
+      // was deliberately removed: it caused the second `Cmd/Ctrl+E`
+      // activation to silently reopen an older entry when the
+      // currently selected entry was image / rich text or empty.
+      const selectedId =
+        selectedEntryId !== null &&
+        resultIds.indexOf(selectedEntryId) >= 0
+          ? selectedEntryId
+          : resultIds[selectedIndex] ?? null;
+      if (selectedId === null) return;
+      const entry = findEntry(mode, recent, hits, selectedId);
+      if (!entry) {
+        return;
+      }
+      if (!isEditableTextEntry(entry)) {
+        // Surface the informative dialog instead of opening the
+        // editor so the user gets a clear explanation for image /
+        // rich-text rows. The dialog never invokes the
+        // `updateTextEntryCommand` bridge and never mutates the
+        // entry, but reuses the shared `Modal.svelte` shell so the
+        // focus trap, the Escape / backdrop contract and the
+        // accessible labelling stay in lockstep with the rest of
+        // the Quick Paste surfaces.
+        event.preventDefault();
+        openQuickPasteNotEditableDialogFor(entry);
+        return;
+      }
+      event.preventDefault();
+      openMenuEntryId = null;
+      quickPasteEditorEntry = entry;
+      quickPasteEditorOpen = true;
+      return;
+    }
     if (event.key === "ArrowDown") {
       event.preventDefault();
       moveSelection(1);
@@ -1705,6 +2090,38 @@
       event.preventDefault();
       void handleEnter();
     } else if (event.key === "Escape") {
+      const target = event.target as HTMLElement | null;
+      // The persistent text editor modal mounts through the shared
+      // `Modal.svelte` shell which exposes a `role="dialog"`
+      // wrapper. The shell already intercepts Escape through a
+      // capture-phase document listener and calls `onClose` (which
+      // dispatches `close` on the editor). If the bubble-phase
+      // `<svelte:window>` listener kept routing the same Escape to
+      // `handleEscape()`, Quick Paste would hide even though the
+      // user only intended to dismiss the editor. The same guard
+      // covers the informative "Captura no editable" dialog so the
+      // user can dismiss it without losing the window.
+      if (target instanceof HTMLElement) {
+        if (target.closest('[role="dialog"]')) {
+          // The dialog owns the Escape. Consume the keystroke
+          // here so `handleEscape` cannot run, but do not call
+          // `preventDefault` — the Modal's capture-phase handler
+          // already owns the close lifecycle and may have to no-op
+          // a busy state.
+          return;
+        }
+      }
+      // The editor and the dialog already suppressed the previous
+      // Escape through the `role="dialog"` guard above; the
+      // `suppressNextWindowEscape` flag is the defence in depth
+      // the `quick-paste-desktop-polish` change pins for the
+      // preview overlay so a focus flicker cannot make the
+      // window-hide branch race the surface close.
+      if (suppressNextWindowEscape) {
+        event.preventDefault();
+        suppressNextWindowEscape = false;
+        return;
+      }
       event.preventDefault();
       void handleEscape();
     }
@@ -1813,6 +2230,15 @@
    * stack and race the hide-on-blur branch.
    */
   let unlistenFocusClose: (() => void) | null = null;
+  /**
+   * Handle returned by `safeListenHistoryUpdated` so the unmount
+   * path can detach the metadata-only `clipvault://history-updated`
+   * listener. The window installs exactly one subscription; remounts
+   * reuse the idempotent `safeListenHistoryUpdated` helper so a
+   * second mount cannot stack a duplicate listener and a stale
+   * commit cannot re-enter a disposed handler.
+   */
+  let unlistenHistoryUpdated: (() => void) | null = null;
   /**
    * Reference to the result list container. The autoscroll helper
    * uses the element only as a "list exists" sentinel; the actual
@@ -1923,6 +2349,62 @@
     return () => {
       if (unlisten) unlisten();
     };
+  }
+
+  /**
+   * Subscribe to the metadata-only `clipvault://history-updated`
+   * event the Tauri shell emits after a successful edit commit (and
+   * after a fresh capture). The Quick Paste window is a separate
+   * webview from the desktop rail, so it must own its own
+   * subscription; the payload is `()` and the refresh always goes
+   * through `loadRecent()` so a successful `Editar captura` rehydrates
+   * the row with the freshly persisted text without ever carrying
+   * clipboard content across the IPC.
+   *
+   * The helper guards the Tauri runtime with the same
+   * `window.__TAURI_INTERNALS__` check `safeListenOpened` uses so
+   * a non-Tauri test harness does not crash; the helper then no-ops.
+   * The returned unlisten handle is the single switch the unmount
+   * path uses to detach the subscription so a remount cannot stack a
+   * duplicate listener.
+   */
+  function safeListenHistoryUpdated(handler: () => void): () => void {
+    if (!window.__TAURI_INTERNALS__) return () => undefined;
+    let unlisten: (() => void) | null = null;
+    void listenHistoryUpdated(() => {
+      try {
+        handler();
+      } catch (error) {
+        console.error("quick-paste history-updated handler threw", error);
+      }
+    })
+      .then((stop) => {
+        unlisten = stop;
+      })
+      .catch((error) => {
+        console.error("failed to listen for history-updated", error);
+      });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }
+
+  /**
+   * Re-hydrate the Quick Paste list when the metadata-only
+   * `clipvault://history-updated` event lands. The handler reuses the
+   * same `loadRecent()` path the window-open path consults so the
+   * row previews, code-language badges, tag chips and selection
+   * clamp stay in lockstep with the rest of the lifecycle. A
+   * pending query is preserved: `runQuery()` runs only when the user
+   * has actually typed something so an empty search query does not
+   * force an unnecessary round-trip.
+   */
+  async function handleQuickPasteHistoryUpdated(): Promise<void> {
+    if (query.trim().length > 0) {
+      await runQuery(query);
+      return;
+    }
+    await loadRecent();
   }
 
   /**
@@ -2052,6 +2534,20 @@
     unlistenOpened = safeListenOpened(() => {
       void onQuickPasteOpened();
     });
+    // Subscribe to the metadata-only `clipvault://history-updated`
+    // event the Tauri shell emits after a successful edit commit
+    // (and after a fresh capture). The Quick Paste window is a
+    // separate webview from the desktop rail so it must own its own
+    // subscription; the payload is `()` and the refresh relies on the
+    // same `clipvault_recent_entries` round-trip the desktop rail
+    // uses, so a successful `Editar captura` rehydrates the row with
+    // the freshly persisted text and the next `Cmd/Ctrl+E` activation
+    // seeds the modal from the new record. The handler is guarded
+    // by the Tauri runtime check so a non-Tauri test harness does
+    // not crash.
+    unlistenHistoryUpdated = safeListenHistoryUpdated(() => {
+      void handleQuickPasteHistoryUpdated();
+    });
     // Window focus listener: when the OS-level window loses focus
     // to another application, hide the Quick Paste window. The
     // listener is installed through
@@ -2104,6 +2600,10 @@
       unlistenFocusClose();
       unlistenFocusClose = null;
     }
+    if (unlistenHistoryUpdated) {
+      unlistenHistoryUpdated();
+      unlistenHistoryUpdated = null;
+    }
     // Revoke every thumbnail and source-app icon blob URL the list
     // minted so a long-lived window does not leak memory.
     assetResolver.release();
@@ -2113,6 +2613,8 @@
     appIconUrls = {};
     appIconStates = {};
     previewEntryId = null;
+    quickPasteEditorOpen = false;
+    quickPasteEditorEntry = null;
   });
 </script>
 
@@ -2288,9 +2790,7 @@
                   data-preview-platform={shortcutPlatform}
                   title={previewShortcutAccessibleLabel(shortcutPlatform)}
                   aria-label={previewShortcutAccessibleLabel(shortcutPlatform)}
-                  aria-keyshortcuts={shortcutPlatform === "macos"
-                    ? "Meta+Enter"
-                    : "Control+Enter"}
+                  aria-keyshortcuts={previewShortcutKeyAttribute(shortcutPlatform)}
                 >
                   <span class="qp-preview-hint-label">Preview</span>
                   <span
@@ -2553,23 +3053,44 @@
             on:keydown={onMenuKeydown}
           >
             {#each anchorActions as action (action.testId)}
+              {@const shortcutLabel = actionShortcutLabel(action)}
+              {@const shortcutAccessible = actionShortcutAccessibleLabel(action)}
+              {@const shortcutKey = actionShortcutKeyAttribute(action)}
               <li role="none">
                 <button
                   type="button"
                   role="menuitem"
                   class="qp-menu-item"
                   class:qp-menu-item-preview={action.kind === "preview"}
+                  class:qp-menu-item-edit={action.kind === "edit"}
                   data-testid={action.testId}
                   data-action-kind={action.kind}
+                  data-shortcut-platform={shortcutPlatform}
                   disabled={action.disabled}
                   aria-label={action.ariaLabel}
+                  aria-keyshortcuts={shortcutKey}
                   title={action.tooltip}
-                  on:click|stopPropagation={() =>
-                    action.kind === "preview"
-                      ? openPreviewFor(openMenuEntryId!)
-                      : runMenuAction(openMenuEntryId!, action.mode)}
+                  on:click|stopPropagation={() => {
+                    if (action.kind === "preview") {
+                      openPreviewFor(openMenuEntryId!);
+                      return;
+                    }
+                    if (action.kind === "edit") {
+                      runMenuEditAction(openMenuEntryId!);
+                      return;
+                    }
+                    runMenuAction(openMenuEntryId!, action.mode);
+                  }}
                 >
-                  {action.label}
+                  <span class="qp-menu-item-label">{action.label}</span>
+                  {#if shortcutLabel}
+                    <span
+                      class="qp-menu-item-shortcut"
+                      data-testid={actionShortcutTestId(action)}
+                      aria-hidden="true"
+                    >{shortcutLabel}</span>
+                    <span class="qp-visually-hidden">{shortcutAccessible}</span>
+                  {/if}
                 </button>
               </li>
             {/each}
@@ -2599,6 +3120,86 @@
       onClose={closePreview}
     />
   {/if}
+{/if}
+
+<!--
+  Persistent text editor modal. The window owns the lifecycle
+  (`quickPasteEditorOpen` / `quickPasteEditorEntry`) and forwards
+  a stable focus return target so the menu trigger or, when the
+  shortcut was used, the selected row's `<li>` element recovers
+  focus after the dialog closes. The modal reuses the shared
+  `EntryTextEditorModal.svelte` component the desktop rail already
+  mounts against the `updateTextEntryCommand` bridge; the Quick
+  Paste window MUST NOT instantiate a parallel modal or a parallel
+  IPC call so the validation, hash, type detection, duplicate
+  detection and transactional semantics stay in one place.
+-->
+{#if quickPasteEditorOpen && quickPasteEditorEntry}
+  {@const editorTitle = renderTitle(
+    mode,
+    recent,
+    hits,
+    quickPasteEditorEntry.id,
+  )}
+  {@const editorFocusTarget = resolveQuickPasteEditorFocusTarget(
+    quickPasteEditorEntry.id,
+  )}
+  <EntryTextEditorModal
+    open={quickPasteEditorOpen}
+    entry={quickPasteEditorEntry}
+    displayTitle={editorTitle}
+    returnFocusTo={editorFocusTarget}
+    on:close={handleQuickPasteEditorClose}
+  />
+{/if}
+
+<!--
+  Informative `Captura no editable` dialog. The window mounts this
+  modal ONLY when the `Cmd/Ctrl+E` shortcut resolves to an image or
+  rich-text entry; the menu matrix already gates `Editar captura`
+  out for those entry shapes, so the dialog is a defence-in-depth
+  surface for the keyboard path. The dialog reuses the shared
+  `Modal.svelte` shell so the focus trap, Escape handling and
+  backdrop dismissal stay in lockstep with the rest of the Quick
+  Paste surfaces; the helper never invokes
+  `updateTextEntryCommand` and never mutates the entry so a stale
+  row cannot be edited through this surface.
+-->
+{#if quickPasteNotEditableDialogEntryId !== null}
+  {@const dialogTitleId = "quick-paste-not-editable-title"}
+  {@const dialogBodyId = "quick-paste-not-editable-body"}
+  {@const dialogFocusTarget = resolveQuickPasteNotEditableDialogFocusTarget()}
+  <Modal
+    open={quickPasteNotEditableDialogEntryId !== null}
+    titleId={dialogTitleId}
+    title={QUICK_PASTE_NOT_EDITABLE_DIALOG_TITLE}
+    returnFocusTo={dialogFocusTarget}
+    onClose={closeQuickPasteNotEditableDialog}
+  >
+    <div
+      class="qp-not-editable-dialog"
+      data-testid="quick-paste-not-editable-dialog"
+      data-entry-id={quickPasteNotEditableDialogEntryId}
+    >
+      <p
+        id={dialogBodyId}
+        class="qp-not-editable-dialog-body"
+        data-testid="quick-paste-not-editable-body"
+      >
+        {QUICK_PASTE_NOT_EDITABLE_DIALOG_BODY}
+      </p>
+      <div class="qp-not-editable-dialog-actions">
+        <button
+          type="button"
+          class="qp-not-editable-dialog-close"
+          data-testid="quick-paste-not-editable-close"
+          on:click={closeQuickPasteNotEditableDialog}
+        >
+          {QUICK_PASTE_NOT_EDITABLE_DIALOG_CLOSE_LABEL}
+        </button>
+      </div>
+    </div>
+  </Modal>
 {/if}
 
 <!--
@@ -3406,7 +4007,10 @@
   }
 
   .qp-menu-item {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.55rem;
     width: 100%;
     padding: 0.35rem 0.55rem;
     border-radius: 4px;
@@ -3430,6 +4034,37 @@
   .qp-menu-item:disabled {
     color: rgba(148, 163, 184, 0.55);
     cursor: not-allowed;
+  }
+
+  .qp-menu-item-label {
+    /* The label keeps its baseline so the platform-aware shortcut
+     * hint sitting on the same line never widens the column beyond
+     * the documented 12rem menu width; long captions still truncate
+     * through the menu's `overflow: hidden` clamp. */
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .qp-menu-item-shortcut {
+    /* The visible shortcut hint is rendered through a dedicated span
+     * so the renderer can keep the label column stable while the
+     * platform-aware modifier updates. The hint carries
+     * `aria-hidden="true"` because the menu item's `aria-label`
+     * already mentions the shortcut, and the renderer also exposes
+     * a screen-reader-only fallback for the accessible wording. */
+    flex: 0 0 auto;
+    font-size: var(--cv-meta, 0.7rem);
+    color: rgba(148, 163, 184, 0.85);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.02em;
+  }
+
+  .qp-menu-item:disabled .qp-menu-item-shortcut {
+    color: inherit;
+    opacity: 0.7;
   }
 
   .qp-thumb {
@@ -3473,6 +4108,50 @@
      * affordance apart from the actions that mutate the clipboard. */
     color: #cbd5f5;
     font-style: italic;
+  }
+
+  .qp-menu-item-edit {
+    /* The `Editar captura` menu entry keeps the default text colour
+     * so it reads as a first-class action (not a muted variant);
+     * the visible shortcut hint is the affordance the user has to
+     * learn so the item does not carry an italic or coloured label. */
+    color: inherit;
+    font-style: normal;
+  }
+
+  .qp-not-editable-dialog {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    min-width: 320px;
+  }
+
+  .qp-not-editable-dialog-body {
+    margin: 0;
+    color: rgba(240, 244, 248, 0.85);
+    font-size: var(--cv-body, 0.9rem);
+    line-height: 1.4;
+  }
+
+  .qp-not-editable-dialog-actions {
+    display: flex;
+    flex-direction: row;
+    justify-content: flex-end;
+    gap: 0.5rem;
+  }
+
+  .qp-not-editable-dialog-close {
+    background: #2563eb;
+    color: #f0f4f8;
+    border: 1px solid #2563eb;
+    border-radius: var(--cv-radius-sm, 6px);
+    padding: 0.4rem 0.85rem;
+    font-size: var(--cv-control, 0.85rem);
+    cursor: pointer;
+  }
+
+  .qp-not-editable-dialog-close:hover {
+    background: #1d4ed8;
   }
 
   /*

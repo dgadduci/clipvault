@@ -21,6 +21,7 @@ import {
   hasRenderableRichText,
   isImageEntry,
 } from "./clipboardAsset.ts";
+import { isEditableTextEntry } from "../types.ts";
 
 /**
  * Mode the keyboard flow asks the backend to copy. `null` is the
@@ -205,6 +206,14 @@ export type QuickPasteMenuAction =
       ariaLabel: string;
       tooltip: string;
       disabled: boolean;
+    }
+  | {
+      kind: "edit";
+      label: string;
+      testId: string;
+      ariaLabel: string;
+      tooltip: string;
+      disabled: boolean;
     };
 
 /**
@@ -238,6 +247,23 @@ export const QUICK_PASTE_COPY_PLAIN_LABEL = "Copiar texto plano";
 export const QUICK_PASTE_PREVIEW_LABEL = "Previsualizar";
 
 /**
+ * Visible label the Quick Paste menu renders for the `Editar captura`
+ * action. The wording mirrors the desktop rail's menu item so the
+ * Quick Paste palette and the main window do not drift apart. The
+ * matching platform-aware shortcut hint (`⌘E` / `Ctrl+E`) is rendered
+ * separately by the renderer through `editTextShortcutLabel`.
+ */
+export const QUICK_PASTE_EDIT_LABEL = "Editar captura";
+
+/**
+ * Stable `data-testid` the `Editar captura` menu item exposes. Pinning
+ * the constant here keeps the Quick Paste palette and the desktop rail
+ * regressions reading from the same value, so a rename surfaces as a
+ * test failure instead of a silent divergence.
+ */
+export const QUICK_PASTE_EDIT_TEST_ID = "quick-paste-menu-edit";
+
+/**
  * Copy-only menu actions the Quick Paste row exposes for an entry.
  *
  * The Quick Paste matrix documented in
@@ -245,9 +271,16 @@ export const QUICK_PASTE_PREVIEW_LABEL = "Previsualizar";
  * is intentionally tighter than the desktop rail's:
  *
  * - plain (or any non-rich) entry → `Copiar` + `Previsualizar`;
+ *   if the entry is also editable through `isEditableTextEntry`, an
+ *   `Editar captura` action is appended between `Copiar` and
+ *   `Previsualizar` so the user can drive the persistent text editor
+ *   without leaving the Quick Paste window.
  * - rich entry → `Copiar texto enriquecido` + `Copiar texto plano` +
- *   `Previsualizar`;
- * - image entry → `Copiar` + `Previsualizar`.
+ *   `Previsualizar`; rich rows NEVER expose `Editar captura` because
+ *   the round-trip would destroy the sanitised rich metadata and
+ *   `isEditableTextEntry` rejects them.
+ * - image entry → `Copiar` + `Previsualizar`; image rows NEVER expose
+ *   `Editar captura` because the editor only persists plain text.
  *
  * The non-rich branch intentionally hides the rich-text copy: the
  * row already exposes the rich-disabled affordance on the rail, and
@@ -313,6 +346,23 @@ export function quickPasteMenuActions(
       tooltip: "Copiar la entrada como texto plano.",
       disabled: options.copyBusy,
     });
+    // `Editar captura` is only added for the non-rich branch the user
+    // can actually edit through the persistent text editor. The
+    // predicate `isEditableTextEntry` is the same one the desktop rail
+    // consults so the Quick Paste palette and the rail cannot drift;
+    // the rich branch above is rejected by the predicate (rich rows
+    // carry `rich_text_hash` / `rich_html_ref` / ...) and image rows
+    // are rejected by the same predicate (`content_type === "image"`).
+    if (isEditableTextEntry(entry as EntryRecord)) {
+      actions.push({
+        kind: "edit",
+        label: QUICK_PASTE_EDIT_LABEL,
+        testId: QUICK_PASTE_EDIT_TEST_ID,
+        ariaLabel: `${QUICK_PASTE_EDIT_LABEL} ${title}`,
+        tooltip: "Abrir el editor persistente para esta captura.",
+        disabled: options.copyBusy,
+      });
+    }
   }
   actions.push({
     kind: "preview",

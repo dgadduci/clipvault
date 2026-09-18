@@ -6,6 +6,8 @@ import {
   clampedSelectedIndex,
   hasAnyQuickPasteAction,
   preserveSelectionAfterReorder,
+  QUICK_PASTE_EDIT_LABEL,
+  QUICK_PASTE_EDIT_TEST_ID,
   quickPasteConfirmAction,
   quickPasteEnterAction,
   quickPasteMenuActions,
@@ -371,6 +373,95 @@ test("quickPasteMenuActions: preview action has no mode and a stable test id", (
     assert.equal(preview?.testId, "quick-paste-menu-preview");
     assert.equal("mode" in (preview ?? {}), false);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Edit-capture matrix. The Quick Paste palette must append the
+// `Editar captura` action only for entries the persistent text editor
+// can persist. The helper is the single switch the renderer and the
+// `Cmd/Ctrl+E` shortcut consult, so a regression that drops the
+// action for plain entries or accidentally surfaces it for image /
+// rich rows is caught here before it can ship. The list-ordering
+// contract — `Copiar` → `Editar captura` → `Previsualizar` — is
+// pinned alongside the predicate so a future refactor that reorders
+// the menu items surfaces as a test failure instead of a silent UX
+// regression.
+// ---------------------------------------------------------------------------
+
+test("quickPasteMenuActions: plain eligible entry yields Copiar + Editar captura + Previsualizar", () => {
+  const actions = quickPasteMenuActions(textEntry(), "Captured plain", {
+    copyBusy: false,
+  });
+  assert.equal(actions.length, 3);
+  assert.equal(actions[0].kind, "copy");
+  assert.equal(actions[1].kind, "edit");
+  assert.equal(actions[1].label, QUICK_PASTE_EDIT_LABEL);
+  assert.equal(actions[1].testId, QUICK_PASTE_EDIT_TEST_ID);
+  assert.equal(actions[1].ariaLabel, `${QUICK_PASTE_EDIT_LABEL} Captured plain`);
+  assert.equal(
+    actions[1].tooltip,
+    "Abrir el editor persistente para esta captura.",
+  );
+  assert.equal(actions[1].disabled, false);
+  assert.equal(actions[2].kind, "preview");
+});
+
+test("quickPasteMenuActions: image entry never exposes Editar captura", () => {
+  const actions = quickPasteMenuActions(imageEntry(), "Captured image", {
+    copyBusy: false,
+  });
+  assert.equal(
+    actions.some((action) => action.kind === "edit"),
+    false,
+    "image entries must not surface an Editar captura action",
+  );
+  // Image entries stay on the documented two-action matrix so the
+  // menu width and order remain stable.
+  assert.equal(actions.length, 2);
+});
+
+test("quickPasteMenuActions: rich entry never exposes Editar captura", () => {
+  // Rich rows carry `rich_text_hash` / `rich_html_ref` / ...; the
+  // editor would destroy the rich metadata, so the menu must not
+  // advertise the action even when the row also exposes a plain
+  // representation. `isEditableTextEntry` rejects rich rows and the
+  // helper mirrors the predicate so the Quick Paste palette and the
+  // desktop rail cannot drift apart.
+  const actions = quickPasteMenuActions(richEntry(), "Captured rich", {
+    copyBusy: false,
+  });
+  assert.equal(
+    actions.some((action) => action.kind === "edit"),
+    false,
+    "rich entries must not surface an Editar captura action",
+  );
+});
+
+test("quickPasteMenuActions: copyBusy disables every action including Editar captura", () => {
+  const actions = quickPasteMenuActions(textEntry(), "Captured plain", {
+    copyBusy: true,
+  });
+  for (const action of actions) {
+    assert.equal(
+      action.disabled,
+      true,
+      `copyBusy must disable every menu action; ${action.kind} stayed enabled`,
+    );
+  }
+});
+
+test("quickPasteMenuActions: edit action sits between Copiar and Previsualizar", () => {
+  // The documented order is `Copiar` → `Editar captura` →
+  // `Previsualizar`. Pinning the relative position here keeps the
+  // matrix stable across future helper refactors; the renderer reads
+  // the action list in order, so an Editar captura that hops over
+  // Copiar would render below `Previsualizar` and surface as a UX
+  // regression instead of a type error.
+  const actions = quickPasteMenuActions(textEntry(), "Captured plain", {
+    copyBusy: false,
+  });
+  const kinds = actions.map((action) => action.kind);
+  assert.deepEqual(kinds, ["copy", "edit", "preview"]);
 });
 
 test("hasAnyQuickPasteAction returns true for every entry shape", () => {

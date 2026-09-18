@@ -29,6 +29,7 @@ import { resolve as resolvePath } from "node:path";
 import {
   matchesPreviewShortcut,
   previewShortcutAccessibleLabel,
+  previewShortcutKeyAttribute,
   previewShortcutLabel,
   previewShortcutPlatform,
   type PreviewShortcutPlatform,
@@ -186,6 +187,14 @@ test("previewShortcutAccessibleLabel — Linux uses Control Enter", () => {
     previewShortcutAccessibleLabel("other"),
     "Previsualizar (Control Enter)",
   );
+});
+
+test("previewShortcutKeyAttribute — macOS renders Meta+Enter", () => {
+  assert.equal(previewShortcutKeyAttribute("macos"), "Meta+Enter");
+});
+
+test("previewShortcutKeyAttribute — Linux renders Control+Enter", () => {
+  assert.equal(previewShortcutKeyAttribute("other"), "Control+Enter");
 });
 
 test("previewShortcutPlatform — macOS-like strings resolve to macos", () => {
