@@ -14,9 +14,11 @@ use thiserror::Error;
 use crate::bootstrap::AppContext;
 use crate::clock::Clock;
 use crate::management::{RetentionPolicy, RETENTION_SETTING_KEY};
+use crate::peer_identity::{LocalPeerProfile, PeerIdentityOutcome, PeerIdentityService};
 use crate::privacy::PrivacyGate;
 use crate::settings::{
     HotkeySpec, Settings, SettingsUpdate, ValidationError, HOTKEY_SETTING_STORAGE_KEY,
+    LOCAL_PEER_DISPLAY_NAME_KEY,
 };
 
 #[derive(Debug, Error)]
@@ -33,14 +35,45 @@ pub enum SettingsServiceError {
 pub struct SettingsService {
     clock: Arc<dyn Clock>,
     privacy_gate: PrivacyGate,
+    peer_identity: PeerIdentityService,
 }
 
 impl SettingsService {
+    /// Build a settings service backed by the supplied clock and
+    /// privacy gate. The peer identity service defaults to
+    /// [`PeerIdentityService::unavailable`], which always reports
+    /// [`PeerIdentityOutcome::Unavailable`]: a fresh `SettingsService`
+    /// never silently mints an in-memory identity, so the shell
+    /// never advertises a `peer_id` it cannot reload on the next
+    /// boot.
+    ///
+    /// Production shells that wire the platform keychain must call
+    /// [`Self::with_peer_identity_service`] before handing the
+    /// service to the bootstrap.
     pub fn new(clock: Arc<dyn Clock>, privacy_gate: PrivacyGate) -> Self {
         Self {
             clock,
             privacy_gate,
+            peer_identity: PeerIdentityService::unavailable(),
         }
+    }
+
+    /// Inject a peer identity service. Used by the bootstrap to
+    /// wire the production keychain-backed implementation; tests
+    /// pass a deterministic fake so the Identity section can be
+    /// exercised without standing up a real `keyring` backend.
+    pub fn with_peer_identity_service(mut self, service: PeerIdentityService) -> Self {
+        self.peer_identity = service;
+        self
+    }
+
+    /// Handle to the underlying [`PeerIdentityService`]. The Tauri
+    /// command surface uses it to render the Identity section
+    /// without re-loading the identity through the database. The
+    /// accessor returns a clone so callers cannot mutate the
+    /// service field.
+    pub fn peer_identity(&self) -> PeerIdentityService {
+        self.peer_identity.clone()
     }
 
     /// Load the effective [`Settings`] aggregate from `app_settings` and
@@ -71,6 +104,21 @@ impl SettingsService {
             Some(Err(_)) => None,
             None => None,
         };
+
+        let display_name_raw = {
+            let repo = AppSettingsRepository::new(db.connection_mut());
+            repo.get(LOCAL_PEER_DISPLAY_NAME_KEY)
+                .ok()
+                .flatten()
+                .map(|s| s.value)
+        };
+        // Re-validate on read so a manually edited / corrupt
+        // `app_settings` row never ends up surfaced to the UI as
+        // raw bytes; the loader silently falls back to `None` and
+        // the user can re-save a clean value through the panel.
+        settings.local_peer_display_name = display_name_raw
+            .as_deref()
+            .and_then(|raw| crate::settings::validate_peer_display_name(raw).ok());
 
         let ignored = {
             let repo = IgnoredAppRepository::new(db.connection_mut());
@@ -123,6 +171,25 @@ impl SettingsService {
             match value {
                 Some(v) if !v.is_empty() => repo.set(HOTKEY_SETTING_STORAGE_KEY, &v, now)?,
                 _ => repo.set(HOTKEY_SETTING_STORAGE_KEY, "", now)?,
+            }
+        }
+
+        // Local peer display name.
+        let display_name_changed = next.local_peer_display_name != current.local_peer_display_name;
+        if display_name_changed {
+            let conn = db.connection_mut();
+            let mut repo = AppSettingsRepository::new(conn);
+            match next.local_peer_display_name.as_deref() {
+                Some(value) if !value.is_empty() => {
+                    repo.set(LOCAL_PEER_DISPLAY_NAME_KEY, value, now)?;
+                }
+                _ => {
+                    // Empty / cleared values are persisted as an
+                    // empty string so the next `load()` does not
+                    // silently resurrect the previous name from a
+                    // deleted-but-orphan row.
+                    repo.set(LOCAL_PEER_DISPLAY_NAME_KEY, "", now)?;
+                }
             }
         }
 
@@ -202,6 +269,48 @@ impl SettingsService {
         };
         self.apply(context, &update)
     }
+
+    /// Persist the validated local peer display name. The value
+    /// goes through [`crate::settings::validate_peer_display_name`]
+    /// first; invalid input is surfaced as
+    /// [`SettingsServiceError::Validation`] without persisting or
+    /// logging the rejected bytes.
+    pub fn set_local_peer_display_name(
+        &self,
+        context: &AppContext,
+        name: Option<&str>,
+    ) -> Result<Settings, SettingsServiceError> {
+        let update = SettingsUpdate {
+            local_peer_display_name: Some(name.map(str::to_string)),
+            ..SettingsUpdate::default()
+        };
+        self.apply(context, &update)
+    }
+
+    /// Metadata-only local peer profile merging the cryptographic
+    /// identity (loaded from the secure store) with the persisted
+    /// display name. The shell calls this to render the Identity
+    /// section of Settings. Returns [`PeerIdentityOutcome::Unavailable`]
+    /// when the platform secure store cannot satisfy the request;
+    /// the caller maps the outcome to a stable user-facing copy
+    /// without leaking the underlying platform error.
+    pub fn local_peer_profile(
+        &self,
+        context: &AppContext,
+    ) -> PeerIdentityOutcome<LocalPeerProfile> {
+        let display_name = self
+            .load(context)
+            .local_peer_display_name
+            .and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+        self.peer_identity.profile(display_name)
+    }
 }
 
 #[cfg(test)]
@@ -210,16 +319,16 @@ mod tests {
 
     fn minimal_service() -> SettingsService {
         use crate::clock::SystemClock;
+        use crate::peer_identity::{InMemoryPeerIdentityStore, PeerIdentityService};
         use clipvault_platform::NoopActiveApplicationProbe;
         use std::sync::Arc;
 
         let probe = Arc::new(NoopActiveApplicationProbe);
         let matcher = crate::privacy::CoreBlacklistMatcher::with_ignored(probe, vec![]);
         let gate = crate::privacy::PrivacyGate::new(matcher);
-        SettingsService {
-            clock: Arc::new(SystemClock),
-            privacy_gate: gate,
-        }
+        SettingsService::new(Arc::new(SystemClock), gate).with_peer_identity_service(
+            PeerIdentityService::new(Arc::new(InMemoryPeerIdentityStore::new())),
+        )
     }
 
     #[test]
@@ -233,5 +342,154 @@ mod tests {
         let current = Settings::defaults();
         let next = update.validate(&current).expect("valid");
         assert_eq!(next.retention, RetentionPolicy::Days7);
+    }
+
+    #[test]
+    fn set_local_peer_display_name_round_trips_through_persistence() {
+        use crate::peer_identity::InMemoryPeerIdentityStore;
+        use crate::test_support::isolated_harness;
+        use std::sync::Arc;
+
+        let (_dir, context) = isolated_harness();
+        let clock: Arc<dyn crate::clock::Clock> = Arc::new(crate::clock::SystemClock);
+        let probe = Arc::new(clipvault_platform::NoopActiveApplicationProbe);
+        let matcher = crate::privacy::CoreBlacklistMatcher::with_ignored(probe, vec![]);
+        let gate = crate::privacy::PrivacyGate::new(matcher);
+        let service = SettingsService::new(clock, gate).with_peer_identity_service(
+            crate::peer_identity::PeerIdentityService::new(Arc::new(
+                InMemoryPeerIdentityStore::new(),
+            )),
+        );
+        let stored = service
+            .set_local_peer_display_name(&context, Some("Studio"))
+            .expect("set");
+        assert_eq!(stored.local_peer_display_name.as_deref(), Some("Studio"));
+        let reloaded = service.load(&context);
+        assert_eq!(reloaded.local_peer_display_name.as_deref(), Some("Studio"));
+    }
+
+    #[test]
+    fn set_local_peer_display_name_rejects_empty_value() {
+        use crate::peer_identity::InMemoryPeerIdentityStore;
+        use crate::test_support::isolated_harness;
+        use std::sync::Arc;
+
+        let (_dir, context) = isolated_harness();
+        let clock: Arc<dyn crate::clock::Clock> = Arc::new(crate::clock::SystemClock);
+        let probe = Arc::new(clipvault_platform::NoopActiveApplicationProbe);
+        let matcher = crate::privacy::CoreBlacklistMatcher::with_ignored(probe, vec![]);
+        let gate = crate::privacy::PrivacyGate::new(matcher);
+        let service = SettingsService::new(clock, gate).with_peer_identity_service(
+            crate::peer_identity::PeerIdentityService::new(Arc::new(
+                InMemoryPeerIdentityStore::new(),
+            )),
+        );
+        let err = service
+            .set_local_peer_display_name(&context, Some("   "))
+            .expect_err("empty name must be rejected");
+        assert!(matches!(err, SettingsServiceError::Validation(_)));
+    }
+
+    /// The 2-arg constructor MUST produce a service whose identity
+    /// path always reports `Unavailable`. The bootstrap wires a real
+    /// `PeerIdentityService` through the builder; this test pins the
+    /// default the rest of the suite relies on.
+    #[test]
+    fn default_constructor_yields_unavailable_identity_outcome() {
+        use crate::peer_identity::PeerIdentityOutcome;
+        use clipvault_platform::NoopActiveApplicationProbe;
+        use std::sync::Arc;
+
+        let probe = Arc::new(NoopActiveApplicationProbe);
+        let matcher = crate::privacy::CoreBlacklistMatcher::with_ignored(probe, vec![]);
+        let gate = crate::privacy::PrivacyGate::new(matcher);
+        let service = SettingsService::new(Arc::new(crate::clock::SystemClock), gate);
+        let outcome = service.peer_identity().profile(Some("Studio".into()));
+        assert!(
+            matches!(outcome, PeerIdentityOutcome::Unavailable),
+            "default SettingsService must surface Unavailable without an injected service",
+        );
+    }
+
+    /// Updating the validated display name MUST NOT rotate the
+    /// cryptographic identity: `peer_id` and `fingerprint` stay
+    /// stable across every name edit, which is the contract the
+    /// spec scenario "User changes visible name" pins.
+    #[test]
+    fn renaming_via_settings_service_does_not_rotate_identity() {
+        use crate::peer_identity::{
+            InMemoryPeerIdentityStore, PeerIdentityOutcome, PeerIdentityService,
+        };
+        use crate::test_support::isolated_harness;
+        use std::sync::Arc;
+
+        let (_dir, context) = isolated_harness();
+        let clock: Arc<dyn crate::clock::Clock> = Arc::new(crate::clock::SystemClock);
+        let probe = Arc::new(clipvault_platform::NoopActiveApplicationProbe);
+        let matcher = crate::privacy::CoreBlacklistMatcher::with_ignored(probe, vec![]);
+        let gate = crate::privacy::PrivacyGate::new(matcher);
+        let identity_service = PeerIdentityService::new(Arc::new(InMemoryPeerIdentityStore::new()));
+        let service =
+            SettingsService::new(clock, gate).with_peer_identity_service(identity_service);
+
+        let initial = match service.local_peer_profile(&context) {
+            PeerIdentityOutcome::Ok(value) => value,
+            other => panic!("expected Ok profile, got {other:?}"),
+        };
+
+        let stored = service
+            .set_local_peer_display_name(&context, Some("Studio Renombrado"))
+            .expect("name update");
+        assert_eq!(
+            stored.local_peer_display_name.as_deref(),
+            Some("Studio Renombrado")
+        );
+
+        let after = match service.local_peer_profile(&context) {
+            PeerIdentityOutcome::Ok(value) => value,
+            other => panic!("expected Ok profile, got {other:?}"),
+        };
+        assert_eq!(initial.peer_id, after.peer_id);
+        assert_eq!(initial.fingerprint, after.fingerprint);
+        assert_eq!(after.display_name.as_deref(), Some("Studio Renombrado"));
+    }
+
+    /// The validated name MUST persist even when the secure store
+    /// is unavailable. The SettingsService must not depend on the
+    /// identity store to write `app_settings`, and the shell must
+    /// surface the typed `Unavailable` outcome on the next profile
+    /// load without losing the user's edit.
+    #[test]
+    fn name_persists_when_secure_store_is_unavailable() {
+        use crate::peer_identity::{
+            InMemoryPeerIdentityStore, PeerIdentityOutcome, PeerIdentityService,
+        };
+        use crate::test_support::isolated_harness;
+        use std::sync::Arc;
+
+        let (_dir, context) = isolated_harness();
+        let clock: Arc<dyn crate::clock::Clock> = Arc::new(crate::clock::SystemClock);
+        let probe = Arc::new(clipvault_platform::NoopActiveApplicationProbe);
+        let matcher = crate::privacy::CoreBlacklistMatcher::with_ignored(probe, vec![]);
+        let gate = crate::privacy::PrivacyGate::new(matcher);
+        let unavailable_store = Arc::new(InMemoryPeerIdentityStore::always_unavailable());
+        let service = SettingsService::new(clock, gate)
+            .with_peer_identity_service(PeerIdentityService::new(unavailable_store));
+
+        // Editing the name while the secure store is unreachable
+        // MUST still land in `app_settings`.
+        let stored = service
+            .set_local_peer_display_name(&context, Some("Studio Sin Llave"))
+            .expect("name update must succeed even with unavailable keychain");
+        assert_eq!(
+            stored.local_peer_display_name.as_deref(),
+            Some("Studio Sin Llave"),
+        );
+
+        // And the identity path stays Unavailable — there is no
+        // implicit fallback to an in-memory identity that would
+        // mint a peer_id the next boot cannot reload.
+        let outcome = service.local_peer_profile(&context);
+        assert!(matches!(outcome, PeerIdentityOutcome::Unavailable));
     }
 }

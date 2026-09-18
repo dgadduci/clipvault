@@ -1,13 +1,14 @@
 <script lang="ts">
   /**
    * Modal hosting the privacy controls (blacklist + active-app
-   * diagnostics). The original settings panel also surfaced the
-   * retention selector; that control has moved to the **Retención**
-   * modal, so this view is the privacy-only slice of the old panel.
+   * diagnostics + local peer identity). The retention selector
+   * lives in its own **Retención** modal so this view stays focused
+   * on privacy-only concerns.
    *
-   * The component keeps the exact Tauri contract the inline panel
-   * used (`clipvault_settings_get`, `clipvault_ignored_app_*`,
-   * `clipvault_active_app_*`). It is self-contained: every
+   * The component keeps the exact Tauri contract the previous
+   * inline privacy surface used (`clipvault_settings_get`,
+   * `clipvault_ignored_app_*`, `clipvault_active_app_*`,
+   * `clipvault_local_peer_profile_*`). It is self-contained: every
    * async refresh lives here and the parent only sees the typed
    * `onSettingsChanged` callback the rest of the app uses to keep
    * the rail / cards in sync.
@@ -21,6 +22,8 @@
     ignoredAppPickAndAddCommand,
     ignoredAppsListWithMetadataCommand,
     ignoredAppsRemoveCommand,
+    localPeerProfileGetCommand,
+    localPeerProfileUpdateCommand,
     refreshActiveAppDiagnosticsCommand,
     settingsGetCommand,
     sourceAppIconCommand,
@@ -30,6 +33,8 @@
     IgnoredAppEntry,
     LinuxCatalogResponse,
     LinuxPickerCandidate,
+    LocalPeerProfile,
+    LocalPeerProfileResponse,
     PickAndAddResponse,
     PickErrorReason,
     Settings,
@@ -61,6 +66,12 @@
   let linuxPickerIconUrls: Record<string, string> = {};
   let linuxPickerIconFailures: Record<string, boolean> = {};
   let linuxPickerIconRefs: Record<string, string> = {};
+  let identityProfile: LocalPeerProfile | null = null;
+  let identityUnavailable: string | null = null;
+  let identityLoading = false;
+  let identityError: string | null = null;
+  let identitySaving = false;
+  let identityDraft = "";
 
   const tauriIconLoader: IconLoader = {
     async loadIconBytes(ref) {
@@ -96,8 +107,10 @@
     loading = true;
     try {
       settings = await settingsGetCommand();
+      identityDraft = settings.local_peer_display_name ?? "";
       await refreshIgnored();
       await refreshIcons();
+      await refreshIdentity();
     } finally {
       loading = false;
     }
@@ -109,6 +122,75 @@
       await refreshIcons();
     } catch (error) {
       pickerError = describeError(error);
+    }
+  }
+
+  async function refreshIdentity(): Promise<void> {
+    identityLoading = true;
+    identityError = null;
+    try {
+      const response: LocalPeerProfileResponse = await localPeerProfileGetCommand();
+      if (response.kind === "available") {
+        identityProfile = response.profile;
+        identityUnavailable = null;
+      } else {
+        identityProfile = null;
+        identityUnavailable = response.reason;
+      }
+    } catch (error) {
+      identityProfile = null;
+      identityUnavailable = null;
+      identityError = describeError(error);
+    } finally {
+      identityLoading = false;
+    }
+  }
+
+  async function saveIdentityName(): Promise<void> {
+    if (!settings) return;
+    const trimmed = identityDraft.trim();
+    if (trimmed === (settings.local_peer_display_name ?? "")) {
+      actionMessage = "El nombre visible ya estaba actualizado.";
+      return;
+    }
+    identitySaving = true;
+    identityError = null;
+    try {
+      const response = await localPeerProfileUpdateCommand({
+        name: trimmed.length > 0 ? trimmed : null,
+      });
+      if (response.kind === "available") {
+        identityProfile = response.profile;
+        identityUnavailable = null;
+        identityDraft = response.profile.display_name ?? "";
+      } else {
+        identityProfile = null;
+        identityUnavailable = response.reason;
+        identityDraft = trimmed.length > 0 ? trimmed : "";
+      }
+      settings = {
+        ...settings,
+        local_peer_display_name: trimmed.length > 0 ? trimmed : null,
+      };
+      onSettingsChanged(settings);
+      actionMessage = trimmed.length > 0
+        ? `Nombre visible actualizado: ${trimmed}.`
+        : "Nombre visible eliminado.";
+    } catch (error) {
+      identityError = describeError(error);
+    } finally {
+      identitySaving = false;
+    }
+  }
+
+  function describePeerDisplayName(code: string | undefined): string {
+    switch (code) {
+      case "invalid_peer_display_name":
+        return "El nombre no puede estar vacío ni contener caracteres de control.";
+      case "peer_display_name_too_long":
+        return "El nombre no puede superar los 64 caracteres.";
+      default:
+        return "El backend rechazó el nombre visible.";
     }
   }
 
@@ -380,8 +462,25 @@
   function describeError(error: unknown): string {
     if (!error) return "Error desconocido.";
     if (typeof error === "string") return error;
-    if (typeof error === "object" && error && "message" in error) {
-      return String((error as { message: unknown }).message);
+    if (typeof error === "object" && error) {
+      const candidate = error as {
+        message?: unknown;
+        code?: unknown;
+        kind?: unknown;
+      };
+      if (candidate.kind === "validation_error") {
+        if (typeof candidate.code === "string") {
+          if (
+            candidate.code === "invalid_peer_display_name" ||
+            candidate.code === "peer_display_name_too_long"
+          ) {
+            return describePeerDisplayName(candidate.code);
+          }
+        }
+      }
+      if (typeof candidate.message === "string") {
+        return candidate.message;
+      }
     }
     return "Error desconocido.";
   }
@@ -508,6 +607,92 @@
 </script>
 
 <section class="privacy" data-testid="privacy-modal">
+  <article data-testid="local-identity-card">
+    <h3>Identidad de este equipo</h3>
+    <p class="muted">
+      ClipVault genera una identidad criptográfica estable para este
+      equipo y la guarda en el almacén seguro del sistema. El material
+      privado nunca abandona ese almacén ni aparece en la interfaz.
+      Compartir en red local se añadirá más adelante sobre esta
+      identidad.
+    </p>
+    {#if identityLoading}
+      <p class="muted" data-testid="local-identity-loading">
+        Cargando identidad…
+      </p>
+    {:else if identityUnavailable}
+      <p
+        class="muted"
+        role="status"
+        aria-live="polite"
+        data-testid="local-identity-unavailable"
+      >
+        El almacén seguro del sistema no está disponible en esta sesión.
+        El nombre visible se guarda de todos modos y se asociará a la
+        identidad cuando vuelvas a desbloquearlo. Detalle: {identityUnavailable}
+      </p>
+    {:else if identityProfile}
+      <dl class="diagnostics" data-testid="local-identity-profile">
+        <dt>peer_id</dt>
+        <dd data-testid="local-identity-peer-id">
+          {identityProfile.peer_id}
+        </dd>
+        <dt>Huella</dt>
+        <dd data-testid="local-identity-fingerprint">
+          {identityProfile.fingerprint}
+        </dd>
+      </dl>
+    {/if}
+    <form
+      class="identity-form"
+      on:submit|preventDefault={saveIdentityName}
+      data-testid="local-identity-form"
+    >
+      <label for="local-identity-name">Nombre visible</label>
+      <input
+        id="local-identity-name"
+        name="local-peer-display-name"
+        type="text"
+        bind:value={identityDraft}
+        maxlength="64"
+        disabled={identitySaving}
+        aria-invalid={identityError !== null}
+        aria-describedby={identityError ? "local-identity-error" : undefined}
+        data-testid="local-identity-name-input"
+      />
+      <button
+        type="submit"
+        disabled={identitySaving}
+        aria-busy={identitySaving}
+        data-testid="local-identity-save"
+      >
+        {identitySaving ? "Guardando…" : "Guardar nombre"}
+      </button>
+      <button
+        type="button"
+        class="secondary"
+        on:click={() => {
+          identityDraft = "";
+          void saveIdentityName();
+        }}
+        disabled={identitySaving}
+        data-testid="local-identity-clear"
+      >
+        Borrar
+      </button>
+    </form>
+    {#if identityError}
+      <p
+        class="error"
+        role="alert"
+        id="local-identity-error"
+        data-testid="local-identity-error"
+      >
+        {identityError}
+      </p>
+    {/if}
+  </article>
+
   <article data-testid="privacy-blacklist-card">
     <h3>Aplicaciones ignoradas</h3>
     <p class="muted">
@@ -880,6 +1065,27 @@
   .diagnostics dd {
     margin: 0;
     word-break: break-all;
+  }
+  .identity-form {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .identity-form label {
+    flex: 0 0 auto;
+    font-weight: 600;
+  }
+  .identity-form input {
+    flex: 1 1 12rem;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--cv-border, #30363d);
+    border-radius: var(--cv-radius-sm, 6px);
+    background: var(--cv-input-bg, #0b0f14);
+    color: inherit;
+  }
+  .identity-form input[aria-invalid="true"] {
+    border-color: var(--cv-fg-error, #f87171);
   }
 
   .modal-backdrop {

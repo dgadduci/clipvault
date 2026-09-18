@@ -66,6 +66,14 @@ linux-gnome-shell-integration = []
 # network during a metadata lookup. The provider already pins the
 # maximum output dimensions and rejects over-sized SVGs.
 linux-svg-raster = ["dep:resvg"]
+# Concrete secure credential store for the
+# `local-peer-identity-foundation` change. Pulls in `keyring` with
+# the Apple Keychain (macOS) and Secret Service over D-Bus
+# (Linux) backends. The core never enables this feature — it only
+# declares the `PeerIdentityStore` trait. Production shells that
+# want the real store enable the feature; tests rely on the fake
+# store the core ships.
+local-peer-identity-keychain = ["dep:keyring"]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -80,6 +88,18 @@ parking_lot = { workspace = true }
 # and lets the platform layer own the PNG fidelity contract without
 # pulling in `clipvault-core`.
 png = { workspace = true }
+# SHA-256 used by the `local-peer-identity-keychain` feature to
+# derive `peer_id` and `fingerprint` from the public key. Already
+# in the workspace graph; surfaced here so the platform owns the
+# hashing contract.
+sha2 = { workspace = true }
+# Ed25519 + randomness used by the
+# `local-peer-identity-keychain` feature to derive the
+# `LocalPeerIdentity` from the 32-byte seed the secure store
+# returns. Pulled in transitively by the core crate; the direct
+# dependency keeps the platform build hermetic.
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
 
 arboard = { workspace = true, optional = true }
 global-hotkey = { workspace = true, optional = true }
@@ -113,7 +133,13 @@ objc2-foundation = { workspace = true, optional = true }
 # without forcing every platform build to compile it.
 dispatch2 = { version = "0.3", optional = true, features = ["std", "alloc", "block2", "objc2"] }
 block2 = { version = "0.6", optional = true }
+# Cross-platform credential storage. Only linked when the
+# `local-peer-identity-keychain` feature is active. The core
+# never references this crate directly — it consumes the trait
+# the platform crate re-exports.
+keyring = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.10"
 serde_json = { workspace = true }
+clipvault-core = { path = "../clipvault-core" }

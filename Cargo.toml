@@ -70,6 +70,23 @@ objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSApplication", "
 objc2-core-graphics = { version = "0.3", features = ["CGContext", "CGImage"] }
 objc2-foundation = { version = "0.3", features = ["NSString"] }
 dispatch2 = "0.3"
+# Ed25519 key generation, signing and verification for the
+# `local-peer-identity-foundation` change. The dependency is
+# approved by OpenSpec: the proposal mandates Ed25519 as the
+# peer identity primitive and the change ships only the metadata
+# surface (peer_id, fingerprint) over the secure store. The crate
+# is small, mature and the canonical Rust implementation of RFC
+# 8032. See `openspec/changes/local-peer-identity-foundation/design.md`
+# §"Dependencias aprobadas".
+ed25519-dalek = { version = "2.1", features = ["pkcs8", "rand_core"] }
+rand_core = { version = "0.6", features = ["std"] }
+# Cross-platform credential storage (macOS Keychain, Linux Secret
+# Service over D-Bus, …). Only enabled when the
+# `local-peer-identity-keychain` feature is active on the platform
+# crate; the core never links the native backend. Approved by
+# OpenSpec; see the same `design.md` §"Dependencias aprobadas" for
+# the alternatives that were discarded.
+keyring = { version = "3.6", default-features = false, features = ["apple-native", "sync-secret-service"] }
 
 [profile.release]
 opt-level = "s"

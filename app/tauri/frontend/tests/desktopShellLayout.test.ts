@@ -356,6 +356,7 @@ test("settings aggregate never carries clipboard content or hashes", () => {
       alt: false,
       meta: false,
     },
+    local_peer_display_name: "Studio",
   };
   // Privacy regression: a future refactor that surfaces clipboard
   // content or hashes through the settings aggregate would let the

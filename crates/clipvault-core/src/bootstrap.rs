@@ -32,6 +32,7 @@ use crate::management::{HistoryManagementService, DEFAULT_RETENTION, RETENTION_S
 use crate::organization::OrganizationService;
 use crate::paste::PasteService;
 use crate::paste_suppression::PasteSuppression;
+use crate::peer_identity::{PeerIdentityService, PeerIdentityStore};
 use crate::platform_adapters::PlatformAdapters;
 use crate::privacy::{CoreBlacklistMatcher, PrivacyGate};
 use crate::rich_text::RichTextAssetStore;
@@ -103,6 +104,18 @@ pub struct BootstrapOptions {
     /// inert. Tests inject a recording sink through
     /// [`crate::bootstrap::AppBootstrap::with_capture_debug_sink`].
     pub capture_debug_sink: Option<CaptureDebugSinkHandle>,
+    /// Optional peer identity store the bootstrap installs. When
+    /// `None`, the bootstrap builds an
+    /// [`crate::peer_identity::InMemoryPeerIdentityStore::always_unavailable`]
+    /// so callers that never wired a platform keychain get a typed
+    /// `Unavailable` outcome instead of an in-memory fake identity
+    /// that would not survive a restart. Production shells inject
+    /// the platform `KeychainPeerIdentityStore` through
+    /// [`AppBootstrap::with_peer_identity_store`]; tests inject the
+    /// regular `InMemoryPeerIdentityStore::new()` or a seeded
+    /// variant to exercise the happy path without linking the
+    /// keychain backend.
+    pub peer_identity_store: Option<Arc<dyn PeerIdentityStore>>,
 }
 
 impl Default for BootstrapOptions {
@@ -112,6 +125,7 @@ impl Default for BootstrapOptions {
             clipboard: Arc::new(FakeClipboard::new()),
             platform_adapters: None,
             capture_debug_sink: None,
+            peer_identity_store: None,
         }
     }
 }
@@ -525,6 +539,20 @@ impl AppBootstrap {
         self
     }
 
+    /// Inject the [`PeerIdentityStore`] the bootstrap hands to the
+    /// settings service. Production shells pass the platform
+    /// keychain-backed implementation; tests pass the regular
+    /// `InMemoryPeerIdentityStore::new()` (or a seeded variant).
+    /// When omitted the bootstrap installs the
+    /// [`InMemoryPeerIdentityStore::always_unavailable`] fake so
+    /// callers that never wired a platform keychain see a typed
+    /// `Unavailable` outcome instead of an in-memory identity that
+    /// would not survive a restart.
+    pub fn with_peer_identity_store(mut self, store: Arc<dyn PeerIdentityStore>) -> Self {
+        self.options.peer_identity_store = Some(store);
+        self
+    }
+
     /// Inject a `PlatformAdapters` bundle built from the host's
     /// detected platform — the bundle the production Tauri shell
     /// wires against `~/.clipvault` at first launch. The method
@@ -660,7 +688,20 @@ impl AppBootstrap {
             .collect();
         let matcher = CoreBlacklistMatcher::with_ignored(probe, normalised);
         let gate = PrivacyGate::new(matcher);
-        let settings_service = SettingsService::new(Arc::clone(&self.options.clock), gate.clone());
+        let peer_identity_store: Arc<dyn PeerIdentityStore> =
+            self.options.peer_identity_store.clone().unwrap_or_else(|| {
+                // Production default: never silently mint an
+                // in-memory identity that would not survive a
+                // restart. The platform keychain must be wired
+                // explicitly through
+                // [`AppBootstrap::with_peer_identity_store`] so the
+                // shell surfaces a typed `Unavailable` outcome
+                // until then.
+                Arc::new(crate::peer_identity::InMemoryPeerIdentityStore::always_unavailable())
+            });
+        let peer_identity_service = PeerIdentityService::new(peer_identity_store);
+        let settings_service = SettingsService::new(Arc::clone(&self.options.clock), gate.clone())
+            .with_peer_identity_service(peer_identity_service.clone());
         let ignored_apps_service =
             IgnoredAppsService::new(Arc::clone(&self.options.clock), gate.clone());
         let gnome_integration_service =

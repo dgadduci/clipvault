@@ -1,5 +1,5 @@
 /**
- * Unit tests for the safe icon resolver used by `SettingsPanel`.
+ * Unit tests for the safe icon resolver used by `PrivacyModal`.
  *
  * The resolver is the single bridge between the opaque `icon_ref`
  * the database persists and the bytes the webview can render. The
@@ -241,7 +241,7 @@ test("createIconResolver refuses to resolve when ref is null without calling the
 });
 
 test("createIconResolver distinguishes delivered bytes from rejected refs", async () => {
-  // The settings panel keeps two separate signals: `iconUrls[id]`
+  // The privacy modal keeps two separate signals: `iconUrls[id]`
   // (the resolver returned a blob URL because the backend delivered
   // bytes) and `iconFailures[id]` (the backend rejected the ref, so
   // the bytes never arrived). The resolver must surface the second

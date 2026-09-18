@@ -411,6 +411,12 @@ export interface Settings {
   retention: RetentionPolicy;
   ignored_apps: string[];
   quick_paste_hotkey: HotkeySpec | null;
+  /**
+   * Validated visible device name for the local peer identity
+   * foundation. Always present (even when `null`) so the Settings
+   * panel renders the Identity section with a stable shape.
+   */
+  local_peer_display_name: string | null;
 }
 
 export interface SettingsUpdate {
@@ -418,10 +424,47 @@ export interface SettingsUpdate {
   ignored_apps_add?: string[];
   ignored_apps_remove?: string[];
   quick_paste_hotkey?: HotkeySpec | null;
+  local_peer_display_name?: string | null;
 }
 
 /**
- * Metadata-only record the settings panel renders for every
+ * Metadata-only projection the frontend reads through
+ * `clipvault_local_peer_profile_get`. Carries the cryptographic
+ * identity the secure store already minted plus the validated
+ * display name. The private key bytes, the raw public key bytes
+ * and any other secret material NEVER cross the bridge; the spec
+ * keeps the wire surface narrow on purpose so the local identity
+ * foundation cannot accidentally expose enough material to attempt
+ * impersonation when the future pairing change lands.
+ */
+export interface LocalPeerProfile {
+  peer_id: string;
+  fingerprint: string;
+  display_name: string | null;
+}
+
+/**
+ * Discriminated response of `clipvault_local_peer_profile_get`
+ * and `clipvault_local_peer_profile_update`. The frontend
+ * branches on `kind` to render the right copy (success vs
+ * unavailable) without parsing free-form strings.
+ */
+export type LocalPeerProfileResponse =
+  | { kind: "available"; profile: LocalPeerProfile }
+  | { kind: "unavailable"; reason: string };
+
+/**
+ * Stable validation error codes the Identity section reads from
+ * `clipvault_local_peer_profile_update`. Mirrors the Rust
+ * `clipvault_core::ValidationCode` enum so the panel never has
+ * to inspect free-form strings.
+ */
+export type PeerDisplayNameErrorCode =
+  | "invalid_peer_display_name"
+  | "peer_display_name_too_long";
+
+/**
+ * Metadata-only record the privacy modal renders for every
  * blacklisted application. The frontend MUST treat the shape as
  * metadata-only: no clipboard content, hashes or snippets ever
  * appear in this object.

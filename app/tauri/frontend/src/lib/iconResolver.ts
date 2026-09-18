@@ -1,7 +1,7 @@
 /**
  * Safe resolver for application-icon assets.
  *
- * The settings panel renders one row per blacklisted application.
+ * The privacy modal renders one row per blacklisted application.
  * Every row carries an opaque `icon_ref` produced by the platform
  * application picker; the resolver turns that reference into a
  * webview-loadable URL (a `Blob:` URL pointing at the PNG bytes the
@@ -18,7 +18,7 @@
  *   `ignored-apps/`, must be a valid PNG). The resolver never widens
  *   that surface.
  * - Failures (loader rejects, file missing, payload too large, ...)
- *   collapse to `null` so the settings panel always renders a row,
+ *   collapse to `null` so the privacy modal always renders a row,
  *   even when the icon cannot be loaded.
  * - Successful resolutions allocate a fresh `Blob` and a `blob:` URL
  *   the caller can `revoke` once the corresponding row goes away.
@@ -51,7 +51,7 @@ export interface IconResolution {
 const PNG_MIME = "image/png";
 
 /**
- * Resolve `icon_ref` to a `blob:` URL the settings panel can render.
+ * Resolve `icon_ref` to a `blob:` URL the privacy modal can render.
  *
  * The function intentionally returns the resolved `Blob` alongside
  * the URL so the caller can call `URL.revokeObjectURL` once the row

@@ -50,6 +50,13 @@ tempfile = "3.10"
 # the deflate wire format. The dependency is small, mature and
 # kept narrow by enabling only the `zlib` backend.
 flate2 = { workspace = true }
+# Ed25519 for the `local-peer-identity-foundation` change. Only the
+# core uses these crates to derive `peer_id` and `fingerprint` from
+# the public key. Private material is produced here and immediately
+# handed to a `PeerIdentityStore` implementation; the core never
+# persists, logs or re-exports the secret key bytes.
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
 
 [dev-dependencies]
 rusqlite = { workspace = true }

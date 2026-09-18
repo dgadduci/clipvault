@@ -469,7 +469,8 @@ persistencia y bloqueo de capturas.
 ### Requirement: No existe una implementación Linux duplicada en una superficie no montada
 
 El flujo Linux SHALL estar definido en `PrivacyModal.svelte`, que es la
-superficie activa, y SHALL NOT permanecer duplicado en `SettingsPanel.svelte`.
+superficie activa, y SHALL NOT residir en un componente que `App.svelte`
+no monte.
 
 #### Scenario: Bundle actualizado
 

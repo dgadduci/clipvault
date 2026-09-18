@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use clipvault_core::{
     ActiveAppDiagnostics, ActiveAppFailureKind, AppBootstrap, AppContext, CaptureWatcher,
-    IgnoredAppError, IgnoredAppsServiceError, PickAndAddOutcome, PlatformAdapters,
-    WatchTickOutcome,
+    IgnoredAppError, IgnoredAppsServiceError, PeerIdentityStore, PickAndAddOutcome,
+    PlatformAdapters, WatchTickOutcome,
 };
 use clipvault_platform::{
     default_linux_binding, default_macos_binding, ActiveApplicationProbe, Capabilities,
@@ -153,6 +153,7 @@ pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
 
     let context = AppBootstrap::new()
         .with_platform_adapters(adapters.clone())
+        .with_peer_identity_store(build_peer_identity_store())
         .bootstrap_default()?;
 
     let watcher = Arc::new(CaptureWatcher::new(
@@ -227,6 +228,100 @@ pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
     };
 
     Ok(app_state)
+}
+
+/// Stable identifier for the platform the shell is currently
+/// building against. Mirrors [`clipvault_platform::OsFamily`] but
+/// collapses to a single `Other` arm for Windows / custom
+/// cross-compiles so the `build_peer_identity_store` resolver can
+/// pin every host to a single, testable outcome. The enum is
+/// `pub(crate)` because the regression suite in this module is the
+/// only consumer; the production code reads the live target through
+/// [`PeerIdentityTarget::current`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Variants are gated by `cfg(target_os = ...)`.
+pub(crate) enum PeerIdentityTarget {
+    Macos,
+    Linux,
+    Other,
+}
+
+impl PeerIdentityTarget {
+    /// Resolve the target the current build was compiled for. macOS
+    /// and Linux are first-class identity targets; every other host
+    /// collapses to `Other` so the keychain path is opt-in by
+    /// platform capability.
+    pub(crate) fn current() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::Macos
+        }
+        #[cfg(all(target_os = "linux", not(target_os = "macos")))]
+        {
+            Self::Linux
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            Self::Other
+        }
+    }
+}
+
+/// Resolve the concrete [`PeerIdentityStore`] the production shell
+/// wires against the bootstrap. Only macOS and Linux builds with the
+/// `local-peer-identity-keychain` feature enabled reach the real
+/// `KeychainPeerIdentityStore` (Apple Keychain on macOS, Secret
+/// Service over D-Bus on Linux). Every other case — Windows builds,
+/// macOS/Linux cross-compiles with the keychain feature turned off,
+/// unsupported targets — falls back to
+/// [`clipvault_core::InMemoryPeerIdentityStore::always_unavailable`]
+/// so the shell surfaces a typed `Unavailable` outcome instead of
+/// minting an in-memory identity that would not survive a restart.
+/// The fallback MUST never be the regular `new()` fake: the previous
+/// draft let `InMemoryPeerIdentityStore::new()` slip into the
+/// production path on unsupported targets, minting a peer_id the
+/// next boot could not reload (the regression this guard pins).
+fn build_peer_identity_store() -> Arc<dyn PeerIdentityStore> {
+    build_peer_identity_store_for_target(PeerIdentityTarget::current())
+}
+
+/// Testable resolver. The regression suite drives the `Other` arm to
+/// confirm the fallback unavailable path without standing up a
+/// keychain; the macOS / Linux arms are cfg-gated so the test always
+/// exercises the production decision on every host.
+pub(crate) fn build_peer_identity_store_for_target(
+    target: PeerIdentityTarget,
+) -> Arc<dyn PeerIdentityStore> {
+    match target {
+        PeerIdentityTarget::Macos | PeerIdentityTarget::Linux => {
+            #[cfg(all(
+                feature = "local-peer-identity-keychain",
+                any(target_os = "macos", target_os = "linux")
+            ))]
+            {
+                Arc::new(clipvault_platform::KeychainPeerIdentityStore::new())
+            }
+            #[cfg(not(all(
+                feature = "local-peer-identity-keychain",
+                any(target_os = "macos", target_os = "linux")
+            )))]
+            {
+                // macOS / Linux build with the keychain feature
+                // turned off (cross-compile to a stripped target,
+                // developer disabling the feature to debug the core).
+                // The shell MUST still surface a typed Unavailable
+                // outcome instead of an in-memory fake.
+                Arc::new(clipvault_core::InMemoryPeerIdentityStore::always_unavailable())
+            }
+        }
+        PeerIdentityTarget::Other => {
+            // Windows / custom cross-compile / any host without a
+            // keychain backend. The shell never has the secret
+            // store available here and MUST NOT fall back to a
+            // plaintext identity.
+            Arc::new(clipvault_core::InMemoryPeerIdentityStore::always_unavailable())
+        }
+    }
 }
 
 /// Synchronously run `f` on the Tauri main thread. Blocks the calling
@@ -1717,6 +1812,41 @@ mod tests {
         // payload surfaces as a test failure instead of leaking
         // data into the event surface.
         assert_eq!(HISTORY_UPDATED_EVENT, "clipvault://history-updated");
+    }
+
+    #[test]
+    fn build_peer_identity_store_for_other_target_surfaces_unavailable() {
+        // Windows builds, custom cross-compiles and every host
+        // without a keychain backend MUST reach the production
+        // fallback so the shell surfaces a typed
+        // `PeerIdentityError::SecureStoreUnavailable` instead of
+        // minting an in-memory identity the next boot could not
+        // reload. The previous draft shipped
+        // `InMemoryPeerIdentityStore::new()` here, which silently
+        // produced a peer_id the secure store had no record of —
+        // the regression this test pins.
+        use clipvault_core::PeerIdentityError;
+        let store = build_peer_identity_store_for_target(PeerIdentityTarget::Other);
+        let outcome = store.load_or_create();
+        assert!(
+            matches!(outcome, Err(PeerIdentityError::SecureStoreUnavailable)),
+            "non-keychain target must surface SecureStoreUnavailable, got {outcome:?}",
+        );
+    }
+
+    #[test]
+    fn peer_identity_target_current_resolves_to_a_known_target() {
+        // The production bootstrap consults `PeerIdentityTarget::current`
+        // to pick the secure store. The helper MUST collapse to one
+        // of the documented variants so the cfg-gated
+        // `build_peer_identity_store_for_target` branch never
+        // reaches an `unreachable!()`. The exhaustive match below
+        // forces a future contributor that adds a fourth variant
+        // to revisit the resolver instead of falling off the end.
+        let resolved = PeerIdentityTarget::current();
+        match resolved {
+            PeerIdentityTarget::Macos | PeerIdentityTarget::Linux | PeerIdentityTarget::Other => {}
+        }
     }
 
     #[test]

@@ -22,6 +22,7 @@ import type {
   IgnoredAppEntry,
   LinuxCatalogResponse,
   LinuxPickAndAddResponse,
+  LocalPeerProfileResponse,
   MigrationsApplied,
   OrganizationSnapshot,
   PasteResponse,
@@ -286,6 +287,17 @@ export const ignoredAppsRemoveCommand: ClipvaultCommandArg<
 > = (args) =>
   invoke<Settings>("clipvault_ignored_apps_remove", { id: args.id });
 
+export const localPeerProfileGetCommand: ClipvaultCommand<LocalPeerProfileResponse> = () =>
+  invoke<LocalPeerProfileResponse>("clipvault_local_peer_profile_get");
+
+export const localPeerProfileUpdateCommand: ClipvaultCommandArg<
+  LocalPeerProfileResponse,
+  { name: string | null }
+> = (args) =>
+  invoke<LocalPeerProfileResponse>("clipvault_local_peer_profile_update", {
+    update: { name: args.name },
+  });
+
 /**
  * Drive the platform application picker. The command returns a
  * discriminated union (added / updated / cancelled / error) so the
@@ -307,7 +319,7 @@ export const ignoredAppsListWithMetadataCommand: ClipvaultCommand<
 
 /**
  * Resolve an `icon_ref` produced by the application picker to the
- * raw PNG bytes the settings panel renders. The command is the only
+ * raw PNG bytes the privacy modal renders. The command is the only
  * bridge between the relative reference the database stores and the
  * image data the webview can decode — the frontend never sees an
  * absolute filesystem path and the backend rejects every reference
@@ -328,7 +340,7 @@ export const ignoredAppIconCommand: ClipvaultCommandArg<
  * Linux-only: enumerate the installed `.desktop` files whose
  * identifier maps deterministically to the active-app adapter's
  * published value. The wrapper exposes the discriminated
- * `kind: "supported" | "unsupported"` response so the settings panel
+ * `kind: "supported" | "unsupported"` response so the privacy modal
  * can render either the picker modal or the manual-entry fallback
  * without inspecting free-form text.
  */

@@ -28,6 +28,7 @@ pub mod management;
 pub mod organization;
 pub mod paste;
 pub mod paste_suppression;
+pub mod peer_identity;
 pub mod platform;
 pub mod platform_adapters;
 pub mod privacy;
@@ -130,6 +131,11 @@ pub use paste::{
     SYNTHETIC_PASTE_CAPABILITY,
 };
 pub use paste_suppression::{PasteSuppression, SuppressionFingerprint, DEFAULT_SUPPRESSION_TTL};
+pub use peer_identity::{
+    InMemoryPeerIdentityStore, LocalPeerIdentity, LocalPeerProfile, PeerFingerprint, PeerId,
+    PeerIdentityError, PeerIdentityOutcome, PeerIdentityService, PeerIdentityStore,
+    PEER_IDENTITY_SERVICE, PEER_IDENTITY_USERNAME,
+};
 pub use platform_adapters::PlatformAdapters;
 pub use privacy::{CaptureDecision, CoreBlacklistMatcher, PrivacyGate};
 pub use redact::{redact, RedactingMakeWriter, RedactingWriter};

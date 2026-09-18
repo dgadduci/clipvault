@@ -11,6 +11,8 @@ import {
   ignoredAppsListCommand,
   ignoredAppsListWithMetadataCommand,
   ignoredAppsRemoveCommand,
+  localPeerProfileGetCommand,
+  localPeerProfileUpdateCommand,
   refreshActiveAppDiagnosticsCommand,
   settingsGetCommand,
   settingsSetCommand,
@@ -21,6 +23,7 @@ import type {
   IgnoredAppEntry,
   LinuxCatalogResponse,
   LinuxPickAndAddResponse,
+  LocalPeerProfileResponse,
   PickAndAddResponse,
   PickErrorReason,
   RetentionPolicy,
@@ -40,6 +43,7 @@ function defaultSettings(): Settings {
     retention: "days_30",
     ignored_apps: [],
     quick_paste_hotkey: null,
+    local_peer_display_name: null,
   };
 }
 
@@ -264,11 +268,11 @@ test("refreshActiveAppDiagnosticsCommand surfaces a failed refresh outcome", asy
   assert.equal(diag.failed_refreshes, 1);
 });
 
-test("SettingsPanel identifiers normalise for the blacklist match (frontend helper)", () => {
+test("PrivacyModal identifiers normalise for the blacklist match (frontend helper)", () => {
   // We mirror the core matcher rule (trim + lowercase) in
-  // `SettingsPanel.svelte` so a captured identifier is compared
+  // `PrivacyModal.svelte` so a captured identifier is compared
   // against the persisted list with the same canonicalisation.
-  // This regression asserts the helper invariant the panel relies
+  // This regression asserts the helper invariant the modal relies
   // on. If a future refactor moves the helper into a dedicated
   // module the test should follow it.
   const observed = "  Com.Apple.Terminal  ".trim().toLowerCase();
@@ -276,11 +280,11 @@ test("SettingsPanel identifiers normalise for the blacklist match (frontend help
   assert.equal(observed, persisted);
 });
 
-test("error responses do not break the settings panel contract", () => {
+test("error responses do not break the privacy modal contract", () => {
   // The frontend relies on a typed `CommandError` shape; we expect
-  // `{ kind: string; message: string }` so that .svelte panel
+  // `{ kind: string; message: string }` so that the Svelte modal
   // renders the message without crashing. The Tauri helpers never
-  // change this contract because the panel teardown depends on the
+  // change this contract because the modal teardown depends on the
   // structured failure path.
   const error = { kind: "validation_error", message: "identifier too long" };
   assert.equal(typeof error.kind, "string");
@@ -340,9 +344,9 @@ test("failure_kind distinguishes schedule from timeout from unavailable from bac
 });
 
 // ---------------------------------------------------------------------------
-// `blacklist-app-picker`: the SettingsPanel now drives the picker through a
-// typed Tauri command instead of accepting arbitrary user-typed identifiers.
-// The tests below pin the contract the panel relies on: the response is a
+// `blacklist-app-picker`: the PrivacyModal now drives the picker through a
+// typed Tauri command instead of accepting arbitrary user-input identifiers.
+// The tests below pin the contract the modal relies on: the response is a
 // discriminated union (added / updated / cancelled / error) and the frontend
 // NEVER receives clipboard content, hashes or snippets through it.
 // ---------------------------------------------------------------------------
@@ -415,7 +419,7 @@ test("ignoredAppPickAndAddCommand surfaces the typed reason on error", async () 
 });
 
 test("ignoredAppPickAndAddCommand preserves the updated outcome", async () => {
-  // The settings panel must distinguish "first time" from "metadata
+  // The privacy modal must distinguish "first time" from "metadata
   // refresh" so the action message stays truthful.
   const updated: PickAndAddResponse = {
     kind: "updated",
@@ -488,7 +492,7 @@ test("ignoredAppsListWithMetadataCommand returns legacy rows with null metadata"
 });
 
 // ---------------------------------------------------------------------------
-// Icon presentation for the picker metadata. The settings panel must
+// Icon presentation for the picker metadata. The privacy modal must
 // distinguish rows whose `icon_ref` resolves to a real PNG from rows
 // whose reference is missing or rejected: the former render an `<img>`
 // backed by a `blob:` URL produced from the new `clipvault_ignored_app_icon`
@@ -660,4 +664,130 @@ test("ignoredAppLinuxAddCommand propagates backend errors without leaking payloa
       return true;
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// Local peer identity foundation.
+//
+// The bridge only forwards metadata-only payloads — the private
+// Ed25519 key bytes MUST never appear in the IPC envelope.
+// ---------------------------------------------------------------------------
+
+test("localPeerProfileGetCommand returns the available profile", async () => {
+  const expected: LocalPeerProfileResponse = {
+    kind: "available",
+    profile: {
+      peer_id: "0123456789abcdef0123456789abcdef",
+      fingerprint: "0123456789abcdef",
+      display_name: "Studio",
+    },
+  };
+  installTauriMock(async (cmd) => {
+    assert.equal(cmd, "clipvault_local_peer_profile_get");
+    return expected;
+  });
+  const response = await localPeerProfileGetCommand();
+  assert.equal(response.kind, "available");
+  if (response.kind !== "available") return;
+  assert.equal(response.profile.peer_id, expected.profile.peer_id);
+  assert.equal(response.profile.display_name, "Studio");
+  // Privacy invariant: the IPC envelope MUST NOT carry a private
+  // key, public key, certificate or any other secret material. The
+  // `public_key_hex` field the previous draft shipped has been
+  // removed from the DTO so the frontend cannot leak the bytes that
+  // the secure store already guards.
+  const forbidden: Array<keyof { public_key_hex: unknown; private_key: unknown; secret: unknown; seed: unknown }> = [
+    "public_key_hex",
+    "private_key",
+    "secret",
+    "seed",
+  ];
+  for (const field of forbidden) {
+    assert.equal(
+      (response.profile as unknown as Record<string, unknown>)[field],
+      undefined,
+      `LocalPeerProfile MUST NOT include ${field}`,
+    );
+  }
+});
+
+test("localPeerProfileGetCommand reports unavailability without leaking platform detail", async () => {
+  installTauriMock(async (cmd) => {
+    assert.equal(cmd, "clipvault_local_peer_profile_get");
+    return {
+      kind: "unavailable",
+      reason: "secure identity store unavailable",
+    } satisfies LocalPeerProfileResponse;
+  });
+  const response = await localPeerProfileGetCommand();
+  assert.equal(response.kind, "unavailable");
+  if (response.kind !== "unavailable") return;
+  assert.equal(response.reason, "secure identity store unavailable");
+});
+
+test("localPeerProfileUpdateCommand returns the refreshed available profile", async () => {
+  // The update command MUST persist the validated name and return
+  // the refreshed profile so the frontend can update its in-memory
+  // snapshot without a follow-up GET. The peer_id and fingerprint
+  // stay unchanged across name edits, which is the spec scenario
+  // "User changes visible name" pins.
+  let observed: Record<string, unknown> | undefined;
+  installTauriMock(async (cmd, args) => {
+    assert.equal(cmd, "clipvault_local_peer_profile_update");
+    observed = args;
+    return {
+      kind: "available",
+      profile: {
+        peer_id: "0123456789abcdef0123456789abcdef",
+        fingerprint: "0123456789abcdef",
+        display_name: (args?.update as { name: string | null }).name,
+      },
+    } satisfies LocalPeerProfileResponse;
+  });
+  const result = await localPeerProfileUpdateCommand({ name: "Studio" });
+  assert.equal(observed?.update, { name: "Studio" });
+  assert.equal(result.kind, "available");
+  if (result.kind !== "available") return;
+  assert.equal(result.profile.display_name, "Studio");
+  assert.equal(result.profile.peer_id, "0123456789abcdef0123456789abcdef");
+  assert.equal(result.profile.fingerprint, "0123456789abcdef");
+});
+
+test("localPeerProfileUpdateCommand clears the name with null", async () => {
+  let observed: Record<string, unknown> | undefined;
+  installTauriMock(async (cmd, args) => {
+    assert.equal(cmd, "clipvault_local_peer_profile_update");
+    observed = args;
+    return {
+      kind: "available",
+      profile: {
+        peer_id: "0123456789abcdef0123456789abcdef",
+        fingerprint: "0123456789abcdef",
+        display_name: null,
+      },
+    } satisfies LocalPeerProfileResponse;
+  });
+  const result = await localPeerProfileUpdateCommand({ name: null });
+  assert.equal(observed?.update, { name: null });
+  assert.equal(result.kind, "available");
+  if (result.kind !== "available") return;
+  assert.equal(result.profile.display_name, null);
+});
+
+test("localPeerProfileUpdateCommand surfaces Unavailable when the secure store is down", async () => {
+  // A temporarily unavailable keychain MUST NOT block the user
+  // from editing the visible name. The backend persists the name
+  // first and then surfaces the typed Unavailable outcome; the
+  // frontend renders the muted copy without losing the edit.
+  installTauriMock(async (cmd) => {
+    assert.equal(cmd, "clipvault_local_peer_profile_update");
+    return {
+      kind: "unavailable",
+      reason: "secure identity store unavailable",
+    } satisfies LocalPeerProfileResponse;
+  });
+  const result = await localPeerProfileUpdateCommand({ name: "Studio" });
+  assert.equal(result.kind, "unavailable");
+  if (result.kind !== "unavailable") return;
+  assert.equal(result.reason, "secure identity store unavailable");
 });

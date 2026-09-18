@@ -24,6 +24,7 @@ mod linux_picker_support;
 mod linux_xlib_init;
 mod noop;
 pub mod paste;
+pub mod peer_identity;
 pub mod runtime;
 mod stub;
 mod tiff_metadata;
@@ -80,6 +81,12 @@ pub use noop::{
     NoopSettingsNavigator, NoopTrayController, NoopTrayHandle,
 };
 pub use paste::{PasteBackendKind, PasteController, PasteError};
+#[cfg(feature = "local-peer-identity-keychain")]
+pub use peer_identity::KeychainPeerIdentityStore;
+pub use peer_identity::{
+    LocalPeerIdentity, PeerFingerprint, PeerId, PeerIdentityError, PeerIdentityOutcome,
+    PeerIdentityStore, PEER_IDENTITY_SERVICE, PEER_IDENTITY_USERNAME,
+};
 #[cfg(target_os = "linux")]
 pub use runtime::linux_app_catalog::{CandidateApplication, IdentifierStrategy};
 #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]

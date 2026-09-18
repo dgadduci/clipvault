@@ -899,6 +899,8 @@ impl ValidationCommandError {
             ValidationCode::InvalidHotkey => "validation_error",
             ValidationCode::InvalidIdentifier => "validation_error",
             ValidationCode::IdentifierTooLong => "validation_error",
+            ValidationCode::InvalidPeerDisplayName => "validation_error",
+            ValidationCode::PeerDisplayNameTooLong => "validation_error",
         };
         Self {
             kind,
@@ -2443,3 +2445,118 @@ mod gnome_commands {
 }
 
 pub use gnome_commands::*;
+
+// ---------------------------------------------------------------------------
+// Local peer identity commands.
+//
+// The shell exposes only metadata-only DTOs to the frontend; the
+// private Ed25519 key never crosses the Tauri boundary, the
+// platform detail never leaks into a typed error variant, and the
+// commands are forbidden from doing anything beyond delegating to
+// the `SettingsService` / `PeerIdentityService` already wired into
+// the `AppContext`.
+// ---------------------------------------------------------------------------
+
+/// Stable user-facing copy returned with the `Unavailable` arm of
+/// [`LocalPeerProfileResponse`]. The string lives here so the
+/// frontend cannot drift from the typed outcome the backend
+/// surfaces; it never carries platform detail, keychain error
+/// messages or session identifiers.
+pub const LOCAL_PEER_UNAVAILABLE_REASON: &str = "secure identity store unavailable";
+
+/// Tagged response for both
+/// [`clipvault_local_peer_profile_get`] and
+/// [`clipvault_local_peer_profile_update`]. The frontend branches
+/// on `kind` so it can render the right copy (success /
+/// unavailable) without inspecting free-form strings.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LocalPeerProfileResponse {
+    /// Identity loaded successfully. `profile` carries only the
+    /// metadata the user is allowed to see; no private key bytes
+    /// are ever serialised.
+    Available {
+        profile: clipvault_core::LocalPeerProfile,
+    },
+    /// Secure credential store is not reachable on this session.
+    /// The shell renders the stable guidance copy returned via
+    /// [`LOCAL_PEER_UNAVAILABLE_REASON`]; the platform detail
+    /// never leaks past this point.
+    Unavailable { reason: String },
+}
+
+impl LocalPeerProfileResponse {
+    /// Build the `Available` arm from a typed
+    /// [`clipvault_core::PeerIdentityOutcome`]. The function is the
+    /// single point that maps the core outcome onto the wire
+    /// contract, so the GET and UPDATE commands cannot drift.
+    fn from_outcome(
+        outcome: clipvault_core::PeerIdentityOutcome<clipvault_core::LocalPeerProfile>,
+    ) -> Self {
+        match outcome {
+            clipvault_core::PeerIdentityOutcome::Ok(profile) => {
+                LocalPeerProfileResponse::Available { profile }
+            }
+            clipvault_core::PeerIdentityOutcome::Unavailable => {
+                LocalPeerProfileResponse::Unavailable {
+                    reason: LOCAL_PEER_UNAVAILABLE_REASON.to_string(),
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub fn clipvault_local_peer_profile_get(
+    state: State<'_, SharedState>,
+) -> Result<LocalPeerProfileResponse, CommandError> {
+    let context = state.context();
+    let outcome = context.settings().local_peer_profile(context);
+    Ok(LocalPeerProfileResponse::from_outcome(outcome))
+}
+
+/// Update payload the frontend submits when the user edits the
+/// visible device name. The `name` field accepts `null` to clear
+/// the value (the UI clears the input box); any other value goes
+/// through the validator before persistence.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LocalPeerDisplayNameUpdate {
+    pub name: Option<String>,
+}
+
+/// Update the visible device name and return the post-update
+/// [`LocalPeerProfileResponse`].
+///
+/// The name is persisted independently from the secure store
+/// status: even when the platform keychain is temporarily
+/// unavailable, the validated name is written to `app_settings` so
+/// the user can keep editing without waiting for the keychain to
+/// come back. The response carries the refreshed
+/// [`clipvault_core::LocalPeerProfile`] when the secure store is
+/// reachable, which lets the frontend update its cached `peer_id`
+/// and `fingerprint` from a single round-trip without a follow-up
+/// GET (the spec scenario "User changes visible name" pins this
+/// shape: peer_id and fingerprint MUST stay unchanged).
+#[tauri::command]
+pub fn clipvault_local_peer_profile_update(
+    state: State<'_, SharedState>,
+    update: LocalPeerDisplayNameUpdate,
+) -> Result<LocalPeerProfileResponse, CommandError> {
+    let context = state.context();
+    // Persist the validated name first. The persistence step does
+    // not depend on the secure store status — a temporarily
+    // unavailable keychain MUST NOT block the user from editing
+    // their visible name.
+    context
+        .settings()
+        .set_local_peer_display_name(context, update.name.as_deref())?;
+    // Re-load the profile so the response carries the updated
+    // `display_name` together with the stable `peer_id` and
+    // `fingerprint`. When the secure store is unavailable the
+    // command surfaces `Unavailable`; the frontend already
+    // rendered the secure-store-unavailable copy and the name
+    // has still been persisted.
+    let outcome = context.settings().local_peer_profile(context);
+    Ok(LocalPeerProfileResponse::from_outcome(outcome))
+}

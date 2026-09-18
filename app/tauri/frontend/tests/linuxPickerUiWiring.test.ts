@@ -2,8 +2,8 @@
  * Regression coverage for the Linux blacklist picker UI wiring.
  *
  * App.svelte mounts PrivacyModal.svelte. Keeping this invariant at source
- * level prevents the catalog flow from silently returning to SettingsPanel,
- * which is not part of the active Privacy surface.
+ * level prevents the catalog flow from silently moving to a different
+ * surface, which is not part of the active Privacy modal.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -17,7 +17,6 @@ function loadSource(...segments: string[]): string {
 test("the active Privacy surface owns the Linux picker flow", () => {
   const app = loadSource("App.svelte");
   const privacy = loadSource("PrivacyModal.svelte");
-  const settingsPanel = loadSource("SettingsPanel.svelte");
 
   assert.match(app, /import\s+PrivacyModal\s+from\s+"\.\/PrivacyModal\.svelte"/);
   assert.match(app, /<PrivacyModal\s*\/?>(?:<\/PrivacyModal>)?/);
@@ -43,8 +42,6 @@ test("the active Privacy surface owns the Linux picker flow", () => {
     /if \(linuxCatalog\)[\s\S]*?describeLinuxCatalogUnavailable\(linuxCatalog\.reason\)/,
     "an explicit Linux catalog rejection must not be masked by the legacy picker",
   );
-  assert.doesNotMatch(settingsPanel, /ignoredAppLinux(?:Add|Catalog)Command/);
-  assert.doesNotMatch(settingsPanel, /linux-picker-modal/);
 });
 
 test("the Linux picker resolves catalog icons via the application-icons bridge", () => {

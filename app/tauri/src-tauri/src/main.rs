@@ -234,6 +234,8 @@ fn main() {
             commands::clipvault_gnome_integration_install,
             commands::clipvault_gnome_integration_uninstall,
             commands::clipvault_gnome_integration_retry,
+            commands::clipvault_local_peer_profile_get,
+            commands::clipvault_local_peer_profile_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ClipVault")

@@ -22,11 +22,19 @@ default = [
     "hotkey-global",
     "linux-gnome-shell-integration",
     "linux-xlib-init",
+    "local-peer-identity-keychain",
 ]
 custom-protocol = ["tauri/custom-protocol"]
 clipboard-arboard = []
 hotkey-global = []
 linux-x11 = []
+# Pull in the concrete `KeychainPeerIdentityStore` on macOS / Linux
+# so the bootstrap wires the real secure credential store. Other
+# targets (Windows builds for CI, custom cross-compiles) get the
+# in-memory fake from `clipvault-core`, which is exactly what the
+# `local-peer-identity-foundation` change promises — the secure
+# store is opt-in by platform capability.
+local-peer-identity-keychain = ["clipvault-platform/local-peer-identity-keychain"]
 # Linux native Wayland active-app detection (`ext-foreign-toplevel-list-v1`
 # with `zwlr_foreign_toplevel_management_unstable_v1` fallback). The
 # feature is opt-in so macOS / non-Linux builds never link the Wayland
@@ -81,6 +89,7 @@ clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
     "clipboard-arboard",
     "hotkey-global",
     "macos-native",
+    "local-peer-identity-keychain",
 ] }
 objc2-foundation = { workspace = true }
 
@@ -93,6 +102,7 @@ clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
     "linux-wayland-active-app",
     "linux-xlib-init",
     "linux-gnome-shell-integration",
+    "local-peer-identity-keychain",
 ] }
 
 [dev-dependencies]

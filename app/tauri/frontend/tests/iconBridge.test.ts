@@ -11,7 +11,7 @@
  *   so the caller can wrap it in `Uint8Array` before constructing a
  *   `Blob`.
  * - Tauri rejection paths (validation failure, missing file, ...)
- *   propagate as a rejected promise; the settings panel surfaces a
+ *   propagate as a rejected promise; the privacy modal surfaces a
  *   generic fallback instead of the underlying error to the user.
  * - The wrapper is metadata-only: it must never carry clipboard
  *   content, hashes, snippets or absolute filesystem paths.
@@ -90,7 +90,7 @@ test("ignoredAppIconCommand does not mutate the supplied ref", async () => {
   const original = "ignored-apps/com.apple.TextEdit.png";
   await ignoredAppIconCommand({ ref: original });
   // The original string must reach the backend unchanged. The
-  // settings panel normalises identifiers in `PrivacyGate`, not in
+  // privacy modal normalises identifiers in `PrivacyGate`, not in
   // the icon bridge.
   // (The observation happens through the captured `args.iconRef`
   // assertion in the previous test; here we just pin that the

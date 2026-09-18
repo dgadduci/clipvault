@@ -20,6 +20,14 @@ use crate::management::RetentionPolicy;
 const HOTKEY_SETTING_KEY: &str = "quick_paste_hotkey";
 
 pub const MAX_IDENTIFIER_LENGTH: usize = 128;
+/// Maximum length of the validated local peer display name. The
+/// limit is intentionally generous (64 Unicode scalar values) so
+/// the user can write in their own language without surprises but
+/// not so large that the value could break the LAN advertisement
+/// records the future `local-peer-discovery` change will own.
+pub const MAX_PEER_DISPLAY_NAME_LENGTH: usize = 64;
+
+pub const LOCAL_PEER_DISPLAY_NAME_KEY: &str = "local_peer_display_name";
 
 /// Aggregate of every setting persisted for the MVP.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +36,11 @@ pub struct Settings {
     pub retention: RetentionPolicy,
     pub ignored_apps: Vec<String>,
     pub quick_paste_hotkey: Option<HotkeySpec>,
+    /// Validated visible device name for the local peer identity
+    /// foundation. Persisted in `app_settings`; the cryptographic
+    /// identity itself is derived from the public key and lives in
+    /// the platform secure store.
+    pub local_peer_display_name: Option<String>,
 }
 
 impl Settings {
@@ -37,6 +50,7 @@ impl Settings {
             retention: RetentionPolicy::Days30,
             ignored_apps: Vec::new(),
             quick_paste_hotkey: None,
+            local_peer_display_name: None,
         }
     }
 }
@@ -149,6 +163,13 @@ pub struct SettingsUpdate {
     pub ignored_apps_add: Vec<String>,
     pub ignored_apps_remove: Vec<String>,
     pub quick_paste_hotkey: Option<Option<HotkeySpec>>,
+    /// Updated local peer display name. The outer `Option` signals
+    /// whether the caller wants to touch the field; the inner
+    /// `Option` carries the value (or `None` to clear it). The
+    /// value passes through [`validate_peer_display_name`] before
+    /// being persisted; the caller's rejected value never reaches
+    /// the storage layer.
+    pub local_peer_display_name: Option<Option<String>>,
 }
 
 impl SettingsUpdate {
@@ -161,6 +182,7 @@ impl SettingsUpdate {
             && self.ignored_apps_add.is_empty()
             && self.ignored_apps_remove.is_empty()
             && self.quick_paste_hotkey.is_none()
+            && self.local_peer_display_name.is_none()
     }
 
     /// Validate the update against the current [`Settings`]. Returns
@@ -170,6 +192,7 @@ impl SettingsUpdate {
             && self.retention.is_none()
             && self.ignored_apps_add.is_empty()
             && self.ignored_apps_remove.is_empty()
+            && self.local_peer_display_name.is_none()
         {
             return Err(ValidationError::empty());
         }
@@ -205,6 +228,13 @@ impl SettingsUpdate {
             next.quick_paste_hotkey = maybe.clone();
         }
 
+        if let Some(maybe) = &self.local_peer_display_name {
+            next.local_peer_display_name = maybe
+                .as_ref()
+                .map(|raw| validate_peer_display_name(raw))
+                .transpose()?;
+        }
+
         Ok(next)
     }
 }
@@ -220,6 +250,34 @@ fn validate_identifier(id: &str) -> Result<(), ValidationError> {
         return Err(ValidationError::invalid_identifier());
     }
     Ok(())
+}
+
+/// Validate the user-supplied local peer display name. Returns
+/// the trimmed value when it passes; rejects empty (after trim),
+/// control characters and values longer than
+/// [`MAX_PEER_DISPLAY_NAME_LENGTH`] Unicode scalar values.
+pub fn validate_peer_display_name(raw: &str) -> Result<String, ValidationError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ValidationError::invalid_peer_display_name());
+    }
+    if trimmed.chars().any(is_invalid_display_char) {
+        return Err(ValidationError::invalid_peer_display_name());
+    }
+    if trimmed.chars().count() > MAX_PEER_DISPLAY_NAME_LENGTH {
+        return Err(ValidationError::peer_display_name_too_long());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn is_invalid_display_char(c: char) -> bool {
+    // Reject ASCII control chars plus a few common confusables
+    // (zero-width spaces, BOM, line/paragraph separators, …) so a
+    // malicious value cannot render an empty row in the UI.
+    if c.is_control() {
+        return true;
+    }
+    matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}')
 }
 
 /// Typed validation errors the shell surfaces back to the user. The
@@ -275,6 +333,25 @@ impl ValidationError {
             ),
         }
     }
+
+    pub fn invalid_peer_display_name() -> Self {
+        Self {
+            code: ValidationCode::InvalidPeerDisplayName,
+            field: "local_peer_display_name",
+            message: "name must not be empty or contain control characters".to_string(),
+        }
+    }
+
+    pub fn peer_display_name_too_long() -> Self {
+        Self {
+            code: ValidationCode::PeerDisplayNameTooLong,
+            field: "local_peer_display_name",
+            message: format!(
+                "name must be at most {} characters",
+                MAX_PEER_DISPLAY_NAME_LENGTH
+            ),
+        }
+    }
 }
 
 impl fmt::Display for ValidationError {
@@ -292,6 +369,8 @@ pub enum ValidationCode {
     InvalidHotkey,
     InvalidIdentifier,
     IdentifierTooLong,
+    InvalidPeerDisplayName,
+    PeerDisplayNameTooLong,
 }
 
 impl ValidationCode {
@@ -302,6 +381,8 @@ impl ValidationCode {
             ValidationCode::InvalidHotkey => "invalid_hotkey",
             ValidationCode::InvalidIdentifier => "invalid_identifier",
             ValidationCode::IdentifierTooLong => "identifier_too_long",
+            ValidationCode::InvalidPeerDisplayName => "invalid_peer_display_name",
+            ValidationCode::PeerDisplayNameTooLong => "peer_display_name_too_long",
         }
     }
 }
@@ -493,6 +574,7 @@ mod tests {
             retention: RetentionPolicy::Days90,
             ignored_apps: vec!["com.apple.Terminal".to_string()],
             quick_paste_hotkey: None,
+            local_peer_display_name: None,
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains("\"retention\":\"days_90\""), "got {json}");
@@ -519,9 +601,110 @@ mod tests {
             ignored_apps_add: vec!["com.apple.Terminal".to_string()],
             ignored_apps_remove: vec![],
             quick_paste_hotkey: None,
+            local_peer_display_name: Some(Some("Studio".to_string())),
         };
         let json = serde_json::to_string(&update).unwrap();
         let parsed: SettingsUpdate = serde_json::from_str(&json).expect("round-trip");
         assert_eq!(parsed, update);
+    }
+
+    #[test]
+    fn settings_serialises_with_local_peer_display_name() {
+        // The frontend relies on `local_peer_display_name` being
+        // present in the `Settings` payload even when it is `null`
+        // so the Settings panel can render the Identity section
+        // with a stable shape.
+        let settings = Settings {
+            local_peer_display_name: Some("Studio".to_string()),
+            ..Settings::defaults()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(
+            json.contains("\"local_peer_display_name\":\"Studio\""),
+            "got {json}"
+        );
+    }
+
+    #[test]
+    fn peer_display_name_trims_surrounding_whitespace() {
+        let update = SettingsUpdate {
+            local_peer_display_name: Some(Some("  Studio  ".to_string())),
+            ..SettingsUpdate::default()
+        };
+        let next = update.validate(&Settings::defaults()).expect("valid");
+        assert_eq!(next.local_peer_display_name.as_deref(), Some("Studio"));
+    }
+
+    #[test]
+    fn peer_display_name_rejects_empty_value() {
+        let update = SettingsUpdate {
+            local_peer_display_name: Some(Some("   ".to_string())),
+            ..SettingsUpdate::default()
+        };
+        let error = update
+            .validate(&Settings::defaults())
+            .expect_err("empty must fail");
+        assert_eq!(error.code, ValidationCode::InvalidPeerDisplayName);
+    }
+
+    #[test]
+    fn peer_display_name_rejects_control_characters() {
+        for bad in ["\u{0001}evil", "line1\nline2", "tab\there"] {
+            let update = SettingsUpdate {
+                local_peer_display_name: Some(Some(bad.to_string())),
+                ..SettingsUpdate::default()
+            };
+            let error = update
+                .validate(&Settings::defaults())
+                .expect_err("control must fail");
+            assert_eq!(error.code, ValidationCode::InvalidPeerDisplayName);
+        }
+    }
+
+    #[test]
+    fn peer_display_name_rejects_oversized_value() {
+        let bad = "a".repeat(MAX_PEER_DISPLAY_NAME_LENGTH + 1);
+        let update = SettingsUpdate {
+            local_peer_display_name: Some(Some(bad)),
+            ..SettingsUpdate::default()
+        };
+        let error = update
+            .validate(&Settings::defaults())
+            .expect_err("oversized must fail");
+        assert_eq!(error.code, ValidationCode::PeerDisplayNameTooLong);
+    }
+
+    #[test]
+    fn peer_display_name_can_be_cleared() {
+        let mut current = Settings::defaults();
+        current.local_peer_display_name = Some("Studio".to_string());
+        let update = SettingsUpdate {
+            local_peer_display_name: Some(None),
+            ..SettingsUpdate::default()
+        };
+        let next = update.validate(&current).expect("valid");
+        assert!(next.local_peer_display_name.is_none());
+    }
+
+    #[test]
+    fn peer_display_name_does_not_change_other_settings() {
+        let mut current = Settings::defaults();
+        current.ignored_apps.push("com.apple.Terminal".to_string());
+        current.quick_paste_hotkey = Some(HotkeySpec {
+            id: "quick_paste".into(),
+            key: "v".into(),
+            cmd_or_ctrl: true,
+            shift: true,
+            alt: false,
+            meta: false,
+        });
+        let update = SettingsUpdate {
+            local_peer_display_name: Some(Some("Studio".to_string())),
+            ..SettingsUpdate::default()
+        };
+        let next = update.validate(&current).expect("valid");
+        assert_eq!(next.ignored_apps, current.ignored_apps);
+        assert_eq!(next.quick_paste_hotkey, current.quick_paste_hotkey);
+        assert_eq!(next.local_peer_display_name.as_deref(), Some("Studio"));
     }
 }

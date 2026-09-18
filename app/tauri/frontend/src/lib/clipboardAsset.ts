@@ -94,7 +94,7 @@ export const tauriRichTextPreviewLoader: IconLoader = {
 /**
  * Build a resolver for clipboard payload assets.
  *
- * The returned resolver is the same implementation the settings panel
+ * The returned resolver is the same implementation the privacy modal
  * uses for application icons — same cache semantics, same `release` /
  * `releaseFor` contract — wired to the clipboard asset command. Callers
  * MUST call `releaseFor(ref)` (or `release()`) when the owning card is
