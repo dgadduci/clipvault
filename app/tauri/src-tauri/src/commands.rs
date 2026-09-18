@@ -2568,10 +2568,20 @@ pub fn clipvault_local_peer_profile_update(
 // the toggle, the runtime snapshot, and a read-only refresh hook.
 // The commands never return IP addresses, ports, raw public keys,
 // clipboard content, previews, hashes or any other secret. The
-// runtime itself is platform-agnostic: the production shell wires
-// the future `clipvault-network` adapter; this change ships with
-// a `NoopPeerDiscoveryAdapter` that reports `MulticastUnavailable`
-// so the bootstrap compiles on every host.
+// runtime itself is platform-agnostic: `clipvault-core` owns the
+// event sink, the presence TTL and the persistence wiring, while
+// `clipvault-platform` provides the productive
+// `MdnsPeerDiscoveryAdapter` behind the optional
+// `local-peer-discovery-mdns` feature. The shell's `bootstrap`
+// installs that adapter by default on macOS / Linux builds that
+// enable the feature and falls back to `NoopPeerDiscoveryAdapter`
+// only on Windows builds or cross-compiles where the runtime
+// cannot bind mDNS. The `service_fullname -> peer_id` association
+// that turns the `_clipvault._tcp.local.` instance descriptor
+// into the validated `peer_id` lives entirely inside the mDNS
+// adapter (see `crates/clipvault-platform/src/peer_discovery/mdns.rs`)
+// and is intentionally opaque to the shell, the core and the
+// frontend.
 // ---------------------------------------------------------------------------
 
 /// Response of [`clipvault_peer_sharing_toggle_get`] /

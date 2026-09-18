@@ -78,9 +78,24 @@
       // toggle; refresh the snapshot so the `Equipos` view
       // reflects the new active / inactive state immediately.
       await refreshSnapshot();
-      actionMessage = target
-        ? "Compartir en red local activado."
-        : "Compartir en red local desactivado.";
+      // Only claim the discovery actually started when the
+      // runtime confirmed it is browsing. `identity_unavailable`
+      // and `runtime_stopped` mean the toggle is persisted but
+      // the runtime did NOT come up (secure store unreachable,
+      // multicast blocked, …); a triumphant "activado" message
+      // would lie to the user and hide the typed status copy
+      // the runtime already surfaces.
+      if (!target) {
+        actionMessage = "Compartir en red local desactivado.";
+      } else if (response.kind === "active") {
+        actionMessage = "Compartir en red local activado.";
+      } else if (response.kind === "identity_unavailable") {
+        actionMessage =
+          "Preferencia guardada, pero la identidad segura no está disponible: el descubrimiento no arrancó. Vuelve a intentarlo cuando el llavero esté accesible.";
+      } else {
+        actionMessage =
+          "Preferencia guardada, pero el descubrimiento no pudo iniciar (multicast bloqueado o ruta no disponible). El estado del runtime se muestra arriba.";
+      }
     } catch (error) {
       errorMessage = describeError(error);
     } finally {

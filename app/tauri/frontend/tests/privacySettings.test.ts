@@ -845,7 +845,13 @@ test("peerSharingToggleGetCommand surfaces runtime_stopped with the persisted fl
   assert.equal(result.enabled, false);
 });
 
-test("peerSharingToggleSetCommand forwards the partial update and returns the new state", async () => {
+test("peerSharingToggleSetCommand forwards the bare boolean and returns the new state", async () => {
+  // The Rust command declares `enabled` as a root argument; the
+  // bridge MUST forward it bare (not nested under an `update`
+  // envelope) so Tauri's argument matcher resolves `enabled`.
+  // The previous wrapper shipped `{ update: { enabled } }` and
+  // Tauri responded with `missing required key enabled`, breaking
+  // the toggle in the field. This test pins the flat shape.
   let observed: Record<string, unknown> | undefined;
   installTauriMock(async (cmd, args) => {
     assert.equal(cmd, "clipvault_peer_sharing_toggle_set");
@@ -853,7 +859,8 @@ test("peerSharingToggleSetCommand forwards the partial update and returns the ne
     return { kind: "active", enabled: true } satisfies PeerSharingToggleResponse;
   });
   const result = await peerSharingToggleSetCommand({ enabled: true });
-  assert.equal(observed?.update, { enabled: true });
+  assert.equal(observed?.enabled, true);
+  assert.equal(observed?.update, undefined, "the bridge MUST NOT wrap the toggle in an `update` envelope");
   assert.equal(result.kind, "active");
   if (result.kind !== "active") return;
   assert.equal(result.enabled, true);

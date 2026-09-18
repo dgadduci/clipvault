@@ -316,13 +316,18 @@ export const peerSharingToggleGetCommand: ClipvaultCommand<PeerSharingToggleResp
  * runtime unconditionally; turning it on surfaces
  * `identity_unavailable` when the secure store is unreachable
  * so the user can retry without losing the persisted `true`.
+ *
+ * The Rust command declares `enabled` as a root argument; the
+ * bridge MUST forward the bare boolean (not a nested `update`
+ * envelope), otherwise Tauri rejects the call with
+ * `missing required key enabled`.
  */
 export const peerSharingToggleSetCommand: ClipvaultCommandArg<
   PeerSharingToggleResponse,
   { enabled: boolean }
 > = (args) =>
   invoke<PeerSharingToggleResponse>("clipvault_peer_sharing_toggle_set", {
-    update: { enabled: args.enabled },
+    enabled: args.enabled,
   });
 
 /**
