@@ -25,10 +25,12 @@
 //! disappearance events) before pushing into the sink so the
 //! core, SQLite, frontend and bridge never see an endpoint.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -106,19 +108,88 @@ struct MdnsHandle {
     fullname: String,
     thread: Option<JoinHandle<()>>,
     cancel: Arc<AtomicBool>,
+    /// Idempotency guard so the ordered shutdown runs at most
+    /// once even when both the explicit `stop` path and `Drop`
+    /// fire (the explicit path takes the [`MdnsHandle`] out of
+    /// the adapter state and runs `shutdown`; the eventual
+    /// `Drop` sees the guard flipped and short-circuits).
+    shutdown_started: Cell<bool>,
+}
+
+/// Bounded wait for the goodbye packet the `mdns-sd` daemon
+/// confirms on the `unregister` channel. RFC 6762 lets the daemon
+/// retransmit the goodbye at +120 ms before responding on the
+/// channel, so a 750 ms ceiling comfortably covers the happy
+/// path while still bounding the adapter when the daemon is
+/// hung or the channel is wedged.
+const UNREGISTER_WAIT: Duration = Duration::from_millis(750);
+
+impl MdnsHandle {
+    /// Run the ordered shutdown exactly once.
+    ///
+    /// The order is critical and matches the design pinned in
+    /// `local-peer-discovery/design.md` §"Descubrimiento, presencia
+    /// y compatibilidad":
+    ///
+    /// 1. flip the cancel flag so the browse loop wakes up early;
+    /// 2. `unregister` the published `fullname` so remote browsers
+    ///    receive `ServiceRemoved` and flip the peer to
+    ///    `NotAvailable` without waiting for the TTL (~120 s);
+    /// 3. shut down the daemon (closes the receiver channel);
+    /// 4. join the browse thread.
+    ///
+    /// The function only logs fixed safe phrases on failure so the
+    /// `fullname`, host name, IP, port and raw `mdns-sd` error
+    /// taxonomy never leak through the adapter. The runtime, core,
+    /// SQLite, frontend and Tauri commands must remain oblivious
+    /// to those values.
+    fn shutdown(&mut self) {
+        if self.shutdown_started.get() {
+            return;
+        }
+        self.shutdown_started.set(true);
+
+        self.cancel.store(true, Ordering::Release);
+
+        // 1. Send the goodbye packet. `mdns-sd` documents
+        //    `unregister` as the graceful shutdown of a service
+        //    and uses the returned `Receiver<UnregisterStatus>` to
+        //    signal completion; on `Error::Msg` / `Error::Again`
+        //    we surface a fixed safe phrase so the wire error
+        //    (which can carry the daemon's host string) never
+        //    reaches the tracing pipeline.
+        match self.daemon.unregister(&self.fullname) {
+            Ok(receiver) => match receiver.recv_timeout(UNREGISTER_WAIT) {
+                Ok(_) => debug!("mdns-sd service unregistered"),
+                Err(_) => warn!("mdns-sd unregister timed out; continuing shutdown"),
+            },
+            Err(_) => warn!("mdns-sd unregister failed; continuing shutdown"),
+        }
+
+        // 2. Tear down the daemon (closes the receiver so the loop
+        //    exits). The daemon's own `Error` enum carries the
+        //    socket path on `Error::Msg`, so we keep the existing
+        //    fixed-phrase log to avoid leaking it.
+        if let Err(_error) = self.daemon.shutdown() {
+            warn!("mdns-sd daemon shutdown failed");
+        }
+
+        // 3. Join the browse thread. The thread may have already
+        //    exited because the daemon receiver closed; ignore
+        //    the join error in that case.
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl Drop for MdnsHandle {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Release);
-        if let Err(error) = self.daemon.shutdown() {
-            warn!(error = %error, "mdns-sd daemon shutdown failed");
-        }
-        if let Some(handle) = self.thread.take() {
-            // Ignore the join error: the thread may have already
-            // exited because the daemon receiver closed.
-            let _ = handle.join();
-        }
+        // Idempotent: the explicit `stop` path takes the
+        // [`MdnsHandle`] out of the adapter state and runs
+        // `shutdown` itself; when this `Drop` fires the guard is
+        // already flipped and the call short-circuits.
+        self.shutdown();
     }
 }
 
@@ -216,6 +287,7 @@ impl MdnsPeerDiscoveryAdapter {
                 fullname,
                 thread: Some(thread),
                 cancel,
+                shutdown_started: Cell::new(false),
             }),
             peer_registry: Some(peer_registry),
         };
@@ -226,13 +298,12 @@ impl MdnsPeerDiscoveryAdapter {
     fn shutdown(&self) {
         let mut state = self.state.lock().expect("state lock");
         if let Some(mut handle) = state.daemon.take() {
-            handle.cancel.store(true, Ordering::Release);
-            if let Err(error) = handle.daemon.shutdown() {
-                warn!(error = %error, "mdns-sd daemon shutdown failed");
-            }
-            if let Some(thread) = handle.thread.take() {
-                let _ = thread.join();
-            }
+            // Take the daemon handle out of state first so a
+            // second `stop` is a compile-time no-op (the
+            // `MdnsHandle` is no longer there) and `Drop` only
+            // runs the idempotent helper if this path didn't
+            // already execute the ordered shutdown.
+            handle.shutdown();
         }
         state.peer_registry = None;
     }
@@ -609,9 +680,14 @@ mod tests {
     }
 
     /// Loopback test: spin up two real daemons on the same host
-    /// and confirm the bouncer sees the first daemons record.
+    /// and confirm the bouncer sees the first daemons record AND
+    /// that stopping the first daemon emits `ServiceRemoved` on
+    /// the second daemon within the bounded window the design
+    /// pins (`local-peer-discovery/design.md` §"Descubrimiento,
+    /// presencia y compatibilidad": ordered shutdown → goodbye →
+    /// `ServiceRemoved` → `NotAvailable`, no TTL wait).
     ///
-    /// The test is feature-gated to keep CI on hosts without
+    /// The test stays feature-gated to keep CI on hosts without
     /// multicast (sandboxed runners, distroless containers, …)
     /// clean — the design documents that real discovery coverage
     /// requires a stable network surface, and the unit tests above
@@ -677,9 +753,9 @@ mod tests {
         // the matching record. mDNS announcements typically
         // resolve within a second on loopback but RFC 6762
         // allows for retransmissions.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
-        let mut found = false;
-        while std::time::Instant::now() < deadline {
+        let observe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        let mut observed = false;
+        while std::time::Instant::now() < observe_deadline {
             if recorder_b
                 .events
                 .lock()
@@ -694,16 +770,49 @@ mod tests {
                             && record.capability == first_ad.capability)
                 })
             {
-                found = true;
+                observed = true;
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        let _ = first.stop();
+        // Stopping `first` must desregister the published
+        // `fullname` *before* tearing the daemon down so the
+        // second daemon sees the goodbye packet and pushes a
+        // `Removed` event for the matching `peer_id`. Without
+        // the ordered shutdown the second daemon would only
+        // observe the disappearance after the mDNS TTL (~120 s),
+        // which is precisely the bug 3.5 must regress against.
+        first.stop().expect("first stop");
+        // The receiver polls every 500 ms; allow a bounded window
+        // (≈5 s) so retransmissions and the bounded
+        // `UNREGISTER_WAIT` ceiling fit comfortably while still
+        // failing fast enough to keep the suite responsive.
+        let removal_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut removed = false;
+        while std::time::Instant::now() < removal_deadline {
+            if recorder_b
+                .events
+                .lock()
+                .expect("events")
+                .iter()
+                .any(|event| {
+                    matches!(event, DiscoveryEvent::Removed { peer_id }
+                        if peer_id == &first_ad.peer_id)
+                })
+            {
+                removed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
         let _ = second.stop();
         assert!(
-            found,
+            observed,
             "second daemon never observed the first daemons advertisement on loopback"
+        );
+        assert!(
+            removed,
+            "second daemon never received ServiceRemoved for the first daemon after stop()"
         );
     }
 

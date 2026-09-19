@@ -35,6 +35,12 @@
   macOS. La prueba manual en Wayland detectó que Linux sólo habilitaba el
   feature de plataforma: el core seleccionaba `NoopPeerDiscoveryAdapter` y
   devolvía `Sin red local` sin llegar a abrir mDNS.
+- [x] 3.5 En el apagado ordenado, desregistrar el `fullname` mediante
+  `mdns_sd::ServiceDaemon::unregister` antes de `shutdown`, para que los
+  browsers remotos reciban `ServiceRemoved` y la presencia cambie a `No
+  disponible` sin esperar el TTL. Agregar una regresión de dos adapters que
+  compruebe `Observed` seguido de `Removed` al detener uno; puede omitir el
+  intercambio sólo cuando el host no permita multicast.
 
 ## 4. UI y comandos
 
@@ -203,6 +209,88 @@
   peer_id` se valida con eventos sintéticos y el caso loopback
   de la pasada anterior; la cobertura entre hosts queda
   pendiente hasta la prueba manual.
+- **3.5 — Goodbye packet y regresión de dos adapters.** El bug
+  observado en la prueba manual Linux ↔ macOS — el peer
+  remoto seguía marcado como `Detectado` hasta el TTL mDNS
+  (~120 s) tras desactivar sharing — venía de que el adaptador
+  llamaba `ServiceDaemon::shutdown()` sin ejecutar antes
+  `ServiceDaemon::unregister(&fullname)`. En `mdns-sd` v0.11
+  `unregister` es el apagado *graceful* del servicio: envía el
+  goodbye RFC 6762 §6.7 que provoca el `ServiceRemoved` en los
+  browsers remotos, mientras que `shutdown` sólo apaga el
+  daemon local sin enviar nada por multicast. La corrección
+  vive en `crates/clipvault-platform/src/peer_discovery/mdns.rs`:
+  - `MdnsHandle` ahora expone `shutdown(&mut self)` con un
+    flag `Cell<bool>` (`shutdown_started`) que ejecuta el
+    orden exacto que el diseño exige
+    (`local-peer-discovery/design.md` §"Descubrimiento,
+    presencia y compatibilidad") y queda idempotente para que
+    `Drop` y el camino explícito `stop()` converjan en una
+    sola pasada. `MdnsPeerDiscoveryAdapter::shutdown` toma el
+    `MdnsHandle` del estado (`Option::take`) y delega en
+    `handle.shutdown()`; al salir del `if let`, `Drop` ve la
+    guarda activada y corta en seco.
+  - El orden es `cancel.store(true) → daemon.unregister(&fullname) →
+    daemon.shutdown() → thread.take().join()`. La llamada a
+    `unregister` se cubre con `UNREGISTER_WAIT = 750 ms`
+    (`recv_timeout` sobre el `Receiver<UnregisterStatus>`
+    que `mdns-sd` expone para la confirmación); si vence el
+    plazo o `unregister` mismo falla, se registra una sola
+    frase técnica segura (`"mdns-sd unregister timed out;
+    continuing shutdown"` /
+    `"mdns-sd unregister failed; continuing shutdown"` /
+    `"mdns-sd daemon shutdown failed"`) — sin `fullname`,
+    hostname, IP, puerto ni detalle del error de red.
+  - El `fullname` sólo se usa dentro del adaptador para
+    pasárselo al daemon; no se loguea ni se expone al core,
+    SQLite, frontend, comandos Tauri ni a los sinks.
+  - El test `two_daemons_discover_each_other_on_loopback_when_multicast_is_available`
+    se extiende para, después del `Observed`, llamar
+    `first.stop()` y esperar (≤ 5 s) un
+    `DiscoveryEvent::Removed { peer_id }` con el `peer_id`
+    del primer adapter. Si alguna de las dos `start` falla
+    con `MulticastUnavailable`, el caso sale con
+    `loopback skipped` y `eprintln!` igual que antes, sin
+    relajarse: una vez que ambos adapters publicaron, tanto
+    `Observed` como `Removed` son aserciones obligatorias
+    (`assert!(observed, ...)` + `assert!(removed, ...)`).
+    Los tests sintéticos previos
+    (`resolved_then_removed_emit_same_peer_id`,
+    `two_peers_with_same_display_name_dont_interfere`,
+    `removed_without_prior_resolved_emits_no_event`,
+    `sanitise_instance_name_*`, `translate_resolved_*`,
+    `build_txt_properties_round_trips_the_advertisement`,
+    `adapter_is_idempotent_around_start_stop`,
+    `adapter_rejects_empty_peer_id_with_typed_error`,
+    `adapter_rejects_empty_capability_with_typed_error`) y los
+    tests neutrales de `peer_discovery.rs` siguen pasando
+    intactos.
+  - Verificación: 16/16 en
+    `cargo test -p clipvault-platform --lib --features
+    local-peer-identity-keychain,local-peer-discovery-mdns
+    peer_discovery` (los 13 tests previos del módulo +
+    el caso loopback ahora ampliado con la aserción
+    `Removed`, que pasa dentro del límite de 5 s con
+    multicast disponible), 16/16 en
+    `cargo test --package clipvault-core --lib
+    peer_discovery`, 149/149 en
+    `cargo test --package clipvault-db --lib`,
+    `cargo fmt --check` (limpio),
+    `cargo check --workspace --all-targets`,
+    `cargo clippy -p clipvault-platform --features
+    local-peer-identity-keychain,local-peer-discovery-mdns
+    --tests --no-deps -- -D warnings`,
+    `npm run check` (0 errores),
+    `npm run build`,
+    `openspec validate local-peer-discovery --strict`
+    (valid) y `git diff --check` limpios. La verificación
+    entre equipos reales sigue pendiente de la prueba
+    manual 5.3; tras el fix, en LAN con multicast el peer
+    remoto debería pasar a `No disponible` en
+    aproximadamente 2–4 s (goodbye + retransmisión a
+    120 ms + polling del receiver cada 500 ms). Una
+    desconexión abrupta del proceso o de la red puede
+    seguir dependiendo del TTL.
 - Los tests de `bootstrap::tests::capture_loop_*` y
   `runtime::linux_app_metadata::tests::*` que fallan en el host son
   preexistentes en `HEAD` antes de este cambio y no están

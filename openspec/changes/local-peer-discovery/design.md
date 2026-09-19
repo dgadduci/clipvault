@@ -26,9 +26,13 @@ los transmite al core, frontend, logs ni SQLite.
 El shell instala un único worker administrado por el ciclo de vida del runtime:
 el sink alimenta al `PeerDiscoveryRuntime`, que procesa/persiste eventos de
 forma continua mediante el servicio core. Al apagar o desactivar sharing, el
-worker se detiene y el adaptador retira el anuncio y browse; los `known_peers`
-persistidos se conservan. Los comandos Tauri siguen siendo adaptadores
-delgados, sin pollers o lógica de mDNS propia.
+worker se detiene y el adaptador DEBE desregistrar primero el `fullname` mDNS
+que publicó —para emitir el goodbye y que los browsers remotos reciban
+`ServiceRemoved`— antes de apagar el daemon y el browse local; los
+`known_peers` persistidos se conservan. Una interrupción no ordenada puede
+depender del TTL, pero desactivar el toggle o cerrar ordenadamente no. Los
+comandos Tauri siguen siendo adaptadores delgados, sin pollers o lógica de
+mDNS propia.
 
 No se agrega servidor TCP en este cambio. El anuncio DNS-SD usa el mismo tipo
 de servicio futuro, _clipvault._tcp.local, con puerto 0 y capability
