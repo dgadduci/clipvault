@@ -42,7 +42,23 @@ local-peer-identity-keychain = ["clipvault-platform/local-peer-identity-keychain
 # `NoopPeerDiscoveryAdapter` the platform crate falls back to.
 # Windows builds and cross-compiles opt out so the platform crate
 # still compiles without linking `mdns-sd`.
-local-peer-discovery-mdns = ["clipvault-platform/local-peer-discovery-mdns"]
+#
+# The feature MUST be propagated to BOTH `clipvault-core` and
+# `clipvault-platform` from this central declaration. The bootstrap
+# in `clipvault-core` selects between `MdnsPeerDiscoveryAdapter` and
+# `NoopPeerDiscoveryAdapter` via its OWN `cfg(feature =
+# "local-peer-discovery-mdns")` check — enabling the feature on
+# `clipvault-platform` alone leaves the core's cfg false and the
+# runtime still resolves `NoopPeerDiscoveryAdapter` on Linux, which
+# is the regression that surfaced as `Sin red local` in the manual
+# Wayland test. Forwarding through `clipvault-core` (which itself
+# forwards to `clipvault-platform`) keeps the wiring in a single
+# place so the macOS / Linux target-specific dependency blocks do
+# not have to repeat it.
+local-peer-discovery-mdns = [
+    "clipvault-core/local-peer-discovery-mdns",
+    "clipvault-platform/local-peer-discovery-mdns",
+]
 # Linux native Wayland active-app detection (`ext-foreign-toplevel-list-v1`
 # with `zwlr_foreign_toplevel_management_unstable_v1` fallback). The
 # feature is opt-in so macOS / non-Linux builds never link the Wayland

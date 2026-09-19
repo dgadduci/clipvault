@@ -16,6 +16,21 @@
    * self-contained: every async refresh lives here and the
    * parent only sees the typed `onSettingsChanged` callback the
    * rest of the app uses to keep the rail / cards in sync.
+   *
+   * While the modal is mounted and the runtime is browsing the
+   * LAN (`toggle.kind === "active"`) the modal polls the
+   * metadata-only snapshot on a short interval so a fresh
+   * `Observed` or `Removed` event the discovery worker drained
+   * reaches the `Equipos` view without reopening the modal. The
+   * frontend never touches SQLite, sockets, IPs, ports or mDNS
+   * logic: the refresh always routes through
+   * `peerSnapshotCommand`. The interval is cleared in
+   * `onDestroy` so closing the modal halts polling immediately,
+   * and `refreshSnapshot` is the single shared helper that owns
+   * the round-trip plus a single-flight guard: every snapshot
+   * read (mount-time refresh, post-toggle refresh, identity
+   * retry and the polling tick) coalesces through it so a
+   * previous in-flight request can never overlap a new one.
    */
   import { onDestroy, onMount } from "svelte";
   import {
@@ -42,15 +57,48 @@
   let actionMessage: string | null = null;
   let errorMessage: string | null = null;
 
+  // Polling cadence for the metadata-only snapshot. Kept short so
+  // a fresh `Observed` / `Removed` event the worker drained from
+  // the queue reflects on the `Equipos` view without reopening
+  // the modal, and short enough to feel near-real-time without
+  // burning the bridge.
+  const PEER_SNAPSHOT_REFRESH_MS = 2_000;
+  let snapshotTimer: ReturnType<typeof setInterval> | null = null;
+  // Single-flight latch for the snapshot round-trip. The polling
+  // tick, the post-toggle reload, the identity retry and the
+  // mount-time refresh all funnel through `refreshSnapshot`; this
+  // promise is shared while a request is in flight so the next
+  // caller reuses it instead of opening a second
+  // `peerSnapshotCommand()` while the previous one is still
+  // pending.
+  let snapshotRefreshPromise: Promise<void> | null = null;
+
+  function startSnapshotRefresh(): void {
+    if (snapshotTimer !== null) return;
+    snapshotTimer = setInterval(() => {
+      void refreshSnapshot();
+    }, PEER_SNAPSHOT_REFRESH_MS);
+  }
+
+  function stopSnapshotRefresh(): void {
+    if (snapshotTimer === null) return;
+    clearInterval(snapshotTimer);
+    snapshotTimer = null;
+  }
+
   async function refresh(): Promise<void> {
     loading = true;
     try {
-      const [toggleValue, snapshotValue] = await Promise.all([
-        peerSharingToggleGetCommand(),
-        peerSnapshotCommand(),
+      // Toggle and snapshot are independent reads; run them in
+      // parallel but always route the snapshot through the
+      // shared single-flight helper so it cannot overlap a
+      // tick that fired just before mount.
+      const [, ] = await Promise.all([
+        peerSharingToggleGetCommand().then((value) => {
+          toggle = value;
+        }),
+        refreshSnapshot(),
       ]);
-      toggle = toggleValue;
-      snapshot = snapshotValue;
     } catch (error) {
       errorMessage = describeError(error);
     } finally {
@@ -59,11 +107,27 @@
   }
 
   async function refreshSnapshot(): Promise<void> {
-    try {
-      snapshot = await peerSnapshotCommand();
-    } catch (error) {
-      errorMessage = describeError(error);
+    // Single-flight: if a previous round-trip is still pending,
+    // return its promise so every snapshot read coalesces into
+    // one bridge call. The polling tick, the post-toggle
+    // reload, the identity retry and the mount-time refresh
+    // all funnel through this helper — only this function may
+    // call `peerSnapshotCommand()`. The IIFE clears the latch
+    // in `finally` so a rejected refresh cannot lock it
+    // forever and starve the next caller.
+    if (snapshotRefreshPromise !== null) {
+      return snapshotRefreshPromise;
     }
+    snapshotRefreshPromise = (async () => {
+      try {
+        snapshot = await peerSnapshotCommand();
+      } catch (error) {
+        errorMessage = describeError(error);
+      } finally {
+        snapshotRefreshPromise = null;
+      }
+    })();
+    return snapshotRefreshPromise;
   }
 
   async function toggleSharing(target: boolean): Promise<void> {
@@ -192,9 +256,26 @@
   onDestroy(() => {
     toggleBusy = false;
     refreshingIdentity = false;
+    // Halting the polling here is required: leaving the modal
+    // open / closed without clearing the interval would keep the
+    // bridge round-trip alive in the background. The shared
+    // `Modal` shell only mounts the slot while `open === true`,
+    // so the timer MUST stop when the modal unmounts.
+    stopSnapshotRefresh();
   });
 
   $: toggle, onSettingsChanged?.({} as Settings);
+  $: {
+    // Only poll while the runtime is actually browsing the LAN.
+    // `identity_unavailable` / `runtime_stopped` mean the toggle
+    // is persisted but the worker is not surfacing new events,
+    // so polling would only re-fetch a frozen snapshot.
+    if (toggle !== null && toggle.kind === "active") {
+      startSnapshotRefresh();
+    } else {
+      stopSnapshotRefresh();
+    }
+  }
 </script>
 
 <section class="peer-sharing" data-testid="peer-sharing-modal">

@@ -30,6 +30,11 @@
 - [x] 3.3 Declarar Local Network/Bonjour reales para macOS en el bundle final,
   y mantener un único camino Rust para Linux Wayland y X11. Comentarios o
   documentación de una obligación futura no satisfacen esta tarea.
+- [x] 3.4 Propagar `local-peer-discovery-mdns` desde el feature productivo de
+  `clipvault-app` hacia `clipvault-core` y `clipvault-platform` en Linux y
+  macOS. La prueba manual en Wayland detectó que Linux sólo habilitaba el
+  feature de plataforma: el core seleccionaba `NoopPeerDiscoveryAdapter` y
+  devolvía `Sin red local` sin llegar a abrir mDNS.
 
 ## 4. UI y comandos
 
@@ -39,6 +44,13 @@
   pares y estados Detectado/No verificado/No disponible.
 - [x] 4.3 Añadir tests frontend de toggle, snapshot, estados y ausencia de
   acciones de pairing/historial.
+- [x] 4.4 Refrescar el snapshot metadata-only mientras `PeerSharingModal` esté
+  abierto y el runtime esté activo, liberando el temporizador al destruir el
+  modal. La prueba manual detectó que el worker recibía anuncios pero la UI
+  sólo consultaba al montar o cambiar el toggle, dejando una presencia
+  histórica como `No disponible` hasta reabrir el modal. Todas las rutas de
+  lectura del snapshot deben compartir el mismo guardia single-flight; el
+  guardia sólo en el tick no evita el solapamiento con la recarga inmediata.
 
 ## 5. Verificación
 
@@ -98,6 +110,42 @@
   conserva `known_peers`. La UI sólo reporta "Activado" cuando
   `kind === "active"`; un fallo de multicast devuelve
   `runtime_stopped` y la UI muestra el estado tipado seguro.
+- **3.4 — Propagación del feature mDNS al core.** El feature
+  productivo `local-peer-discovery-mdns` en
+  `app/tauri/src-tauri/Cargo.toml` ahora habilita, además de
+  `clipvault-platform/local-peer-discovery-mdns`, el forwarding
+  `clipvault-core/local-peer-discovery-mdns`. La causa raíz era
+  exactamente la del bug manual: el `default_peer_discovery_adapter`
+  en `crates/clipvault-core/src/bootstrap.rs:992` discrimina con
+  `#[cfg(all(feature = "local-peer-discovery-mdns", any(target_os
+  = "macos", target_os = "linux")))]`, y ese `cfg` se evalúa contra
+  las features del *propio* `clipvault-core`. Hasta ahora el shell
+  sólo forwardaba la feature hacia `clipvault-platform`, así que en
+  Linux el `cfg` del core quedaba en `false` aunque el de plataforma
+  estuviera activo: el bootstrap resolvía `NoopPeerDiscoveryAdapter`
+  y el toggle quedaba persistido pero el runtime en `Sin red local`.
+  Centralizar el forwarding en la declaración del feature evita
+  duplicar el wiring target-specific (los bloques
+  `[target.'cfg(target_os = "macos")'.dependencies]` y
+  `[target.'cfg(all(target_os = "linux", not(target_os = "macos")))'.dependencies]`
+  ya no necesitan repetir
+  `local-peer-discovery-mdns` para `clipvault-core`; siguen
+  habilitándolo sobre `clipvault-platform` para conservar el
+  contrato existente). Verificación:
+  `cargo check -p clipvault-app` (compila, recompila
+  `clipvault-core` con el feature activo),
+  `cargo tree -e features -p clipvault-app -i clipvault-core`
+  (muestra `clipvault-core feature "local-peer-discovery-mdns"`
+  activada por `clipvault-app feature "local-peer-discovery-mdns"`),
+  `cargo tree -e features -p clipvault-app` (saca `mdns-sd v0.11.5`
+  en el grafo), 16/16 en `cargo test --package clipvault-core --lib
+  peer_discovery`, 16/16 en `cargo test -p clipvault-platform --lib
+  --features local-peer-identity-keychain,local-peer-discovery-mdns
+  peer_discovery`, 149/149 en `cargo test --package clipvault-db
+  --lib`, `cargo fmt --check`, `openspec validate
+  local-peer-discovery --strict` y `git diff --check` limpios. No se
+  tocaron adaptador mDNS, TXT metadata, puertos, UI ni contratos de
+  discovery. Pendiente la prueba manual Linux↔macOS de 5.3.
 - **3.3 — Bundle macOS.** El plist real vive en
   `app/tauri/src-tauri/macos/Info.plist` y `tauri.conf.json` lo
   enlaza vía `bundle.macOS.infoPlist`. Tauri mergea
@@ -159,3 +207,41 @@
   `runtime::linux_app_metadata::tests::*` que fallan en el host son
   preexistentes en `HEAD` antes de este cambio y no están
   relacionados con él.
+- **4.4 — Refresco periódico del snapshot metadata-only.**
+  `app/tauri/frontend/src/PeerSharingModal.svelte` arma un
+  `setInterval` de `2_000 ms` (constante
+  `PEER_SNAPSHOT_REFRESH_MS`) que delega en el helper compartido
+  `refreshSnapshot` (siempre vía `peerSnapshotCommand`, sin
+  SQLite / sockets / IPs / puertos / mDNS en el frontend) y se
+  libera en `onDestroy` con `clearInterval`. El temporizador
+  sólo se inicia cuando `toggle.kind === "active"` (el runtime
+  está navegando la LAN); en `identity_unavailable` /
+  `runtime_stopped` el modal deja de hacer polling porque el
+  worker no está drenando eventos nuevos. El guardia
+  `snapshotRefreshPromise` vive dentro de `refreshSnapshot`, no
+  en el callback del temporizador: cuando hay un round-trip en
+  curso, el helper devuelve esa misma promesa en lugar de
+  abrir un segundo `peerSnapshotCommand`. Por eso el tick
+  periódico, la recarga inmediata al montar, la recarga
+  inmediata posterior al toggle y el reintento de identidad
+  comparten el mismo single-flight: el `peerSnapshotCommand()`
+  directo sólo existe dentro de `refreshSnapshot`. La IIFE
+  limpia la promesa en `finally` para que un refresh rechazado
+  no deje el guardia bloqueado. La recarga inmediata al montar
+  y al cambiar el toggle se conserva intacta. Verificación:
+  5/5 en `node --test
+  node_modules/.cache/clipvault-test-build/tests/peerSharingModal.test.js`
+  (cadencia acotada, gate sobre `toggle.kind === "active"`,
+  un único `peerSnapshotCommand()` directo dentro de
+  `refreshSnapshot`, guardia `snapshotRefreshPromise`
+  reutilizando la promesa en curso, ausencia de
+  `peerSnapshotCommand()` directo en `refresh` /
+  `toggleSharing` / `refreshIdentity` / callback del
+  `setInterval`, `clearInterval` dentro de `onDestroy`,
+  refresco inmediato al montar y al toggle), `npm run check`
+  (0 errores), `npm run build`, `openspec validate
+  local-peer-discovery --strict` (valid) y `git diff --check`
+  limpios. La nota rápida del manual — cerrar y reabrir el
+  modal tras unos segundos debe seguir siendo la prueba
+  visual de que el worker ya estaba emitiendo y el defecto era
+  sólo del refresco en UI.

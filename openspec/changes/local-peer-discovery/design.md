@@ -6,9 +6,13 @@ Depende de local-peer-identity-foundation. Esta entrega incorpora el adaptador
 productivo de mDNS en `clipvault-platform`, detrás de `PeerDiscoveryAdapter`;
 no se difiere a un crate ni a un cambio futuro. Usa `mdns-sd` como dependencia
 opcional, madura y compartida por macOS y Linux, activada sólo por el feature
-`local-peer-discovery-mdns` del shell productivo. El core recibe eventos
-normalizados y decide validación/persistencia; Tauri sólo inicia/detiene el
-runtime y entrega DTOs metadata-only.
+`local-peer-discovery-mdns` del shell productivo. Ese feature del shell DEBE
+propagarse tanto a `clipvault-core` (que selecciona el adaptador productivo)
+como a `clipvault-platform` (que lo implementa); habilitarlo sólo en la
+dependencia de plataforma deja al core en el fallback `Noop` y no satisface el
+opt-in. El core recibe eventos normalizados y decide
+validación/persistencia; Tauri sólo inicia/detiene el runtime y entrega DTOs
+metadata-only.
 
 El contrato neutral de plataforma define `DiscoveryAdvertisement` y
 `DiscoveryEvent` (resuelto/eliminado), ambos con sólo `peer_id`, fingerprint,
@@ -66,8 +70,15 @@ escanear.
 ## UI y pruebas
 
 Settings agrega el toggle. La vista Equipos lista el snapshot persistido y
-presente, con nombre, fingerprint abreviado y presencia. Sólo se muestra
-información: no hay acción Vincular ni Ver historial todavía.
+presente, con nombre, fingerprint abreviado y presencia. Mientras ese modal
+esté abierto y el runtime esté activo, el frontend DEBE volver a solicitar el
+snapshot metadata-only con un intervalo acotado y liberar el temporizador al
+cerrarse. Así un anuncio o una desaparición procesados por el worker se
+reflejan sin cerrar/reabrir la aplicación; la UI no accede a SQLite, sockets ni
+lógica de mDNS. Todas las lecturas de snapshot de ese modal —incluida la
+recarga inmediata tras el toggle— deben pasar por un único guardia single-flight
+para no solaparse con un tick pendiente. Sólo se muestra información: no hay
+acción Vincular ni Ver historial todavía.
 
 Tests puros cubren validación, self-filter, merge idempotente, TTL,
 desactivación y no persistencia de endpoints. El adaptador productivo se prueba
