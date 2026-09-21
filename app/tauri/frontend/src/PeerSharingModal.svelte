@@ -41,7 +41,7 @@
    * pairing modal ([`PeerPairingModal.svelte`]) handles focus,
    * Escape and the two-minute timeout the runtime enforces.
    */
-  import { onDestroy, onMount } from "svelte";
+  import { createEventDispatcher, onDestroy, onMount } from "svelte";
   import {
     peerPairingBlockCommand,
     peerPairingRevokeCommand,
@@ -51,9 +51,9 @@
     peerSharingToggleSetCommand,
     peerSnapshotCommand,
   } from "./lib/tauri";
-  import PeerPairingModal from "./PeerPairingModal.svelte";
   import type {
     PeerPresence,
+    PeerRow,
     PeerSharingToggleResponse,
     PeerSnapshot,
     PeerSnapshotEntry,
@@ -63,10 +63,10 @@
 
   export let onSettingsChanged: (settings: Settings) => void = () => {};
 
+  const dispatch = createEventDispatcher<{ pairingRequested: PeerRow }>();
+
   /** Local trust-state mirror used to drive the per-row actions. */
   let trustStates: Record<string, PeerTrustState> = {};
-  let pairingOpen = false;
-  let pairingRow: PeerSnapshotEntry | null = null;
   let pairingActionMessage: string | null = null;
   let pairingActionError: string | null = null;
   let pairingBusy = false;
@@ -267,11 +267,18 @@
     }
   }
 
-  async function openPairingModal(entry: PeerSnapshotEntry): Promise<void> {
-    pairingRow = entry;
+  function openPairingModal(entry: PeerSnapshotEntry): void {
     pairingActionMessage = null;
     pairingActionError = null;
-    pairingOpen = true;
+    dispatch("pairingRequested", {
+      peer_id: entry.peer_id,
+      display_name: describeEntry(entry),
+      short_fingerprint: shortFingerprint(entry.public_key_fingerprint),
+      trust_state: trustStateOf(entry.peer_id),
+      presence: entry.presence,
+      paired_at: null,
+      last_discovered_at: entry.last_discovered_at,
+    });
   }
 
   async function revoke(entry: PeerSnapshotEntry): Promise<void> {
@@ -317,12 +324,6 @@
     } finally {
       pairingBusy = false;
     }
-  }
-
-  function handlePairingClosed(): void {
-    pairingOpen = false;
-    pairingRow = null;
-    void refresh();
   }
 
   function isToggleOn(value: PeerSharingToggleResponse | null): boolean {
@@ -565,14 +566,6 @@
     {/if}
   </article>
 
-  <PeerPairingModal
-    open={pairingOpen}
-    row={pairingRow
-      ? { peer_id: pairingRow.peer_id, display_name: describeEntry(pairingRow), short_fingerprint: shortFingerprint(pairingRow.public_key_fingerprint), trust_state: trustStateOf(pairingRow.peer_id), presence: pairingRow.presence, paired_at: null, last_discovered_at: pairingRow.last_discovered_at }
-      : null}
-    trigger={null}
-    on:close={handlePairingClosed}
-  />
 </section>
 
 <style>

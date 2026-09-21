@@ -589,6 +589,8 @@ export interface PeerPairingSessionSnapshot {
   session_id: number;
   remote_peer_id: string;
   remote_fingerprint: string;
+  /** True when this host received the authenticated pairing invitation. */
+  is_inbound: boolean;
   remote_display_name: string;
   local_approved: boolean;
   remote_approved: boolean;

@@ -177,6 +177,14 @@ pub struct PairingSessionSnapshot {
     pub session_id: PairingSessionId,
     pub remote_peer_id: String,
     pub remote_fingerprint: String,
+    /// `true` when the remote peer initiated this session and the
+    /// local listener registered it from an authenticated `Hello`.
+    ///
+    /// This is metadata-only directionality, not transport state:
+    /// it lets the shell surface an inbound invitation immediately
+    /// instead of starting a competing outbound session when the
+    /// user opens the pairing UI on the receiving host.
+    pub is_inbound: bool,
     /// SHA-256 of the remote peer's TLS cert DER. The runtime
     /// persists this value in `known_peers.tls_cert_fingerprint`
     /// after the dual-approval gate promotes the row and forwards
@@ -1200,6 +1208,7 @@ impl PairingRuntime {
                     session_id: session.id,
                     remote_peer_id: session.remote_peer_id.clone(),
                     remote_fingerprint: session.remote_fingerprint.clone(),
+                    is_inbound: session.is_inbound,
                     cert_fingerprint: if session.cert_fingerprint.is_empty() {
                         None
                     } else {
@@ -1491,6 +1500,7 @@ impl PairingRuntime {
             session_id: session.id,
             remote_peer_id: session.remote_peer_id.clone(),
             remote_fingerprint: session.remote_fingerprint.clone(),
+            is_inbound: session.is_inbound,
             cert_fingerprint: if session.cert_fingerprint.is_empty() {
                 None
             } else {
@@ -2432,6 +2442,12 @@ mod tests {
         // the runtime drives in production.
         let registered = transport.inbound_registrations.lock().expect("reg");
         assert_eq!(registered.len(), 1);
+        let snapshots = runtime.snapshot();
+        assert_eq!(snapshots.len(), 1);
+        assert!(
+            snapshots[0].is_inbound,
+            "the shell must be able to identify an authenticated inbound invitation"
+        );
 
         // Approve the inbound session. The runtime MUST route
         // through `approve_inbound_session`, NOT

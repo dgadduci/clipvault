@@ -60,6 +60,10 @@ function peerPairingSource(): string {
   return stripComments(loadSource("src/PeerPairingModal.svelte"));
 }
 
+function appSource(): string {
+  return stripComments(loadSource("src/App.svelte"));
+}
+
 function tauriSource(): string {
   return stripComments(loadSource("src/lib/tauri.ts"));
 }
@@ -226,7 +230,7 @@ test("peer-pairing modal detects inbound sessions before auto-starting outbound"
   // attempt and bypass the dual-approval gate.
   assert.match(
     body,
-    /if\s*\(\s*await\s+detectInboundSession\(\)\s*\)\s*\{\s*return;\s*\}/,
+    /if\s*\(\s*await\s+detectInboundSession\([^)]*\)\s*\)\s*(?:\{\s*)?return;/,
     "inbound detection must NOT auto-approve; it must only surface the metadata and wait for the user",
   );
 });
@@ -239,12 +243,18 @@ test("peer-pairing modal cancels on close and on unmount", () => {
   // A stale inbound listener that keeps a held session past
   // dismissal would pin a peer the user dismissed.
   const body = peerPairingSource();
-  // Close handler must cancel the active session before
-  // hiding the modal.
+  // Close captures the active id, invalidates late IPC work, and
+  // forwards cancellation before the parent is notified. This
+  // avoids both a stale listener and a dialog that cannot reopen.
   assert.match(
     body,
-    /function close\b[\s\S]{0,200}if\s*\(\s*session\s*\)\s*\{[\s\S]{0,80}void\s+cancel\(\)/,
-    "close() must cancel the active session before toggling open=false",
+    /function close\b[\s\S]{0,300}const\s+sessionId\s*=\s*session\?\.session_id[\s\S]{0,500}peerPairingCancelCommand\(\{\s*session_id:\s*sessionId\s*}\)/,
+    "close() must cancel the active pairing session",
+  );
+  assert.match(
+    body,
+    /dispatch\(\s*"close"\s*,\s*\{\s*sessionId:/,
+    "the child modal must notify its parent so a later Vincular click can reopen it",
   );
   // onDestroy must cancel the active session so the listener
   // releases its bounded wait.
@@ -252,6 +262,32 @@ test("peer-pairing modal cancels on close and on unmount", () => {
     body,
     /onDestroy[\s\S]{0,200}peerPairingCancelCommand/,
     "onDestroy must cancel the active pairing session",
+  );
+});
+
+test("App surfaces inbound invitations globally and only once", () => {
+  // The receiving device must not require its Settings modal to be
+  // open. The root app polls the metadata-only snapshot, filters to
+  // listener-originated sessions, and mounts the shared pairing
+  // modal. Dismissed ids suppress the short cancel propagation race;
+  // a fresh inbound session still remains eligible.
+  const body = appSource();
+  assert.match(body, /peerPairingSnapshotCommand/);
+  assert.match(body, /session\.is_inbound/);
+  assert.match(body, /PAIRING_INVITATION_REFRESH_MS\s*=\s*1_000/);
+  assert.match(body, /dismissedInboundPairingSessions/);
+  assert.match(body, /<PeerPairingModal[\s\S]*open=\{openModal === "peer_pairing"\}/);
+});
+
+test("failed starts show a typed error instead of looping on Generando código", () => {
+  const body = peerPairingSource();
+  assert.match(body, /function failedOutcomeMessage/);
+  assert.match(body, /const failure = failedOutcomeMessage\(response\)/);
+  assert.match(body, /if\s*\(failure\)\s*\{\s*lastError = failure;\s*return;/);
+  assert.doesNotMatch(
+    body,
+    /open\s*&&\s*!session\s*&&\s*!starting/,
+    "a failed or cancelled session must wait for an explicit new open, not auto-start again",
   );
 });
 

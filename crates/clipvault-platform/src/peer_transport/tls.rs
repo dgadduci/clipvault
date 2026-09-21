@@ -147,19 +147,19 @@ pub(crate) type InboundSessionsMap = Arc<
 /// Register a fresh inbound session in the per-transport
 /// registry and return the ([`crate::peer_transport::PairingSessionId`],
 /// [`Arc<Mutex<InboundSession>>`]) pair the listener uses to
-/// drive the bounded pairing protocol. `next_inbound_session_id`
-/// is the per-transport monotonic counter so two listeners never
-/// hand out the same id.
+/// drive the bounded pairing protocol. `next_session_id` is shared
+/// with outbound sessions on this transport so ids stay unique in
+/// the runtime's direction-agnostic session table.
 pub(crate) fn register_inbound_session(
     inbound_sessions: &InboundSessionsMap,
-    next_inbound_session_id: &std::sync::atomic::AtomicU64,
+    next_session_id: &std::sync::atomic::AtomicU64,
     remote_peer_id: &str,
     sink: Option<SharedSink>,
 ) -> (
     crate::peer_transport::PairingSessionId,
     Arc<parking_lot::Mutex<InboundSession>>,
 ) {
-    let id = next_inbound_session_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let id = next_session_id.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     let session_id = crate::peer_transport::PairingSessionId(id);
     let session = Arc::new(parking_lot::Mutex::new(InboundSession {
         session_id,
@@ -649,7 +649,11 @@ pub fn install_with_material_and_resolver(
         let identity_for_task = material.clone();
         let local_public_key = identity.public_key;
         let local_peer_id = identity.peer_id.to_string();
-        let local_fingerprint = identity.fingerprint.to_string();
+        // The SAS commits to both full public-key fingerprints. The
+        // abbreviated identity fingerprint is UI-only and would make
+        // this side derive a weaker, different transcript input than
+        // the mTLS dialer and the signed approval use.
+        let local_fingerprint = full_public_key_fingerprint(&identity.public_key);
         let peer_cert_slot_for_task = Arc::clone(&peer_cert_slot);
         let local_display_name_for_task = display_name.clone();
         // Use the shared handshake pin lookup the transport owns
@@ -673,8 +677,10 @@ pub fn install_with_material_and_resolver(
             let state = transport.state.lock().expect("state lock");
             Arc::clone(&state.inbound_sessions)
         };
-        let next_inbound_session_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
-        let next_inbound_session_id_for_task = Arc::clone(&next_inbound_session_id);
+        let next_session_id_for_task = {
+            let state = transport.state.lock().expect("state lock");
+            Arc::clone(&state.next_session_id)
+        };
         let accept_handle = runtime.spawn(async move {
             run_accept_loop(
                 listener,
@@ -689,7 +695,7 @@ pub fn install_with_material_and_resolver(
                 peer_cert_slot_for_task,
                 handshake_pins_lookup,
                 inbound_sessions_for_task,
-                next_inbound_session_id_for_task,
+                next_session_id_for_task,
             )
             .await;
         });
@@ -1148,7 +1154,7 @@ async fn run_accept_loop(
     // wakes up. Cloning the `Arc` keeps every spawned session
     // handler pointed at the same map.
     inbound_sessions: InboundSessionsMap,
-    next_inbound_session_id: Arc<std::sync::atomic::AtomicU64>,
+    next_session_id: Arc<std::sync::atomic::AtomicU64>,
 ) {
     loop {
         if cancel.load(Ordering::Acquire) {
@@ -1178,7 +1184,7 @@ async fn run_accept_loop(
         let peer_cert_slot_for_session = Arc::clone(&peer_cert_slot);
         let handshake_pins_for_session = handshake_pins.clone();
         let inbound_sessions_for_session = Arc::clone(&inbound_sessions);
-        let next_inbound_session_id_for_session = Arc::clone(&next_inbound_session_id);
+        let next_session_id_for_session = Arc::clone(&next_session_id);
         tokio::spawn(async move {
             let outcome = handle_connection(
                 stream,
@@ -1194,7 +1200,7 @@ async fn run_accept_loop(
                 peer_cert_slot_for_session,
                 handshake_pins_for_session,
                 inbound_sessions_for_session,
-                next_inbound_session_id_for_session,
+                next_session_id_for_session,
             )
             .await;
             if !matches!(outcome, ConnectionOutcome::Completed) {
@@ -1241,7 +1247,7 @@ async fn handle_connection(
     peer_cert_slot: Arc<PeerCertSlot>,
     handshake_pins: Arc<HandshakePinLookup>,
     inbound_sessions: InboundSessionsMap,
-    next_inbound_session_id: Arc<std::sync::atomic::AtomicU64>,
+    next_session_id: Arc<std::sync::atomic::AtomicU64>,
 ) -> ConnectionOutcome {
     let _ = peer_addr;
     let tls_stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
@@ -1270,7 +1276,7 @@ async fn handle_connection(
             peer_cert_slot,
             handshake_pins,
             inbound_sessions,
-            next_inbound_session_id,
+            next_session_id,
         ),
     )
     .await;
@@ -1327,7 +1333,7 @@ async fn run_pairing_session<IO>(
     peer_cert_slot: Arc<PeerCertSlot>,
     handshake_pins: Arc<HandshakePinLookup>,
     inbound_sessions: InboundSessionsMap,
-    next_inbound_session_id: Arc<std::sync::atomic::AtomicU64>,
+    next_session_id: Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<(), String>
 where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1433,7 +1439,7 @@ where
     // immediately.
     let (session_id, inbound_session) = register_inbound_session(
         &inbound_sessions,
-        &next_inbound_session_id,
+        &next_session_id,
         &remote_peer_id,
         Some(Arc::clone(&sink) as SharedSink),
     );
@@ -3147,6 +3153,30 @@ mod tests {
     fn deterministic_material(seed_byte: u8) -> LocalIdentityMaterial {
         let seed = [seed_byte; 32];
         LocalIdentityMaterial::from_seed(seed).expect("material")
+    }
+
+    /// Inbound and outbound session ids land in one runtime map.
+    /// They therefore MUST reserve values from the same counter: a
+    /// receiver that has an invitation open and then clicks
+    /// `Vincular` must not overwrite that inbound row with another
+    /// session bearing id `1`.
+    #[test]
+    fn inbound_and_outbound_sessions_share_one_id_namespace() {
+        let transport = super::super::TlsPeerTransport::new();
+        let (inbound_sessions, next_session_id) = {
+            let state = transport.state.lock().expect("state lock");
+            (
+                Arc::clone(&state.inbound_sessions),
+                Arc::clone(&state.next_session_id),
+            )
+        };
+        let (inbound_id, _) =
+            register_inbound_session(&inbound_sessions, &next_session_id, "remote-peer", None);
+        let outbound_id =
+            crate::peer_transport::PairingSessionId(next_session_id.fetch_add(1, Ordering::AcqRel));
+        assert_ne!(inbound_id, outbound_id);
+        assert_eq!(inbound_id.as_u64(), 1);
+        assert_eq!(outbound_id.as_u64(), 2);
     }
 
     /// A fresh `LocalIdentityMaterial` exposes the same public

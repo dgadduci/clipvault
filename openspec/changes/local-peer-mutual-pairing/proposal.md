@@ -18,7 +18,8 @@ sólo health autenticado; ningún historial ni contenido se expone aún.
 - Reutilizar identidad y known_peers de los cambios previos.
 - Añadir listener TCP/TLS local, identidad certificada y mTLS pinning.
 - Implementar invitación, código decimal de seis dígitos, doble aprobación,
-  cancelación/timeout y trust state.
+  cancelación/timeout y trust state, incluida una invitación inbound visible
+  aunque el panel de Compartir no esté abierto.
 - Permitir N vínculos independientes por identidad.
 - Exponer desvincular, bloquear, desbloquear y health autenticado.
 

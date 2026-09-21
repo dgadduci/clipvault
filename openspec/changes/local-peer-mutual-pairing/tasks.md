@@ -825,6 +825,16 @@
   `sync_pairing_transport_on_startup` en `bootstrap.rs`).
 - [x] 4.2 Implementar modal accesible de código y acciones de trust en Equipos,
   con foco, Escape, timeout y retorno; no incluir historial aún.
+  *Nota 2026-09-21 (corrección de prueba manual):* el snapshot ahora expone
+  `is_inbound` metadata-only. `App.svelte` consulta sólo esas sesiones y abre
+  el modal global aunque el panel de Compartir esté cerrado; nunca inicia una
+  segunda sesión outbound ni aprueba automáticamente. `PeerPairingModal`
+  emite `close` al padre, cancela el id opaco y usa un epoch para que una
+  respuesta `start` tardía se cancele en vez de revivir el diálogo. Las
+  salidas `failed` se muestran como error tipado, no como “Generando código…”.
+  `TlsPeerTransport` además reserva ids inbound y outbound desde un mismo
+  contador (`inbound_and_outbound_sessions_share_one_id_namespace`), evitando
+  que los dos intentos se sobrescriban si ambos usuarios pulsan Vincular.
 - [x] 4.3 Probar frontend, listener TLS real y que rutas history/fetch/import
   siguen rechazadas.
   *Cobertura:* los 14 tests de `peerPairingModal.test.ts` /

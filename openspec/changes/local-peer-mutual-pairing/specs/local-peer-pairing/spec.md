@@ -87,6 +87,12 @@ envelope travels the wire. Only after `approve_local` on each side does the
 listener sign and send its own `Approve`; the listener MUST send its
 `Approve` even when the dialer is the only one expected to sign, so the
 dual approval gate cannot be bypassed by a missing acknowledgement.
+The metadata-only session snapshot SHALL mark listener-originated sessions as
+inbound. The shell SHALL use that marker to surface the same approval dialog
+without requiring the receiving user to open the sharing settings or start a
+second outbound pairing operation. Closing the dialog SHALL cancel its opaque
+session id and suppress only that id until the runtime removes it; a later
+invitation with a new id remains eligible to be shown.
 
 #### Scenario: Inbound session appears before HelloAck
 
@@ -102,6 +108,15 @@ dual approval gate cannot be bypassed by a missing acknowledgement.
 - **THEN** the listener continues the bounded pairing protocol and signs /
   sends its own `Approve` envelope; if no approval lands before the session
   timeout the listener closes the connection without promoting the peer
+
+#### Scenario: Receiver sees an inbound invitation automatically
+
+- **WHEN** a remote peer starts pairing while the receiving desktop is open
+  but its sharing settings panel is closed
+- **THEN** the shell reads the inbound metadata-only snapshot and opens the
+  same SAS dialog for that peer without sending another `Hello` or an
+  approval; dismissing it cancels that session and a new future invitation can
+  still be displayed
 
 ### Requirement: Peer trust state supports N independent relationships
 

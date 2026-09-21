@@ -188,7 +188,17 @@ el material público TLS fijable además de ambas identidades, nonces, peer_ids
 y versión. No se acepta un peer_id que cambie de clave.
 
 La UI/Tauri sólo puede iniciar, aprobar localmente, cancelar y consultar el
-estado. Ningún comando Tauri acepta `PairingMessage`, firma, certificado,
+estado. El snapshot metadata-only marca explícitamente si la sesión llegó por
+el listener (`is_inbound`), para que el shell pueda elevar una invitación
+entrante desde su coordinador global aun cuando el panel de Compartir esté
+cerrado; esa marca no incluye endpoint, secreto ni habilita aprobación
+automática. Al cerrar, el modal comunica el id opaco al coordinador y ambos
+cancelan la sesión de forma idempotente; una respuesta IPC tardía queda
+invalidada y se cancela, en vez de reabrir el diálogo o iniciar una segunda
+conexión. Los ids de sesión inbound y outbound se reservan de un único contador
+por transporte: ambas direcciones comparten la tabla del runtime y dos
+contadores que arrancasen en `1` podrían sobrescribir una invitación al pulsar
+Vincular en ambos hosts. Ningún comando Tauri acepta `PairingMessage`, firma, certificado,
 huella TLS ni una supuesta aprobación remota desde el renderer: esos eventos
 entran exclusivamente desde el transport autenticado al runtime.
 
@@ -206,8 +216,11 @@ import entran en cambios posteriores.
 ## UI y pruebas
 
 Equipos agrega Vincular para unverified, modal de pairing accesible y acciones
-revoke/block/unblock. Sólo trusted+health aparece Activo. El modal no
-autoacepta, tiene cancelar, timeout, Escape y foco restaurado.
+revoke/block/unblock. El coordinador global también consulta el snapshot de
+sesiones inbound y abre el mismo modal para una invitación entrante; no exige
+que el receptor pulse Vincular ni tenga abierto el panel de Compartir. Sólo
+trusted+health aparece Activo. El modal no autoacepta, tiene cancelar, timeout,
+Escape y foco restaurado.
 
 Tests loopback/fake verifican código coincidente, key mismatch, una aprobación,
 timeout, cancelación, reconnect mTLS, bloqueo/revoke y N pares aislados. La

@@ -804,10 +804,12 @@ pub(crate) struct TransportState {
             Arc<parking_lot::Mutex<crate::peer_transport::tls::OutboundSession>>,
         >,
     >,
-    /// Monotonic counter the transport uses to mint the next
-    /// [`PairingSessionId`]. Never collides with previously
-    /// handed-out ids within a single process lifetime.
-    pub next_session_id: std::sync::atomic::AtomicU64,
+    /// Shared monotonic counter for BOTH locally-dialled and
+    /// listener-originated [`PairingSessionId`] values. The core
+    /// runtime stores the two directions in one session map, so
+    /// separate counters starting at `1` could overwrite an
+    /// inbound invitation when both peers pressed Vincular.
+    pub next_session_id: Arc<std::sync::atomic::AtomicU64>,
     /// Optional sender the session tasks use to push a
     /// `TransportSink::on_pairing_observed` event back to the
     /// runtime. Wired to the same [`TransportSink`] the
@@ -848,7 +850,7 @@ impl Default for TransportState {
             local_display_name: String::new(),
             resolver: None,
             sessions: parking_lot::Mutex::new(std::collections::HashMap::new()),
-            next_session_id: std::sync::atomic::AtomicU64::new(1),
+            next_session_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             session_sink: None,
             inbound_sessions: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         }

@@ -1,47 +1,10 @@
 <script lang="ts">
   /**
-   * Local peer pairing modal.
-   *
-   * Drives the `local-peer-mutual-pairing` reciprocal approval
-   * flow. The modal is intentionally accessible:
-   *
-   * - on open, focus moves to the `Aceptar` button so a screen
-   *   reader announces the next action; `Vincular` is only
-   *   enabled while the local session is still waiting for the
-   *   remote approval;
-   * - `Escape` cancels the session without leaking the runtime
-   *   state machine;
-   * - the modal restores focus to the originating trigger when
-   *   it closes;
-   * - a two-minute hard timeout mirrors
-   *   [`clipvault_core::PAIRING_SESSION_TIMEOUT`] so the modal
-   *   cannot stay open indefinitely even if the runtime never
-   *   reports a `session_expired` outcome;
-   * - the modal is metadata-only: the wire contract never
-   *   accepts an IP, a port, a TLS key, a SAS candidate or a
-   *   signature from the frontend; the pairing runtime owns
-   *   every byte that crosses the trust boundary.
-   *
-   * The modal also detects an inbound pairing session the
-   * remote peer opened through the same mDNS-detected channel.
-   * When [`peerPairingSnapshotCommand`] returns a session for
-   * the same `peer_id` BEFORE the local user clicks `Vincular`,
-   * the modal renders the inbound metadata (SAS, peer_id,
-   * fingerprint, display name, expiration) WITHOUT invoking
-   * [`peerPairingStartCommand`] — the inbound session was
-   * already created by the listener, so starting a new outbound
-   * one would duplicate the dialog and race the inbound state
-   * machine. The local approval flows through the same
-   * [`peerPairingApproveLocalCommand`] the runtime routes to
-   * [`PeerTransport::approve_inbound_session`] for inbound
-   * sessions.
-   *
-   * Closing the modal — through Escape, the backdrop, the
-   * `Cerrar` / `Cancelar` button, or by unmounting the slot
-   * — cancels the active session so a stale inbound listener
-   * does not stay pinned to a peer the user dismissed.
+   * Reciprocal local-peer pairing UI. Its state is deliberately
+   * epoch-scoped: dismissing the dialog invalidates outstanding IPC
+   * calls, so a late start response cannot re-open a cancelled session.
    */
-  import { onDestroy, onMount, tick } from "svelte";
+  import { createEventDispatcher, onDestroy, tick } from "svelte";
 
   import {
     peerPairingApproveLocalCommand,
@@ -57,51 +20,60 @@
 
   export let open = false;
   export let row: PeerRow | null = null;
-  /** Element to restore focus to when the modal closes. */
   export let trigger: HTMLElement | null = null;
+
+  const dispatch = createEventDispatcher<{ close: { sessionId: number | null } }>();
+  const SESSION_TIMEOUT_SECONDS = 120;
 
   let session: PeerPairingSessionSnapshot | null = null;
   let outcome: PeerPairingOutcomeResponse | null = null;
   let lastError: string | null = null;
-  let starting = false;
   let approving = false;
-  let cancelling = false;
   let mountedAt: number | null = null;
   let refreshInterval: ReturnType<typeof setInterval> | null = null;
   let countdownInterval: ReturnType<typeof setInterval> | null = null;
   let secondsLeft = 0;
-  /**
-   * True when the modal is rendering an inbound session the
-   * listener registered. The flag suppresses the auto-start
-   * branch (the listener already owns the session) and routes
-   * the local approval through the same `approve_local`
-   * command the runtime maps to
-   * [`PeerTransport::approve_inbound_session`].
-   */
   let inboundMode = false;
+  let openEpoch = 0;
+  let wasOpen = false;
 
-  const SESSION_TIMEOUT_SECONDS = 120;
+  function isCurrentOpen(epoch: number): boolean {
+    return open && epoch === openEpoch;
+  }
 
-  async function refreshSnapshot(): Promise<void> {
+  function computeSecondsLeft(): number {
+    if (!mountedAt) return SESSION_TIMEOUT_SECONDS;
+    const elapsed = (Date.now() - mountedAt) / 1000;
+    return Math.max(0, Math.ceil(SESSION_TIMEOUT_SECONDS - elapsed));
+  }
+
+  async function refreshSnapshot(epoch = openEpoch): Promise<void> {
     try {
       const snapshots = await peerPairingSnapshotCommand();
-      const match = row
-        ? snapshots.find((value) => value.remote_peer_id === row!.peer_id)
-        : snapshots[0];
-      session = match ?? null;
+      if (!isCurrentOpen(epoch)) return;
+      session = row
+        ? snapshots.find((value) => value.remote_peer_id === row!.peer_id) ?? null
+        : snapshots[0] ?? null;
       secondsLeft = computeSecondsLeft();
     } catch (error) {
-      lastError = describeError(error);
+      if (isCurrentOpen(epoch)) lastError = describeError(error);
     }
   }
 
   function startRefresh(): void {
-    if (refreshInterval !== null) {
-      return;
-    }
-    refreshInterval = setInterval(() => {
-      void refreshSnapshot();
-    }, 1000);
+    if (refreshInterval !== null) return;
+    refreshInterval = setInterval(() => void refreshSnapshot(), 1000);
+  }
+
+  function startCountdown(epoch: number): void {
+    if (countdownInterval !== null) return;
+    countdownInterval = setInterval(() => {
+      if (!isCurrentOpen(epoch)) return;
+      secondsLeft = computeSecondsLeft();
+      if (secondsLeft <= 0 && !session?.remote_approved) {
+        lastError = "La sesión expiró antes de la aprobación remota.";
+      }
+    }, 250);
   }
 
   function stopRefresh(): void {
@@ -115,109 +87,110 @@
     }
   }
 
-  function computeSecondsLeft(): number {
-    if (!mountedAt) {
-      return SESSION_TIMEOUT_SECONDS;
-    }
-    const elapsed = (Date.now() - mountedAt) / 1000;
-    return Math.max(0, Math.ceil(SESSION_TIMEOUT_SECONDS - elapsed));
-  }
-
   /**
-   * Detect an inbound session for the current row BEFORE
-   * auto-starting an outbound one. The runtime already keeps
-   * the inbound session in its in-memory map; rendering it
-   * avoids a second `start_outbound` round-trip that would
-   * collide with the listener's bounded wait and double the
-   * connection count on the wire.
+   * Reuse the existing session, whether it is inbound or the user
+   * reopened a still-active outbound attempt. Starting again would
+   * create a competing mTLS connection.
    */
-  async function detectInboundSession(): Promise<boolean> {
-    if (!row) {
-      return false;
-    }
+  async function detectInboundSession(epoch: number): Promise<boolean> {
+    if (!row) return false;
     try {
       const snapshots = await peerPairingSnapshotCommand();
-      const inbound = snapshots.find(
+      if (!isCurrentOpen(epoch)) return false;
+      const existing = snapshots.find(
         (value) => value.remote_peer_id === row!.peer_id,
       );
-      if (!inbound) {
-        return false;
-      }
-      session = inbound;
-      inboundMode = true;
+      if (!existing) return false;
+      session = existing;
+      inboundMode = existing.is_inbound;
       mountedAt = Date.now();
       startRefresh();
-      countdownInterval = setInterval(() => {
-        secondsLeft = computeSecondsLeft();
-        if (secondsLeft <= 0 && !session?.remote_approved) {
-          lastError = "La sesión expiró antes de la aprobación remota.";
-        }
-      }, 250);
+      startCountdown(epoch);
       await focusPrimaryAction();
       return true;
     } catch (error) {
-      lastError = describeError(error);
+      if (isCurrentOpen(epoch)) lastError = describeError(error);
       return false;
     }
   }
 
-  async function startSession(): Promise<void> {
-    if (!row) {
-      return;
+  function failedOutcomeMessage(response: PeerPairingOutcomeResponse): string | null {
+    if (response.kind !== "failed") return null;
+    switch (response.reason) {
+      case "transport_unavailable":
+        return "No se pudo abrir una conexión segura con el otro equipo. Verifica que siga disponible e inténtalo otra vez.";
+      case "unknown_or_key_mismatch":
+        return "La identidad del otro equipo cambió o ya no coincide con el anuncio de red.";
+      case "rate_limited":
+        return "Hay demasiados intentos de vínculo. Espera un minuto antes de reintentar.";
+      case "blocked":
+        return "El otro equipo está bloqueado.";
+      case "revoked":
+        return "El vínculo fue revocado. Revisa el estado del equipo antes de reintentar.";
+      case "incompatible_protocol":
+        return "El otro equipo usa una versión de vínculo incompatible.";
+      case "session_expired":
+        return "La sesión de vínculo expiró.";
+      case "cancelled":
+        return "La sesión de vínculo se canceló.";
     }
-    starting = true;
+  }
+
+  async function cancelOutcomeSession(response: PeerPairingOutcomeResponse): Promise<void> {
+    if (response.kind !== "awaiting_remote_approval") return;
+    try {
+      await peerPairingCancelCommand({ session_id: response.session_id });
+    } catch {
+      // The runtime may already have released it; cancellation is idempotent.
+    }
+  }
+
+  async function startSession(epoch: number): Promise<void> {
+    if (!row) return;
     lastError = null;
     outcome = null;
     try {
-      // Detect an inbound session the listener already opened
-      // before we attempt to start a new outbound one. The
-      // pairing runtime returns the same canonical metadata the
-      // remote peer's modal would render; the modal surfaces the
-      // SAS / fingerprint / display name without ever calling
-      // `peerPairingStartCommand`.
-      if (await detectInboundSession()) {
-        return;
-      }
+      if (await detectInboundSession(epoch)) return;
+      if (!isCurrentOpen(epoch)) return;
       const response = await peerPairingStartCommand({
         peer_id: row.peer_id,
         display_name: row.display_name,
       });
+      if (!isCurrentOpen(epoch)) {
+        await cancelOutcomeSession(response);
+        return;
+      }
       outcome = response;
+      const failure = failedOutcomeMessage(response);
+      if (failure) {
+        lastError = failure;
+        return;
+      }
       mountedAt = Date.now();
       startRefresh();
-      countdownInterval = setInterval(() => {
-        secondsLeft = computeSecondsLeft();
-        if (secondsLeft <= 0 && session && !session.remote_approved) {
-          lastError = "La sesión expiró antes de la aprobación remota.";
-        }
-      }, 250);
-      await refreshSnapshot();
+      startCountdown(epoch);
+      await refreshSnapshot(epoch);
+      if (!isCurrentOpen(epoch)) {
+        await cancelOutcomeSession(response);
+        return;
+      }
+      if (!session && response.kind === "awaiting_remote_approval") {
+        lastError = "La sesión de vínculo no quedó disponible. Cierra e inténtalo otra vez.";
+        return;
+      }
       await focusPrimaryAction();
     } catch (error) {
-      lastError = describeError(error);
-    } finally {
-      starting = false;
+      if (isCurrentOpen(epoch)) lastError = describeError(error);
     }
   }
 
   async function approve(): Promise<void> {
-    if (!session) {
-      return;
-    }
+    if (!session) return;
     approving = true;
     try {
-      // The runtime routes inbound vs outbound internally:
-      // [`PairingRuntime::approve_local`] calls
-      // [`PeerTransport::approve_inbound_session`] when the
-      // session originated in `register_inbound_from_metadata`,
-      // and [`PeerTransport::approve_local`] otherwise. The
-      // modal calls the same `approve_local` command either way
-      // — the bridge is metadata-only and never inspects the
-      // direction.
-      const response = await peerPairingApproveLocalCommand({
+      outcome = await peerPairingApproveLocalCommand({
         session_id: session.session_id,
       });
-      outcome = response;
       await refreshSnapshot();
     } catch (error) {
       lastError = describeError(error);
@@ -226,44 +199,8 @@
     }
   }
 
-  async function cancel(): Promise<void> {
-    if (!session) {
-      close();
-      return;
-    }
-    cancelling = true;
-    try {
-      const response = await peerPairingCancelCommand({
-        session_id: session.session_id,
-      });
-      outcome = response;
-      session = null;
-      inboundMode = false;
-    } catch (error) {
-      lastError = describeError(error);
-    } finally {
-      cancelling = false;
-    }
-  }
-
-  function handleKeydown(event: KeyboardEvent): void {
-    if (!open) {
-      return;
-    }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      if (session) {
-        void cancel();
-      } else {
-        close();
-      }
-    }
-  }
-
   function describeError(error: unknown): string {
-    if (typeof error === "string") {
-      return error;
-    }
+    if (typeof error === "string") return error;
     if (error && typeof error === "object" && "message" in error) {
       return String((error as { message: unknown }).message);
     }
@@ -271,48 +208,59 @@
   }
 
   function close(): void {
-    // Always cancel an in-flight session before closing the
-    // modal so the listener's bounded wait does not stay
-    // pinned to a peer the user dismissed. The helper is
-    // idempotent — calling it on a session that already
-    // completed collapses to a no-op.
-    if (session) {
-      void cancel();
-    }
-    open = false;
+    const sessionId = session?.session_id;
+    // Invalidate first: a late start response will cancel its own
+    // reserved session instead of bringing this dialog back.
+    openEpoch += 1;
+    session = null;
+    outcome = null;
     inboundMode = false;
-    if (trigger && typeof trigger.focus === "function") {
-      trigger.focus();
+    stopRefresh();
+    open = false;
+    dispatch("close", { sessionId: sessionId ?? null });
+    if (sessionId !== undefined) {
+      void peerPairingCancelCommand({ session_id: sessionId });
+    }
+    if (trigger && typeof trigger.focus === "function") trigger.focus();
+  }
+
+  function handleKeydown(event: KeyboardEvent): void {
+    if (open && event.key === "Escape") {
+      event.preventDefault();
+      close();
     }
   }
 
-  onMount(async () => {
-    if (open) {
-      await startSession();
-    }
-  });
-
   onDestroy(() => {
+    openEpoch += 1;
     stopRefresh();
-    // Closing the modal slot MUST cancel any active session
-    // so a stale inbound listener does not leak a held
-    // session across reopens. The bridge command is idempotent
-    // when the session is already gone.
     if (session) {
       void peerPairingCancelCommand({ session_id: session.session_id });
     }
   });
 
-  $: if (open && !session && !starting && !inboundMode) {
-    void startSession();
+  $: if (open && !wasOpen) {
+    wasOpen = true;
+    openEpoch += 1;
+    session = null;
+    outcome = null;
+    lastError = null;
+    inboundMode = false;
+    mountedAt = null;
+    secondsLeft = SESSION_TIMEOUT_SECONDS;
+    stopRefresh();
+    void startSession(openEpoch);
+  } else if (!open && wasOpen) {
+    wasOpen = false;
+    openEpoch += 1;
+    stopRefresh();
   }
 
   async function focusPrimaryAction(): Promise<void> {
     await tick();
-    const button = document.querySelector<HTMLButtonElement>(
-      '[data-testid="peer-pairing-approve"]',
-    );
-    button?.focus();
+    document
+      .querySelector<HTMLButtonElement>('[data-testid="peer-pairing-approve"]')
+      ?.focus();
   }
 </script>
 
@@ -409,8 +357,7 @@
           type="button"
           class="secondary"
           data-testid="peer-pairing-cancel"
-          disabled={cancelling}
-          on:click={() => (session ? cancel() : close())}
+          on:click={close}
         >
           {session ? "Cancelar" : "Cerrar"}
         </button>
@@ -426,7 +373,7 @@
     background: rgba(8, 11, 16, 0.7);
     display: grid;
     place-items: center;
-    z-index: 50;
+    z-index: 80;
   }
   .peer-pairing {
     background: var(--cv-bg-surface, #0e1116);

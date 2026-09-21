@@ -13,6 +13,8 @@
     GnomeIntegrationStatusResponse,
     OrganizationSnapshot,
     PasteResponse,
+    PeerPairingSessionSnapshot,
+    PeerRow,
     PlatformGuidance,
     SearchResponse,
     SourceAppFilter,
@@ -43,6 +45,7 @@
     searchEntriesCommand,
     setFavoriteCommand,
     sourceApplicationsCommand,
+    peerPairingSnapshotCommand,
     unorganizedClearableCountCommand,
   } from "./lib/tauri";
   import { retryGuidance } from "./lib/guidance";
@@ -100,6 +103,7 @@
   import GnomeIntegrationModal from "./GnomeIntegrationModal.svelte";
   import PrivacyModal from "./PrivacyModal.svelte";
   import PeerSharingModal from "./PeerSharingModal.svelte";
+  import PeerPairingModal from "./PeerPairingModal.svelte";
   import RetentionModal from "./RetentionModal.svelte";
   import QuickPasteShortcutModal from "./QuickPasteShortcutModal.svelte";
   import AboutModal from "./AboutModal.svelte";
@@ -125,6 +129,7 @@
     | "gnome_integration"
     | "privacy"
     | "peer_sharing"
+    | "peer_pairing"
     | "retention"
     | "quick_paste_shortcut"
     | "about";
@@ -177,6 +182,12 @@
   let nonEditableTextNoticeReturnFocus: HTMLElement | null = null;
   let openModal: ModalId = null;
   let modalReturnFocus: HTMLElement | null = null;
+  /** The global pairing prompt can appear even while Settings is closed. */
+  let pairingRow: PeerRow | null = null;
+  const PAIRING_INVITATION_REFRESH_MS = 1_000;
+  let pairingInvitationTimer: ReturnType<typeof setInterval> | null = null;
+  let pairingInvitationRefresh: Promise<void> | null = null;
+  const dismissedInboundPairingSessions = new Set<number>();
   /**
    * Single source of truth for the Desktop preview overlay the
    * `desktop-card-preview` change introduces. The component holds
@@ -1483,6 +1494,69 @@
 
   // ---- Modal coordinator --------------------------------------------------
 
+  function pairingRowFromInbound(session: PeerPairingSessionSnapshot): PeerRow {
+    return {
+      peer_id: session.remote_peer_id,
+      display_name: session.remote_display_name || session.remote_peer_id,
+      short_fingerprint: session.remote_fingerprint.slice(0, 8),
+      trust_state: "unverified",
+      presence: "detected",
+      paired_at: null,
+      // The invitation has no discovery timestamp of its own. Its
+      // expiration is still metadata-only and is the closest stable
+      // timestamp for the row the pairing modal renders.
+      last_discovered_at: session.expires_at,
+    };
+  }
+
+  async function refreshInboundPairingInvitation(): Promise<void> {
+    if (pairingInvitationRefresh !== null) return pairingInvitationRefresh;
+    pairingInvitationRefresh = (async () => {
+      try {
+        const sessions = await peerPairingSnapshotCommand();
+        const activeSessionIds = new Set(sessions.map((session) => session.session_id));
+        for (const sessionId of dismissedInboundPairingSessions) {
+          if (!activeSessionIds.has(sessionId)) {
+            dismissedInboundPairingSessions.delete(sessionId);
+          }
+        }
+        // Do not interrupt unrelated modal work. A pending invitation
+        // remains in the bounded runtime snapshot and will be shown as
+        // soon as the desktop has no other modal open.
+        if (openModal !== null && openModal !== "peer_sharing") return;
+        const invitation = sessions.find(
+          (session) =>
+            session.is_inbound &&
+            !dismissedInboundPairingSessions.has(session.session_id),
+        );
+        if (!invitation) return;
+        pairingRow = pairingRowFromInbound(invitation);
+        openModalWith("peer_pairing", null);
+      } catch {
+        // The pairing transport is optional. A failed metadata poll
+        // must never affect the history desktop or create an error toast.
+      } finally {
+        pairingInvitationRefresh = null;
+      }
+    })();
+    return pairingInvitationRefresh;
+  }
+
+  function startPairingInvitationRefresh(): void {
+    if (pairingInvitationTimer !== null) return;
+    void refreshInboundPairingInvitation();
+    pairingInvitationTimer = setInterval(
+      () => void refreshInboundPairingInvitation(),
+      PAIRING_INVITATION_REFRESH_MS,
+    );
+  }
+
+  function stopPairingInvitationRefresh(): void {
+    if (pairingInvitationTimer === null) return;
+    clearInterval(pairingInvitationTimer);
+    pairingInvitationTimer = null;
+  }
+
   function openModalWith(
     id: ModalId,
     trigger: HTMLElement | null,
@@ -1523,6 +1597,19 @@
 
   function onOpenPeerSharing(event: MouseEvent): void {
     openModalWith("peer_sharing", event.currentTarget as HTMLElement | null);
+  }
+
+  function onPairingRequested(event: CustomEvent<PeerRow>): void {
+    pairingRow = event.detail;
+    openModalWith("peer_pairing", modalReturnFocus);
+  }
+
+  function onPairingClosed(event: CustomEvent<{ sessionId: number | null }>): void {
+    if (event.detail.sessionId !== null) {
+      dismissedInboundPairingSessions.add(event.detail.sessionId);
+    }
+    pairingRow = null;
+    closeModal();
   }
 
   function onOpenRetention(event: MouseEvent): void {
@@ -1678,6 +1765,7 @@
 
   onMount(() => {
     void refresh();
+    startPairingInvitationRefresh();
     registerQuickSearch(handleQuickSearchActivation)
       .then((unlisten) => {
         unlistenQuickSearch = unlisten;
@@ -1721,6 +1809,7 @@
   });
 
   onDestroy(() => {
+    stopPairingInvitationRefresh();
     if (unlistenQuickSearch) {
       unlistenQuickSearch();
       unlistenQuickSearch = null;
@@ -2000,8 +2089,15 @@
   returnFocusTo={modalReturnFocus}
   onClose={closeModal}
 >
-  <PeerSharingModal />
+  <PeerSharingModal on:pairingRequested={onPairingRequested} />
 </Modal>
+
+<PeerPairingModal
+  open={openModal === "peer_pairing"}
+  row={pairingRow}
+  trigger={modalReturnFocus}
+  on:close={onPairingClosed}
+/>
 
 <Modal
   open={openModal === "retention"}
