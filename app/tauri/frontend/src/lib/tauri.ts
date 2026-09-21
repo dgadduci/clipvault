@@ -370,8 +370,8 @@ export const peerPairingStartCommand: ClipvaultCommandArg<
   { peer_id: string; display_name: string }
 > = (args) =>
   invoke<PeerPairingOutcomeResponse>("clipvault_peer_pairing_start", {
-    peer_id: args.peer_id,
-    display_name: args.display_name,
+    peerId: args.peer_id,
+    displayName: args.display_name,
   });
 
 export const peerPairingApproveLocalCommand: ClipvaultCommandArg<

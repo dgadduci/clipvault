@@ -136,6 +136,16 @@ test("pairing bridge exposes start / approve / cancel / snapshot commands", () =
   );
 });
 
+test("pairing start serializes Tauri arguments in camelCase", () => {
+  // Tauri exposes Rust arguments as camelCase by default. The bridge
+  // may keep its local DTO snake_case, but the invoke payload must use
+  // the command contract or the listener is never contacted.
+  assert.match(
+    tauriSource(),
+    /clipvault_peer_pairing_start",\s*\{\s*peerId:\s*args\.peer_id,\s*displayName:\s*args\.display_name,\s*\}/,
+  );
+});
+
 test("peer-sharing modal wires the per-row trust actions", () => {
   // The Equipos view MUST render the Vincular / Desvincular /
   // Bloquear / Desbloquear action set next to every peer so the
