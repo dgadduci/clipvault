@@ -151,10 +151,47 @@ pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         platform,
     );
 
-    let context = AppBootstrap::new()
-        .with_platform_adapters(adapters.clone())
-        .with_peer_identity_store(build_peer_identity_store())
-        .bootstrap_default()?;
+    let (peer_identity_store, keychain_store) = build_peer_identity_store();
+    // Build the concrete mDNS adapter the pairing toggle wires
+    // into the productive pairing advertisement. The handle is
+    // feature-gated to the same `local-peer-discovery-mdns` cfg
+    // the platform adapter links; without the feature the
+    // pairing transport surfaces the typed `Unavailable` outcome.
+    #[cfg(all(
+        feature = "local-peer-discovery-mdns",
+        feature = "local-peer-pairing-tls"
+    ))]
+    let mdns_adapter = Arc::new(clipvault_platform::MdnsPeerDiscoveryAdapter::new());
+    let context = {
+        let builder = AppBootstrap::new()
+            .with_platform_adapters(adapters.clone())
+            .with_peer_identity_store(peer_identity_store);
+        #[cfg(all(
+            feature = "local-peer-discovery-mdns",
+            feature = "local-peer-pairing-tls"
+        ))]
+        let builder = builder
+            .with_peer_discovery_adapter(mdns_adapter.clone())
+            .with_peer_discovery_concrete(mdns_adapter.clone());
+        builder.bootstrap_default()?
+    };
+    // Install the productive pairing material loader when the
+    // keychain is reachable. The pairing transport can then mint
+    // the self-signed TLS cert from the same 32-byte seed the
+    // secure store already minted for the local identity, so the
+    // cert SPKI stays pinned to the identity across restarts.
+    // The loader is feature-gated to the same cfg the
+    // `KeychainPairingMaterialLoader` lives under; hosts without
+    // the feature keep the empty loader slot and the pairing
+    // runtime surfaces `Unavailable` for the toggle on, which is
+    // the documented degraded copy.
+    #[cfg(all(
+        feature = "local-peer-pairing-tls",
+        feature = "local-peer-identity-keychain"
+    ))]
+    if let Some(keychain) = keychain_store {
+        context.install_default_pairing_material_loader(keychain);
+    }
 
     let watcher = Arc::new(CaptureWatcher::new(
         Arc::clone(&clipboard),
@@ -227,7 +264,54 @@ pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         gnome_integration: provisional_state.gnome_integration,
     };
 
+    // On startup with `local_peer_sharing_enabled = true`, the
+    // previous prototype only restarted the discovery runtime. A
+    // restart therefore left the productive pairing listener
+    // uninstalled while the persisted toggle still reported
+    // `active` to `clipvault_peer_sharing_toggle_get`. Drive
+    // the pairing install path here so the next
+    // `toggle_get` reflects the real listener state and the
+    // local peer remains reachable over the mTLS path.
+    let persisted_settings = app_state.context.settings().load(&app_state.context);
+    if persisted_settings.local_peer_sharing_enabled {
+        let _ = sync_pairing_transport_on_startup(
+            &app_state.context,
+            persisted_settings.local_peer_sharing_enabled,
+        );
+    }
+
     Ok(app_state)
+}
+
+/// Wrapper around the toggle's pairing sync helper that the
+/// bootstrap calls on startup. The helper mirrors the toggle
+/// command's behavior so the post-restart state is identical
+/// to the user's last selection: the discovery runtime is
+/// already running (the production pairing layer is what the
+/// bootstrap missed), so the helper only has to install the
+/// pairing listener + resolver.
+#[cfg(all(
+    feature = "local-peer-pairing-tls",
+    feature = "local-peer-discovery-mdns"
+))]
+fn sync_pairing_transport_on_startup(
+    context: &AppContext,
+    enabled: bool,
+) -> Result<u16, Box<dyn std::error::Error>> {
+    crate::commands::sync_pairing_transport_with_toggle(context, enabled).map_err(
+        |err| -> Box<dyn std::error::Error> { Box::new(std::io::Error::other(format!("{err:?}"))) },
+    )
+}
+
+#[cfg(not(all(
+    feature = "local-peer-pairing-tls",
+    feature = "local-peer-discovery-mdns"
+)))]
+fn sync_pairing_transport_on_startup(
+    _context: &AppContext,
+    _enabled: bool,
+) -> Result<u16, Box<dyn std::error::Error>> {
+    Ok(0)
 }
 
 /// Stable identifier for the platform the shell is currently
@@ -281,7 +365,19 @@ impl PeerIdentityTarget {
 /// draft let `InMemoryPeerIdentityStore::new()` slip into the
 /// production path on unsupported targets, minting a peer_id the
 /// next boot could not reload (the regression this guard pins).
-fn build_peer_identity_store() -> Arc<dyn PeerIdentityStore> {
+///
+/// The function also returns the concrete
+/// [`clipvault_platform::KeychainPeerIdentityStore`] handle the
+/// bootstrap needs to install the productive pairing material
+/// loader. On builds / targets without a keychain the handle is
+/// `None` and the bootstrap leaves the pairing loader slot empty,
+/// so the pairing transport falls back to its typed `Unavailable`
+/// outcome — the user sees a stable reason instead of a half-broken
+/// listener that mints a self-signed cert from an in-memory seed.
+fn build_peer_identity_store() -> (
+    Arc<dyn PeerIdentityStore>,
+    Option<Arc<clipvault_platform::KeychainPeerIdentityStore>>,
+) {
     build_peer_identity_store_for_target(PeerIdentityTarget::current())
 }
 
@@ -291,7 +387,10 @@ fn build_peer_identity_store() -> Arc<dyn PeerIdentityStore> {
 /// exercises the production decision on every host.
 pub(crate) fn build_peer_identity_store_for_target(
     target: PeerIdentityTarget,
-) -> Arc<dyn PeerIdentityStore> {
+) -> (
+    Arc<dyn PeerIdentityStore>,
+    Option<Arc<clipvault_platform::KeychainPeerIdentityStore>>,
+) {
     match target {
         PeerIdentityTarget::Macos | PeerIdentityTarget::Linux => {
             #[cfg(all(
@@ -299,7 +398,9 @@ pub(crate) fn build_peer_identity_store_for_target(
                 any(target_os = "macos", target_os = "linux")
             ))]
             {
-                Arc::new(clipvault_platform::KeychainPeerIdentityStore::new())
+                let keychain = Arc::new(clipvault_platform::KeychainPeerIdentityStore::new());
+                let store: Arc<dyn PeerIdentityStore> = keychain.clone();
+                (store, Some(keychain))
             }
             #[cfg(not(all(
                 feature = "local-peer-identity-keychain",
@@ -311,7 +412,10 @@ pub(crate) fn build_peer_identity_store_for_target(
                 // developer disabling the feature to debug the core).
                 // The shell MUST still surface a typed Unavailable
                 // outcome instead of an in-memory fake.
-                Arc::new(clipvault_core::InMemoryPeerIdentityStore::always_unavailable())
+                (
+                    Arc::new(clipvault_core::InMemoryPeerIdentityStore::always_unavailable()),
+                    None,
+                )
             }
         }
         PeerIdentityTarget::Other => {
@@ -319,7 +423,10 @@ pub(crate) fn build_peer_identity_store_for_target(
             // keychain backend. The shell never has the secret
             // store available here and MUST NOT fall back to a
             // plaintext identity.
-            Arc::new(clipvault_core::InMemoryPeerIdentityStore::always_unavailable())
+            (
+                Arc::new(clipvault_core::InMemoryPeerIdentityStore::always_unavailable()),
+                None,
+            )
         }
     }
 }
@@ -1826,11 +1933,15 @@ mod tests {
         // produced a peer_id the secure store had no record of —
         // the regression this test pins.
         use clipvault_core::PeerIdentityError;
-        let store = build_peer_identity_store_for_target(PeerIdentityTarget::Other);
+        let (store, _keychain) = build_peer_identity_store_for_target(PeerIdentityTarget::Other);
         let outcome = store.load_or_create();
         assert!(
             matches!(outcome, Err(PeerIdentityError::SecureStoreUnavailable)),
             "non-keychain target must surface SecureStoreUnavailable, got {outcome:?}",
+        );
+        assert!(
+            _keychain.is_none(),
+            "non-keychain target must NOT expose a keychain handle even though the trait store is built"
         );
     }
 

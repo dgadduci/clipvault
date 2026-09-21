@@ -47,7 +47,22 @@ pub mod mdns;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveryAdvertisement {
     pub peer_id: String,
+    /// Short public-key fingerprint (16 hex chars). The mDNS TXT
+    /// record always carries this projection so a discovery-only
+    /// browser can render the same UI badge the pairing surface
+    /// exposes. The pairing change additionally writes the full
+    /// SHA-256 (64 hex chars) digest in [`Self::pairing_fingerprint`]
+    /// so the listener can pin the canonical peer identity the
+    /// pairing transcript signs over; the two values are derivable
+    /// from each other through truncation.
     pub public_key_fingerprint: String,
+    /// Full public-key fingerprint (64 hex chars). The pairing
+    /// change populates the field ONLY when `capability =
+    /// "pairing"`, never for the discovery-only record, so a
+    /// discovery-only browser that does not understand pairing
+    /// still rejects the record at the existing
+    /// [`TxtRecord::public_key_fingerprint`] length check.
+    pub pairing_fingerprint: Option<String>,
     pub display_name: String,
     pub protocol_major: i64,
     pub capability: String,
@@ -69,9 +84,32 @@ impl DiscoveryAdvertisement {
         Self {
             peer_id: peer_id.into(),
             public_key_fingerprint: public_key_fingerprint.into(),
+            pairing_fingerprint: None,
             display_name: display_name.into(),
             protocol_major,
             capability: capability.into(),
+        }
+    }
+
+    /// Build a pairing advertisement that carries both the short
+    /// fingerprint (for the UI badge the discovery-side browsers
+    /// also render) and the full SHA-256 (for the TLS listener).
+    /// The helper exists so the productive pairing sink does not
+    /// have to reach into struct fields directly.
+    pub fn new_pairing(
+        peer_id: impl Into<String>,
+        short_fingerprint: impl Into<String>,
+        pairing_fingerprint: impl Into<String>,
+        display_name: impl Into<String>,
+        protocol_major: i64,
+    ) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+            public_key_fingerprint: short_fingerprint.into(),
+            pairing_fingerprint: Some(pairing_fingerprint.into()),
+            display_name: display_name.into(),
+            protocol_major,
+            capability: "pairing".to_string(),
         }
     }
 }
@@ -129,7 +167,20 @@ pub enum DiscoveryEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxtRecord {
     pub peer_id: String,
+    /// Short public-key fingerprint (16 hex chars) the
+    /// discovery-only mDNS TXT carries. Always populated by both
+    /// `discovery_only` and `pairing` advertisements so a legacy
+    /// browser that does not understand pairing still renders a
+    /// usable badge.
     pub public_key_fingerprint: String,
+    /// Full SHA-256 of the public key (64 hex chars). The
+    /// productive pairing advertisement sets this field; the
+    /// discovery-only advertisement leaves it `None`. The runtime
+    /// persists the value in `known_peers.public_key_fingerprint_full`
+    /// so the pairing runtime can build the canonical
+    /// `OutboundSessionDescriptor` without re-resolving through
+    /// mDNS.
+    pub pairing_fingerprint: Option<String>,
     pub display_name: String,
     pub protocol_major: i64,
     pub capability: String,
@@ -154,6 +205,7 @@ impl TxtRecord {
         Self {
             peer_id: peer_id.into(),
             public_key_fingerprint: public_key_fingerprint.into(),
+            pairing_fingerprint: None,
             display_name: display_name.into(),
             protocol_major,
             capability: capability.into(),
@@ -195,8 +247,8 @@ pub enum AdapterError {
 /// Platform-neutral trait the runtime uses to drive the adapter.
 pub trait PeerDiscoveryAdapter: Send + Sync {
     /// Start the browser / registrant. Idempotent: a second call
-    /// while the adapter is already running MUST be a no-op so
-    /// the shell can call `start` from every bootstrap path
+    /// while the adapter is already running MUST be a no-op so the
+    /// shell can call `start` from every bootstrap path
     /// without coordinating state. The advertisement is the
     /// local metadata the adapter publishes; the sink is where
     /// the adapter pushes observed / removed events. The sink is
@@ -207,6 +259,26 @@ pub trait PeerDiscoveryAdapter: Send + Sync {
         advertisement: &DiscoveryAdvertisement,
         sink: std::sync::Arc<dyn DiscoverySink>,
     ) -> Result<(), AdapterError>;
+
+    /// Productive install path the pairing change uses when the
+    /// local TLS listener has reserved a real, non-zero ephemeral
+    /// port. The adapter MUST publish the supplied `port` in the
+    /// mDNS record so a remote browser knows where to dial. A
+    /// `port` of `0` (the discovery-only placeholder) is rejected
+    /// here so the productive path never silently downgrades to
+    /// a discovery-only record — the `start` entry point keeps
+    /// the discovery-only contract. The default implementation
+    /// refuses the call so adapters that do not yet publish a
+    /// real port never silently fall back to discovery-only.
+    fn start_with_port(
+        &self,
+        advertisement: &DiscoveryAdvertisement,
+        sink: std::sync::Arc<dyn DiscoverySink>,
+        port: u16,
+    ) -> Result<(), AdapterError> {
+        let _ = (advertisement, sink, port);
+        Err(AdapterError::MalformedAdvertisement)
+    }
 
     /// Stop the browser / registrant. Idempotent: a second call
     /// after a previous `stop` MUST be a no-op.
@@ -256,6 +328,20 @@ impl PeerDiscoveryAdapter for NoopPeerDiscoveryAdapter {
         // call intentionally fails with a typed error so the
         // runtime reports `runtime_stopped` and the UI shows the
         // toggle in the off state.
+        self.running.store(false, Ordering::Release);
+        Err(AdapterError::MulticastUnavailable)
+    }
+
+    fn start_with_port(
+        &self,
+        _advertisement: &DiscoveryAdvertisement,
+        _sink: std::sync::Arc<dyn DiscoverySink>,
+        _port: u16,
+    ) -> Result<(), AdapterError> {
+        // The noop path does not link `mdns-sd`; refuse the
+        // productive pairing call with the same typed error the
+        // discovery-only `start` surfaces so the runtime reports
+        // a stable reason without a network round-trip.
         self.running.store(false, Ordering::Release);
         Err(AdapterError::MulticastUnavailable)
     }

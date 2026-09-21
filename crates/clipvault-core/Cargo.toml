@@ -36,6 +36,25 @@ macos-native = ["clipvault-platform/macos-native"]
 # noop fallback stays the safe default for cross-compiles, tests
 # and unsupported targets.
 local-peer-discovery-mdns = ["clipvault-platform/local-peer-discovery-mdns"]
+# Forward the `local-peer-pairing-tls` feature to
+# `clipvault-platform/local-peer-pairing-tls` so the
+# `PairingRuntime::install_pairing_transport` entry point and
+# the `LocalIdentityMaterial` re-export the bootstrap wires
+# against the keychain resolve. Production shells on macOS /
+# Linux enable this on both crates; the noop transport remains
+# the safe default for cross-compiles and unsupported targets.
+local-peer-pairing-tls = [
+    "clipvault-platform/local-peer-pairing-tls",
+    "clipvault-platform/local-peer-identity-keychain",
+    "local-peer-identity-keychain",
+]
+# Forward the `local-peer-identity-keychain` feature through the
+# core so the bootstrap can use a single `cfg` check on both
+# `install_default_pairing_material_loader` and the keychain-
+# backed `PeerIdentityStore` wiring the shell exposes. The core
+# itself never links `keyring`; the feature is purely a cfg-gate
+# that forwards to the platform crate.
+local-peer-identity-keychain = ["clipvault-platform/local-peer-identity-keychain"]
 
 [dependencies]
 clipvault-db = { path = "../clipvault-db" }

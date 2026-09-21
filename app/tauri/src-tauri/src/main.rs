@@ -240,6 +240,14 @@ fn main() {
             commands::clipvault_peer_sharing_toggle_set,
             commands::clipvault_peer_snapshot,
             commands::clipvault_peer_sharing_refresh_identity,
+            commands::clipvault_peer_pairing_start,
+            commands::clipvault_peer_pairing_approve_local,
+            commands::clipvault_peer_pairing_cancel,
+            commands::clipvault_peer_pairing_snapshot,
+            commands::clipvault_peer_pairing_revoke,
+            commands::clipvault_peer_pairing_block,
+            commands::clipvault_peer_pairing_unblock,
+            commands::clipvault_peer_pairing_health,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ClipVault")

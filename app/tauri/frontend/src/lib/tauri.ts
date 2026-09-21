@@ -28,6 +28,10 @@ import type {
   PasteResponse,
   PeerSharingToggleResponse,
   PeerSnapshot,
+  PeerPairingHealthResponse,
+  PeerPairingOutcomeResponse,
+  PeerPairingSessionSnapshot,
+  PeerTrustOperationResponse,
   PickAndAddResponse,
   PlatformSettingsTarget,
   RetentionPreview,
@@ -350,6 +354,88 @@ export const peerSnapshotCommand: ClipvaultCommand<PeerSnapshot> = () =>
 export const peerSharingRefreshIdentityCommand: ClipvaultCommand<PeerSharingToggleResponse> =
   () =>
     invoke<PeerSharingToggleResponse>("clipvault_peer_sharing_refresh_identity");
+
+/**
+ * Bridge the `local-peer-mutual-pairing` change exposes for the
+ * pairing modal. Every command is metadata-only: the runtime
+ * never accepts an IP, a port, a TLS key, a SAS candidate or a
+ * signature from the frontend; the pairing state machine owns
+ * every byte that crosses the trust boundary. The `Equipos`
+ * view links to [`peerPairingStartCommand`] from each
+ * `unverified` row; the modal then drives the bounded session
+ * against the typed [`PeerPairingOutcomeResponse`] variants.
+ */
+export const peerPairingStartCommand: ClipvaultCommandArg<
+  PeerPairingOutcomeResponse,
+  { peer_id: string; display_name: string }
+> = (args) =>
+  invoke<PeerPairingOutcomeResponse>("clipvault_peer_pairing_start", {
+    peer_id: args.peer_id,
+    display_name: args.display_name,
+  });
+
+export const peerPairingApproveLocalCommand: ClipvaultCommandArg<
+  PeerPairingOutcomeResponse,
+  { session_id: number }
+> = (args) =>
+  invoke<PeerPairingOutcomeResponse>("clipvault_peer_pairing_approve_local", {
+    sessionId: args.session_id,
+  });
+
+export const peerPairingCancelCommand: ClipvaultCommandArg<
+  PeerPairingOutcomeResponse,
+  { session_id: number }
+> = (args) =>
+  invoke<PeerPairingOutcomeResponse>("clipvault_peer_pairing_cancel", {
+    sessionId: args.session_id,
+  });
+
+export const peerPairingSnapshotCommand: ClipvaultCommand<
+  PeerPairingSessionSnapshot[]
+> = () => invoke<PeerPairingSessionSnapshot[]>("clipvault_peer_pairing_snapshot");
+
+export const peerPairingRevokeCommand: ClipvaultCommandArg<
+  PeerTrustOperationResponse,
+  { peer_id: string }
+> = (args) =>
+  invoke<PeerTrustOperationResponse>("clipvault_peer_pairing_revoke", {
+    peerId: args.peer_id,
+  });
+
+export const peerPairingBlockCommand: ClipvaultCommandArg<
+  PeerTrustOperationResponse,
+  { peer_id: string }
+> = (args) =>
+  invoke<PeerTrustOperationResponse>("clipvault_peer_pairing_block", {
+    peerId: args.peer_id,
+  });
+
+export const peerPairingUnblockCommand: ClipvaultCommandArg<
+  PeerTrustOperationResponse,
+  { peer_id: string }
+> = (args) =>
+  invoke<PeerTrustOperationResponse>("clipvault_peer_pairing_unblock", {
+    peerId: args.peer_id,
+  });
+
+/**
+ * Productive metadata-only health probe the runtime runs against
+ * a trusted peer. The transport dials the remote listener over
+ * mTLS, exchanges the bounded `health` envelope, and returns
+ * only the typed response (`ok` / `failed`). The bridge never
+ * accepts an IP, a port or a TLS key from the renderer; the
+ * runtime reads the pinned cert fingerprint from the persisted
+ * row before dialing. History / fetch / import routes are not
+ * part of this change and the productive transport refuses
+ * them as `not_available`.
+ */
+export const peerPairingHealthCommand: ClipvaultCommandArg<
+  PeerPairingHealthResponse,
+  { peer_id: string }
+> = (args) =>
+  invoke<PeerPairingHealthResponse>("clipvault_peer_pairing_health", {
+    peerId: args.peer_id,
+  });
 
 /**
  * Drive the platform application picker. The command returns a

@@ -31,23 +31,45 @@
    * read (mount-time refresh, post-toggle refresh, identity
    * retry and the polling tick) coalesces through it so a
    * previous in-flight request can never overlap a new one.
+   *
+   * Pairing actions (`Vincular` / `Desvincular` / `Bloquear` /
+   * `Desbloquear`) live next to each `Equipos` row. The modal
+   * never accepts an IP, a port, a TLS key, a SAS candidate or a
+   * signature; the pairing runtime owns every byte that crosses
+   * the trust boundary and the bridge exposes only the typed
+   * `PeerPairingOutcomeResponse` variants. The accessible
+   * pairing modal ([`PeerPairingModal.svelte`]) handles focus,
+   * Escape and the two-minute timeout the runtime enforces.
    */
   import { onDestroy, onMount } from "svelte";
   import {
+    peerPairingBlockCommand,
+    peerPairingRevokeCommand,
+    peerPairingUnblockCommand,
     peerSharingRefreshIdentityCommand,
     peerSharingToggleGetCommand,
     peerSharingToggleSetCommand,
     peerSnapshotCommand,
   } from "./lib/tauri";
+  import PeerPairingModal from "./PeerPairingModal.svelte";
   import type {
     PeerPresence,
     PeerSharingToggleResponse,
     PeerSnapshot,
     PeerSnapshotEntry,
+    PeerTrustState,
     Settings,
   } from "./types";
 
   export let onSettingsChanged: (settings: Settings) => void = () => {};
+
+  /** Local trust-state mirror used to drive the per-row actions. */
+  let trustStates: Record<string, PeerTrustState> = {};
+  let pairingOpen = false;
+  let pairingRow: PeerSnapshotEntry | null = null;
+  let pairingActionMessage: string | null = null;
+  let pairingActionError: string | null = null;
+  let pairingBusy = false;
 
   let loading = true;
   let toggle: PeerSharingToggleResponse | null = null;
@@ -228,6 +250,81 @@
     return "Error desconocido.";
   }
 
+  function trustStateOf(peerId: string): PeerTrustState {
+    return trustStates[peerId] ?? "unverified";
+  }
+
+  function describeTrustState(state: PeerTrustState): string {
+    switch (state) {
+      case "trusted":
+        return "Activo";
+      case "revoked":
+        return "Desvinculado";
+      case "blocked":
+        return "Bloqueado";
+      default:
+        return "Sin pareado";
+    }
+  }
+
+  async function openPairingModal(entry: PeerSnapshotEntry): Promise<void> {
+    pairingRow = entry;
+    pairingActionMessage = null;
+    pairingActionError = null;
+    pairingOpen = true;
+  }
+
+  async function revoke(entry: PeerSnapshotEntry): Promise<void> {
+    if (pairingBusy) return;
+    pairingBusy = true;
+    pairingActionError = null;
+    try {
+      await peerPairingRevokeCommand({ peer_id: entry.peer_id });
+      trustStates = { ...trustStates, [entry.peer_id]: "revoked" };
+      pairingActionMessage = "Vínculo deshecho.";
+    } catch (error) {
+      pairingActionError = describeError(error);
+    } finally {
+      pairingBusy = false;
+    }
+  }
+
+  async function block(entry: PeerSnapshotEntry): Promise<void> {
+    if (pairingBusy) return;
+    pairingBusy = true;
+    pairingActionError = null;
+    try {
+      await peerPairingBlockCommand({ peer_id: entry.peer_id });
+      trustStates = { ...trustStates, [entry.peer_id]: "blocked" };
+      pairingActionMessage = "Equipo bloqueado.";
+    } catch (error) {
+      pairingActionError = describeError(error);
+    } finally {
+      pairingBusy = false;
+    }
+  }
+
+  async function unblock(entry: PeerSnapshotEntry): Promise<void> {
+    if (pairingBusy) return;
+    pairingBusy = true;
+    pairingActionError = null;
+    try {
+      await peerPairingUnblockCommand({ peer_id: entry.peer_id });
+      trustStates = { ...trustStates, [entry.peer_id]: "unverified" };
+      pairingActionMessage = "Equipo desbloqueado; el vínculo debe restablecerse manualmente.";
+    } catch (error) {
+      pairingActionError = describeError(error);
+    } finally {
+      pairingBusy = false;
+    }
+  }
+
+  function handlePairingClosed(): void {
+    pairingOpen = false;
+    pairingRow = null;
+    void refresh();
+  }
+
   function isToggleOn(value: PeerSharingToggleResponse | null): boolean {
     if (!value) return false;
     // Only report the toggle as "on" when the runtime actually
@@ -375,11 +472,107 @@
             >
               {describePresence(entry.presence)}
             </span>
+            <span
+              class="presence"
+              data-testid="peer-equipos-trust-state"
+              data-trust={trustStateOf(entry.peer_id)}
+            >
+              {describeTrustState(trustStateOf(entry.peer_id))}
+            </span>
+            <div class="peer-actions" data-testid="peer-equipos-actions">
+              {#if trustStateOf(entry.peer_id) === "unverified"}
+                <button
+                  type="button"
+                  class="secondary"
+                  data-testid="peer-equipos-pair"
+                  disabled={pairingBusy}
+                  on:click={() => openPairingModal(entry)}
+                >
+                  Vincular
+                </button>
+                <button
+                  type="button"
+                  class="secondary"
+                  data-testid="peer-equipos-block"
+                  disabled={pairingBusy}
+                  on:click={() => block(entry)}
+                >
+                  Bloquear
+                </button>
+              {:else if trustStateOf(entry.peer_id) === "trusted"}
+                <button
+                  type="button"
+                  class="secondary"
+                  data-testid="peer-equipos-revoke"
+                  disabled={pairingBusy}
+                  on:click={() => revoke(entry)}
+                >
+                  Desvincular
+                </button>
+                <button
+                  type="button"
+                  class="secondary"
+                  data-testid="peer-equipos-block"
+                  disabled={pairingBusy}
+                  on:click={() => block(entry)}
+                >
+                  Bloquear
+                </button>
+              {:else if trustStateOf(entry.peer_id) === "revoked"}
+                <button
+                  type="button"
+                  class="secondary"
+                  data-testid="peer-equipos-pair"
+                  disabled={pairingBusy}
+                  on:click={() => openPairingModal(entry)}
+                >
+                  Volver a parear
+                </button>
+                <button
+                  type="button"
+                  class="secondary"
+                  data-testid="peer-equipos-block"
+                  disabled={pairingBusy}
+                  on:click={() => block(entry)}
+                >
+                  Bloquear
+                </button>
+              {:else if trustStateOf(entry.peer_id) === "blocked"}
+                <button
+                  type="button"
+                  class="secondary"
+                  data-testid="peer-equipos-unblock"
+                  disabled={pairingBusy}
+                  on:click={() => unblock(entry)}
+                >
+                  Desbloquear
+                </button>
+              {/if}
+            </div>
           </li>
         {/each}
       </ul>
+      {#if pairingActionMessage}
+        <p class="ok" role="status" data-testid="peer-pairing-action">
+          {pairingActionMessage}
+        </p>
+      {/if}
+      {#if pairingActionError}
+        <p class="error" role="alert" data-testid="peer-pairing-error">
+          {pairingActionError}
+        </p>
+      {/if}
     {/if}
   </article>
+
+  <PeerPairingModal
+    open={pairingOpen}
+    row={pairingRow
+      ? { peer_id: pairingRow.peer_id, display_name: describeEntry(pairingRow), short_fingerprint: shortFingerprint(pairingRow.public_key_fingerprint), trust_state: trustStateOf(pairingRow.peer_id), presence: pairingRow.presence, paired_at: null, last_discovered_at: pairingRow.last_discovered_at }
+      : null}
+    trigger={null}
+    on:close={handlePairingClosed}
+  />
 </section>
 
 <style>

@@ -84,6 +84,24 @@ local-peer-identity-keychain = ["dep:keyring"]
 # real adapter on. The core / db / frontend never depend on this
 # feature; only `clipvault-app` (the Tauri shell) does.
 local-peer-discovery-mdns = ["dep:mdns-sd"]
+# Production TLS / mTLS transport for the `local-peer-mutual-pairing`
+# change. Pulls in `tokio` + `rustls` + `tokio-rustls` + `rcgen`
+# behind the same `local-peer-pairing-tls` feature so the platform
+# crate keeps compiling without the TLS stack — cross-compiles
+# to unsupported targets, the distroless test sandbox, and
+# `cargo check` runs on hosts that cannot link the mDNS / TLS
+# backends all link the noop transport instead. The shell enables
+# this feature on macOS / Linux; the noop remains the fallback for
+# Windows builds and for any host the bootstrap cannot install a
+# real adapter on.
+local-peer-pairing-tls = [
+    "dep:tokio",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rcgen",
+    "dep:rustls-pki-types",
+    "dep:rustls-webpki",
+]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -159,6 +177,26 @@ keyring = { workspace = true, optional = true }
 # production builds. The platform layer owns the multicast
 # surface so the core never references the crate directly.
 mdns-sd = { workspace = true, optional = true }
+# Tokio async runtime + TLS stack the `local-peer-mutual-pairing`
+# change drives from inside the platform crate. The platform layer
+# owns the listener / connector / pairing session surface so the
+# core never references `tokio`, `rustls` or `rcgen` directly.
+tokio = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+# `rustls-pki-types` is the typed surface rustls exposes for
+# `CertificateDer`, `PrivateKeyDer`, `ServerName`, … The pairing
+# transport constructs those values directly so the cert builder
+# can hand them to `ServerConfig::with_single_cert` without
+# depending on `rustls`'s internals. Already pulled in
+# transitively; declaring it directly keeps the surface stable.
+rustls-pki-types = { workspace = true, optional = true }
+# X.509 + SPKI verifier the mTLS pairing transport uses to decode
+# the peer's certificate and verify its self-signature during the
+# handshake. Already pulled in transitively by `rustls`; declaring
+# it directly keeps the pairing surface stable.
+rustls-webpki = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.10"

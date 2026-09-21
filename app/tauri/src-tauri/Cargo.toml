@@ -24,6 +24,7 @@ default = [
     "linux-xlib-init",
     "local-peer-identity-keychain",
     "local-peer-discovery-mdns",
+    "local-peer-pairing-tls",
 ]
 custom-protocol = ["tauri/custom-protocol"]
 clipboard-arboard = []
@@ -36,6 +37,29 @@ linux-x11 = []
 # `local-peer-identity-foundation` change promises — the secure
 # store is opt-in by platform capability.
 local-peer-identity-keychain = ["clipvault-platform/local-peer-identity-keychain"]
+# Production mTLS pairing transport for the
+# `local-peer-mutual-pairing` change. Enabled by default so the
+# bootstrap wires the productive TLS-backed transport on macOS /
+# Linux instead of the noop stub the platform crate falls back to.
+# Windows builds and cross-compiles opt out so the platform crate
+# still compiles without linking `rustls` / `tokio-rustls` / `rcgen`.
+#
+# The feature MUST be propagated to BOTH `clipvault-core` and
+# `clipvault-platform` from this central declaration so the
+# `install_default_pairing_material_loader` entry point and the
+# `start_with_material` install path compile into the production
+# binary. Enabling the feature on `clipvault-platform` alone
+# leaves the core's `cfg(feature = "local-peer-pairing-tls")`
+# check false and the runtime still resolves the noop transport,
+# which is the regression the manual Wayland test surfaced as
+# `Sin TLS local`. Forwarding through `clipvault-core` (which
+# itself forwards to `clipvault-platform`) keeps the wiring in a
+# single place so the macOS / Linux target-specific dependency
+# blocks do not have to repeat it.
+local-peer-pairing-tls = [
+    "clipvault-core/local-peer-pairing-tls",
+    "clipvault-platform/local-peer-pairing-tls",
+]
 # Production mDNS adapter for the `local-peer-discovery` change.
 # Enabled by default so the bootstrap installs the
 # `MdnsPeerDiscoveryAdapter` on macOS / Linux instead of the
@@ -109,6 +133,7 @@ global-hotkey = { workspace = true }
 clipvault-core = { path = "../../../crates/clipvault-core", features = [
     "macos-native",
     "local-peer-discovery-mdns",
+    "local-peer-pairing-tls",
 ] }
 clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
     "clipboard-arboard",
@@ -116,6 +141,7 @@ clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
     "macos-native",
     "local-peer-identity-keychain",
     "local-peer-discovery-mdns",
+    "local-peer-pairing-tls",
 ] }
 objc2-foundation = { workspace = true }
 
@@ -130,6 +156,7 @@ clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
     "linux-gnome-shell-integration",
     "local-peer-identity-keychain",
     "local-peer-discovery-mdns",
+    "local-peer-pairing-tls",
 ] }
 
 [dev-dependencies]

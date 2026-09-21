@@ -129,6 +129,20 @@ pub struct BootstrapOptions {
     /// crate inject it through
     /// [`AppBootstrap::with_peer_discovery_adapter`].
     pub peer_discovery_adapter: Option<Arc<dyn crate::peer_discovery::PeerDiscoveryAdapter>>,
+    /// Optional concrete mDNS adapter the bootstrap keeps so the
+    /// pairing toggle can wire it into the productive pairing
+    /// advertisement. The shell passes the same handle it used
+    /// for [`Self::peer_discovery_adapter`] cast to its concrete
+    /// type; the adapter is what `MdnsPairingAdvertisementSink`
+    /// accepts. When `None` the pairing toggle surfaces the
+    /// typed `Unavailable` outcome instead of attempting to
+    /// downcast through `Any` — a coercion that the trait object
+    /// does not allow without a back-channel like this one.
+    #[cfg(all(
+        feature = "local-peer-discovery-mdns",
+        feature = "local-peer-pairing-tls"
+    ))]
+    pub peer_discovery_concrete: Option<Arc<clipvault_platform::MdnsPeerDiscoveryAdapter>>,
 }
 
 impl Default for BootstrapOptions {
@@ -140,6 +154,11 @@ impl Default for BootstrapOptions {
             capture_debug_sink: None,
             peer_identity_store: None,
             peer_discovery_adapter: None,
+            #[cfg(all(
+                feature = "local-peer-discovery-mdns",
+                feature = "local-peer-pairing-tls"
+            ))]
+            peer_discovery_concrete: None,
         }
     }
 }
@@ -204,6 +223,29 @@ pub struct AppContext {
     /// only injects the runtime so the shell sees a single
     /// metadata-only surface.
     peer_discovery: PeerDiscoveryRuntime,
+    /// Local peer mutual pairing runtime. The shell starts a
+    /// session through [`PairingRuntime::start_outbound`],
+    /// accepts inbound pairing envelopes through
+    /// [`PairingRuntime::observe_pairing`], and reads
+    /// [`PairingRuntime::snapshot`] to render the metadata-only
+    /// pairing modal. The runtime owns the platform transport
+    /// and the in-memory session table; the bootstrap wires the
+    /// persistence adapter that delegates to
+    /// [`clipvault_db::KnownPeerRepository`].
+    peer_pairing: crate::peer_pairing::PairingRuntime,
+    /// Concrete mDNS adapter the bootstrap installed for
+    /// discovery. The toggle command wires this handle into the
+    /// `PairingAdvertisement` the productive pairing transport
+    /// publishes through. `None` on hosts / builds without the
+    /// `local-peer-discovery-mdns` feature — the toggle then
+    /// surfaces `transport_unavailable` instead of a half-broken
+    /// listener that registered the discovery-only placeholder
+    /// port (`DISCOVERY_ONLY_PORT = 0`).
+    #[cfg(all(
+        feature = "local-peer-discovery-mdns",
+        feature = "local-peer-pairing-tls"
+    ))]
+    peer_discovery_concrete: Option<Arc<clipvault_platform::MdnsPeerDiscoveryAdapter>>,
 }
 
 impl AppContext {
@@ -474,6 +516,14 @@ impl AppContext {
         self.peer_discovery.clone()
     }
 
+    /// Handle to the local peer pairing runtime. The shell uses
+    /// it to start / accept / cancel pairing sessions and to
+    /// surface the metadata-only session snapshot the pairing
+    /// modal renders.
+    pub fn peer_pairing(&self) -> crate::peer_pairing::PairingRuntime {
+        self.peer_pairing.clone()
+    }
+
     /// Best-effort wire of the local peer identity the runtime
     /// uses for self-filtering, plus the validated display name
     /// the runtime publishes in its own TXT record. The shell
@@ -506,6 +556,132 @@ impl AppContext {
             }
         });
         self.peer_discovery.set_local_identity(snapshot);
+    }
+
+    /// Install the [`crate::peer_pairing::MaterialLoader`] the
+    /// production pairing transport uses to bind a real listener.
+    /// The bootstrap leaves the slot empty by default; the shell
+    /// wires a loader that delegates to the platform keychain so
+    /// `install_pairing_transport` can mint the cert from the
+    /// secure store. The pairing runtime never sees the seed —
+    /// only the typed [`clipvault_platform::LocalIdentityMaterial`]
+    /// the loader returns.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub fn install_pairing_material_loader(
+        &self,
+        loader: Arc<dyn crate::peer_pairing::MaterialLoader>,
+    ) {
+        self.peer_pairing.set_material_loader(loader);
+    }
+
+    /// Install a default material loader backed by the
+    /// platform keychain store the bootstrap was wired with.
+    /// The helper is the canonical way for the production shell
+    /// to register a productive material loader without
+    /// importing the platform crate directly; tests that exercise
+    /// the runtime can leave the slot empty.
+    #[cfg(all(
+        feature = "local-peer-pairing-tls",
+        feature = "local-peer-identity-keychain"
+    ))]
+    pub fn install_default_pairing_material_loader(
+        &self,
+        keychain: Arc<clipvault_platform::KeychainPeerIdentityStore>,
+    ) {
+        let loader = KeychainPairingMaterialLoader::new(keychain);
+        self.peer_pairing
+            .set_material_loader(Arc::new(loader) as Arc<dyn crate::peer_pairing::MaterialLoader>);
+    }
+
+    /// Forward the typed outcome the pairing transport returns
+    /// when the shell asks it to bind a real listener. The
+    /// bootstrap keeps the call site thin so the shell stays a
+    /// typed adapter that never inspects free-form strings.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub fn install_pairing_transport(
+        &self,
+        sink: Arc<dyn crate::peer_pairing::TransportSink>,
+        advertisement: Arc<dyn crate::peer_pairing::PairingAdvertisement>,
+        display_name: &str,
+    ) -> Result<u16, crate::peer_pairing::TransportOutcome> {
+        self.peer_pairing
+            .install_pairing_transport(sink, advertisement, display_name)
+    }
+
+    /// Forward the typed outcome with an explicit
+    /// [`RemotePeerResolver`]. The shell uses this variant when
+    /// the mDNS adapter is wired so the productive pairing
+    /// transport can resolve a `peer_id` to a `SocketAddr`
+    /// without exposing the address to the bridge.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub fn install_pairing_transport_with_resolver(
+        &self,
+        sink: Arc<dyn crate::peer_pairing::TransportSink>,
+        advertisement: Arc<dyn crate::peer_pairing::PairingAdvertisement>,
+        resolver: Arc<dyn clipvault_platform::peer_transport::RemotePeerResolver>,
+        display_name: &str,
+    ) -> Result<u16, crate::peer_pairing::TransportOutcome> {
+        self.peer_pairing.install_pairing_transport_with_resolver(
+            sink,
+            advertisement,
+            resolver,
+            display_name,
+        )
+    }
+
+    /// Install the local peer identity the pairing runtime uses
+    /// to compute the SAS and sign the local approval. The
+    /// bootstrap caches the value through
+    /// [`crate::peer_pairing::PairingRuntime::set_local_identity`]
+    /// so the runtime never has to reach into the platform crate
+    /// to resolve it. The shell calls this every time the secure
+    /// store hands out (or rotates) the local identity.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub fn install_pairing_local_identity(&self, identity: Option<&LocalPeerIdentity>) {
+        self.peer_pairing.set_local_identity(identity.cloned());
+    }
+
+    /// Concrete mDNS adapter the bootstrap installed. The toggle
+    /// command wires this handle into the
+    /// [`crate::peer_pairing::PairingAdvertisement`] the productive
+    /// pairing transport publishes through; `None` on hosts /
+    /// builds without the productive feature pair, where the
+    /// toggle must surface the typed `Unavailable` outcome.
+    #[cfg(all(
+        feature = "local-peer-discovery-mdns",
+        feature = "local-peer-pairing-tls"
+    ))]
+    pub fn peer_discovery_mdns_adapter(
+        &self,
+    ) -> Option<Arc<clipvault_platform::MdnsPeerDiscoveryAdapter>> {
+        self.peer_discovery_concrete.clone()
+    }
+
+    /// Stop the production pairing transport. The platform
+    /// layer withdraws the mDNS advertisement and closes the
+    /// listener before returning; the runtime surfaces the typed
+    /// outcome so the shell can render the off state without
+    /// inspecting free-form strings.
+    pub fn stop_pairing_transport(&self) -> Result<(), crate::peer_pairing::TransportOutcome> {
+        self.peer_pairing.stop_pairing_transport()
+    }
+
+    /// Whether the production pairing transport is currently
+    /// bound to a real listener. The shell consults this before
+    /// calling [`Self::install_pairing_transport`] so a redundant
+    /// toggle is a no-op.
+    pub fn pairing_transport_is_running(&self) -> bool {
+        self.peer_pairing.pairing_transport_is_running()
+    }
+
+    /// Return the ephemeral port the pairing transport bound to,
+    /// or `None` while the listener is stopped. The toggle helper
+    /// uses this value to confirm the productive install actually
+    /// succeeded — a `None` while the toggle is on means the
+    /// listener never came up and the toggle response must
+    /// collapse to `RuntimeStopped` instead of `active`.
+    pub fn pairing_bound_port(&self) -> Option<u16> {
+        self.peer_pairing.pairing_bound_port()
     }
 
     /// Wire the shared [`CaptureWatcher`] the destructive operations
@@ -632,6 +808,26 @@ impl AppBootstrap {
         adapter: Arc<dyn crate::peer_discovery::PeerDiscoveryAdapter>,
     ) -> Self {
         self.options.peer_discovery_adapter = Some(adapter);
+        self
+    }
+
+    /// Inject the concrete [`MdnsPeerDiscoveryAdapter`] the
+    /// pairing toggle wires into the productive pairing
+    /// advertisement. The shell MUST pass the same handle it
+    /// used for [`Self::with_peer_discovery_adapter`] so the
+    /// discovery and pairing halves agree on the underlying
+    /// `mdns-sd` daemon. When omitted the toggle surfaces the
+    /// typed `Unavailable` outcome instead of attempting to
+    /// downcast through `Any`.
+    #[cfg(all(
+        feature = "local-peer-discovery-mdns",
+        feature = "local-peer-pairing-tls"
+    ))]
+    pub fn with_peer_discovery_concrete(
+        mut self,
+        adapter: Arc<clipvault_platform::MdnsPeerDiscoveryAdapter>,
+    ) -> Self {
+        self.options.peer_discovery_concrete = Some(adapter);
         self
     }
 
@@ -883,18 +1079,77 @@ impl AppBootstrap {
                         clipvault_db::UpsertObservationOutcome::Conflict(clipvault_db::KnownPeer {
                             peer_id: observation.peer_id.clone(),
                             public_key_fingerprint: observation.public_key_fingerprint.clone(),
+                            full_public_key_fingerprint: observation
+                                .full_public_key_fingerprint
+                                .clone()
+                                .unwrap_or_default(),
                             display_name: observation.display_name.clone(),
                             protocol_major: observation.protocol_major,
                             capability: observation.capability.clone(),
                             first_seen_at: String::new(),
                             last_discovered_at: String::new(),
                             updated_at: String::new(),
+                            trust_state: clipvault_db::TrustState::Unverified,
+                            tls_cert_fingerprint: String::new(),
+                            paired_at: String::new(),
+                            paired_protocol_major: 0,
                         })
                     }
                 }
             })
         };
         peer_discovery.set_persistence(persist_closure);
+
+        // Build the local peer pairing runtime. The runtime owns
+        // the platform transport + the in-memory session table
+        // and delegates every trust-state transition to the
+        // repository the bootstrap owns. The persistence
+        // adapter is the only place where the runtime touches
+        // `known_peers`, mirroring the discovery worker.
+        //
+        // The bootstrap installs the production TLS-backed
+        // transport (not the noop stub) so the
+        // `local-peer-pairing-tls` feature gates the only
+        // productive install path. Cross-compiles and
+        // unsupported targets fall back to the noop transport
+        // through `default_peer_transport` so the runtime
+        // surfaces a typed `Unavailable` reason instead of
+        // silently spawning a half-broken listener.
+        let pairing_persistence: Arc<dyn crate::peer_pairing::PairingPersistence + Send + Sync> = {
+            let database_handle_for_closure = Arc::clone(&database_handle);
+            Arc::new(KnownPeerPairingPersistence::new(
+                database_handle_for_closure,
+            ))
+        };
+        let pairing_transport = crate::peer_pairing::default_peer_transport();
+        let peer_pairing =
+            crate::peer_pairing::PairingRuntime::new(pairing_transport, pairing_persistence);
+        // Keep the concrete mDNS adapter the bootstrap installed
+        // so the toggle command can wire it into the
+        // [`crate::peer_pairing::PairingAdvertisement`] the
+        // productive pairing transport publishes through. Storing
+        // the concrete type (not the trait object the discovery
+        // runtime owns) is required because the
+        // `MdnsPairingAdvertisementSink` constructor lives in
+        // `clipvault-platform` and expects the typed handle. We
+        // downcast the trait object via `Any`; a `None` outcome
+        // collapses into the typed `Unavailable` path the toggle
+        // already documents.
+        #[cfg(all(
+            feature = "local-peer-discovery-mdns",
+            feature = "local-peer-pairing-tls"
+        ))]
+        let peer_discovery_concrete = self.options.peer_discovery_concrete.clone();
+        #[cfg(not(all(
+            feature = "local-peer-discovery-mdns",
+            feature = "local-peer-pairing-tls"
+        )))]
+        let _peer_discovery_concrete: Option<
+            Arc<clipvault_platform::NoopPeerDiscoveryAdapter>,
+        > = {
+            let _ = self;
+            None
+        };
 
         Ok(AppContext {
             database: database_handle,
@@ -917,6 +1172,7 @@ impl AppBootstrap {
             active_app_diagnostics,
             paste_suppression,
             peer_discovery,
+            peer_pairing,
             // The capture-debug sink is either the caller-supplied
             // handle (tests) or the production wiring that consults
             // `CLIPVAULT_DEBUG_CAPTURE` exactly once at startup. When
@@ -928,6 +1184,11 @@ impl AppBootstrap {
                 .capture_debug_sink
                 .unwrap_or_else(CaptureDebugSinkHandle::enabled),
             environment_snapshot_emitted: Arc::new(AtomicBool::new(false)),
+            #[cfg(all(
+                feature = "local-peer-discovery-mdns",
+                feature = "local-peer-pairing-tls"
+            ))]
+            peer_discovery_concrete,
         })
     }
 }
@@ -1003,6 +1264,134 @@ fn default_peer_discovery_adapter() -> impl clipvault_platform::PeerDiscoveryAda
     )))]
     {
         clipvault_platform::NoopPeerDiscoveryAdapter::new()
+    }
+}
+
+/// Adapter the bootstrap installs as the
+/// [`crate::peer_pairing::PairingPersistence`] backend. The
+/// adapter delegates every transition to
+/// [`clipvault_db::KnownPeerRepository`] so the runtime never has
+/// to write SQL; the runtime calls the typed transition methods
+/// the repository exposes and surfaces the typed
+/// [`clipvault_db::TrustTransitionOutcome`] back to the pairing
+/// state machine. SQLite failures collapse into
+/// [`crate::peer_pairing::PairingPersistenceError::Unavailable`]
+/// so the runtime never sees a raw sqlite error.
+struct KnownPeerPairingPersistence {
+    database: Arc<Mutex<Database>>,
+}
+
+/// Adapter the bootstrap installs as the
+/// [`crate::peer_pairing::MaterialLoader`] when the shell wires
+/// the platform keychain. The loader is the single owner of the
+/// seed bytes — the runtime only sees the typed
+/// [`clipvault_platform::LocalIdentityMaterial`] the keychain
+/// returns. Keychain failures collapse into
+/// [`crate::peer_pairing::PairingPersistenceError::Unavailable`]
+/// so the runtime surfaces a typed reason instead of leaking the
+/// raw platform detail.
+#[cfg(all(
+    feature = "local-peer-pairing-tls",
+    feature = "local-peer-identity-keychain"
+))]
+struct KeychainPairingMaterialLoader {
+    keychain: Arc<clipvault_platform::KeychainPeerIdentityStore>,
+}
+
+#[cfg(all(
+    feature = "local-peer-pairing-tls",
+    feature = "local-peer-identity-keychain"
+))]
+impl KeychainPairingMaterialLoader {
+    fn new(keychain: Arc<clipvault_platform::KeychainPeerIdentityStore>) -> Self {
+        Self { keychain }
+    }
+}
+
+#[cfg(all(
+    feature = "local-peer-pairing-tls",
+    feature = "local-peer-identity-keychain"
+))]
+impl crate::peer_pairing::MaterialLoader for KeychainPairingMaterialLoader {
+    fn load(
+        &self,
+    ) -> Result<
+        clipvault_platform::LocalIdentityMaterial,
+        crate::peer_pairing::PairingPersistenceError,
+    > {
+        self.keychain
+            .load_or_create_material()
+            .map_err(|_error| crate::peer_pairing::PairingPersistenceError::Unavailable)
+    }
+}
+
+impl KnownPeerPairingPersistence {
+    fn new(database: Arc<Mutex<Database>>) -> Self {
+        Self { database }
+    }
+}
+
+impl crate::peer_pairing::PairingPersistence for KnownPeerPairingPersistence {
+    fn mark_trusted(
+        &self,
+        peer_id: &str,
+        tls_cert_fingerprint: &str,
+        paired_at: time::OffsetDateTime,
+        paired_protocol_major: i64,
+    ) -> Result<clipvault_db::TrustTransitionOutcome, crate::peer_pairing::PairingPersistenceError>
+    {
+        let mut db = self.database.lock();
+        let mut repo = clipvault_db::KnownPeerRepository::new(db.connection_mut());
+        repo.mark_trusted(
+            peer_id,
+            tls_cert_fingerprint,
+            paired_at,
+            paired_protocol_major,
+        )
+        .map_err(|_| crate::peer_pairing::PairingPersistenceError::Unavailable)
+    }
+
+    fn mark_revoked(
+        &self,
+        peer_id: &str,
+    ) -> Result<clipvault_db::TrustTransitionOutcome, crate::peer_pairing::PairingPersistenceError>
+    {
+        let mut db = self.database.lock();
+        let mut repo = clipvault_db::KnownPeerRepository::new(db.connection_mut());
+        repo.mark_revoked(peer_id)
+            .map_err(|_| crate::peer_pairing::PairingPersistenceError::Unavailable)
+    }
+
+    fn mark_blocked(
+        &self,
+        peer_id: &str,
+    ) -> Result<clipvault_db::TrustTransitionOutcome, crate::peer_pairing::PairingPersistenceError>
+    {
+        let mut db = self.database.lock();
+        let mut repo = clipvault_db::KnownPeerRepository::new(db.connection_mut());
+        repo.mark_blocked(peer_id)
+            .map_err(|_| crate::peer_pairing::PairingPersistenceError::Unavailable)
+    }
+
+    fn unblock(
+        &self,
+        peer_id: &str,
+    ) -> Result<clipvault_db::TrustTransitionOutcome, crate::peer_pairing::PairingPersistenceError>
+    {
+        let mut db = self.database.lock();
+        let mut repo = clipvault_db::KnownPeerRepository::new(db.connection_mut());
+        repo.unblock(peer_id)
+            .map_err(|_| crate::peer_pairing::PairingPersistenceError::Unavailable)
+    }
+
+    fn load(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<clipvault_db::KnownPeer>, crate::peer_pairing::PairingPersistenceError> {
+        let mut db = self.database.lock();
+        let repo = clipvault_db::KnownPeerRepository::new(db.connection_mut());
+        repo.get(peer_id)
+            .map_err(|_| crate::peer_pairing::PairingPersistenceError::Unavailable)
     }
 }
 

@@ -30,6 +30,7 @@ pub mod paste;
 pub mod paste_suppression;
 pub mod peer_discovery;
 pub mod peer_identity;
+pub mod peer_pairing;
 pub mod platform;
 pub mod platform_adapters;
 pub mod privacy;
@@ -144,6 +145,13 @@ pub use peer_identity::{
     InMemoryPeerIdentityStore, LocalPeerIdentity, LocalPeerProfile, PeerFingerprint, PeerId,
     PeerIdentityError, PeerIdentityOutcome, PeerIdentityService, PeerIdentityStore,
     PEER_IDENTITY_SERVICE, PEER_IDENTITY_USERNAME,
+};
+pub use peer_pairing::{
+    compute_sas, default_peer_transport, PairingError, PairingMessage, PairingOutcome,
+    PairingPersistence, PairingPersistenceError, PairingRuntime, PairingSessionId,
+    PairingSessionSnapshot, TrustOperationOutcome, PAIRING_CAPABILITY,
+    PAIRING_MAX_IN_FLIGHT_SESSIONS, PAIRING_MAX_PAYLOAD_BYTES, PAIRING_PROTOCOL_MAJOR,
+    PAIRING_RATE_LIMIT_PER_MINUTE, PAIRING_SESSION_TIMEOUT, PAIRING_WIRE_VERSION,
 };
 pub use platform_adapters::PlatformAdapters;
 pub use privacy::{CaptureDecision, CoreBlacklistMatcher, PrivacyGate};

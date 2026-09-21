@@ -524,6 +524,132 @@ export type PeerDisplayNameErrorCode =
   | "peer_display_name_too_long";
 
 /**
+ * Trust state the pairing runtime persists in `known_peers`.
+ * Mirrors [`clipvault_db::TrustState`] so the frontend can
+ * render the matching copy without inspecting free-form strings.
+ *
+ * - `unverified`: discovery has observed the peer; the user has
+ *   not started (or has rejected / cancelled) a pairing session.
+ * - `trusted`: the reciprocal SAS exchange completed; health
+ *   probes are accepted on the mTLS-pinned channel.
+ * - `revoked`: the user disconnected. A fresh pairing is required
+ *   to restore trust.
+ * - `blocked`: the user blocked the peer. Pairing and health
+ *   probes are rejected before any cryptographic work runs.
+ */
+export type PeerTrustState =
+  | "unverified"
+  | "trusted"
+  | "revoked"
+  | "blocked";
+
+/**
+ * Discriminated response of every `clipvault_peer_pairing_*`
+ * command the bridge exposes. The frontend branches on `kind`
+ * to render the matching modal state without inspecting the
+ * typed variants on the Rust side.
+ */
+export type PeerPairingOutcomeResponse =
+  | {
+      kind: "trusted";
+      peer_id: string;
+      display_name: string;
+      short_fingerprint: string;
+      paired_at: string;
+    }
+  | { kind: "awaiting_remote_approval"; session_id: number }
+  | {
+      kind: "failed";
+      reason:
+        | "session_expired"
+        | "cancelled"
+        | "incompatible_protocol"
+        | "unknown_or_key_mismatch"
+        | "blocked"
+        | "revoked"
+        | "rate_limited"
+        | "transport_unavailable";
+    };
+
+/**
+ * Metadata-only snapshot of every in-flight pairing session
+ * the runtime holds. The modal renders the SAS code next to the
+ * session id; the runtime expires the entries automatically so
+ * the snapshot is always in sync with the state machine's hard
+ * two-minute timeout.
+ *
+ * The optional `cert_fingerprint` field carries the SHA-256 of
+ * the remote peer's TLS cert DER. The runtime persists this
+ * value in `known_peers.tls_cert_fingerprint` after the
+ * dual-approval gate promotes the row and forwards it to the
+ * productive pairing transport so the next mTLS handshake is
+ * pinned against it.
+ */
+export interface PeerPairingSessionSnapshot {
+  session_id: number;
+  remote_peer_id: string;
+  remote_fingerprint: string;
+  remote_display_name: string;
+  local_approved: boolean;
+  remote_approved: boolean;
+  sas: string;
+  expires_at: string;
+  cert_fingerprint?: string | null;
+}
+
+/**
+ * Discriminated response of the trust-state transition
+ * commands the bridge exposes. The frontend branches on `kind`
+ * to render the matching copy and to refresh the snapshot.
+ */
+export type PeerTrustOperationResponse =
+  | { kind: "stored"; trust_state: PeerTrustState }
+  | { kind: "conflict"; trust_state: PeerTrustState }
+  | { kind: "unknown" };
+
+/**
+ * Stable wire representation of the productive health probe.
+ * The transport dials the remote listener over mTLS, exchanges
+ * the bounded `health` envelope, and returns only the typed
+ * response so the bridge never crosses free-form strings. The
+ * `failed` variant carries a stable `reason` the renderer can
+ * branch on without inspecting free-form messages.
+ */
+export type PeerPairingHealthResponse =
+  | { kind: "ok"; peer_id: string; protocol_major: number }
+  | { kind: "failed"; reason: PeerPairingHealthFailureReason };
+
+export type PeerPairingHealthFailureReason =
+  | "unknown_or_key_mismatch"
+  | "blocked"
+  | "revoked"
+  | "incompatible_protocol"
+  | "transport_unavailable"
+  | "cancelled"
+  | "session_expired"
+  | "rate_limited";
+
+/**
+ * Augmented metadata-only row the `Equipos` view renders when
+ * the pairing change is enabled. The DTO extends the discovery
+ * snapshot entry with the trust state the pairing runtime
+ * persists so the modal can branch on the row without an extra
+ * round-trip. The `peer_id`, `display_name`,
+ * `short_fingerprint`, `paired_at`, `last_discovered_at` and
+ * `presence` fields keep the same wire contract the
+ * `local-peer-discovery` change exposes.
+ */
+export interface PeerRow {
+  peer_id: string;
+  display_name: string;
+  short_fingerprint: string;
+  trust_state: PeerTrustState;
+  presence: "detected" | "not_available" | "unverified";
+  paired_at: string | null;
+  last_discovered_at: string;
+}
+
+/**
  * Metadata-only record the privacy modal renders for every
  * blacklisted application. The frontend MUST treat the shape as
  * metadata-only: no clipboard content, hashes or snippets ever

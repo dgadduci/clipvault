@@ -644,6 +644,119 @@ const MIGRATION_0013_KNOWN_PEERS: Migration = Migration {
     DROP TABLE IF EXISTS known_peers;",
 };
 
+/// `local-peer-mutual-pairing`: extend the `known_peers` table with
+/// the trust state the pairing runtime needs. The change is
+/// strictly additive — every column has a `NOT NULL` default so
+/// pre-existing rows keep matching the table without a backfill
+/// cascade.
+///
+/// Column contract:
+///
+/// - `trust_state`: one of `unverified`, `trusted`, `revoked`,
+///   `blocked`. The pairing runtime owns every transition. The
+///   discovery runtime reads it but never writes it.
+/// - `tls_cert_fingerprint`: SHA-256 of the DER-encoded TLS cert
+///   the peer used during the last successful mTLS handshake.
+///   Pinned so the runtime can reject a peer whose identity
+///   fingerprint stays the same but whose TLS key rotated
+///   (compromised key scenario). Empty until pairing completes.
+/// - `paired_at`: instant the reciprocal pairing was first
+///   persisted. Empty when `trust_state = unverified`.
+/// - `paired_protocol_major`: protocol major version at the moment
+///   pairing completed. Lets future protocol bumps surface an
+///   `IncompatibleProtocol` outcome before re-pinning.
+///
+/// The `idx_known_peers_trust_state` index supports the
+/// `Equipos` snapshot query that filters by trust state, the
+/// `revoked/blocked` lookup the runtime uses when receiving an
+/// incoming connection, and the future "forget revoked peer" UI
+/// action. The `down` step drops the columns through the table
+/// rebuild pattern so a rollback returns to the pre-pairing shape
+/// without losing pre-pairing rows.
+const MIGRATION_0014_KNOWN_PEERS_PAIRING: Migration = Migration {
+    version: 14,
+    description: "local-peer-mutual-pairing: add trust_state and pinned TLS columns to known_peers",
+    up_sql: "ALTER TABLE known_peers ADD COLUMN trust_state TEXT NOT NULL DEFAULT 'unverified';
+    ALTER TABLE known_peers ADD COLUMN tls_cert_fingerprint TEXT NOT NULL DEFAULT '';
+    ALTER TABLE known_peers ADD COLUMN paired_at TEXT NOT NULL DEFAULT '';
+    ALTER TABLE known_peers ADD COLUMN paired_protocol_major INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX IF NOT EXISTS idx_known_peers_trust_state
+        ON known_peers (trust_state);",
+    down_sql: "DROP INDEX IF EXISTS idx_known_peers_trust_state;
+    CREATE TABLE known_peers_pairing_rollback (
+        peer_id TEXT PRIMARY KEY,
+        public_key_fingerprint TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        protocol_major INTEGER NOT NULL,
+        capability TEXT NOT NULL,
+        first_seen_at TEXT NOT NULL,
+        last_discovered_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    INSERT INTO known_peers_pairing_rollback
+        (peer_id, public_key_fingerprint, display_name, protocol_major,
+         capability, first_seen_at, last_discovered_at, updated_at)
+    SELECT peer_id, public_key_fingerprint, display_name, protocol_major,
+           capability, first_seen_at, last_discovered_at, updated_at
+    FROM known_peers;
+    DROP TABLE known_peers;
+    ALTER TABLE known_peers_pairing_rollback RENAME TO known_peers;
+    CREATE INDEX idx_known_peers_last_discovered_at
+        ON known_peers (last_discovered_at DESC);
+    CREATE INDEX idx_known_peers_first_seen_at
+        ON known_peers (first_seen_at);",
+};
+
+/// `local-peer-mutual-pairing`: add the full public-key fingerprint
+/// the pairing layer uses to build the canonical
+/// `OutboundSessionDescriptor`. The pairing advertisement
+/// (`capability = pairing`) populates this column with the
+/// canonical 64-hex SHA-256 of the Ed25519 public key, distinct
+/// from the 16-hex `public_key_fingerprint` column the
+/// discovery-side UI badge uses. A row whose full fingerprint
+/// is empty means the peer has only ever been seen via
+/// `discovery_only` and cannot start a pairing session until a
+/// fresh pairing advertisement upgrades the column. The column
+/// has a `NOT NULL DEFAULT ''` so pre-existing rows keep
+/// matching without a backfill.
+const MIGRATION_0015_KNOWN_PEERS_PAIRING_FULL_FINGERPRINT: Migration = Migration {
+    version: 15,
+    description: "local-peer-mutual-pairing: add canonical full public-key fingerprint column",
+    up_sql:
+        "ALTER TABLE known_peers ADD COLUMN full_public_key_fingerprint TEXT NOT NULL DEFAULT '';",
+    down_sql: "DROP INDEX IF EXISTS idx_known_peers_trust_state;
+    CREATE TABLE known_peers_pairing_full_fingerprint_rollback (
+        peer_id TEXT PRIMARY KEY,
+        public_key_fingerprint TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        protocol_major INTEGER NOT NULL,
+        capability TEXT NOT NULL,
+        first_seen_at TEXT NOT NULL,
+        last_discovered_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        trust_state TEXT NOT NULL DEFAULT 'unverified',
+        tls_cert_fingerprint TEXT NOT NULL DEFAULT '',
+        paired_at TEXT NOT NULL DEFAULT '',
+        paired_protocol_major INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT INTO known_peers_pairing_full_fingerprint_rollback
+        (peer_id, public_key_fingerprint, display_name, protocol_major,
+         capability, first_seen_at, last_discovered_at, updated_at,
+         trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major)
+    SELECT peer_id, public_key_fingerprint, display_name, protocol_major,
+           capability, first_seen_at, last_discovered_at, updated_at,
+           trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major
+    FROM known_peers;
+    DROP TABLE known_peers;
+    ALTER TABLE known_peers_pairing_full_fingerprint_rollback RENAME TO known_peers;
+    CREATE INDEX idx_known_peers_last_discovered_at
+        ON known_peers (last_discovered_at DESC);
+    CREATE INDEX idx_known_peers_first_seen_at
+        ON known_peers (first_seen_at);
+    CREATE INDEX idx_known_peers_trust_state
+        ON known_peers (trust_state);",
+};
+
 /// Returns the migrations shipped with ClipVault. Each new migration is
 /// appended to this slice to keep ordering deterministic.
 pub fn builtin_migrations() -> Vec<Migration> {
@@ -661,6 +774,8 @@ pub fn builtin_migrations() -> Vec<Migration> {
         MIGRATION_0011_CODE_LANGUAGE,
         MIGRATION_0012_COLLECTION_COLORS,
         MIGRATION_0013_KNOWN_PEERS,
+        MIGRATION_0014_KNOWN_PEERS_PAIRING,
+        MIGRATION_0015_KNOWN_PEERS_PAIRING_FULL_FINGERPRINT,
     ]
 }
 
@@ -922,6 +1037,101 @@ mod tests {
             up.contains("IDX_CLIPBOARD_ENTRIES_CODE_LANGUAGE"),
             "missing code_language index"
         );
+    }
+
+    #[test]
+    fn known_peers_pairing_migration_creates_required_columns_and_index() {
+        // The `local-peer-mutual-pairing` change extends the
+        // metadata-only `known_peers` table with the trust state +
+        // TLS pin columns the runtime needs. The columns MUST be
+        // present with safe defaults (`unverified` for the trust
+        // state, empty strings for the pin / paired_at fields,
+        // `0` for the protocol major) so a pre-pairing row keeps
+        // matching the schema.
+        let up = MIGRATION_0014_KNOWN_PEERS_PAIRING.up_sql.to_uppercase();
+        for column in [
+            "TRUST_STATE",
+            "TLS_CERT_FINGERPRINT",
+            "PAIRED_AT",
+            "PAIRED_PROTOCOL_MAJOR",
+        ] {
+            assert!(
+                up.contains(&format!("ADD COLUMN {column}")),
+                "known_peers must extend with column {column}",
+            );
+        }
+        assert!(
+            up.contains("DEFAULT 'UNVERIFIED'"),
+            "trust_state must default to unverified",
+        );
+        assert!(
+            up.contains("IDX_KNOWN_PEERS_TRUST_STATE"),
+            "missing trust_state index",
+        );
+        // Endpoints, secrets, raw key bytes MUST NOT land in the
+        // table; only the SHA-256 fingerprint of the DER cert is
+        // persisted.
+        for forbidden in ["PRIVATE_KEY", "TSEED", "RAW_KEY", "TLS_KEY", "PRESHARED"] {
+            assert!(
+                !up.contains(forbidden),
+                "known_peers must not persist {forbidden}",
+            );
+        }
+        // The `down` step must rebuild the table through the
+        // rollback pattern without touching the pre-existing
+        // columns.
+        let down = MIGRATION_0014_KNOWN_PEERS_PAIRING.down_sql.to_uppercase();
+        assert!(down.contains("DROP INDEX IF EXISTS IDX_KNOWN_PEERS_TRUST_STATE"));
+        assert!(down.contains("KNOWN_PEERS_PAIRING_ROLLBACK"));
+    }
+
+    #[test]
+    fn known_peers_pairing_migration_rolls_back_cleanly() {
+        use crate::rollback_migration;
+        use crate::Database;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("clipvault.db");
+        let mut db = Database::open(&path).expect("open");
+        let outcomes = db.run_migrations(&builtin_migrations()).expect("migrate");
+        let applied: Vec<i64> = outcomes
+            .iter()
+            .filter_map(|o| match o {
+                crate::MigrationOutcome::Applied { version, .. } => Some(*version),
+                crate::MigrationOutcome::AlreadyApplied { .. } => None,
+            })
+            .collect();
+        assert!(
+            applied.contains(&14),
+            "pairing migration must apply on top of known_peers",
+        );
+
+        rollback_migration(&mut db, &MIGRATION_0014_KNOWN_PEERS_PAIRING).expect("rollback");
+        // After the rollback the pre-pairing columns stay; the
+        // added columns are gone. The schema the discovery tests
+        // build on stays compatible.
+        let conn = db.connection();
+        let _: i64 = conn
+            .query_row("SELECT COUNT(*) FROM known_peers", [], |row| row.get(0))
+            .expect("table still present after rollback");
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(known_peers)")
+            .expect("pragma")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("columns")
+            .filter_map(|name| name.ok())
+            .collect();
+        for new_col in [
+            "trust_state",
+            "tls_cert_fingerprint",
+            "paired_at",
+            "paired_protocol_major",
+        ] {
+            assert!(
+                !columns.iter().any(|c| c == new_col),
+                "{new_col} must be dropped on rollback, got {columns:?}",
+            );
+        }
     }
 
     #[test]

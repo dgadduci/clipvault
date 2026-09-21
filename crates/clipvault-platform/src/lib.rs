@@ -26,6 +26,7 @@ mod noop;
 pub mod paste;
 pub mod peer_discovery;
 pub mod peer_identity;
+pub mod peer_transport;
 pub mod runtime;
 mod stub;
 mod tiff_metadata;
@@ -90,6 +91,8 @@ pub use peer_discovery::{
 };
 #[cfg(feature = "local-peer-identity-keychain")]
 pub use peer_identity::KeychainPeerIdentityStore;
+#[cfg(feature = "local-peer-pairing-tls")]
+pub use peer_identity::LocalIdentityMaterial;
 pub use peer_identity::{
     LocalPeerIdentity, PeerFingerprint, PeerId, PeerIdentityError, PeerIdentityOutcome,
     PeerIdentityStore, PEER_IDENTITY_SERVICE, PEER_IDENTITY_USERNAME,

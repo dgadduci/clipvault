@@ -82,11 +82,20 @@ pub const MAX_PEER_DISPLAY_NAME_LENGTH: usize = 64;
 pub const PROTOCOL_MAJOR: i64 = 1;
 
 /// Capability advertised in every TXT record this change owns.
-/// The `local-peer-mutual-pairing` change will replace this string
-/// with `pairing` once the listener ships; the discovery-only
-/// capability stays valid for any pair that does not yet trust the
-/// remote peer.
+/// The `local-peer-mutual-pairing` change ships its own
+/// `pairing` capability for the productive path; the
+/// discovery-only capability stays valid for every peer that has
+/// not yet trusted the remote listener. The runtime rejects
+/// every other capability at validation time.
 pub const DISCOVERY_ONLY_CAPABILITY: &str = "discovery_only";
+
+/// Capability the productive pairing change advertises when the
+/// local peer has a real ephemeral port bound and the mDNS TXT
+/// record additionally carries the full public-key fingerprint
+/// the pairing listener pins during the mTLS handshake. The
+/// constant lives in the discovery module so the validation path
+/// and the bridge can share a single string.
+pub const PAIRING_CAPABILITY: &str = "pairing";
 
 /// Service type the runtime browses / registers. The trailing dot
 /// is intentional: `mdns-sd` treats it as a fully-qualified name
@@ -99,6 +108,13 @@ pub const SERVICE_TYPE: &str = "_clipvault._tcp.local.";
 /// value here so it can validate TXT records without exposing the
 /// platform-internal constant.
 pub const PEER_ID_HEX_CHARS: usize = 32;
+
+/// Number of lowercase hex characters the full public-key
+/// fingerprint MUST carry. The pairing advertisement carries the
+/// full SHA-256 of the Ed25519 public key in this projection so
+/// the pairing runtime never has to derive it from the 16-char
+/// short fingerprint the discovery-only advertisement advertises.
+pub const FULL_FINGERPRINT_HEX_CHARS: usize = 64;
 
 /// Identifier of the local peer the runtime must filter out before
 /// persisting. The runtime compares the TXT `peer_id` against this
@@ -155,6 +171,16 @@ impl LocalPeerIdentitySnapshot {
 pub struct PeerObservationRecord {
     pub peer_id: String,
     pub public_key_fingerprint: String,
+    /// Full SHA-256 of the peer's Ed25519 public key (64 hex
+    /// chars). The pairing change populates the field when the
+    /// incoming advertisement declares `capability = pairing`;
+    /// the discovery-only path leaves it `None`. The runtime
+    /// never synthesizes the value from the short fingerprint —
+    /// the full digest is only ever set by the productive
+    /// advertisement so the pairing runtime can build the
+    /// canonical `OutboundSessionDescriptor` from a row that was
+    /// only ever seen over pairing-capable mDNS.
+    pub full_public_key_fingerprint: Option<String>,
     pub display_name: String,
     pub protocol_major: i64,
     pub capability: String,
@@ -205,14 +231,40 @@ impl PeerObservationRecord {
                 observed: raw.protocol_major,
             });
         }
-        if raw.capability != DISCOVERY_ONLY_CAPABILITY {
-            return Err(PeerRecordValidationError::UnsupportedCapability {
-                capability: raw.capability.clone(),
-            });
+        // The runtime accepts both `discovery_only` and
+        // `pairing` advertisements. The pairing advertisement
+        // additionally carries the full public-key fingerprint
+        // in the `pairing_fingerprint` field; the runtime refuses
+        // pairing records that lack a well-formed 64-hex full
+        // fingerprint so the pairing layer never receives a
+        // half-pinned row.
+        match raw.capability.as_str() {
+            DISCOVERY_ONLY_CAPABILITY => {}
+            PAIRING_CAPABILITY => {
+                let full = raw.pairing_fingerprint.as_deref().unwrap_or("");
+                if full.len() != FULL_FINGERPRINT_HEX_CHARS
+                    || !full
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+                {
+                    return Err(PeerRecordValidationError::MissingPairingFingerprint);
+                }
+            }
+            _ => {
+                return Err(PeerRecordValidationError::UnsupportedCapability {
+                    capability: raw.capability.clone(),
+                });
+            }
         }
+        let full_public_key_fingerprint = if raw.capability == PAIRING_CAPABILITY {
+            raw.pairing_fingerprint.clone()
+        } else {
+            None
+        };
         Ok(Self {
             peer_id: raw.peer_id.clone(),
             public_key_fingerprint: raw.public_key_fingerprint.clone(),
+            full_public_key_fingerprint,
             display_name,
             protocol_major: raw.protocol_major,
             capability: raw.capability.clone(),
@@ -227,6 +279,7 @@ impl PeerObservationRecord {
         PeerObservation {
             peer_id: self.peer_id,
             public_key_fingerprint: self.public_key_fingerprint,
+            full_public_key_fingerprint: self.full_public_key_fingerprint,
             display_name: self.display_name,
             protocol_major: self.protocol_major,
             capability: self.capability,
@@ -267,6 +320,8 @@ pub enum PeerRecordValidationError {
     IncompatibleProtocol { observed: i64 },
     #[error("TXT record capability {capability:?} is not supported by this build")]
     UnsupportedCapability { capability: String },
+    #[error("TXT record pairing advertisement is missing the full public-key fingerprint")]
+    MissingPairingFingerprint,
 }
 
 fn is_invalid_display_char(c: char) -> bool {
@@ -734,6 +789,7 @@ impl PeerDiscoveryRuntime {
         let persisted = apply_observation(&PeerObservation {
             peer_id: observation.peer_id.clone(),
             public_key_fingerprint: observation.public_key_fingerprint.clone(),
+            full_public_key_fingerprint: observation.full_public_key_fingerprint.clone(),
             display_name: observation.display_name.clone(),
             protocol_major: observation.protocol_major,
             capability: observation.capability.clone(),
@@ -849,6 +905,9 @@ fn apply_event(handles: &WorkerHandles, event: DiscoveryEvent) {
                         let persisted = (handles.persist)(&PeerObservation {
                             peer_id: observation.peer_id.clone(),
                             public_key_fingerprint: observation.public_key_fingerprint.clone(),
+                            full_public_key_fingerprint: observation
+                                .full_public_key_fingerprint
+                                .clone(),
                             display_name: observation.display_name.clone(),
                             protocol_major: observation.protocol_major,
                             capability: observation.capability.clone(),
@@ -1000,15 +1059,31 @@ mod tests {
                         && existing.protocol_major == observation.protocol_major
                         && existing.capability == observation.capability
                     {
+                        // Merge: upgrade the full fingerprint when
+                        // the new observation carries one and the
+                        // previous row did not. A peer first seen
+                        // via discovery_only is promoted the
+                        // moment a pairing advertisement upgrades
+                        // the column.
+                        let merged_full = observation
+                            .full_public_key_fingerprint
+                            .clone()
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or_else(|| existing.full_public_key_fingerprint.clone());
                         let refreshed = KnownPeer {
                             peer_id: observation.peer_id.clone(),
                             public_key_fingerprint: observation.public_key_fingerprint.clone(),
+                            full_public_key_fingerprint: merged_full,
                             display_name: observation.display_name.clone(),
                             protocol_major: observation.protocol_major,
                             capability: observation.capability.clone(),
                             first_seen_at: existing.first_seen_at.clone(),
                             last_discovered_at: stamp.clone(),
                             updated_at: stamp.clone(),
+                            trust_state: existing.trust_state,
+                            tls_cert_fingerprint: existing.tls_cert_fingerprint.clone(),
+                            paired_at: existing.paired_at.clone(),
+                            paired_protocol_major: existing.paired_protocol_major,
                         };
                         guard.push(refreshed.clone());
                         UpsertObservationOutcome::Stored(refreshed)
@@ -1021,12 +1096,20 @@ mod tests {
                     let row = KnownPeer {
                         peer_id: observation.peer_id.clone(),
                         public_key_fingerprint: observation.public_key_fingerprint.clone(),
+                        full_public_key_fingerprint: observation
+                            .full_public_key_fingerprint
+                            .clone()
+                            .unwrap_or_default(),
                         display_name: observation.display_name.clone(),
                         protocol_major: observation.protocol_major,
                         capability: observation.capability.clone(),
                         first_seen_at: stamp.clone(),
                         last_discovered_at: stamp.clone(),
                         updated_at: stamp,
+                        trust_state: clipvault_db::TrustState::Unverified,
+                        tls_cert_fingerprint: String::new(),
+                        paired_at: String::new(),
+                        paired_protocol_major: 0,
                     };
                     guard.push(row.clone());
                     UpsertObservationOutcome::Stored(row)
@@ -1129,7 +1212,7 @@ mod tests {
     #[test]
     fn validation_rejects_unsupported_capability() {
         let raw = TxtRecord {
-            capability: "pairing".into(),
+            capability: "totally_unknown".into(),
             ..txt(
                 "0123456789abcdef0123456789abcdef",
                 "0123456789abcdef",
@@ -1140,7 +1223,46 @@ mod tests {
             .expect_err("unsupported capability must fail");
         assert!(matches!(
             err,
-            PeerRecordValidationError::UnsupportedCapability { ref capability } if capability == "pairing"
+            PeerRecordValidationError::UnsupportedCapability { ref capability } if capability == "totally_unknown"
+        ));
+    }
+
+    #[test]
+    fn validation_accepts_a_pairing_advertisement_with_full_fingerprint() {
+        let raw = TxtRecord {
+            capability: PAIRING_CAPABILITY.into(),
+            pairing_fingerprint: Some("f".repeat(64)),
+            ..txt(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+                "Studio",
+            )
+        };
+        let validated =
+            PeerObservationRecord::from_txt_record(&raw).expect("pairing must validate");
+        assert_eq!(validated.capability, PAIRING_CAPABILITY);
+        assert_eq!(
+            validated.full_public_key_fingerprint.as_deref(),
+            Some("f".repeat(64).as_str())
+        );
+    }
+
+    #[test]
+    fn validation_rejects_pairing_advertisement_missing_full_fingerprint() {
+        let raw = TxtRecord {
+            capability: PAIRING_CAPABILITY.into(),
+            pairing_fingerprint: None,
+            ..txt(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+                "Studio",
+            )
+        };
+        let err = PeerObservationRecord::from_txt_record(&raw)
+            .expect_err("pairing without full fingerprint must fail");
+        assert!(matches!(
+            err,
+            PeerRecordValidationError::MissingPairingFingerprint
         ));
     }
 
@@ -1278,12 +1400,17 @@ mod tests {
             KnownPeer {
                 peer_id: "0123456789abcdef0123456789abcdef".to_string(),
                 public_key_fingerprint: "aaaaaaaaaaaaaaaa".to_string(),
+                full_public_key_fingerprint: String::new(),
                 display_name: "Original".to_string(),
                 protocol_major: PROTOCOL_MAJOR,
                 capability: DISCOVERY_ONLY_CAPABILITY.to_string(),
                 first_seen_at: "2026-01-01T00:00:00Z".to_string(),
                 last_discovered_at: "2026-01-01T00:00:00Z".to_string(),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
+                trust_state: clipvault_db::TrustState::Unverified,
+                tls_cert_fingerprint: String::new(),
+                paired_at: String::new(),
+                paired_protocol_major: 0,
             },
         );
         runtime.start().expect("start");
@@ -1291,6 +1418,7 @@ mod tests {
         runtime.enqueue(DiscoveryEvent::Observed(TxtRecord {
             peer_id: "0123456789abcdef0123456789abcdef".to_string(),
             public_key_fingerprint: "bbbbbbbbbbbbbbbb".to_string(),
+            pairing_fingerprint: None,
             display_name: "Impostor".to_string(),
             protocol_major: PROTOCOL_MAJOR,
             capability: DISCOVERY_ONLY_CAPABILITY.to_string(),
@@ -1318,6 +1446,7 @@ mod tests {
         runtime.enqueue(DiscoveryEvent::Observed(TxtRecord {
             peer_id: "not-a-hex-peer-id".to_string(),
             public_key_fingerprint: "0123456789abcdef".to_string(),
+            pairing_fingerprint: None,
             display_name: "Studio".to_string(),
             protocol_major: PROTOCOL_MAJOR,
             capability: DISCOVERY_ONLY_CAPABILITY.to_string(),

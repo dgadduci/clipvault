@@ -3,6 +3,14 @@
 
 use std::sync::Arc;
 
+#[cfg(all(
+    feature = "local-peer-pairing-tls",
+    feature = "local-peer-discovery-mdns"
+))]
+use clipvault_core::{
+    peer_pairing::TransportError,
+    peer_pairing::{PairingAdvertisement, TransportSink},
+};
 use clipvault_core::{
     ActiveAppDiagnostics, Capabilities, ClearOutcome, ClipboardAssetStore,
     CodeLanguageServiceError, CopyOutcome, DeleteOutcome, IgnoredAppEntry, IgnoredAppError,
@@ -2607,6 +2615,36 @@ pub enum PeerSharingToggleResponse {
 
 impl PeerSharingToggleResponse {
     fn from_runtime(runtime: &clipvault_core::PeerDiscoveryRuntime, enabled: bool) -> Self {
+        Self::from_pairing(
+            runtime,
+            enabled,
+            Err(clipvault_core::peer_pairing::TransportOutcome::Unavailable),
+        )
+    }
+
+    /// Build the typed discriminated union from the discovery
+    /// runtime state and the typed pairing transport outcome.
+    /// The pairing outcome is what prevents the regression the
+    /// 2026-09-20 review flagged: when the productive TLS install
+    /// fails, the toggle must NOT collapse into `active` even
+    /// though discovery is browsing. The function folds both
+    /// signals into the union so the UI renders the documented
+    /// `identity_unavailable` / `runtime_stopped` copy.
+    fn from_pairing(
+        runtime: &clipvault_core::PeerDiscoveryRuntime,
+        enabled: bool,
+        pairing_result: Result<u16, clipvault_core::peer_pairing::TransportOutcome>,
+    ) -> Self {
+        if pairing_result.is_err() {
+            // The productive pairing transport refused to bind
+            // the listener (or the shell deliberately turned it
+            // off). The runtime may still be browsing but the
+            // pairing endpoint is not actually dialable; the UI
+            // collapses this into `runtime_stopped` so the user
+            // sees the same degraded copy regardless of the
+            // typed reason.
+            return PeerSharingToggleResponse::RuntimeStopped { enabled };
+        }
         if !runtime.is_running() {
             // Distinguish `identity_unavailable` (the secure store
             // is unreachable on this session) from `runtime_stopped`
@@ -2634,6 +2672,16 @@ impl PeerSharingToggleResponse {
 /// [`PeerSharingToggleResponse`]; the frontend uses it to render
 /// the toggle and the status copy without inspecting free-form
 /// strings.
+///
+/// The function consults BOTH the discovery runtime AND the
+/// productive pairing transport: after a restart with the toggle
+/// active, the bootstrap re-installs the pairing listener; if
+/// the install failed the toggle MUST surface as
+/// `RuntimeStopped` rather than collapsing into `active` only
+/// because discovery is browsing. The pairing result is
+/// synthetic here (we don't re-install on every poll) — the
+/// runtime reports the production pairing state the install
+/// path cached in [`AppContext`].
 #[tauri::command]
 pub fn clipvault_peer_sharing_toggle_get(
     state: State<'_, SharedState>,
@@ -2641,9 +2689,23 @@ pub fn clipvault_peer_sharing_toggle_get(
     let context = state.context();
     let settings = context.settings().load(context);
     let runtime = context.peer_discovery();
-    Ok(PeerSharingToggleResponse::from_runtime(
+    let pairing_running = context.pairing_transport_is_running();
+    let pairing_result = if settings.local_peer_sharing_enabled && !pairing_running {
+        // The toggle is on but the pairing listener is not bound.
+        // Surface a typed `Unavailable` so the union collapses to
+        // `RuntimeStopped` instead of reporting `active`.
+        Err(clipvault_core::peer_pairing::TransportOutcome::Unavailable)
+    } else if !settings.local_peer_sharing_enabled {
+        // Toggle is off: pairing is intentionally stopped.
+        Err(clipvault_core::peer_pairing::TransportOutcome::Unavailable)
+    } else {
+        // Toggle is on AND the pairing listener is bound.
+        Ok(context.pairing_bound_port().unwrap_or(0))
+    };
+    Ok(PeerSharingToggleResponse::from_pairing(
         &runtime,
         settings.local_peer_sharing_enabled,
+        pairing_result,
     ))
 }
 
@@ -2669,10 +2731,142 @@ pub fn clipvault_peer_sharing_toggle_set(
     context
         .settings()
         .sync_runtime_with_settings(context, &runtime, &settings);
-    Ok(PeerSharingToggleResponse::from_runtime(
+    // The productive pairing transport follows the same toggle.
+    // When sharing flips off we stop the listener and withdraw the
+    // mDNS advertisement so a remote browser sees the goodbye
+    // packet immediately; when it flips on we install the listener
+    // and publish the pairing capability alongside the real
+    // ephemeral port. The transport itself owns the cert pinning
+    // and the mTLS handshake; the toggle is a thin adapter over
+    // the productive install path the bootstrap wired. The
+    // returned `Result<u16, TransportOutcome>` is forwarded into
+    // the discriminated union so a failed TLS install can never
+    // collapse into `active`.
+    let pairing_result = sync_pairing_transport_with_toggle(context, enabled);
+    Ok(PeerSharingToggleResponse::from_pairing(
         &runtime,
         settings.local_peer_sharing_enabled,
+        pairing_result,
     ))
+}
+
+/// Drive the productive pairing transport in lockstep with the
+/// `Compartir en red local` toggle. The shell keeps this helper
+/// inline so the toggle command stays a thin adapter. The
+/// function returns the typed outcome the install path produced
+/// so the toggle can fold it into the documented discriminated
+/// union (a failed TLS install MUST NOT collapse into `active`).
+#[cfg(all(
+    feature = "local-peer-pairing-tls",
+    feature = "local-peer-discovery-mdns"
+))]
+pub(crate) fn sync_pairing_transport_with_toggle(
+    context: &clipvault_core::AppContext,
+    enabled: bool,
+) -> Result<u16, clipvault_core::peer_pairing::TransportOutcome> {
+    if !enabled {
+        let _ = context.stop_pairing_transport();
+        return Err(clipvault_core::peer_pairing::TransportOutcome::Unavailable);
+    }
+    // Sharing is on: resolve the local identity so the productive
+    // install path can mint the cert and publish the real
+    // ephemeral port. A missing / unloaded identity surfaces the
+    // same `identity_unavailable` reason the discovery runtime
+    // already publishes; the toggle keeps the documented degraded
+    // copy instead of falling back to a half-broken listener.
+    let identity = match context.settings().peer_identity().load_identity() {
+        clipvault_core::PeerIdentityOutcome::Ok(identity) => identity,
+        clipvault_core::PeerIdentityOutcome::Unavailable => {
+            return Err(clipvault_core::peer_pairing::TransportOutcome::Unavailable);
+        }
+    };
+    let display_name = context
+        .settings()
+        .load(context)
+        .local_peer_display_name
+        .clone()
+        .unwrap_or_default();
+    context.install_pairing_local_identity(Some(&identity));
+    let Some(mdns_adapter) = context.peer_discovery_mdns_adapter() else {
+        return Err(clipvault_core::peer_pairing::TransportOutcome::Unavailable);
+    };
+    let advertisement_sink =
+        clipvault_platform::peer_transport::tls::MdnsPairingAdvertisementSink::new(
+            mdns_adapter.clone(),
+            &identity,
+            display_name.clone(),
+        );
+    let advertisement: Arc<dyn PairingAdvertisement> = Arc::new(PairingAdvertisementAdapter::new(
+        Arc::new(advertisement_sink),
+    ));
+    let transport_sink: Arc<dyn TransportSink> = Arc::new(context.peer_pairing());
+    let resolver: Arc<dyn clipvault_platform::peer_transport::RemotePeerResolver> = Arc::new(
+        clipvault_platform::peer_transport::tls::MdnsRemotePeerResolver::new(mdns_adapter),
+    );
+    context.install_pairing_transport_with_resolver(
+        transport_sink,
+        advertisement,
+        resolver,
+        &display_name,
+    )
+}
+
+#[cfg(not(all(
+    feature = "local-peer-pairing-tls",
+    feature = "local-peer-discovery-mdns"
+)))]
+pub(crate) fn sync_pairing_transport_with_toggle(
+    context: &clipvault_core::AppContext,
+    enabled: bool,
+) -> Result<u16, clipvault_core::peer_pairing::TransportOutcome> {
+    // Without the productive feature pair the pairing transport
+    // cannot install a real listener; a `false` toggle short-
+    // circuits to the noop stop so a previous install attempt
+    // (built when the feature was enabled) does not leak.
+    if !enabled {
+        let _ = context.stop_pairing_transport();
+    }
+    Err(clipvault_core::peer_pairing::TransportOutcome::Unavailable)
+}
+
+/// Adapter the toggle uses to bridge the platform-level
+/// [`PairingAdvertisementSink`] (the type the
+/// [`MdnsPairingAdvertisementSink`] implements) into the
+/// runtime-level [`PairingAdvertisement`] trait the bootstrap
+/// re-exports. The adapter is feature-gated to the same cfg the
+/// pairing transport install path lives under; without the
+/// productive feature pair the toggle does not compile the
+/// adapter and the runtime falls back to its typed `Unavailable`
+/// path.
+#[cfg(all(
+    feature = "local-peer-pairing-tls",
+    feature = "local-peer-discovery-mdns"
+))]
+struct PairingAdvertisementAdapter {
+    inner: Arc<dyn clipvault_platform::peer_transport::PairingAdvertisementSink>,
+}
+
+#[cfg(all(
+    feature = "local-peer-pairing-tls",
+    feature = "local-peer-discovery-mdns"
+))]
+impl PairingAdvertisementAdapter {
+    fn new(inner: Arc<dyn clipvault_platform::peer_transport::PairingAdvertisementSink>) -> Self {
+        Self { inner }
+    }
+}
+
+#[cfg(all(
+    feature = "local-peer-pairing-tls",
+    feature = "local-peer-discovery-mdns"
+))]
+impl PairingAdvertisement for PairingAdvertisementAdapter {
+    fn publish(&self, bound_port: u16) -> Result<(), TransportError> {
+        self.inner.publish(bound_port)
+    }
+    fn withdraw(&self) -> Result<(), TransportError> {
+        self.inner.withdraw()
+    }
 }
 
 /// Metadata-only snapshot the `Equipos` view renders. The
@@ -2727,4 +2921,410 @@ pub fn clipvault_peer_sharing_refresh_identity(
         &runtime,
         settings.local_peer_sharing_enabled,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Pairing commands
+//
+// The `local-peer-mutual-pairing` change adds a metadata-only
+// bridge for the reciprocal pairing flow. The commands are
+// intentionally thin: every cryptographic surface lives in
+// `clipvault-core::peer_pairing`; the bridge forwards typed
+// arguments, surfaces typed outcomes, and never touches the
+// pairing state machine directly. The frontend can therefore
+// drive the modal without importing the runtime crate.
+//
+// Wire contract: every payload is metadata-only. The commands
+// never accept an IP, a port, a TLS key, a SAS candidate, a
+// signature or any other peer-supplied bytes; the pairing runtime
+// owns every byte that crosses the trust boundary.
+// ---------------------------------------------------------------------------
+
+/// Stable wire representation of a [`clipvault_core::PairingOutcome`].
+/// The frontend branches on `kind` to render the modal's next
+/// state without inspecting free-form strings or reconstructing the
+/// typed variant on the TypeScript side.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerPairingOutcomeResponse {
+    /// The reciprocal approval completed and the row is now
+    /// `trusted`. The frontend offers `Desvincular` /
+    /// `Bloquear` actions; the trusted row's `peer_id`,
+    /// `display_name`, `short_fingerprint` and `paired_at` are
+    /// safe to render.
+    Trusted {
+        peer_id: String,
+        display_name: String,
+        short_fingerprint: String,
+        paired_at: String,
+    },
+    /// The session is waiting for the remote peer's approval.
+    /// The frontend keeps the modal open and shows the SAS code
+    /// until either the remote approval arrives or the timeout
+    /// expires.
+    AwaitingRemoteApproval { session_id: u64 },
+    /// The session failed for one of the typed reasons the
+    /// runtime surfaces. The frontend renders the matching
+    /// copy without inspecting the message.
+    Failed { reason: &'static str },
+}
+
+impl PeerPairingOutcomeResponse {
+    fn from(outcome: clipvault_core::PairingOutcome) -> Self {
+        match outcome {
+            clipvault_core::PairingOutcome::Trusted(row) => {
+                let short_fingerprint = if row.public_key_fingerprint.len() <= 8 {
+                    row.public_key_fingerprint.clone()
+                } else {
+                    row.public_key_fingerprint[..8].to_string()
+                };
+                PeerPairingOutcomeResponse::Trusted {
+                    peer_id: row.peer_id,
+                    display_name: row.display_name,
+                    short_fingerprint,
+                    paired_at: row.paired_at,
+                }
+            }
+            clipvault_core::PairingOutcome::AwaitingRemoteApproval(id) => {
+                PeerPairingOutcomeResponse::AwaitingRemoteApproval {
+                    session_id: id.as_u64(),
+                }
+            }
+            clipvault_core::PairingOutcome::Failed(error) => {
+                let reason = match error {
+                    clipvault_core::PairingError::SessionExpired => "session_expired",
+                    clipvault_core::PairingError::Cancelled => "cancelled",
+                    clipvault_core::PairingError::IncompatibleProtocol => "incompatible_protocol",
+                    clipvault_core::PairingError::UnknownOrKeyMismatch => "unknown_or_key_mismatch",
+                    clipvault_core::PairingError::Blocked => "blocked",
+                    clipvault_core::PairingError::Revoked => "revoked",
+                    clipvault_core::PairingError::RateLimited => "rate_limited",
+                    clipvault_core::PairingError::TransportUnavailable => "transport_unavailable",
+                };
+                PeerPairingOutcomeResponse::Failed { reason }
+            }
+        }
+    }
+}
+
+/// Start an outbound pairing session against a known peer. The
+/// runtime mints a fresh `session_id` and a candidate SAS code;
+/// the modal renders the code and waits for the reciprocal
+/// approval. The `peer_id` and `display_name` arguments come
+/// from the `Equipos` snapshot the discovery runtime exposes; the
+/// runtime refuses to start a session against an unknown peer so
+/// the shell cannot accidentally prompt for a peer the
+/// discovery surface has never observed. The fingerprint comes
+/// from `known_peers.full_public_key_fingerprint` so the TLS
+/// listener validates the canonical 64-hex SHA-256 (not the
+/// 16-hex UI projection that the discovery-side TXT record
+/// carries).
+#[tauri::command]
+pub fn clipvault_peer_pairing_start(
+    state: State<'_, SharedState>,
+    peer_id: String,
+    display_name: String,
+) -> Result<PeerPairingOutcomeResponse, CommandError> {
+    let context = state.context();
+    let runtime = context.peer_pairing();
+    let fingerprint = peer_full_fingerprint_for(context, &peer_id)?;
+    let outcome = runtime
+        .start_outbound(&peer_id, &fingerprint, &display_name)
+        .map_err(map_pairing_error)?;
+    Ok(PeerPairingOutcomeResponse::from(outcome))
+}
+
+/// Record the local user's approval of the SAS code shown next
+/// to the modal. The runtime marks the session locally approved;
+/// the reciprocal approval is what triggers the
+/// [`PeerPairingOutcomeResponse::Trusted`] outcome.
+#[tauri::command]
+pub fn clipvault_peer_pairing_approve_local(
+    state: State<'_, SharedState>,
+    session_id: u64,
+) -> Result<PeerPairingOutcomeResponse, CommandError> {
+    let context = state.context();
+    let runtime = context.peer_pairing();
+    let outcome = runtime.approve_local(clipvault_core::PairingSessionId(session_id));
+    Ok(PeerPairingOutcomeResponse::from(outcome))
+}
+
+/// Cancel an in-flight pairing session. Idempotent.
+#[tauri::command]
+pub fn clipvault_peer_pairing_cancel(
+    state: State<'_, SharedState>,
+    session_id: u64,
+) -> Result<PeerPairingOutcomeResponse, CommandError> {
+    let context = state.context();
+    let runtime = context.peer_pairing();
+    let outcome = runtime.cancel(clipvault_core::PairingSessionId(session_id));
+    Ok(PeerPairingOutcomeResponse::from(outcome))
+}
+
+/// Metadata-only snapshot of every in-flight pairing session.
+/// The frontend renders the modal against the first row; the
+/// runtime expires the entries automatically so the snapshot is
+/// always in sync with the state machine's hard timeout.
+#[tauri::command]
+pub fn clipvault_peer_pairing_snapshot(
+    state: State<'_, SharedState>,
+) -> Result<Vec<clipvault_core::PairingSessionSnapshot>, CommandError> {
+    let context = state.context();
+    let runtime = context.peer_pairing();
+    Ok(runtime.snapshot())
+}
+
+/// Disconnect (revoke) a previously-trusted peer. The runtime
+/// marks the row `revoked`, clears any in-flight sessions and
+/// returns the metadata-only DTO the snapshot renders. The
+/// caller can re-pair the same peer later by accepting a new
+/// reciprocal SAS exchange.
+#[tauri::command]
+pub fn clipvault_peer_pairing_revoke(
+    state: State<'_, SharedState>,
+    peer_id: String,
+) -> Result<PeerTrustOperationResponse, CommandError> {
+    let context = state.context();
+    let runtime = context.peer_pairing();
+    let outcome = runtime.revoke(&peer_id);
+    Ok(PeerTrustOperationResponse::from(outcome))
+}
+
+/// Metadata-only health probe the runtime runs against a
+/// trusted peer. The transport dials the remote listener over
+/// mTLS, exchanges the bounded `health` envelope, and returns
+/// the typed [`PeerPairingHealthResponse`] union. The union is
+/// the only outcome the renderer ever sees — the productive
+/// path collapses UnknownPeer / KeyMismatch / Revoked / Blocked
+/// / IncompatibleProtocol / RateLimited / Cancelled /
+/// SessionExpired / TransportUnavailable into the typed
+/// `Failed` variant so the bridge never inspects free-form
+/// strings or surfaces a `CommandError` the renderer has to
+/// translate. The shell never opens history / fetch / import
+/// routes — the transport refuses them as `not_available`.
+#[tauri::command]
+#[cfg(feature = "local-peer-pairing-tls")]
+pub fn clipvault_peer_pairing_health(
+    state: State<'_, SharedState>,
+    peer_id: String,
+) -> PeerPairingHealthResponse {
+    let context = state.context();
+    let runtime = context.peer_pairing();
+    let cert_fingerprint = match runtime.cert_fingerprint_for(&peer_id) {
+        Ok(value) => value,
+        Err(error) => {
+            return PeerPairingHealthResponse::from_pairing_error(error);
+        }
+    };
+    match runtime.health_probe(&peer_id, &cert_fingerprint) {
+        Ok(snapshot) => PeerPairingHealthResponse::from(snapshot),
+        Err(error) => PeerPairingHealthResponse::from_pairing_error(error),
+    }
+}
+
+#[cfg(not(feature = "local-peer-pairing-tls"))]
+#[tauri::command]
+pub fn clipvault_peer_pairing_health(
+    _state: State<'_, SharedState>,
+    _peer_id: String,
+) -> PeerPairingHealthResponse {
+    PeerPairingHealthResponse::Failed {
+        reason: PeerPairingHealthFailureReason::TransportUnavailable,
+    }
+}
+
+/// Stable wire representation of a
+/// [`clipvault_core::PeerPairingHealthSnapshot`]. The frontend
+/// branches on `kind` to render the matching copy without
+/// inspecting free-form strings or reconstructing the typed
+/// variant on the TypeScript side. The bridge never returns a
+/// `CommandError` for the health probe: every typed failure
+/// collapses into the `Failed` variant so the renderer stays
+/// a thin adapter over the discriminated union.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerPairingHealthResponse {
+    /// The transport validated the pinned cert fingerprint,
+    /// completed the bounded health envelope exchange and
+    /// surfaced presence + protocol major.
+    Ok {
+        peer_id: String,
+        protocol_major: i64,
+    },
+    /// The transport refused the probe for one of the typed
+    /// reasons the runtime already branches on. The reason is
+    /// a stable identifier the renderer maps to copy without
+    /// inspecting the underlying message.
+    Failed {
+        reason: PeerPairingHealthFailureReason,
+    },
+}
+
+#[cfg(feature = "local-peer-pairing-tls")]
+impl PeerPairingHealthResponse {
+    fn from(snapshot: clipvault_core::peer_pairing::PeerPairingHealthSnapshot) -> Self {
+        PeerPairingHealthResponse::Ok {
+            peer_id: snapshot.peer_id,
+            protocol_major: snapshot.protocol_major,
+        }
+    }
+
+    /// Bridge the typed [`clipvault_core::PairingError`] the
+    /// productive pairing runtime surfaces into the typed
+    /// [`PeerPairingHealthFailureReason`] the renderer maps to
+    /// copy. Every variant the runtime exposes has a stable
+    /// mapping here so the bridge never surfaces a `CommandError`
+    /// for the health probe.
+    fn from_pairing_error(error: clipvault_core::PairingError) -> Self {
+        use clipvault_core::PairingError as E;
+        let reason = match error {
+            E::SessionExpired => PeerPairingHealthFailureReason::SessionExpired,
+            E::Cancelled => PeerPairingHealthFailureReason::Cancelled,
+            E::IncompatibleProtocol => PeerPairingHealthFailureReason::IncompatibleProtocol,
+            E::UnknownOrKeyMismatch => PeerPairingHealthFailureReason::UnknownOrKeyMismatch,
+            E::Blocked => PeerPairingHealthFailureReason::Blocked,
+            E::Revoked => PeerPairingHealthFailureReason::Revoked,
+            E::RateLimited => PeerPairingHealthFailureReason::RateLimited,
+            E::TransportUnavailable => PeerPairingHealthFailureReason::TransportUnavailable,
+        };
+        PeerPairingHealthResponse::Failed { reason }
+    }
+}
+
+#[cfg(not(feature = "local-peer-pairing-tls"))]
+impl PeerPairingHealthResponse {
+    #[allow(dead_code)]
+    fn from_pairing_error(error: clipvault_core::PairingError) -> Self {
+        let _ = error;
+        PeerPairingHealthResponse::Failed {
+            reason: PeerPairingHealthFailureReason::TransportUnavailable,
+        }
+    }
+}
+
+/// Stable, sorted identifiers the renderer maps to copy. The
+/// wire shape mirrors the TypeScript
+/// `PeerPairingHealthFailureReason` enum so a misnamed variant
+/// surfaces as a compile-time type error in the renderer.
+#[derive(Debug, Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerPairingHealthFailureReason {
+    UnknownOrKeyMismatch,
+    Blocked,
+    Revoked,
+    IncompatibleProtocol,
+    TransportUnavailable,
+    Cancelled,
+    SessionExpired,
+    RateLimited,
+}
+
+/// Block a peer. The runtime marks the row `blocked`, clears any
+/// in-flight sessions and refuses every future pairing /
+/// health probe against the row. Unblocking requires the
+/// explicit [`clipvault_peer_pairing_unblock`] command.
+#[tauri::command]
+pub fn clipvault_peer_pairing_block(
+    state: State<'_, SharedState>,
+    peer_id: String,
+) -> Result<PeerTrustOperationResponse, CommandError> {
+    let context = state.context();
+    let runtime = context.peer_pairing();
+    let outcome = runtime.block(&peer_id);
+    Ok(PeerTrustOperationResponse::from(outcome))
+}
+
+/// Unblock a previously-blocked peer. The runtime clears the
+/// cert fingerprint and paired_at columns so a re-detection
+/// cannot claim the previous trust state. The row returns to
+/// `unverified`; the user has to re-pair to restore trust.
+#[tauri::command]
+pub fn clipvault_peer_pairing_unblock(
+    state: State<'_, SharedState>,
+    peer_id: String,
+) -> Result<PeerTrustOperationResponse, CommandError> {
+    let context = state.context();
+    let runtime = context.peer_pairing();
+    let outcome = runtime.unblock(&peer_id);
+    Ok(PeerTrustOperationResponse::from(outcome))
+}
+
+/// Wire representation of a [`clipvault_core::TrustOperationOutcome`].
+/// The frontend branches on `kind` to render the matching copy
+/// without inspecting the inner row.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerTrustOperationResponse {
+    Stored { trust_state: &'static str },
+    Conflict { trust_state: &'static str },
+    Unknown,
+}
+
+impl PeerTrustOperationResponse {
+    fn from(outcome: clipvault_core::TrustOperationOutcome) -> Self {
+        match outcome {
+            clipvault_core::TrustOperationOutcome::Stored(row) => {
+                PeerTrustOperationResponse::Stored {
+                    trust_state: trust_state_str(row.trust_state),
+                }
+            }
+            clipvault_core::TrustOperationOutcome::Conflict(row) => {
+                PeerTrustOperationResponse::Conflict {
+                    trust_state: trust_state_str(row.trust_state),
+                }
+            }
+            clipvault_core::TrustOperationOutcome::Unknown => PeerTrustOperationResponse::Unknown,
+        }
+    }
+}
+
+fn trust_state_str(state: clipvault_db::TrustState) -> &'static str {
+    state.as_str()
+}
+
+/// Resolve the canonical full public-key fingerprint the pairing
+/// runtime hands to the productive TLS listener. The
+/// `known_peers.full_public_key_fingerprint` column is only
+/// populated by a `capability = pairing` mDNS observation, so a
+/// row that was first seen via `discovery_only` collapses into
+/// [`CommandError`] of kind `pairing_fingerprint_missing`. The
+/// `peer_pairing_start` command surfaces the typed reason so the
+/// UI can prompt the user to wait for a pairing advertisement
+/// instead of silently feeding the short 16-hex fingerprint into
+/// the mTLS layer.
+fn peer_full_fingerprint_for(
+    context: &clipvault_core::AppContext,
+    peer_id: &str,
+) -> Result<String, CommandError> {
+    let mut db = context.database().lock();
+    let conn = db.connection_mut();
+    let repo = clipvault_db::KnownPeerRepository::new(conn);
+    let row = repo
+        .get(peer_id)
+        .map_err(|error| {
+            CommandError::new(
+                "known_peers_error",
+                format!("known_peers lookup failed: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            CommandError::new(
+                "peer_not_found",
+                format!("peer {peer_id} not in known_peers"),
+            )
+        })?;
+    if row.full_public_key_fingerprint.is_empty() {
+        return Err(CommandError::new(
+            "pairing_fingerprint_missing",
+            format!(
+                "peer {peer_id} has no full pairing fingerprint yet; \
+                 wait for a pairing advertisement before starting a session"
+            ),
+        ));
+    }
+    Ok(row.full_public_key_fingerprint)
+}
+
+fn map_pairing_error(error: clipvault_core::PairingError) -> CommandError {
+    CommandError::new("pairing_error", format!("pairing failed: {error}"))
 }

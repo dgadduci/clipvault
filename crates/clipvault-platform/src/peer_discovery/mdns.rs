@@ -46,13 +46,15 @@ use super::{
 /// `clipvault-core`.
 const SERVICE_TYPE: &str = "_clipvault._tcp.local.";
 
-/// Port the adapter publishes. Per the design
+/// Port the discovery-only record publishes. Per the design
 /// (`local-peer-discovery/design.md` §"Descubrimiento, presencia
 /// y compatibilidad") discovery-only records use a placeholder
-/// port so a client knows NOT to attempt a TCP connect — the
-/// `local-peer-mutual-pairing` change will replace the
-/// registration with a real TLS listener and a non-zero port,
-/// but until then the contract is metadata-only.
+/// port so a client knows NOT to attempt a TCP connect. The
+/// `local-peer-mutual-pairing` change uses the productive
+/// [`Self::start_with_port`] entry point to publish the real
+/// non-zero ephemeral port the TLS listener reserved; the
+/// discovery-only contract stays bound to the legacy `start`
+/// path and to this constant.
 const DISCOVERY_ONLY_PORT: u16 = 0;
 
 /// TXT keys the adapter reads / writes for the metadata the
@@ -61,6 +63,7 @@ const DISCOVERY_ONLY_PORT: u16 = 0;
 /// TXT record bound.
 const TXT_PEER_ID: &str = "peer_id";
 const TXT_FINGERPRINT: &str = "fp";
+const TXT_PAIRING_FINGERPRINT: &str = "pfp";
 const TXT_DISPLAY_NAME: &str = "name";
 const TXT_PROTOCOL_MAJOR: &str = "pmajor";
 const TXT_CAPABILITY: &str = "cap";
@@ -96,6 +99,11 @@ pub struct MdnsPeerDiscoveryAdapter {
 struct AdapterState {
     daemon: Option<MdnsHandle>,
     peer_registry: Option<Arc<Mutex<HashMap<String, String>>>>,
+    /// Most recent `SocketAddr` the browse loop observed for
+    /// each `peer_id`. The pairing transport uses this to dial
+    /// the announced listener without exposing the address to
+    /// the runtime layer. `None` when the adapter is stopped.
+    peer_addresses: Option<Arc<Mutex<HashMap<String, std::net::SocketAddr>>>>,
 }
 
 /// Owns the [`mdns_sd::ServiceDaemon`] plus the join handle of
@@ -234,6 +242,7 @@ impl MdnsPeerDiscoveryAdapter {
         &self,
         advertisement: &DiscoveryAdvertisement,
         sink: Arc<dyn DiscoverySink>,
+        port: u16,
     ) -> Result<(), MdnsAdapterError> {
         let daemon = mdns_sd::ServiceDaemon::new().map_err(|error| {
             warn!(error = %error, "failed to start mdns-sd daemon");
@@ -247,7 +256,7 @@ impl MdnsPeerDiscoveryAdapter {
             &instance,
             &fullname,
             "",
-            DISCOVERY_ONLY_PORT,
+            port,
             &properties[..],
         )
         .map_err(|error| {
@@ -268,6 +277,9 @@ impl MdnsPeerDiscoveryAdapter {
         let peer_registry: Arc<Mutex<HashMap<String, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let peer_registry_for_thread = Arc::clone(&peer_registry);
+        let peer_addresses: Arc<Mutex<HashMap<String, std::net::SocketAddr>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let peer_addresses_for_thread = Arc::clone(&peer_addresses);
         // The browse loop runs on a dedicated thread; the
         // runtime passes the sink as an `Arc` so the closure
         // can move it into the thread without leaking the
@@ -275,7 +287,13 @@ impl MdnsPeerDiscoveryAdapter {
         let thread = thread::Builder::new()
             .name("clipvault-peer-discovery".to_string())
             .spawn(move || {
-                run_browse_loop(receiver, sink, cancel_for_thread, peer_registry_for_thread);
+                run_browse_loop(
+                    receiver,
+                    sink,
+                    cancel_for_thread,
+                    peer_registry_for_thread,
+                    peer_addresses_for_thread,
+                );
             })
             .map_err(|error| {
                 warn!(error = %error, "failed to spawn mdns-sd browse thread");
@@ -290,8 +308,9 @@ impl MdnsPeerDiscoveryAdapter {
                 shutdown_started: Cell::new(false),
             }),
             peer_registry: Some(peer_registry),
+            peer_addresses: Some(peer_addresses),
         };
-        debug!("mdns-sd adapter registered and browse loop started");
+        debug!(port, "mdns-sd adapter registered and browse loop started");
         Ok(())
     }
 
@@ -306,6 +325,19 @@ impl MdnsPeerDiscoveryAdapter {
             handle.shutdown();
         }
         state.peer_registry = None;
+        state.peer_addresses = None;
+    }
+
+    /// Resolve the most recent `SocketAddr` the mDNS browse loop
+    /// observed for the matching `peer_id`. The pairing
+    /// transport uses this internally to dial the announced
+    /// listener without ever exposing the address to the
+    /// runtime, SQLite, Tauri or the frontend.
+    pub fn resolve_peer(&self, peer_id: &str) -> Option<std::net::SocketAddr> {
+        let state = self.state.lock().expect("state lock");
+        let addresses = state.peer_addresses.as_ref()?;
+        let map = addresses.lock().expect("peer addresses");
+        map.get(peer_id).copied()
     }
 }
 
@@ -321,24 +353,58 @@ impl PeerDiscoveryAdapter for MdnsPeerDiscoveryAdapter {
         advertisement: &DiscoveryAdvertisement,
         sink: Arc<dyn DiscoverySink>,
     ) -> Result<(), AdapterError> {
+        // The advertisement must be metadata-only and aligned
+        // with the runtime contract; we refuse to start with an
+        // empty peer_id or capability so a misconfigured shell
+        // surfaces the error before publishing.
+        if advertisement.peer_id.is_empty() || advertisement.capability.is_empty() {
+            return Err(AdapterError::MalformedAdvertisement);
+        }
         if self.running.swap(true, Ordering::AcqRel) {
             return Err(AdapterError::AlreadyRunning);
+        }
+        // The discovery-only path publishes the placeholder
+        // port the previous design pinned. The productive
+        // pairing path uses [`Self::start_with_port`] to publish
+        // the real ephemeral port the TLS listener reserved.
+        let install_result = self.install(advertisement, sink, DISCOVERY_ONLY_PORT);
+        if let Err(error) = install_result {
+            self.running.store(false, Ordering::Release);
+            return Err(map_install_error(error));
+        }
+        Ok(())
+    }
+
+    fn start_with_port(
+        &self,
+        advertisement: &DiscoveryAdvertisement,
+        sink: Arc<dyn DiscoverySink>,
+        port: u16,
+    ) -> Result<(), AdapterError> {
+        if port == 0 {
+            // The productive pairing path MUST publish a real,
+            // non-zero port so a remote browser can dial the
+            // TLS listener. A zero port here means the caller
+            // accidentally fell back to the discovery-only
+            // contract — surface it as a typed rejection so the
+            // runtime reports a stable reason instead of
+            // silently publishing a record that misleads every
+            // browser on the link.
+            return Err(AdapterError::MalformedAdvertisement);
         }
         // The advertisement must be metadata-only and aligned
         // with the runtime contract; we refuse to start with an
         // empty peer_id or capability so a misconfigured shell
         // surfaces the error before publishing.
         if advertisement.peer_id.is_empty() || advertisement.capability.is_empty() {
-            self.running.store(false, Ordering::Release);
             return Err(AdapterError::MalformedAdvertisement);
         }
-        if let Err(_error) = self.install(advertisement, sink) {
+        if self.running.swap(true, Ordering::AcqRel) {
+            return Err(AdapterError::AlreadyRunning);
+        }
+        if let Err(error) = self.install(advertisement, sink, port) {
             self.running.store(false, Ordering::Release);
-            // `install` already logged the upstream cause; map
-            // every internal failure to the typed multicast
-            // unavailable variant so the runtime surfaces a
-            // stable `runtime_stopped` reason.
-            return Err(AdapterError::MulticastUnavailable);
+            return Err(map_install_error(error));
         }
         Ok(())
     }
@@ -351,6 +417,23 @@ impl PeerDiscoveryAdapter for MdnsPeerDiscoveryAdapter {
 
     fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
+    }
+}
+
+/// Map an internal [`MdnsAdapterError`] to the public
+/// [`AdapterError`] taxonomy. Every install-time failure
+/// collapses to [`AdapterError::MulticastUnavailable`] except
+/// the explicit `ServiceInfo` rejection the productive path
+/// raises for a zero port, which surfaces as
+/// [`AdapterError::MalformedAdvertisement`] so the runtime can
+/// distinguish "could not reach mDNS" from "advertisement did
+/// not satisfy the productive pairing contract".
+fn map_install_error(error: MdnsAdapterError) -> AdapterError {
+    match error {
+        MdnsAdapterError::ServiceInfo => AdapterError::MalformedAdvertisement,
+        MdnsAdapterError::Register | MdnsAdapterError::Browse | MdnsAdapterError::SpawnThread => {
+            AdapterError::MulticastUnavailable
+        }
     }
 }
 
@@ -368,10 +451,11 @@ fn run_browse_loop(
     sink: Arc<dyn DiscoverySink>,
     cancel: Arc<AtomicBool>,
     peer_registry: Arc<Mutex<HashMap<String, String>>>,
+    peer_addresses: Arc<Mutex<HashMap<String, std::net::SocketAddr>>>,
 ) {
     while !cancel.load(Ordering::Acquire) {
         match receiver.recv_timeout(std::time::Duration::from_millis(500)) {
-            Ok(event) => process_event(&event, &sink, &peer_registry),
+            Ok(event) => process_event(&event, &sink, &peer_registry, &peer_addresses),
             Err(error) => {
                 if is_disconnected(&error) {
                     break;
@@ -397,16 +481,29 @@ pub(super) fn process_event(
     event: &mdns_sd::ServiceEvent,
     sink: &Arc<dyn DiscoverySink>,
     peer_registry: &Arc<Mutex<HashMap<String, String>>>,
+    peer_addresses: &Arc<Mutex<HashMap<String, std::net::SocketAddr>>>,
 ) {
     match event {
         mdns_sd::ServiceEvent::ServiceResolved(info) => {
             let fullname = info.get_fullname().to_string();
             if let Some(record) = translate_resolved(info) {
                 let peer_id = record.peer_id.clone();
+                let address = info
+                    .get_addresses()
+                    .iter()
+                    .copied()
+                    .next()
+                    .and_then(|ip| std::net::SocketAddr::new(ip, info.get_port()).into());
                 peer_registry
                     .lock()
                     .expect("peer registry")
-                    .insert(fullname, peer_id);
+                    .insert(fullname.clone(), peer_id.clone());
+                if let Some(address) = address {
+                    peer_addresses
+                        .lock()
+                        .expect("peer addresses")
+                        .insert(peer_id, address);
+                }
                 sink.push(DiscoveryEvent::Observed(record));
             }
         }
@@ -415,7 +512,11 @@ pub(super) fn process_event(
                 .lock()
                 .expect("peer registry")
                 .remove(fullname);
-            if let Some(peer_id) = peer_id {
+            if let Some(peer_id) = peer_id.clone() {
+                peer_addresses
+                    .lock()
+                    .expect("peer addresses")
+                    .remove(&peer_id);
                 sink.push(DiscoveryEvent::Removed { peer_id });
             }
         }
@@ -461,14 +562,17 @@ fn translate_resolved(info: &mdns_sd::ServiceInfo) -> Option<TxtRecord> {
     let display_name = read_string_property(properties, TXT_DISPLAY_NAME)?;
     let protocol_major = read_int_property(properties, TXT_PROTOCOL_MAJOR)?;
     let capability = read_string_property(properties, TXT_CAPABILITY)?;
-    Some(TxtRecord::new(
+    let pairing_fingerprint = read_optional_string_property(properties, TXT_PAIRING_FINGERPRINT);
+    let mut record = TxtRecord::new(
         peer_id,
         fingerprint,
         display_name,
         protocol_major,
         capability,
         time::OffsetDateTime::now_utc(),
-    ))
+    );
+    record.pairing_fingerprint = pairing_fingerprint;
+    Some(record)
 }
 
 fn read_string_property(properties: &mdns_sd::TxtProperties, key: &str) -> Option<String> {
@@ -478,12 +582,16 @@ fn read_string_property(properties: &mdns_sd::TxtProperties, key: &str) -> Optio
         .map(|value| value.to_string())
 }
 
+fn read_optional_string_property(properties: &mdns_sd::TxtProperties, key: &str) -> Option<String> {
+    read_string_property(properties, key)
+}
+
 fn read_int_property(properties: &mdns_sd::TxtProperties, key: &str) -> Option<i64> {
     read_string_property(properties, key).and_then(|value| value.parse::<i64>().ok())
 }
 
-fn build_txt_properties(advertisement: &DiscoveryAdvertisement) -> [(String, String); 5] {
-    [
+fn build_txt_properties(advertisement: &DiscoveryAdvertisement) -> [(String, String); 6] {
+    let mut properties = [
         (TXT_PEER_ID.to_string(), advertisement.peer_id.clone()),
         (
             TXT_FINGERPRINT.to_string(),
@@ -498,7 +606,35 @@ fn build_txt_properties(advertisement: &DiscoveryAdvertisement) -> [(String, Str
             advertisement.protocol_major.to_string(),
         ),
         (TXT_CAPABILITY.to_string(), advertisement.capability.clone()),
-    ]
+        // The pairing fingerprint is always serialized (even as
+        // an empty value) so a legacy browser ignores the key
+        // without breaking the record layout. The core rejects
+        // pairing records whose `pfp` is empty so the empty
+        // value never reaches the pairing runtime.
+        (
+            TXT_PAIRING_FINGERPRINT.to_string(),
+            advertisement
+                .pairing_fingerprint
+                .clone()
+                .unwrap_or_default(),
+        ),
+    ];
+    if advertisement.pairing_fingerprint.is_none() {
+        // Discovery-only advertisement: keep the record byte
+        // length down by collapsing the empty pairing fingerprint
+        // into a value mDNS-sd strips from the wire. The TXT
+        // record still parses back to a `None` field. We achieve
+        // the same effect by leaving an empty string (mDNS-sd
+        // surfaces it as an empty property) which the runtime
+        // treats as missing.
+        if let Some((_, value)) = properties
+            .iter_mut()
+            .find(|(k, _)| k == TXT_PAIRING_FINGERPRINT)
+        {
+            value.clear();
+        }
+    }
+    properties
 }
 
 /// mDNS instance names are limited to 63 octets per RFC 6763
@@ -679,6 +815,33 @@ mod tests {
         assert!(!adapter.is_running());
     }
 
+    /// `start_with_port` MUST reject a zero port before any
+    /// `mdns-sd` round-trip so a regression that defaulted to
+    /// `DISCOVERY_ONLY_PORT = 0` (the discovery-only placeholder)
+    /// cannot silently publish a record that misleads every
+    /// browser on the link. The earlier `port == 0` rejection
+    /// is what separates the productive pairing path from the
+    /// discovery-only path; both code paths share the same
+    /// adapter but the productive one is the only one that has
+    /// any business binding a real port.
+    #[test]
+    fn start_with_port_zero_is_rejected_before_mdns_round_trip() {
+        let adapter = MdnsPeerDiscoveryAdapter::new();
+        let ad = DiscoveryAdvertisement::new(
+            "0123456789abcdef0123456789abcdef",
+            "fp",
+            "Studio",
+            1,
+            "pairing",
+        );
+        let sink: Arc<dyn DiscoverySink> = Arc::new(CapturingSink::default());
+        let err = adapter
+            .start_with_port(&ad, sink, 0)
+            .expect_err("port=0 must be rejected before any mdns-sd call");
+        assert!(matches!(err, AdapterError::MalformedAdvertisement));
+        assert!(!adapter.is_running());
+    }
+
     /// Loopback test: spin up two real daemons on the same host
     /// and confirm the bouncer sees the first daemons record AND
     /// that stopping the first daemon emits `ServiceRemoved` on
@@ -827,6 +990,8 @@ mod tests {
     fn resolved_then_removed_emit_same_peer_id() {
         let registry: Arc<StdMutex<HashMap<String, String>>> =
             Arc::new(StdMutex::new(HashMap::new()));
+        let addresses: Arc<StdMutex<HashMap<String, std::net::SocketAddr>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
         let sink = Arc::new(CapturingSink::default());
         let sink_dyn: Arc<dyn DiscoverySink> = sink.clone();
         let mut properties = std::collections::HashMap::new();
@@ -843,9 +1008,9 @@ mod tests {
                 .expect("service info");
         let fullname = info.get_fullname().to_string();
         let resolved = mdns_sd::ServiceEvent::ServiceResolved(info);
-        process_event(&resolved, &sink_dyn, &registry);
+        process_event(&resolved, &sink_dyn, &registry, &addresses);
         let removed = mdns_sd::ServiceEvent::ServiceRemoved(SERVICE_TYPE.to_string(), fullname);
-        process_event(&removed, &sink_dyn, &registry);
+        process_event(&removed, &sink_dyn, &registry, &addresses);
         let events = sink.events.lock().expect("events").clone();
         assert_eq!(events.len(), 2);
         let observed = match &events[0] {
@@ -873,6 +1038,8 @@ mod tests {
     #[test]
     fn two_peers_with_same_display_name_dont_interfere() {
         let registry: Arc<StdMutex<HashMap<String, String>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
+        let addresses: Arc<StdMutex<HashMap<String, std::net::SocketAddr>>> =
             Arc::new(StdMutex::new(HashMap::new()));
         let sink = Arc::new(CapturingSink::default());
         let sink_dyn: Arc<dyn DiscoverySink> = sink.clone();
@@ -913,21 +1080,25 @@ mod tests {
             &mdns_sd::ServiceEvent::ServiceResolved(info_a),
             &sink_dyn,
             &registry,
+            &addresses,
         );
         process_event(
             &mdns_sd::ServiceEvent::ServiceResolved(info_b),
             &sink_dyn,
             &registry,
+            &addresses,
         );
         process_event(
             &mdns_sd::ServiceEvent::ServiceRemoved(SERVICE_TYPE.to_string(), fullname_a),
             &sink_dyn,
             &registry,
+            &addresses,
         );
         process_event(
             &mdns_sd::ServiceEvent::ServiceRemoved(SERVICE_TYPE.to_string(), fullname_b),
             &sink_dyn,
             &registry,
+            &addresses,
         );
         let events = sink.events.lock().expect("events").clone();
         assert_eq!(events.len(), 4);
@@ -971,13 +1142,15 @@ mod tests {
     fn removed_without_prior_resolved_emits_no_event() {
         let registry: Arc<StdMutex<HashMap<String, String>>> =
             Arc::new(StdMutex::new(HashMap::new()));
+        let addresses: Arc<StdMutex<HashMap<String, std::net::SocketAddr>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
         let sink = Arc::new(CapturingSink::default());
         let sink_dyn: Arc<dyn DiscoverySink> = sink.clone();
         let removed = mdns_sd::ServiceEvent::ServiceRemoved(
             SERVICE_TYPE.to_string(),
             "Unknown._clipvault._tcp.local.".to_string(),
         );
-        process_event(&removed, &sink_dyn, &registry);
+        process_event(&removed, &sink_dyn, &registry, &addresses);
         assert!(sink.events.lock().expect("events").is_empty());
     }
 }

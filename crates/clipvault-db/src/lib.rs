@@ -30,7 +30,8 @@ pub use entry_repository::{
 pub use error::{DbError, DbResult};
 pub use ignored_apps::{IgnoredApp, IgnoredAppRepository, IgnoredAppsError};
 pub use known_peers::{
-    KnownPeer, KnownPeerRepository, KnownPeersError, PeerObservation, UpsertObservationOutcome,
+    KnownPeer, KnownPeerRepository, KnownPeersError, PeerObservation, TrustState,
+    TrustTransitionOutcome, UpsertObservationOutcome,
 };
 pub use migration::{Migration, MigrationOutcome};
 pub use organization::{
