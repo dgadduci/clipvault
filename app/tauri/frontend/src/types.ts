@@ -493,6 +493,10 @@ export interface PeerSnapshotEntry {
   display_name: string;
   protocol_major: number;
   capability: string;
+  /** Persisted local trust relationship, independent from mDNS presence. */
+  trust_state: PeerTrustState;
+  /** Time of reciprocal approval; absent until the peer is trusted. */
+  paired_at: string | null;
   first_seen_at: string;
   last_discovered_at: string;
   /** True when the runtime observed the peer inside the presence TTL. */

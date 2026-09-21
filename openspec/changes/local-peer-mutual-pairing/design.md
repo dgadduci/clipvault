@@ -231,6 +231,15 @@ que el receptor pulse Vincular ni tenga abierto el panel de Compartir. Sólo
 trusted+health aparece Activo. El modal no autoacepta, tiene cancelar, timeout,
 Escape y foco restaurado.
 
+La conclusión de la aprobación llega desde una tarea de transporte asíncrona,
+por lo que el comando que registra el segundo `Aceptar` puede responder aún
+`awaiting_remote_approval`. Cuando esa tarea verifica el `Approve` remoto,
+persiste `trusted` y borra la sesión efímera. El snapshot metadata-only de
+pares incluye entonces `trust_state` y `paired_at`; el shell usa esos campos
+para reemplazar el diálogo en espera por la confirmación de vínculo y para
+refrescar la acción de la fila a `Activo` / `Desvincular`. No cruza ningún
+payload, endpoint, certificado ni firma adicional por IPC.
+
 Tests loopback/fake verifican código coincidente, key mismatch, una aprobación,
 timeout, cancelación, reconnect mTLS, bloqueo/revoke y N pares aislados. La
 prueba manual cubre dos pares a la vez sobre Wayland, X11 y macOS.

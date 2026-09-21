@@ -2,6 +2,26 @@
 
 ## Notas de implementación
 
+> **Corrección de integración (2026-09-21, conclusión visible de aprobación).**
+> El protocolo real ya completaba la promoción después de que las dos personas
+> aceptaran, pero `approve_local` devuelve antes de que la tarea asíncrona lea
+> el `Approve` remoto. El modal seguía renderizando el snapshot efímero
+> `local_approved` y la lista mantenía un mirror local `unverified`, por lo que
+> podía aparentar que ambos equipos esperaban indefinidamente aunque el vínculo
+> ya estuviera persistido. `PeerSnapshotEntry` ahora proyecta sólo
+> `trust_state` y `paired_at` desde `known_peers`; al desaparecer una sesión
+> aprobada, `PeerPairingModal` consulta ese snapshot y muestra `Vínculo
+> establecido` si observa `trusted`, o un error terminal reintentable si no se
+> promovió. `PeerSharingModal` prioriza una acción local pendiente, pero en
+> ausencia de ella toma el trust persistido y muestra `Activo` / `Desvincular`.
+> El test
+> `reciprocal_runtime_approvals_promote_both_real_peers_to_trusted` instala dos
+> runtimes y listeners TLS reales y fija el orden manual Linux inbound → macOS
+> outbound; ambas filas pasan a `trusted`. El test frontend
+> `pairing modal reconciles an asynchronous trusted session from the peer
+> snapshot` cubre la reconciliación visual. Verificado con core 421/421,
+> frontend check/build y 19/19 regresiones pairing/sharing.
+
 > **Auditoría de integración (2026-09-21, resolución SRV macOS → Linux).**
 > La red Linux recibió el PTR `_clipvault._tcp` de macOS, pero
 > `avahi-browse -r` agotó la resolución de ambos servicios. El adapter estaba

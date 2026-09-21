@@ -301,6 +301,18 @@ test("failed starts show a typed error instead of looping on Generando código",
   );
 });
 
+test("pairing modal reconciles an asynchronous trusted session from the peer snapshot", () => {
+  // The live TLS task observes the remote approval after the local
+  // command has returned. It then removes the in-memory session and
+  // persists trust. The modal must turn that terminal state into the
+  // successful UI instead of leaving a stale countdown visible.
+  const body = peerPairingSource();
+  assert.match(body, /peerSnapshotCommand/);
+  assert.match(body, /peer\?\.trust_state\s*===\s*"trusted"/);
+  assert.match(body, /kind:\s*"trusted"/);
+  assert.match(body, /stopRefresh\(\)/);
+});
+
 test("peer-pairing wire shape is metadata-only and never carries endpoint bytes", () => {
   // The Tauri commands the bridge forwards accept a typed
   // payload; the wire shape MUST NOT carry IP, port, TLS key,

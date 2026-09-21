@@ -11,6 +11,7 @@
     peerPairingCancelCommand,
     peerPairingSnapshotCommand,
     peerPairingStartCommand,
+    peerSnapshotCommand,
   } from "./lib/tauri";
   import type {
     PeerPairingOutcomeResponse,
@@ -51,9 +52,37 @@
     try {
       const snapshots = await peerPairingSnapshotCommand();
       if (!isCurrentOpen(epoch)) return;
-      session = row
+      const previousSession = session;
+      const nextSession = row
         ? snapshots.find((value) => value.remote_peer_id === row!.peer_id) ?? null
         : snapshots[0] ?? null;
+      // Pairing completes asynchronously in the transport task, so
+      // the command that accepted the local SAS normally returns
+      // `awaiting_remote_approval`. Once the task persists trust it
+      // removes the in-memory session. Reconcile that disappearance
+      // with the metadata-only peer snapshot rather than continuing
+      // to render a stale “Esperando aprobación” state.
+      if (!nextSession && previousSession?.local_approved && row) {
+        const peerSnapshot = await peerSnapshotCommand();
+        if (!isCurrentOpen(epoch)) return;
+        const peer = peerSnapshot.entries.find((entry) => entry.peer_id === row!.peer_id);
+        if (peer?.trust_state === "trusted") {
+          outcome = {
+            kind: "trusted",
+            peer_id: peer.peer_id,
+            display_name: peer.display_name,
+            short_fingerprint: peer.public_key_fingerprint.slice(0, 8),
+            paired_at: peer.paired_at ?? "",
+          };
+          lastError = null;
+          stopRefresh();
+        } else {
+          outcome = null;
+          lastError = "El vínculo no se pudo completar. Inténtalo de nuevo.";
+          stopRefresh();
+        }
+      }
+      session = nextSession;
       secondsLeft = computeSecondsLeft();
     } catch (error) {
       if (isCurrentOpen(epoch)) lastError = describeError(error);

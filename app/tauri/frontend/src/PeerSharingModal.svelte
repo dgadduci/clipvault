@@ -251,7 +251,16 @@
   }
 
   function trustStateOf(peerId: string): PeerTrustState {
-    return trustStates[peerId] ?? "unverified";
+    // An explicit action performed in this mounted modal wins while
+    // its next snapshot is in flight. Otherwise use the persisted
+    // state that pairing writes asynchronously after both users
+    // approve; keeping every unseen peer at `unverified` made a
+    // completed invitation still look pairable until a reload.
+    return (
+      trustStates[peerId] ??
+      snapshot?.entries.find((entry) => entry.peer_id === peerId)?.trust_state ??
+      "unverified"
+    );
   }
 
   function pairingAdvertisementReady(entry: PeerSnapshotEntry): boolean {
@@ -284,7 +293,7 @@
       short_fingerprint: shortFingerprint(entry.public_key_fingerprint),
       trust_state: trustStateOf(entry.peer_id),
       presence: entry.presence,
-      paired_at: null,
+      paired_at: entry.paired_at,
       last_discovered_at: entry.last_discovered_at,
     });
   }

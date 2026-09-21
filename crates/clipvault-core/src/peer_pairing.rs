@@ -1628,6 +1628,210 @@ mod tests {
         }
     }
 
+    /// Covers the exact manual sequence used by the desktop UI:
+    /// the listener-side user approves first, then the dialer-side
+    /// user approves. Both runtimes must receive the authenticated
+    /// remote approval and persist their own known-peer record as
+    /// trusted. The lower-level transport test proves the wire
+    /// exchange; this test additionally proves its two sink events
+    /// reach the real pairing state machines.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn reciprocal_runtime_approvals_promote_both_real_peers_to_trusted() {
+        use std::net::SocketAddr;
+        use std::sync::atomic::{AtomicU16, Ordering as AtomicOrdering};
+
+        use clipvault_platform::peer_transport::{
+            tls::full_public_key_fingerprint, RemotePeerResolver, TlsPeerTransport,
+        };
+
+        #[derive(Clone)]
+        struct FixedMaterialLoader(clipvault_platform::LocalIdentityMaterial);
+
+        impl MaterialLoader for FixedMaterialLoader {
+            fn load(
+                &self,
+            ) -> Result<clipvault_platform::LocalIdentityMaterial, PairingPersistenceError>
+            {
+                Ok(self.0.clone())
+            }
+        }
+
+        struct NoopAdvertisement;
+
+        impl PairingAdvertisement for NoopAdvertisement {
+            fn publish(&self, _bound_port: u16) -> Result<(), TransportError> {
+                Ok(())
+            }
+
+            fn withdraw(&self) -> Result<(), TransportError> {
+                Ok(())
+            }
+        }
+
+        struct LoopbackResolver {
+            expected_peer_id: String,
+            port: Arc<AtomicU16>,
+        }
+
+        impl RemotePeerResolver for LoopbackResolver {
+            fn resolve(&self, peer_id: &str) -> Option<SocketAddr> {
+                if peer_id != self.expected_peer_id {
+                    return None;
+                }
+                let port = self.port.load(AtomicOrdering::Acquire);
+                (port != 0).then_some(([127, 0, 0, 1], port).into())
+            }
+        }
+
+        fn pairing_row(
+            identity: &clipvault_platform::LocalPeerIdentity,
+            display_name: &str,
+        ) -> KnownPeer {
+            let mut row = known_peer(
+                &identity.peer_id.to_string(),
+                &identity.fingerprint.to_string(),
+                display_name,
+            );
+            row.full_public_key_fingerprint = full_public_key_fingerprint(&identity.public_key);
+            row.capability = PAIRING_CAPABILITY.to_string();
+            row
+        }
+
+        let material_a =
+            clipvault_platform::LocalIdentityMaterial::from_seed([41u8; 32]).expect("material A");
+        let material_b =
+            clipvault_platform::LocalIdentityMaterial::from_seed([42u8; 32]).expect("material B");
+
+        let transport_a = Arc::new(TlsPeerTransport::new());
+        let persistence_a = Arc::new(InMemoryPairingPersistence::new());
+        persistence_a.seed(pairing_row(material_b.identity(), "Peer B"));
+        let runtime_a = PairingRuntime::new(transport_a.clone(), persistence_a.clone());
+        runtime_a.set_material_loader(Arc::new(FixedMaterialLoader(material_a.clone())));
+        runtime_a.set_local_identity(Some(material_a.identity().clone()));
+
+        let transport_b = Arc::new(TlsPeerTransport::new());
+        let persistence_b = Arc::new(InMemoryPairingPersistence::new());
+        persistence_b.seed(pairing_row(material_a.identity(), "Peer A"));
+        let runtime_b = PairingRuntime::new(transport_b.clone(), persistence_b.clone());
+        runtime_b.set_material_loader(Arc::new(FixedMaterialLoader(material_b.clone())));
+        runtime_b.set_local_identity(Some(material_b.identity().clone()));
+
+        let port_a = Arc::new(AtomicU16::new(0));
+        let port_b = Arc::new(AtomicU16::new(0));
+        let resolver_a: Arc<dyn RemotePeerResolver> = Arc::new(LoopbackResolver {
+            expected_peer_id: material_b.identity().peer_id.to_string(),
+            port: Arc::clone(&port_b),
+        });
+        let resolver_b: Arc<dyn RemotePeerResolver> = Arc::new(LoopbackResolver {
+            expected_peer_id: material_a.identity().peer_id.to_string(),
+            port: Arc::clone(&port_a),
+        });
+
+        let sink_a: Arc<dyn TransportSink> = Arc::new(runtime_a.clone());
+        let sink_b: Arc<dyn TransportSink> = Arc::new(runtime_b.clone());
+        let advertisement_a: Arc<dyn PairingAdvertisement> = Arc::new(NoopAdvertisement);
+        let advertisement_b: Arc<dyn PairingAdvertisement> = Arc::new(NoopAdvertisement);
+        let bound_a = runtime_a
+            .install_pairing_transport_with_resolver(sink_a, advertisement_a, resolver_a, "Peer A")
+            .expect("install A");
+        port_a.store(bound_a, AtomicOrdering::Release);
+        let bound_b = runtime_b
+            .install_pairing_transport_with_resolver(sink_b, advertisement_b, resolver_b, "Peer B")
+            .expect("install B");
+        port_b.store(bound_b, AtomicOrdering::Release);
+
+        let remote_b_fingerprint = full_public_key_fingerprint(&material_b.identity().public_key);
+        let outbound_id = match runtime_a
+            .start_outbound(
+                &material_b.identity().peer_id.to_string(),
+                &remote_b_fingerprint,
+                "Peer B",
+            )
+            .expect("start outbound")
+        {
+            PairingOutcome::AwaitingRemoteApproval(id) => id,
+            outcome => panic!("expected awaiting approval, got {outcome:?}"),
+        };
+
+        let inbound_id = wait_for_pairing_session(&runtime_b, true)
+            .expect("listener runtime must register its inbound invitation");
+        let outbound_sas = runtime_a
+            .snapshot()
+            .into_iter()
+            .find(|session| session.session_id == outbound_id)
+            .expect("outbound snapshot")
+            .sas;
+        let inbound_sas = runtime_b
+            .snapshot()
+            .into_iter()
+            .find(|session| session.session_id == inbound_id)
+            .expect("inbound snapshot")
+            .sas;
+        assert_eq!(
+            outbound_sas, inbound_sas,
+            "both users must review the same SAS"
+        );
+
+        // This is deliberately the order the user exercised: the
+        // receiving (inbound) host accepts before the initiating host.
+        assert!(matches!(
+            runtime_b.approve_local(inbound_id),
+            PairingOutcome::AwaitingRemoteApproval(_)
+        ));
+        assert!(matches!(
+            runtime_a.approve_local(outbound_id),
+            PairingOutcome::AwaitingRemoteApproval(_)
+        ));
+
+        wait_for_trusted(&persistence_a, &material_b.identity().peer_id.to_string())
+            .expect("dialer runtime must become trusted");
+        wait_for_trusted(&persistence_b, &material_a.identity().peer_id.to_string())
+            .expect("listener runtime must become trusted");
+        assert!(runtime_a.snapshot().is_empty());
+        assert!(runtime_b.snapshot().is_empty());
+
+        transport_a.stop().expect("stop A");
+        transport_b.stop().expect("stop B");
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn wait_for_pairing_session(
+        runtime: &PairingRuntime,
+        inbound: bool,
+    ) -> Option<PairingSessionId> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if let Some(session) = runtime
+                .snapshot()
+                .into_iter()
+                .find(|session| session.is_inbound == inbound)
+            {
+                return Some(session.session_id);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn wait_for_trusted(
+        persistence: &InMemoryPairingPersistence,
+        peer_id: &str,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if matches!(
+                persistence.load(peer_id),
+                Ok(Some(row)) if row.trust_state == TrustState::Trusted
+            ) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err(format!("{peer_id} did not become trusted"))
+    }
+
     #[test]
     fn start_outbound_returns_awaiting_remote_approval() {
         let persistence = Arc::new(InMemoryPairingPersistence::new());

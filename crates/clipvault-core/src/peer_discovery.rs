@@ -363,6 +363,16 @@ pub struct PeerSnapshotEntry {
     pub display_name: String,
     pub protocol_major: i64,
     pub capability: String,
+    /// Persisted trust state, projected as its stable wire string.
+    /// Discovery owns presence; pairing owns this independent
+    /// relationship state. Including it in the same metadata-only
+    /// snapshot lets the shell reconcile an asynchronously completed
+    /// mutual approval without receiving a raw transport event.
+    pub trust_state: String,
+    /// RFC 3339 timestamp of a successful reciprocal approval, if
+    /// the peer has been paired. Empty / absent pairing state stays
+    /// `None` instead of inventing a timestamp for unverified peers.
+    pub paired_at: Option<String>,
     pub first_seen_at: String,
     pub last_discovered_at: String,
     /// `true` when the runtime observed the peer inside the
@@ -387,6 +397,8 @@ impl PeerSnapshotEntry {
             display_name: row.display_name,
             protocol_major: row.protocol_major,
             capability: row.capability,
+            trust_state: row.trust_state.as_str().to_string(),
+            paired_at: (!row.paired_at.is_empty()).then_some(row.paired_at),
             first_seen_at: row.first_seen_at,
             last_discovered_at: row.last_discovered_at,
             is_present,
@@ -954,6 +966,7 @@ pub enum StartError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clipvault_db::TrustState;
     use clipvault_platform::peer_identity::{PeerFingerprint, PeerId};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use time::macros::datetime;
@@ -1381,6 +1394,36 @@ mod tests {
         assert_eq!(row.peer_id, "0123456789abcdef0123456789abcdef");
         assert_eq!(row.display_name, "Studio");
         drop(rows);
+        runtime.stop().expect("stop");
+    }
+
+    #[test]
+    fn snapshot_projects_persisted_pairing_trust_without_transport_data() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime = runtime_with_storage(adapter, std::sync::Arc::clone(&storage));
+        runtime.set_local_identity(Some(local_identity(
+            "00000000000000000000000000000000",
+            "ffffffffffffffff",
+        )));
+        runtime.start().expect("start");
+        runtime.enqueue(DiscoveryEvent::Observed(txt(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            "Studio",
+        )));
+        wait_for_drain(&runtime, 2_000);
+        {
+            let mut rows = storage.lock().expect("storage");
+            rows[0].trust_state = TrustState::Trusted;
+            rows[0].paired_at = "2026-09-21T00:00:00Z".to_string();
+        }
+
+        let snapshot =
+            runtime.snapshot(|| storage.lock().expect("storage").clone(), Instant::now());
+        let entry = snapshot.entries.first().expect("trusted peer");
+        assert_eq!(entry.trust_state, "trusted");
+        assert_eq!(entry.paired_at.as_deref(), Some("2026-09-21T00:00:00Z"));
         runtime.stop().expect("stop");
     }
 

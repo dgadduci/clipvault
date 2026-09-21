@@ -14,7 +14,9 @@ so both sides compute the same code regardless of who initiated the session.
 
 - **WHEN** two users confirm the same code before the pairing session expires
 - **THEN** both known-peer records become trusted and later health checks
-  authenticate without another pairing prompt
+  authenticate without another pairing prompt; the metadata-only peer snapshot
+  reports `trust_state = trusted` so both dialogs replace any transient
+  "waiting for approval" state with the successful-link confirmation
 
 #### Scenario: Pairing is cancelled or expires
 
