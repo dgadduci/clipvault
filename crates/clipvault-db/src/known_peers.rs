@@ -15,7 +15,11 @@
 //!
 //! Re-observing a known peer is idempotent: the merge updates
 //! `last_discovered_at` and `updated_at`, and the public fields the
-//! core re-validates (fingerprint, display name, protocol, capability).
+//! core re-validates (fingerprint, display name and protocol).
+//! `discovery_only` and `pairing` are a live listener-state transition
+//! of that same identity, not a competing identity, so their transition
+//! updates the capability while preserving a previously learned full
+//! pairing fingerprint.
 //! A conflicting announcement (a different `public_key_fingerprint`
 //! reusing an existing `peer_id`) is intentionally rejected by the
 //! repository: the core sees the rejection as an "ignore" and the
@@ -143,7 +147,7 @@ pub enum UpsertObservationOutcome {
     Stored(KnownPeer),
     /// The observation conflicted with a previously persisted
     /// identity (different fingerprint, display name, protocol major
-    /// or capability reusing the same `peer_id`). The repository
+    /// or an incompatible capability transition reusing the same `peer_id`). The repository
     /// left the previously persisted row untouched and returned the
     /// existing record so the core can log the rejection without
     /// inspecting the conflicting bytes.
@@ -215,11 +219,15 @@ impl<'a> KnownPeerRepository<'a> {
     /// Conflict handling:
     /// - A new `peer_id` always inserts.
     /// - A re-observed `peer_id` with the same fingerprint / display
-    ///   name / protocol major / capability refreshes
+    ///   name / protocol major refreshes
     ///   `last_discovered_at` and `updated_at`; `first_seen_at` is
     ///   preserved.
+    /// - `discovery_only` ↔ `pairing` is a compatible dynamic
+    ///   transition. A pairing observation upgrades the canonical
+    ///   full fingerprint; a discovery-only withdrawal changes the
+    ///   current capability without erasing that fingerprint.
     /// - A re-observed `peer_id` whose fingerprint, display name,
-    ///   protocol major or capability diverges from the previously
+    ///   protocol major or incompatible capability transition diverges from the previously
     ///   persisted row is reported as [`UpsertObservationOutcome::Conflict`]
     ///   and the persisted row is left intact.
     pub fn upsert_observation(
@@ -271,10 +279,19 @@ impl<'a> KnownPeerRepository<'a> {
                 UpsertObservationOutcome::Stored(row)
             }
             Some(previous) => {
+                let compatible_capability_transition = previous.capability
+                    == observation.capability
+                    || matches!(
+                        (
+                            previous.capability.as_str(),
+                            observation.capability.as_str()
+                        ),
+                        ("discovery_only", "pairing") | ("pairing", "discovery_only")
+                    );
                 if previous.public_key_fingerprint != observation.public_key_fingerprint
                     || previous.display_name != observation.display_name
                     || previous.protocol_major != observation.protocol_major
-                    || previous.capability != observation.capability
+                    || !compatible_capability_transition
                 {
                     // Conflict: refuse to overwrite the trusted row.
                     // The core sees the conflict and surfaces it as
@@ -296,12 +313,19 @@ impl<'a> KnownPeerRepository<'a> {
                         .clone()
                         .filter(|value| !value.is_empty())
                         .unwrap_or_else(|| previous.full_public_key_fingerprint.clone());
-                    if merged_full != previous.full_public_key_fingerprint {
+                    let capability_changed = previous.capability != observation.capability;
+                    if merged_full != previous.full_public_key_fingerprint || capability_changed {
                         tx.execute(
                             "UPDATE known_peers \
-                             SET full_public_key_fingerprint = ?1, last_discovered_at = ?2, updated_at = ?2 \
-                             WHERE peer_id = ?3",
-                            params![merged_full, now, observation.peer_id],
+                             SET full_public_key_fingerprint = ?1, capability = ?2, \
+                                 last_discovered_at = ?3, updated_at = ?3 \
+                             WHERE peer_id = ?4",
+                            params![
+                                merged_full,
+                                observation.capability,
+                                now,
+                                observation.peer_id
+                            ],
                         )?;
                     } else {
                         tx.execute(
@@ -883,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_rejects_a_conflicting_capability_without_overwriting() {
+    fn upsert_promotes_discovery_only_to_pairing_and_retains_fingerprint_on_withdrawal() {
         let (_dir, mut db) = open_temp_db();
         let when = datetime!(2026-01-02 03:04:05 UTC);
         let mut repo = KnownPeerRepository::new(db.connection_mut());
@@ -897,19 +921,39 @@ mod tests {
                 when,
             ))
             .expect("first insert");
+        let full_fingerprint = "f".repeat(64);
+        let outcome = repo
+            .upsert_observation(&PeerObservation {
+                peer_id: "peer-aaaa".to_string(),
+                public_key_fingerprint: "0123456789abcdef".to_string(),
+                full_public_key_fingerprint: Some(full_fingerprint.clone()),
+                display_name: "Studio".to_string(),
+                protocol_major: 1,
+                capability: "pairing".to_string(),
+                observed_at: when + time::Duration::hours(1),
+            })
+            .expect("pairing upgrade");
+        let UpsertObservationOutcome::Stored(upgraded) = outcome else {
+            panic!("pairing capability must upgrade a discovery-only row");
+        };
+        assert_eq!(upgraded.capability, "pairing");
+        assert_eq!(upgraded.full_public_key_fingerprint, full_fingerprint);
+
         let outcome = repo
             .upsert_observation(&observation(
                 "peer-aaaa",
                 "0123456789abcdef",
                 "Studio",
                 1,
-                "pairing",
-                when,
+                "discovery_only",
+                when + time::Duration::hours(2),
             ))
-            .expect("conflict insert");
-        assert!(matches!(outcome, UpsertObservationOutcome::Conflict(_)));
-        let reloaded = repo.get("peer-aaaa").expect("reload").expect("present");
-        assert_eq!(reloaded.capability, "discovery_only");
+            .expect("discovery-only withdrawal");
+        let UpsertObservationOutcome::Stored(withdrawn) = outcome else {
+            panic!("withdrawal must update the dynamic capability");
+        };
+        assert_eq!(withdrawn.capability, "discovery_only");
+        assert_eq!(withdrawn.full_public_key_fingerprint, full_fingerprint);
     }
 
     #[test]

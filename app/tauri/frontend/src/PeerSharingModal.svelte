@@ -254,6 +254,14 @@
     return trustStates[peerId] ?? "unverified";
   }
 
+  function pairingAdvertisementReady(entry: PeerSnapshotEntry): boolean {
+    // Discovery-only keeps the peer visible, but intentionally does
+    // not carry the full fingerprint or a dialable TLS port. Do not
+    // open a modal that cannot start until the same peer advertises
+    // the live pairing capability.
+    return entry.presence === "detected" && entry.capability === "pairing";
+  }
+
   function describeTrustState(state: PeerTrustState): string {
     switch (state) {
       case "trusted":
@@ -486,10 +494,15 @@
                   type="button"
                   class="secondary"
                   data-testid="peer-equipos-pair"
-                  disabled={pairingBusy}
+                  disabled={pairingBusy || !pairingAdvertisementReady(entry)}
+                  title={pairingAdvertisementReady(entry)
+                    ? "Vincular este equipo"
+                    : "Esperando el anuncio seguro de vínculo del equipo"}
                   on:click={() => openPairingModal(entry)}
                 >
-                  Vincular
+                  {pairingAdvertisementReady(entry)
+                    ? "Vincular"
+                    : "Esperando anuncio seguro…"}
                 </button>
                 <button
                   type="button"
@@ -524,10 +537,15 @@
                   type="button"
                   class="secondary"
                   data-testid="peer-equipos-pair"
-                  disabled={pairingBusy}
+                  disabled={pairingBusy || !pairingAdvertisementReady(entry)}
+                  title={pairingAdvertisementReady(entry)
+                    ? "Volver a vincular este equipo"
+                    : "Esperando el anuncio seguro de vínculo del equipo"}
                   on:click={() => openPairingModal(entry)}
                 >
-                  Volver a parear
+                  {pairingAdvertisementReady(entry)
+                    ? "Volver a parear"
+                    : "Esperando anuncio seguro…"}
                 </button>
                 <button
                   type="button"

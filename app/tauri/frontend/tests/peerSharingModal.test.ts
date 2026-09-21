@@ -406,3 +406,15 @@ test("PeerSharingModal keeps the immediate snapshot refresh on mount and on togg
     "the mount-time refresh must route through the shared refreshSnapshot helper",
   );
 });
+
+test("PeerSharingModal enables pairing only after a live pairing advertisement", () => {
+  const body = source();
+  assert.match(
+    body,
+    /function pairingAdvertisementReady\(entry: PeerSnapshotEntry\)[\s\S]*entry\.presence === "detected" && entry\.capability === "pairing"/,
+  );
+  assert.match(
+    body,
+    /disabled=\{pairingBusy \|\| !pairingAdvertisementReady\(entry\)\}/,
+  );
+});

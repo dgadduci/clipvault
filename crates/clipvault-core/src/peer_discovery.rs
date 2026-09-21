@@ -1057,7 +1057,6 @@ mod tests {
                     if existing.public_key_fingerprint == observation.public_key_fingerprint
                         && existing.display_name == observation.display_name
                         && existing.protocol_major == observation.protocol_major
-                        && existing.capability == observation.capability
                     {
                         // Merge: upgrade the full fingerprint when
                         // the new observation carries one and the
@@ -1381,6 +1380,45 @@ mod tests {
         let row = &rows[0];
         assert_eq!(row.peer_id, "0123456789abcdef0123456789abcdef");
         assert_eq!(row.display_name, "Studio");
+        drop(rows);
+        runtime.stop().expect("stop");
+    }
+
+    #[test]
+    fn drain_upgrades_a_discovery_record_when_pairing_is_advertised() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime = runtime_with_storage(adapter, std::sync::Arc::clone(&storage));
+        runtime.set_local_identity(Some(local_identity(
+            "00000000000000000000000000000000",
+            "ffffffffffffffff",
+        )));
+        runtime.start().expect("start");
+
+        runtime.enqueue(DiscoveryEvent::Observed(txt(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            "Studio",
+        )));
+        wait_for_drain(&runtime, 2_000);
+
+        let mut pairing = txt(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            "Studio",
+        );
+        pairing.capability = PAIRING_CAPABILITY.to_string();
+        pairing.pairing_fingerprint = Some("f".repeat(FULL_FINGERPRINT_HEX_CHARS));
+        runtime.enqueue(DiscoveryEvent::Observed(pairing));
+        wait_for_drain(&runtime, 2_000);
+
+        let rows = storage.lock().expect("storage");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].capability, PAIRING_CAPABILITY);
+        assert_eq!(
+            rows[0].full_public_key_fingerprint,
+            "f".repeat(FULL_FINGERPRINT_HEX_CHARS)
+        );
         drop(rows);
         runtime.stop().expect("stop");
     }

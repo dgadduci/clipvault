@@ -105,6 +105,15 @@ evita además que dos equipos con el mismo nombre visible colisionen en mDNS.
 - `stop()` cierra el daemon, retira el record y une el thread. Sólo
   lo dispara el runtime cuando el toggle queda `false`.
 
+En el receptor, `capability` representa disponibilidad dinámica del listener,
+no identidad. Por eso la persistencia acepta `discovery_only → pairing` sólo
+si peer_id, huella corta, nombre y protocolo permanecen iguales; entonces
+actualiza el capability y guarda la huella pública completa de 64 hex. El
+camino inverso conserva la huella aprendida, pero la UI no habilita un nuevo
+Vincular hasta observar nuevamente `pairing`: una huella previa no convierte
+un anuncio sin puerto TLS en un endpoint dialable. Cualquier cambio de esos
+campos de identidad sigue siendo conflicto y no reemplaza el registro.
+
 El pairing transport **nunca** invoca `start_with_port` ni instala su
 propio sink en el camino productivo: ese contrato provoca (a) un
 `AlreadyRunning` en el camino del toggle manual porque el runtime ya

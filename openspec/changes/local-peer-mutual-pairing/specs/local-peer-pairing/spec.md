@@ -59,6 +59,13 @@ identity across restarts. The Hello envelope the runtime hands to the
 transport MUST carry the canonical full fingerprint the discovery layer
 advertised; the listener rejects any value that is not a 64-char hex
 string.
+The persistence layer SHALL treat `discovery_only` → `pairing` for a peer
+with unchanged peer_id, short fingerprint, display name and protocol as a
+compatible live-capability upgrade, storing the full fingerprint and current
+capability rather than reporting an identity conflict. The reverse transition
+updates the current capability without erasing the learned full fingerprint;
+the renderer SHALL offer a new pairing attempt only while a detected peer is
+currently advertising `pairing`.
 
 #### Scenario: Renderer cannot forge remote approval
 
@@ -73,6 +80,14 @@ string.
 - **THEN** ClipVault binds a real non-zero ephemeral port, advertises pairing
   capability through mDNS, and accepts only the bounded pairing/health
   protocol over TLS
+
+#### Scenario: Discovery record upgrades to pairing
+
+- **WHEN** a peer is first observed with `discovery_only` and then re-advertises
+  `pairing` with the same stable identity and a valid full fingerprint
+- **THEN** its persisted row is upgraded with that full fingerprint and the
+  renderer can offer Vincular; withdrawing back to `discovery_only` removes
+  that offer until a fresh pairing advertisement arrives
 
 ### Requirement: Inbound pairing registers the session before approval
 

@@ -638,6 +638,14 @@
   `reconfigure_keeps_the_running_browse_loop_alive`,
   `stop_after_reconfigure_returns_adapter_to_idle_state` y
   `mdns_pairing_advertisement_sink_publishes_via_reconfigure`.
+  *Nota 2026-09-21 (upgrade de anuncio):* `known_peers` trata
+  `discovery_only ↔ pairing` como disponibilidad dinámica de una identidad ya
+  validada, no como conflicto. Al observar pairing guarda la huella completa
+  de 64 hex y actualiza capability; al retirar el listener conserva la huella
+  pero la UI deja Vincular deshabilitado hasta un anuncio pairing detectado.
+  Cubierto por `upsert_promotes_discovery_only_to_pairing_and_retains_fingerprint_on_withdrawal`
+  (db), `drain_upgrades_a_discovery_record_when_pairing_is_advertised` (core)
+  y la regresión frontend del botón.
 - [x] 2.3 Implementar el accept/connect mTLS, pinning de la identidad/certificado
   estable, health metadata-only y outcomes para unknown/key
   mismatch/revoked/blocked/incompatible.
@@ -837,7 +845,7 @@
   que los dos intentos se sobrescriban si ambos usuarios pulsan Vincular.
 - [x] 4.3 Probar frontend, listener TLS real y que rutas history/fetch/import
   siguen rechazadas.
-  *Cobertura:* los 14 tests de `peerPairingModal.test.ts` /
+  *Cobertura:* los 18 tests de `peerPairingModal.test.ts` /
   `peerSharingModal.test.ts` verifican que el bridge sólo expone
   `start` / `approve_local` / `cancel` / `snapshot` / `revoke` /
   `block` / `unblock` / `health`, nunca un `observe` con
