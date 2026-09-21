@@ -2,6 +2,25 @@
 
 ## Notas de implementación
 
+> **Auditoría de integración (2026-09-21, resolución SRV macOS → Linux).**
+> La red Linux recibió el PTR `_clipvault._tcp` de macOS, pero
+> `avahi-browse -r` agotó la resolución de ambos servicios. El adapter estaba
+> usando el fullname de servicio (`<nombre>._clipvault._tcp.local.`) como
+> destino SRV; ese valor contiene labels `_...` y no es un hostname DNS
+> válido. El resolver permisivo de macOS podía observar anuncios de Linux,
+> mientras Linux no alcanzaba `ServiceResolved` para macOS, por lo que el
+> runtime nunca registraba presencia. El adapter ahora deriva instancia y
+> hostname de `peer_id` (`ClipVault-<peer_id>` /
+> `clipvault-<peer_id>.local.`) y mantiene `display_name` exclusivamente en
+> TXT. Los tests `service_names_use_a_stable_dns_safe_peer_identity` y
+> `service_names_ignore_display_name_and_keep_peers_distinct` cubren el
+> contrato. Verificado en Linux: `cargo fmt --all -- --check`, discovery
+> 21/21, transporte 32/32, `peer_pairing` 13/13, OpenSpec strict y
+> `git diff --check` pasan; la build Tauri también enlazó con `gold` y
+> `avahi-browse -r _clipvault._tcp` resolvió el nuevo SRV/TXT/A+AAAA local.
+> 5.2 continúa pendiente: macOS debe actualizar este mismo fix y se debe
+> repetir la observación bidireccional entre los dos hosts.
+
 > **Auditoría de código (2026-09-21, fix de asimetría macOS ↔ Linux).**
 > La prueba manual entre equipos detectó que macOS veía a Linux pero
 > Linux no veía a macOS. La auditoría confirmó la causa raíz que la

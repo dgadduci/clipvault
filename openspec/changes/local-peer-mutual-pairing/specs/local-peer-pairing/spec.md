@@ -148,7 +148,11 @@ discovery-only port placeholder; it MUST NOT call `stop` on the adapter
 because the runtime owns the lifecycle. A pairing `publish` or
 `reconfigure` against a stopped adapter MUST surface the typed reason
 the runtime already documents (`MalformedAdvertisement` /
-`AlreadyRunning`) instead of silently downgrading the published record.
+`AlreadyRunning`) instead of silently downgrading the published record. The
+DNS-SD instance name and the SRV target hostname MUST be derived from the
+stable local `peer_id`, while the editable visible name remains TXT metadata.
+The SRV target MUST be a DNS-safe `.local.` hostname and MUST NOT reuse the
+service fullname containing `_clipvault._tcp`.
 
 #### Scenario: Toggle ON keeps the discovery browse loop alive
 
@@ -166,6 +170,13 @@ the runtime already documents (`MalformedAdvertisement` /
   collapses to a no-op because the adapter is already stopped and the
   pairing listener is torn down without disturbing any other adapter
   lifecycle
+
+#### Scenario: DNS-SD service resolves across implementations
+
+- **WHEN** two peers have equal visible device names or one browser is a
+  stricter DNS-SD implementation than the announcing host
+- **THEN** each peer receives a resolvable SRV/TXT/A-or-AAAA record set and
+  reaches `Detected` presence using the peer-id-derived instance and hostname
 
 ### Requirement: Restart with toggle active reinstalls the pairing listener
 

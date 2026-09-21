@@ -251,13 +251,12 @@ impl MdnsPeerDiscoveryAdapter {
             warn!(error = %error, "failed to start mdns-sd daemon");
             MdnsAdapterError::Register
         })?;
-        let instance = sanitise_instance_name(&advertisement.display_name);
-        let fullname = format!("{instance}.{SERVICE_TYPE}");
+        let (instance, hostname, fullname) = service_names(advertisement);
         let properties = build_txt_properties(advertisement);
         let service_info = mdns_sd::ServiceInfo::new(
             SERVICE_TYPE,
             &instance,
-            &fullname,
+            &hostname,
             "",
             port,
             &properties[..],
@@ -357,17 +356,21 @@ impl MdnsPeerDiscoveryAdapter {
         // Build the new service descriptor first so a malformed
         // advertisement cannot leave the adapter with the
         // previous record unregistered and no replacement
-        // registered. The `instance` / `fullname` are derived
-        // from the display name the runtime validated, so the
-        // mdns-sd 63-octet bound the adapter documents still
-        // applies.
-        let instance = sanitise_instance_name(&advertisement.display_name);
-        let new_fullname = format!("{instance}.{SERVICE_TYPE}");
+        // registered. The DNS-SD instance and SRV target are
+        // derived from the stable peer id, not the editable
+        // display name. In particular, a service fullname (which
+        // contains `_clipvault._tcp`) is NOT a valid DNS hostname
+        // for the SRV target. Some browsers tolerate that invalid
+        // target while others only surface `ServiceFound`, causing
+        // one-way macOS/Linux discovery. `service_names` creates a
+        // label-safe `clipvault-<peer_id>.local.` hostname so every
+        // browser can resolve the SRV/TXT/A(AAA) record set.
+        let (instance, hostname, new_fullname) = service_names(advertisement);
         let properties = build_txt_properties(advertisement);
         let service_info = mdns_sd::ServiceInfo::new(
             SERVICE_TYPE,
             &instance,
-            &new_fullname,
+            &hostname,
             "",
             port,
             &properties[..],
@@ -727,26 +730,32 @@ fn build_txt_properties(advertisement: &DiscoveryAdvertisement) -> [(String, Str
     properties
 }
 
-/// mDNS instance names are limited to 63 octets per RFC 6763
-/// §7.2 / §7.3. We trim the validated visible name to that
-/// bound and replace unsafe characters so the service
-/// registration does not fail with `ServiceNameTooLong`.
-fn sanitise_instance_name(display_name: &str) -> String {
-    let trimmed = display_name.trim();
-    let mut out = String::with_capacity(trimmed.len());
-    for ch in trimmed.chars() {
-        if ch.is_control() {
-            out.push('_');
-        } else {
-            out.push(ch);
+/// Build the DNS-SD service instance and the hostname that the
+/// service's SRV record targets.
+///
+/// A display name is editable and may collide between two devices,
+/// so it must remain TXT metadata instead of identifying the DNS-SD
+/// service. The local peer id is a 32-char lowercase hexadecimal
+/// value minted from the public key, which makes it both stable and
+/// valid inside a DNS label. The public adapter still guards the
+/// label in case a lower-level caller bypasses the core's identity
+/// validation; such a caller cannot inject dots, underscores or
+/// control characters into DNS names.
+fn service_names(advertisement: &DiscoveryAdvertisement) -> (String, String, String) {
+    let mut identity_label = String::with_capacity(advertisement.peer_id.len());
+    for ch in advertisement.peer_id.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            identity_label.push(ch.to_ascii_lowercase());
         }
     }
-    out.truncate(63);
-    if out.is_empty() {
-        "ClipVault".to_string()
-    } else {
-        out
+    identity_label.truncate(52);
+    if identity_label.is_empty() {
+        identity_label.push_str("unknown");
     }
+    let instance = format!("ClipVault-{identity_label}");
+    let hostname = format!("clipvault-{identity_label}.local.");
+    let fullname = format!("{instance}.{SERVICE_TYPE}");
+    (instance, hostname, fullname)
 }
 
 #[cfg(test)]
@@ -837,17 +846,59 @@ mod tests {
     }
 
     #[test]
-    fn sanitise_instance_name_truncates_to_sixty_three_chars() {
-        let long = "a".repeat(200);
-        let sanitised = sanitise_instance_name(&long);
-        assert_eq!(sanitised.len(), 63);
+    fn service_names_use_a_stable_dns_safe_peer_identity() {
+        let (instance, hostname, fullname) = service_names(&ad());
+        assert_eq!(instance, "ClipVault-0123456789abcdef0123456789abcdef");
+        assert_eq!(
+            hostname,
+            "clipvault-0123456789abcdef0123456789abcdef.local."
+        );
+        assert_eq!(
+            fullname,
+            "ClipVault-0123456789abcdef0123456789abcdef._clipvault._tcp.local."
+        );
+        // DNS-SD instance names may contain the service type, but
+        // the SRV target is a hostname and must not carry the
+        // `_clipvault._tcp` labels. Avahi uses that distinction
+        // while resolving an announcement from macOS.
+        assert!(!hostname.contains('_'));
+        let properties = build_txt_properties(&ad());
+        assert!(mdns_sd::ServiceInfo::new(
+            SERVICE_TYPE,
+            &instance,
+            &hostname,
+            "192.0.2.42",
+            65000,
+            &properties[..],
+        )
+        .is_ok());
     }
 
     #[test]
-    fn sanitise_instance_name_replaces_control_chars_and_falls_back() {
-        assert_eq!(sanitise_instance_name("\u{0001}ctrl"), "_ctrl");
-        assert_eq!(sanitise_instance_name(""), "ClipVault");
-        assert_eq!(sanitise_instance_name("   "), "ClipVault");
+    fn service_names_ignore_display_name_and_keep_peers_distinct() {
+        let first = DiscoveryAdvertisement::new(
+            "11111111111111111111111111111111",
+            "aaaaaaaaaaaaaaaa",
+            "Mac-M1",
+            1,
+            "discovery_only",
+        );
+        let renamed_first = DiscoveryAdvertisement::new(
+            "11111111111111111111111111111111",
+            "aaaaaaaaaaaaaaaa",
+            "Equipo de Diego",
+            1,
+            "discovery_only",
+        );
+        let second = DiscoveryAdvertisement::new(
+            "22222222222222222222222222222222",
+            "bbbbbbbbbbbbbbbb",
+            "Mac-M1",
+            1,
+            "discovery_only",
+        );
+        assert_eq!(service_names(&first), service_names(&renamed_first));
+        assert_ne!(service_names(&first), service_names(&second));
     }
 
     #[derive(Default)]

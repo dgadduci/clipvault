@@ -82,6 +82,15 @@ instancia** compartida por el `PeerDiscoveryRuntime` y por el transporte de
 pairing. El adapter expone tres ciclos de vida diferenciados que deben
 convivir:
 
+El nombre de instancia DNS-SD y el hostname destino del registro SRV se
+derivan del `peer_id` estable (`ClipVault-<peer_id>` y
+`clipvault-<peer_id>.local.`). El nombre visible es únicamente metadata TXT.
+Un fullname de servicio que contiene `_clipvault._tcp` no es un hostname
+válido como destino SRV: algunos resolvedores toleran ese formato, pero otros
+sólo emiten `ServiceFound` y nunca `ServiceResolved`, produciendo presencia
+unidireccional entre macOS y Linux. Derivar ambos nombres de la identidad
+evita además que dos equipos con el mismo nombre visible colisionen en mDNS.
+
 - `start(port=0, sink=RuntimeSink)` instala el daemon, registra
   `capability = discovery_only` con puerto placeholder y arranca el
   loop de browse que reenvía cada `ServiceResolved` / `ServiceRemoved`
