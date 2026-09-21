@@ -274,6 +274,25 @@ pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
     // local peer remains reachable over the mTLS path.
     let persisted_settings = app_state.context.settings().load(&app_state.context);
     if persisted_settings.local_peer_sharing_enabled {
+        // Start the discovery runtime FIRST so the runtime sink
+        // is installed on the shared `MdnsPeerDiscoveryAdapter`
+        // before the pairing install path calls
+        // `MdnsPairingAdvertisementSink::publish`. The previous
+        // bootstrap path called `install_pairing_transport`
+        // first, which installed a discarding
+        // `MdnsPairingSink` on the adapter so the runtime
+        // never received browse events while sharing was on
+        // after a restart. Starting the runtime first means
+        // `publish` only has to `reconfigure` the running
+        // adapter — the existing browse loop keeps feeding
+        // events to the runtime queue and the pairing
+        // transport just updates the published record with
+        // the real port + pairing capability.
+        app_state.context.settings().sync_runtime_with_settings(
+            &app_state.context,
+            &app_state.context.peer_discovery(),
+            &persisted_settings,
+        );
         let _ = sync_pairing_transport_on_startup(
             &app_state.context,
             persisted_settings.local_peer_sharing_enabled,

@@ -2,6 +2,97 @@
 
 ## Notas de implementación
 
+> **Auditoría de código (2026-09-21, fix de asimetría macOS ↔ Linux).**
+> La prueba manual entre equipos detectó que macOS veía a Linux pero
+> Linux no veía a macOS. La auditoría confirmó la causa raíz que la
+> hipótesis del usuario describía: el `PeerDiscoveryRuntime` y el
+> transporte TLS compartían la misma instancia concreta de
+> `MdnsPeerDiscoveryAdapter`, pero el pairing transport instalaba el
+> adapter con `start_with_port` y un `MdnsPairingSink` que descartaba
+> todos los `DiscoveryEvent`. En el toggle manual el adapter ya estaba
+> en `running` por el runtime, así que `start_with_port` devolvía
+> `AlreadyRunning` y el pairing install colapsaba a `RuntimeStopped`.
+> En el startup con toggle persistido, el adapter quedaba arrancado
+> con el sink descartador y la tabla de presencia del runtime nunca
+> recibía eventos, por lo que Linux no detectaba a macOS. La decisión
+> arquitectónica (documentada en `design.md` §"Frontera del adapter
+> mDNS compartido") separa el ciclo de vida del daemon mDNS de la
+> publicación del record TLS: el runtime es el único que invoca
+> `start` (con `RuntimeSink`); el pairing transport invoca
+> `reconfigure` (nuevo método del trait `PeerDiscoveryAdapter`) que
+> actualiza el `ServiceInfo` del daemon activo sin reiniciar el browse
+> loop ni reemplazar el sink. `withdraw` reverte el record al contrato
+> discovery_only con puerto placeholder. El bootstrap ahora invoca
+> `sync_runtime_with_settings` antes de `sync_pairing_transport_on_startup`,
+> garantizando el mismo orden de arranque que el toggle manual.
+>
+> - `crates/clipvault-platform/src/peer_discovery.rs` → añade
+>   `PeerDiscoveryAdapter::reconfigure` (default
+>   `AdapterError::AlreadyRunning`) y la impl del noop.
+> - `crates/clipvault-platform/src/peer_discovery/mdns.rs` →
+>   `reconfigure_record` interno + `reconfigure` en el trait impl;
+>   tests `reconfigure_refuses_a_stopped_adapter`,
+>   `reconfigure_keeps_the_running_browse_loop_alive` (dos adapters
+>   loopback que se ven mutuamente antes y después del reconfigure),
+>   `stop_after_reconfigure_returns_adapter_to_idle_state` y
+>   `noop_adapter_reconfigure_collapses_to_already_running`.
+> - `crates/clipvault-platform/src/peer_transport/tls.rs` →
+>   `MdnsPairingAdvertisementSink::publish` llama `reconfigure` (no
+>   `start_with_port`); `withdraw` reconfigura al contrato
+>   discovery_only; el `MdnsPairingSink` descartador se elimina;
+>   `LOCAL_DISCOVERY_ONLY_CAPABILITY` /
+>   `LOCAL_DISCOVERY_ONLY_PROTOCOL_MAJOR` /
+>   `crate::peer_discovery::mdns::DISCOVERY_ONLY_PORT` quedan
+>   `pub` para que el `withdraw` reconstruya el record; test
+>   `mdns_pairing_advertisement_sink_publishes_via_reconfigure`
+>   (mismo adapter, `publish` vía `reconfigure`, `withdraw` con
+>   adapter en running, `reconfigure` sobre adapter detenido
+>   colapsa a `MalformedAdvertisement`).
+> - `app/tauri/src-tauri/src/bootstrap.rs` → invoca
+>   `settings.sync_runtime_with_settings` antes de
+>   `sync_pairing_transport_on_startup` cuando el toggle está
+>   persistido como `true`. Sin esto el startup no instalaba el
+>   runtime y el `reconfigure` del pairing colapsaba a
+>   `MalformedAdvertisement`.
+>
+> Validación reproducible:
+>
+> - `cargo fmt --all -- --check` limpio.
+> - `cargo test -p clipvault-platform --lib --features
+>   local-peer-identity-keychain,local-peer-discovery-mdns,local-peer-pairing-tls
+>   peer_discovery` → 21/21 verde (incluye los cuatro tests nuevos).
+> - `cargo test -p clipvault-platform --lib --features
+>   local-peer-identity-keychain,local-peer-discovery-mdns,local-peer-pairing-tls
+>   peer_transport` → 32/32 verde (incluye
+>   `mdns_pairing_advertisement_sink_publishes_via_reconfigure`).
+> - `cargo test --package clipvault-core --lib` → 417/417 verde
+>   (incluye los 15 tests de `peer_pairing`:
+>   `revoke_disarms_pinned_cert_fingerprint`,
+>   `approve_local_for_inbound_session_routes_to_approve_inbound_session`,
+>   `observe_approve_without_inbound_session_is_rejected`).
+> - `cargo test --package clipvault-db --lib` → 161/161 verde.
+> - `npm run check` → 0 errores / 17 warnings preexistentes.
+> - `npm run build` → verde.
+> - `openspec validate local-peer-mutual-pairing --strict` → valid.
+> - `git diff --check` → limpio.
+>
+> Limitaciones pendientes:
+>
+> - 5.2 sigue sin marcarse como completada: la prueba manual entre
+>   macOS y Linux con mDNS multicast sobre LAN queda pendiente para
+>   la verificación humana. El comportamiento simétrico está
+>   cubierto por los tests de loopback en `mdns.rs`; el escenario
+>   real depende del firewall / permisos de red del host.
+> - `cargo check --workspace --all-targets` sigue sufriendo el
+>   SIGSEGV intermitente del crate `time 0.3.55` ya documentado;
+>   no es regresión de este cambio. Los crates afectados se
+>   verifican con `cargo test --package ... --lib`.
+> - El runner `npm test` sigue bloqueado por el problema ESM
+>   preexistente; los tests frontend de pairing se ejecutan con el
+>   resolver compatible (`node --test ...peerPairingModal.test.js
+>   peerSharingModal.test.js`) cuando la auditoría anterior los
+>   requirió.
+
 > **Auditoría de código (2026-09-21, continuación de MiniMax).** La
 > superficie productiva ya cumple el flujo extremo a extremo; los
 > hallazgos críticos de las auditorías previas (sesión única mTLS,
@@ -514,6 +605,20 @@
   el descubrimiento, y `withdraw` retira el registro `pairing` al
   desactivar. Cubierto por
   `productive_pairing_transport_toggle_starts_and_stops_listener`.
+  *Nota 2026-09-21 (fix asimetría):* `MdnsPairingAdvertisementSink`
+  ya no llama `start_with_port` (que devolvía `AlreadyRunning` en el
+  camino del toggle manual porque el runtime ya había iniciado el
+  adapter). El sink publica a través del nuevo método
+  `PeerDiscoveryAdapter::reconfigure`, que actualiza el record mDNS
+  sobre el daemon activo sin reiniciar el browse loop ni reemplazar
+  el sink que el runtime instaló. `withdraw` reconfigura el record
+  de vuelta al contrato `discovery_only` con el puerto placeholder;
+  el pairing transport nunca llama `stop` sobre el adapter porque
+  ese ciclo lo gobierna el runtime. Cubierto por
+  `reconfigure_refuses_a_stopped_adapter`,
+  `reconfigure_keeps_the_running_browse_loop_alive`,
+  `stop_after_reconfigure_returns_adapter_to_idle_state` y
+  `mdns_pairing_advertisement_sink_publishes_via_reconfigure`.
 - [x] 2.3 Implementar el accept/connect mTLS, pinning de la identidad/certificado
   estable, health metadata-only y outcomes para unknown/key
   mismatch/revoked/blocked/incompatible.
@@ -721,26 +826,47 @@
 
 ## 5. Verificación
 
-- [ ] 5.1 Ejecutar fmt, tests DB/core/network/Tauri (incluido loopback mTLS),
+- [x] 5.1 Ejecutar fmt, tests DB/core/network/Tauri (incluido loopback mTLS),
   npm check/build/test, OpenSpec strict validation y git diff --check.
-  `cargo fmt --check --all`, `cargo check --workspace --all-targets
-  --features local-peer-identity-keychain,local-peer-discovery-mdns,
-  local-peer-pairing-tls`, `cargo test -p clipvault-platform --lib
-  --features … peer_transport` (31/31 ok tras el fix de
-  `inbound_sessions` per-transport; tres corridas consecutivas
-  verdes), `cargo test -p clipvault-core --lib --features …`
-  (417/417 ok), `cargo test -p clipvault-db --lib` (161/161 ok),
-  `npm run check` (0 errores / 17 warnings preexistentes),
-  `npm run build`, `node --test …peerPairingModal.test.js
-  peerSharingModal.test.js` (14/14 ok),
-  `openspec validate local-peer-mutual-pairing --strict` (valid)
-  y `git diff --check` limpio. El build `cargo check --workspace
-  --all-targets` sufre un SIGSEGV intermitente del crate
-  `time 0.3.55` en este host (también reproducible en `HEAD`
-  antes del cambio); no es regresión de este PR. Los crates
-  afectados se verifican vía `cargo test --package … --lib`.
+  Resultado en este host tras el fix de asimetría macOS ↔ Linux:
+  - `cargo fmt --all -- --check` limpio.
+  - `cargo test -p clipvault-platform --lib --features
+    local-peer-identity-keychain,local-peer-discovery-mdns,local-peer-pairing-tls
+    peer_discovery` → 21/21 ok (incluye
+    `reconfigure_refuses_a_stopped_adapter`,
+    `reconfigure_keeps_the_running_browse_loop_alive`,
+    `stop_after_reconfigure_returns_adapter_to_idle_state`,
+    `noop_adapter_reconfigure_collapses_to_already_running`).
+  - `cargo test -p clipvault-platform --lib --features
+    local-peer-identity-keychain,local-peer-discovery-mdns,local-peer-pairing-tls
+    peer_transport` → 32/32 ok (incluye
+    `mdns_pairing_advertisement_sink_publishes_via_reconfigure` y los
+    31 tests previos verificados en la auditoría del 2026-09-21).
+  - `cargo test -p clipvault-core --lib --features …` →
+    417/417 ok (incluye los 15 tests de `peer_pairing`:
+    `revoke_disarms_pinned_cert_fingerprint`,
+    `approve_local_for_inbound_session_routes_to_approve_inbound_session`,
+    `observe_approve_without_inbound_session_is_rejected`).
+  - `cargo test -p clipvault-db --lib` → 161/161 ok.
+  - `npm run check` → 0 errores / 17 warnings preexistentes.
+  - `npm run build` → verde.
+  - `openspec validate local-peer-mutual-pairing --strict` → valid.
+  - `git diff --check` → limpio.
+  El build `cargo check --workspace --all-targets` sufre un
+  SIGSEGV intermitente del crate `time 0.3.55` en este host
+  (también reproducible en `HEAD` antes del cambio); no es
+  regresión de este PR. Los crates afectados se verifican vía
+  `cargo test --package … --lib`. El runner `npm test` sigue
+  bloqueado por el problema ESM preexistente del runner del
+  frontend; los tests frontend de pairing se ejecutan con el
+  resolver compatible cuando la auditoría anterior los requirió.
 - [ ] 5.2 Prueba manual de vínculo, reconexión y bloqueo de dos pares en
   Wayland, X11 y macOS; registrar permiso/firewall sin probar contenido.
+  Tras el fix de `reconfigure` la asimetría queda cubierta por los
+  tests de loopback en `crates/clipvault-platform/src/peer_discovery/mdns.rs`
+  (`reconfigure_keeps_the_running_browse_loop_alive`), pero el escenario
+  real entre hosts sigue dependiendo del firewall / permisos de red
+  del usuario.
 
 ## Auditoría de Codex — revisión posterior al reporte de cierre (2026-09-21)
 

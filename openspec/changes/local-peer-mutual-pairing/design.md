@@ -75,6 +75,79 @@ al runtime únicamente un evento de pairing ya autenticado (identidad pública,
 transcript verificado, aprobación remota verificada y huella del certificado).
 No entrega envelopes crudos y ningún evento de red atraviesa IPC.
 
+### Frontera del adapter mDNS compartido (descubrimiento + pairing)
+
+El `MdnsPeerDiscoveryAdapter` que el bootstrap construye es **una sola
+instancia** compartida por el `PeerDiscoveryRuntime` y por el transporte de
+pairing. El adapter expone tres ciclos de vida diferenciados que deben
+convivir:
+
+- `start(port=0, sink=RuntimeSink)` instala el daemon, registra
+  `capability = discovery_only` con puerto placeholder y arranca el
+  loop de browse que reenvía cada `ServiceResolved` / `ServiceRemoved`
+  al `RuntimeSink` del runtime. El runtime persiste y actualiza la
+  tabla de presencia a partir de esos eventos.
+- `reconfigure(advertisement, port)` actualiza el record publicado en
+  el daemon activo **sin** reiniciar el loop de browse ni reemplazar
+  el sink. Es el camino que el `MdnsPairingAdvertisementSink` usa
+  cuando el listener TLS ya reservó un puerto efímero real: cambia
+  la capability a `pairing` y publica el puerto real sin perder los
+  eventos que el browse loop sigue emitiendo al runtime.
+- `stop()` cierra el daemon, retira el record y une el thread. Sólo
+  lo dispara el runtime cuando el toggle queda `false`.
+
+El pairing transport **nunca** invoca `start_with_port` ni instala su
+propio sink en el camino productivo: ese contrato provoca (a) un
+`AlreadyRunning` en el camino del toggle manual porque el runtime ya
+inició el adapter, y (b) en el camino del startup un
+`MdnsPairingSink` que descarta todos los `DiscoveryEvent` de browse,
+dejando la tabla de presencia del runtime vacía aunque el record
+mDNS se publique correctamente. La asimetría que producía eso entre
+macOS y Linux (una plataforma detectaba a la otra pero no al revés)
+queda cubierta por los tests
+`peer_discovery::mdns::tests::reconfigure_refuses_a_stopped_adapter`,
+`peer_discovery::mdns::tests::reconfigure_keeps_the_running_browse_loop_alive`,
+`peer_discovery::mdns::tests::stop_after_reconfigure_returns_adapter_to_idle_state`
+y
+`peer_transport::tls::tests::mdns_pairing_advertisement_sink_publishes_via_reconfigure`.
+
+El orden de instalación en cada camino queda entonces así:
+
+- **Toggle manual `false → true`:**
+  `sync_runtime_with_settings(true)` llama `runtime.start()` (que
+  invoca `adapter.start(port=0, RuntimeSink)`). Después
+  `sync_pairing_transport_with_toggle(true)` invoca
+  `advertisement.publish(real_port)`, que detecta el adapter en
+  curso y llama `adapter.reconfigure(pairing, real_port)`. El
+  listener TLS queda bind-eado, el browse loop sigue alimentando al
+  `RuntimeSink` y el record mDNS refleja `pairing` con el puerto
+  real. `runtime.is_running() == true`,
+  `pairing_transport_is_running() == true`.
+- **Startup con toggle persistido:** el bootstrap llama primero
+  `sync_runtime_with_settings(true)` (idéntico al camino del toggle)
+  y después `sync_pairing_transport_on_startup(true)`, que
+  reutiliza el mismo `reconfigure`. El estado final es
+  idéntico al toggle manual; `clipvault_peer_sharing_toggle_get`
+  reporta `active` con el puerto real.
+- **Toggle `true → false`:** `sync_runtime_with_settings(false)`
+  llama `runtime.stop()` (que invoca `adapter.stop()`). Después
+  `sync_pairing_transport_with_toggle(false)` llama
+  `context.stop_pairing_transport()`, que cierra el listener TLS y
+  en su camino de retirada invoca `advertisement.withdraw()`; el
+  adapter ya está parado y el `withdraw` colapsa al no-op
+  tipado. El runtime nunca delega la retirada del record al
+  transporte de pairing.
+
+**Alternativa descartada:** mantener dos adapters separados (uno
+para discovery, otro para pairing) y dejar que el bridge los
+coordine. Lo descartamos porque el record mDNS sólo puede
+publicar un único `fullname` por instancia (`_clipvault._tcp.local`)
+y un peer que ya navegó hacia el record discovery_only recibiría
+un `ServiceRemoved` falso al instalar el segundo adapter,
+rompiendo la presencia sin justificación. La ruta del
+`reconfigure` mantiene una única fuente de verdad del daemon y
+del browse loop.
+
 El runtime no inventa un SAS ni envía una aprobación por su cuenta. Al
 iniciar un vínculo, el transport resuelve internamente el peer anunciado por
 mDNS y abre la sesión; al recibir una invitación, crea el estado remoto. Sólo

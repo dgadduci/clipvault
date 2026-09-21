@@ -54,8 +54,11 @@ const SERVICE_TYPE: &str = "_clipvault._tcp.local.";
 /// [`Self::start_with_port`] entry point to publish the real
 /// non-zero ephemeral port the TLS listener reserved; the
 /// discovery-only contract stays bound to the legacy `start`
-/// path and to this constant.
-const DISCOVERY_ONLY_PORT: u16 = 0;
+/// path and to this constant. The constant is `pub` so the
+/// pairing transport's withdrawal path can flip the
+/// advertisement back to the discovery-only contract without
+/// embedding a magic number in the call site.
+pub const DISCOVERY_ONLY_PORT: u16 = 0;
 
 /// TXT keys the adapter reads / writes for the metadata the
 /// runtime validates / persists. The keys are kept short so the
@@ -328,6 +331,73 @@ impl MdnsPeerDiscoveryAdapter {
         state.peer_addresses = None;
     }
 
+    /// Update the published mDNS record on a running adapter
+    /// without restarting the browse loop. The method unregisters
+    /// the previous `fullname` and registers a fresh service with
+    /// the supplied `port` + TXT properties; the receiver and the
+    /// browse thread keep running so presence delivery to the
+    /// runtime is never interrupted. The pairing transport calls
+    /// this after binding the ephemeral TLS listener so the same
+    /// adapter the runtime started for discovery continues to
+    /// forward browse events while the published record flips to
+    /// `capability = pairing` with the real port.
+    ///
+    /// Returns [`MdnsAdapterError::Register`] when the adapter
+    /// is not currently running (the runtime should have started
+    /// it before the pairing transport tries to publish) so the
+    /// productive install path never silently downgrades to
+    /// discovery-only.
+    fn reconfigure_record(
+        &self,
+        advertisement: &DiscoveryAdvertisement,
+        port: u16,
+    ) -> Result<(), MdnsAdapterError> {
+        let mut state = self.state.lock().expect("state lock");
+        let handle = state.daemon.as_mut().ok_or(MdnsAdapterError::Register)?;
+        // Build the new service descriptor first so a malformed
+        // advertisement cannot leave the adapter with the
+        // previous record unregistered and no replacement
+        // registered. The `instance` / `fullname` are derived
+        // from the display name the runtime validated, so the
+        // mdns-sd 63-octet bound the adapter documents still
+        // applies.
+        let instance = sanitise_instance_name(&advertisement.display_name);
+        let new_fullname = format!("{instance}.{SERVICE_TYPE}");
+        let properties = build_txt_properties(advertisement);
+        let service_info = mdns_sd::ServiceInfo::new(
+            SERVICE_TYPE,
+            &instance,
+            &new_fullname,
+            "",
+            port,
+            &properties[..],
+        )
+        .map_err(|error| {
+            warn!(error = %error, "failed to build mdns-sd service info");
+            MdnsAdapterError::ServiceInfo
+        })?
+        .enable_addr_auto();
+        // Only unregister the previous record when the
+        // `fullname` actually changed; flipping the TXT record
+        // for the same instance keeps the daemon's state
+        // machine clean.
+        if handle.fullname != new_fullname {
+            match handle.daemon.unregister(&handle.fullname) {
+                Ok(receiver) => {
+                    let _ = receiver.recv_timeout(UNREGISTER_WAIT);
+                }
+                Err(_) => warn!("mdns-sd unregister during reconfigure failed; continuing"),
+            }
+        }
+        handle.daemon.register(service_info).map_err(|error| {
+            warn!(error = %error, "failed to register mdns-sd service");
+            MdnsAdapterError::Register
+        })?;
+        handle.fullname = new_fullname;
+        debug!(port, "mdns-sd adapter reconfigured");
+        Ok(())
+    }
+
     /// Resolve the most recent `SocketAddr` the mDNS browse loop
     /// observed for the matching `peer_id`. The pairing
     /// transport uses this internally to dial the announced
@@ -413,6 +483,26 @@ impl PeerDiscoveryAdapter for MdnsPeerDiscoveryAdapter {
         self.shutdown();
         self.running.store(false, Ordering::Release);
         Ok(())
+    }
+
+    fn reconfigure(
+        &self,
+        advertisement: &DiscoveryAdvertisement,
+        port: u16,
+    ) -> Result<(), AdapterError> {
+        // The adapter must be running for a reconfigure to make
+        // sense: the runtime installs the adapter (and its
+        // sink) via `start` and the pairing transport flips the
+        // advertisement to pairing + the real port once the TLS
+        // listener has bound. A reconfigure against a stopped
+        // adapter is the typed `MalformedAdvertisement` reason
+        // the productive pairing path already documents for
+        // a missing mdns daemon.
+        if !self.running.load(Ordering::Acquire) {
+            return Err(AdapterError::MalformedAdvertisement);
+        }
+        self.reconfigure_record(advertisement, port)
+            .map_err(map_install_error)
     }
 
     fn is_running(&self) -> bool {
@@ -976,6 +1066,217 @@ mod tests {
         assert!(
             removed,
             "second daemon never received ServiceRemoved for the first daemon after stop()"
+        );
+    }
+
+    /// `reconfigure` MUST refuse to publish anything when the
+    /// adapter is not running. The pairing transport relies on
+    /// the runtime to start the adapter (and install its sink)
+    /// first; a reconfigure attempt against a stopped adapter
+    /// is the typed `MalformedAdvertisement` reason the
+    /// productive pairing path documents, not a silent
+    /// downgrade to a half-built record.
+    #[test]
+    fn reconfigure_refuses_a_stopped_adapter() {
+        let adapter = MdnsPeerDiscoveryAdapter::new();
+        let ad = DiscoveryAdvertisement::new(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            "Studio",
+            1,
+            "pairing",
+        );
+        let err = adapter
+            .reconfigure(&ad, 65000)
+            .expect_err("reconfigure on a stopped adapter must fail");
+        assert!(matches!(err, AdapterError::MalformedAdvertisement));
+        assert!(!adapter.is_running());
+    }
+
+    /// `reconfigure` MUST keep the existing browse loop running
+    /// so the runtime keeps receiving browse events while the
+    /// pairing transport flips the published record to
+    /// `capability = pairing`. The previous `start_with_port`
+    /// path either failed with `AlreadyRunning` on the toggle
+    /// path or replaced the runtime sink with a discarding one
+    /// on the bootstrap path; `reconfigure` lets the same
+    /// adapter instance carry both the discovery and pairing
+    /// lifecycle without dropping browse events.
+    ///
+    /// The test runs on the loopback: two adapters start in
+    /// discovery-only mode, then each reconfigures to pairing
+    /// mode with a non-zero port. The browse loop the discovery
+    /// `start` call installed must keep firing — the second
+    /// adapter's browse events reach the first adapter's sink
+    /// after the reconfigure, and the first adapter's
+    /// reconfigured record reaches the second adapter's sink
+    /// through the same receiver.
+    #[test]
+    fn reconfigure_keeps_the_running_browse_loop_alive() {
+        let first_id = "11111111111111111111111111111111";
+        let second_id = "22222222222222222222222222222222";
+        let first_discovery = DiscoveryAdvertisement::new(
+            first_id,
+            "aaaaaaaaaaaaaaaa",
+            "Studio-A",
+            1,
+            "discovery_only",
+        );
+        let first_pairing = DiscoveryAdvertisement::new_pairing(
+            first_id,
+            "aaaaaaaaaaaaaaaa",
+            &"a".repeat(64),
+            "Studio-A",
+            1,
+        );
+        let second_discovery = DiscoveryAdvertisement::new(
+            second_id,
+            "bbbbbbbbbbbbbbbb",
+            "Studio-B",
+            1,
+            "discovery_only",
+        );
+        let second_pairing = DiscoveryAdvertisement::new_pairing(
+            second_id,
+            "bbbbbbbbbbbbbbbb",
+            &"b".repeat(64),
+            "Studio-B",
+            1,
+        );
+        let recorder_a = Arc::new(CapturingSink::default());
+        let recorder_b = Arc::new(CapturingSink::default());
+        let sink_a: Arc<dyn DiscoverySink> = recorder_a.clone();
+        let sink_b: Arc<dyn DiscoverySink> = recorder_b.clone();
+        let first = MdnsPeerDiscoveryAdapter::new();
+        let second = MdnsPeerDiscoveryAdapter::new();
+        // Discovery-only start. We must classify the multicast
+        // unavailability symmetrically to the loopback test
+        // above; if either `start` fails, the productive path
+        // cannot run and we exit explicitly without asserting.
+        let first_started = first.start(&first_discovery, sink_a.clone()).is_ok();
+        let second_started = second.start(&second_discovery, sink_b.clone()).is_ok();
+        if !(first_started && second_started) {
+            let _ = first.stop();
+            let _ = second.stop();
+            eprintln!(
+                "reconfigure loopback skipped: first_started={first_started} second_started={second_started}"
+            );
+            return;
+        }
+        // Wait up to ~6 s for the discovery-only browse loop to
+        // see both peers. We then reconfigure BOTH adapters to
+        // pairing mode; the same browse loop and sink must
+        // remain active so a second round of browse events
+        // reaches each recorder.
+        let mut observed_pair = false;
+        let mut observed_pair_after = false;
+        let initial_deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        while std::time::Instant::now() < initial_deadline {
+            observed_pair = recorder_a
+                .events
+                .lock()
+                .expect("events")
+                .iter()
+                .any(|event| {
+                    matches!(event, DiscoveryEvent::Observed(record)
+                        if record.peer_id == second_id
+                            && record.capability == "discovery_only")
+                });
+            if observed_pair {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        // Flip both adapters to pairing with a real port. The
+        // adapter must accept the reconfigure and keep the
+        // browse loop running.
+        let reconfigure_first = first.reconfigure(&first_pairing, 65100);
+        let reconfigure_second = second.reconfigure(&second_pairing, 65200);
+        let _ = reconfigure_first;
+        let _ = reconfigure_second;
+        assert!(
+            first.is_running(),
+            "first adapter must stay running after reconfigure"
+        );
+        assert!(
+            second.is_running(),
+            "second adapter must stay running after reconfigure"
+        );
+        // The first adapter's existing `sink_a` is still
+        // installed. The reconfigured record must reach the
+        // second adapter through the same browse loop within
+        // the bounded window.
+        let after_deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        while std::time::Instant::now() < after_deadline {
+            observed_pair_after = recorder_a
+                .events
+                .lock()
+                .expect("events")
+                .iter()
+                .any(|event| {
+                    matches!(event, DiscoveryEvent::Observed(record)
+                        if record.peer_id == second_id
+                            && record.capability == "pairing")
+                });
+            if observed_pair_after {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let _ = first.stop();
+        let _ = second.stop();
+        assert!(
+            observed_pair,
+            "first adapter never observed the second adapter's discovery-only record"
+        );
+        assert!(
+            observed_pair_after,
+            "first adapter's browse loop did not survive the reconfigure (no pairing record observed)"
+        );
+    }
+
+    /// Stopping the adapter MUST release the browse loop so a
+    /// subsequent `start` succeeds. The previous prototype's
+    /// `MdnsPairingSink::push` short-circuited events; the new
+    /// `reconfigure` path replaces the start_with_port path and
+    /// must not leave the adapter in a state where the next
+    /// `start` fails. The regression test confirms stop/start
+    /// still works through the existing `start` entry point
+    /// after a reconfigure cycle.
+    #[test]
+    fn stop_after_reconfigure_returns_adapter_to_idle_state() {
+        let adapter = MdnsPeerDiscoveryAdapter::new();
+        let discovery = ad();
+        let pairing = DiscoveryAdvertisement::new_pairing(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            &"f".repeat(64),
+            "Studio",
+            1,
+        );
+        let sink: Arc<dyn DiscoverySink> = Arc::new(CapturingSink::default());
+        if adapter.start(&discovery, sink.clone()).is_err() {
+            // Multicast unavailable: the typed-error unit tests
+            // already cover the contract. Skip the stop assertion
+            // because we cannot run a productive cycle on a
+            // sandbox that blocks mDNS.
+            eprintln!("stop after reconfigure skipped: multicast unavailable");
+            return;
+        }
+        adapter
+            .reconfigure(&pairing, 65111)
+            .expect("reconfigure on a running adapter must succeed");
+        adapter
+            .stop()
+            .expect("stop after reconfigure must release the adapter");
+        assert!(!adapter.is_running());
+        // Restarting the same adapter must succeed because the
+        // previous stop fully unwound the daemon + browse loop.
+        let restart = adapter.start(&discovery, sink);
+        adapter.stop().ok();
+        assert!(
+            restart.is_ok(),
+            "stop must release the adapter so the next start succeeds"
         );
     }
 

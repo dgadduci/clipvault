@@ -280,6 +280,32 @@ pub trait PeerDiscoveryAdapter: Send + Sync {
         Err(AdapterError::MalformedAdvertisement)
     }
 
+    /// Update the published mDNS record (port + properties) on an
+    /// adapter that is already running. The browse loop and the
+    /// sink the adapter installed at `start` time MUST stay alive
+    /// so a discovery update never interrupts presence delivery
+    /// to the runtime. The pairing transport calls this after
+    /// binding the ephemeral TLS listener so the same
+    /// [`crate::peer_discovery::mdns::MdnsPeerDiscoveryAdapter`]
+    /// instance the [`crate::peer_discovery::PeerDiscoveryRuntime`]
+    /// already started keeps emitting browse events to the
+    /// runtime while the published record flips to
+    /// `capability = pairing` with the real port. Callers MUST
+    /// refuse to [`Self::reconfigure`] an adapter that is not
+    /// running so the productive install path never silently
+    /// downgrades to discovery-only. The default implementation
+    /// returns [`AdapterError::AlreadyRunning`] so an adapter
+    /// without a productive reconfigure path surfaces the same
+    /// typed reason every other stateful call already documents.
+    fn reconfigure(
+        &self,
+        advertisement: &DiscoveryAdvertisement,
+        port: u16,
+    ) -> Result<(), AdapterError> {
+        let _ = (advertisement, port);
+        Err(AdapterError::AlreadyRunning)
+    }
+
     /// Stop the browser / registrant. Idempotent: a second call
     /// after a previous `stop` MUST be a no-op.
     fn stop(&self) -> Result<(), AdapterError>;
@@ -346,6 +372,18 @@ impl PeerDiscoveryAdapter for NoopPeerDiscoveryAdapter {
         Err(AdapterError::MulticastUnavailable)
     }
 
+    fn reconfigure(
+        &self,
+        _advertisement: &DiscoveryAdvertisement,
+        _port: u16,
+    ) -> Result<(), AdapterError> {
+        // The noop adapter never started. A reconfigure attempt
+        // collapses to the typed `AlreadyRunning` reason the
+        // default impl surfaces; the runtime can branch on the
+        // typed error instead of a generic panic.
+        Err(AdapterError::AlreadyRunning)
+    }
+
     fn stop(&self) -> Result<(), AdapterError> {
         self.running.store(false, Ordering::Release);
         Ok(())
@@ -408,6 +446,27 @@ mod tests {
         let adapter = NoopPeerDiscoveryAdapter::new();
         adapter.stop().expect("noop stop is a no-op");
         assert!(!adapter.is_running());
+    }
+
+    /// The noop adapter must refuse a reconfigure with the same
+    /// typed `AlreadyRunning` reason the default impl surfaces
+    /// so the runtime can distinguish "adapter never started"
+    /// from a productive error on hosts that do not link
+    /// `mdns-sd`.
+    #[test]
+    fn noop_adapter_reconfigure_collapses_to_already_running() {
+        let adapter = NoopPeerDiscoveryAdapter::new();
+        let ad = DiscoveryAdvertisement::new(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            "Studio",
+            1,
+            "pairing",
+        );
+        let err = adapter
+            .reconfigure(&ad, 65111)
+            .expect_err("noop must refuse reconfigure");
+        assert!(matches!(err, AdapterError::AlreadyRunning));
     }
 
     #[test]

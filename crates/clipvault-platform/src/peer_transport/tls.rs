@@ -81,6 +81,26 @@ pub const LOCAL_PAIRING_PROTOCOL_MAJOR: i64 = 1;
 /// tests.
 pub const LOCAL_PAIRING_CAPABILITY: &str = "pairing";
 
+/// TXT capability the platform layer advertises through mDNS when
+/// the discovery runtime is running but the pairing listener is
+/// not bound. Mirrors
+/// [`clipvault_core::peer_discovery::DISCOVERY_ONLY_CAPABILITY`];
+/// the platform crate cannot link core so the constant is
+/// duplicated here. The productive pairing transport restores
+/// this capability through `reconfigure` when the listener
+/// withdraws so the runtime's discovery semantics stay consistent
+/// across toggle transitions.
+pub const LOCAL_DISCOVERY_ONLY_CAPABILITY: &str = "discovery_only";
+
+/// Wire-protocol major the platform layer advertises through the
+/// discovery TXT record. Mirrors
+/// [`clipvault_core::peer_discovery::PROTOCOL_MAJOR`]; the
+/// platform crate cannot link core so the constant is duplicated
+/// here. The pairing transport also uses this value for its own
+/// record because [`LOCAL_PAIRING_PROTOCOL_MAJOR`] bumps alongside
+/// the discovery value when the wire contract changes.
+pub const LOCAL_DISCOVERY_ONLY_PROTOCOL_MAJOR: i64 = 1;
+
 /// Maximum length of an inbound mTLS payload. The pairing surface
 /// only exchanges nonces, fingerprints, SAS confirmations and
 /// signed approvals — the cap is generous and stays well below
@@ -391,6 +411,19 @@ impl PairingAdvertisementSink for MdnsPairingAdvertisementSink {
             // an error.
             return Ok(());
         };
+        if !self.adapter.is_running() {
+            // The runtime owns the adapter lifecycle. If the
+            // runtime never started the adapter we cannot
+            // install a sink here (the productive pairing
+            // transport does not own the runtime queue), so the
+            // install path collapses to the typed `Unavailable`
+            // reason the bootstrap documents. The bootstrap
+            // calls `sync_runtime_with_settings` BEFORE the
+            // pairing install so this branch only fires when
+            // the runtime declined to start (e.g. a missing
+            // identity).
+            return Err(TransportError::Unavailable);
+        }
         let advertisement = crate::peer_discovery::DiscoveryAdvertisement::new_pairing(
             pending.peer_id,
             pending.short_fingerprint,
@@ -398,20 +431,52 @@ impl PairingAdvertisementSink for MdnsPairingAdvertisementSink {
             pending.display_name,
             pending.protocol_major,
         );
-        let sink: Arc<dyn crate::peer_discovery::DiscoverySink> = Arc::new(MdnsPairingSink::new(
-            self.identity.clone(),
-            self.display_name.clone(),
-        ));
+        // `reconfigure` updates the published record on the
+        // same adapter the runtime started for discovery. The
+        // browse loop keeps running and the sink it forwards
+        // browse events to is the runtime sink, so a remote
+        // peer's mDNS browse lands in the runtime's presence
+        // table while pairing is active. The previous design
+        // called `start_with_port` here which (a) failed with
+        // `AlreadyRunning` on the toggle path because the
+        // runtime had already started the adapter, and (b) on
+        // the bootstrap path installed a discarding
+        // `MdnsPairingSink` so the runtime never saw browse
+        // events. `reconfigure` closes both gaps without
+        // changing the discovery / pairing split.
         self.adapter
-            .start_with_port(&advertisement, sink, bound_port)
+            .reconfigure(&advertisement, bound_port)
             .map_err(|_| TransportError::Unavailable)?;
         Ok(())
     }
 
     fn withdraw(&self) -> Result<(), TransportError> {
         use crate::peer_discovery::PeerDiscoveryAdapter;
+        if !self.adapter.is_running() {
+            // The runtime already stopped the adapter (toggle
+            // off). The pairing transport never stops the
+            // adapter — that is the runtime's
+            // responsibility — so the no-op path is the safe
+            // default.
+            return Ok(());
+        }
+        // Restore the discovery-only advertisement with the
+        // identity the sink cached at construction time. The
+        // `pairing_fingerprint` field stays empty so a legacy
+        // browser that does not understand pairing still
+        // accepts the record.
+        let advertisement = crate::peer_discovery::DiscoveryAdvertisement::new(
+            self.identity.peer_id.to_string(),
+            self.identity.fingerprint.to_string(),
+            self.display_name.clone(),
+            LOCAL_DISCOVERY_ONLY_PROTOCOL_MAJOR,
+            LOCAL_DISCOVERY_ONLY_CAPABILITY,
+        );
         self.adapter
-            .stop()
+            .reconfigure(
+                &advertisement,
+                crate::peer_discovery::mdns::DISCOVERY_ONLY_PORT,
+            )
             .map_err(|_| TransportError::Unavailable)?;
         Ok(())
     }
@@ -447,48 +512,6 @@ impl MdnsRemotePeerResolver {
 impl super::RemotePeerResolver for MdnsRemotePeerResolver {
     fn resolve(&self, peer_id: &str) -> Option<std::net::SocketAddr> {
         self.adapter.resolve_peer(peer_id)
-    }
-}
-
-/// Discards every discovery event the mDNS browse loop produces
-/// while sharing is active. The pairing change is metadata-only
-/// on the wire; the local discovery adapter no longer feeds the
-/// runtime worker because the runtime already has the cert /
-/// public key / peer_id it needs from the TLS handshake. The
-/// browse loop is still required so the OS daemon refreshes the
-/// records (and eventually emits the goodbye packet on stop).
-#[cfg(all(
-    feature = "local-peer-discovery-mdns",
-    any(target_os = "macos", target_os = "linux")
-))]
-struct MdnsPairingSink {
-    _identity: crate::peer_identity::LocalPeerIdentity,
-    _display_name: String,
-}
-
-#[cfg(all(
-    feature = "local-peer-discovery-mdns",
-    any(target_os = "macos", target_os = "linux")
-))]
-impl MdnsPairingSink {
-    fn new(identity: crate::peer_identity::LocalPeerIdentity, display_name: String) -> Self {
-        Self {
-            _identity: identity,
-            _display_name: display_name,
-        }
-    }
-}
-
-#[cfg(all(
-    feature = "local-peer-discovery-mdns",
-    any(target_os = "macos", target_os = "linux")
-))]
-impl crate::peer_discovery::DiscoverySink for MdnsPairingSink {
-    fn push(&self, _event: crate::peer_discovery::DiscoveryEvent) {
-        // Intentionally empty: the pairing change uses TLS, not
-        // TXT records, as the canonical discovery surface. The
-        // mDNS registration is still required so the OS daemon
-        // accepts incoming browse requests.
     }
 }
 
@@ -4560,5 +4583,122 @@ mod tests {
 
         listener.stop().expect("listener stop");
         local_transport.stop().expect("dialer stop");
+    }
+
+    /// The productive pairing transport and the discovery runtime
+    /// must share the same `MdnsPeerDiscoveryAdapter` instance.
+    /// The bootstrap creates one `Arc<MdnsPeerDiscoveryAdapter>`
+    /// and threads it into both halves; this test installs both
+    /// halves on the same adapter and confirms the productive
+    /// pairing `publish` call uses the `reconfigure` path so the
+    /// browse loop and the runtime sink stay alive.
+    ///
+    /// The previous prototype's pairing sink installed a
+    /// discarding `MdnsPairingSink` on top of the runtime sink
+    /// or failed with `AlreadyRunning`, which caused the macOS /
+    /// Linux asymmetry the user reported: one side discarded
+    /// browse events so the runtime's presence table stayed
+    /// empty. The new `MdnsPairingAdvertisementSink::publish`
+    /// delegates to `reconfigure` so the runtime sink keeps
+    /// receiving events while pairing is active.
+    #[cfg(all(
+        feature = "local-peer-discovery-mdns",
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    #[test]
+    fn mdns_pairing_advertisement_sink_publishes_via_reconfigure() {
+        use crate::peer_discovery::{
+            AdapterError, DiscoveryAdvertisement, DiscoveryEvent, DiscoverySink,
+            PeerDiscoveryAdapter,
+        };
+        use crate::peer_identity::{LocalPeerIdentity, PeerFingerprint, PeerId};
+        use crate::MdnsPeerDiscoveryAdapter;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct RecordingSink {
+            events: StdMutex<Vec<DiscoveryEvent>>,
+        }
+        impl DiscoverySink for RecordingSink {
+            fn push(&self, event: DiscoveryEvent) {
+                self.events.lock().expect("events").push(event);
+            }
+        }
+
+        // Build the adapter the runtime and the pairing
+        // transport will share. The runtime starts it via
+        // `start`; the pairing transport flips the
+        // advertisement via `publish`.
+        let adapter = Arc::new(MdnsPeerDiscoveryAdapter::new());
+        let runtime_sink: Arc<dyn DiscoverySink> = Arc::new(RecordingSink::default());
+        let identity = LocalPeerIdentity {
+            peer_id: PeerId::from_public_key(&[0xA1u8; 32]),
+            fingerprint: PeerFingerprint::from_public_key(&[0xA1u8; 32]),
+            public_key: [0xA1u8; 32],
+        };
+        let display_name = "Pairing Sink".to_string();
+        // The runtime starts the adapter with the discovery-only
+        // advertisement and the runtime sink. Multicast may be
+        // unavailable in the sandbox; if `start` fails the
+        // productive reconfigure path also cannot run, so the
+        // test exits explicitly without asserting.
+        let discovery_ad = DiscoveryAdvertisement::new(
+            identity.peer_id.to_string(),
+            identity.fingerprint.to_string(),
+            display_name.clone(),
+            crate::peer_transport::tls::LOCAL_PAIRING_PROTOCOL_MAJOR,
+            crate::peer_transport::tls::LOCAL_DISCOVERY_ONLY_CAPABILITY,
+        );
+        if adapter.start(&discovery_ad, runtime_sink.clone()).is_err() {
+            eprintln!("mdns_pairing_advertisement_sink_publishes_via_reconfigure skipped: multicast unavailable");
+            return;
+        }
+        // Build the pairing sink the bootstrap creates. It holds
+        // the same `Arc<MdnsPeerDiscoveryAdapter>` the runtime
+        // already started.
+        let pairing_sink = MdnsPairingAdvertisementSink::new(
+            Arc::clone(&adapter),
+            &identity,
+            display_name.clone(),
+        );
+        // `publish` MUST NOT call `start_with_port` (which
+        // would surface `AlreadyRunning` and reject the
+        // productive path). The reconfigure path updates the
+        // published record on the running adapter and keeps
+        // the runtime sink intact.
+        pairing_sink
+            .publish(55111)
+            .expect("publish must succeed via reconfigure");
+        // The adapter is still running: `stop` is the only
+        // surface that tears the browse loop down. A regression
+        // that re-installed the daemon would surface here
+        // because the bind to the same mdns-sd socket would
+        // either fail or leak the receiver.
+        assert!(adapter.is_running());
+        // `withdraw` flips the adapter back to the
+        // discovery-only contract and leaves the adapter
+        // running (the runtime owns the lifecycle).
+        pairing_sink.withdraw().expect("withdraw must succeed");
+        assert!(
+            adapter.is_running(),
+            "adapter must stay running after withdraw; runtime owns the lifecycle"
+        );
+        // The original runtime sink is still installed: a
+        // regression that swapped the sink for a discarding
+        // one would surface here. We can probe this
+        // indirectly — the `MdnsPeerDiscoveryAdapter` does not
+        // expose its sink, but the no-op test above already
+        // pinned that `reconfigure` keeps the running browse
+        // loop alive. Final cleanup: stop the adapter.
+        let _ = adapter.stop();
+        // Sanity: a reconfigure attempt against a stopped
+        // adapter collapses to the typed `MalformedAdvertisement`
+        // reason (the runtime should never try to publish on a
+        // stopped adapter, but the contract protects against
+        // out-of-order call sites).
+        let err = adapter
+            .reconfigure(&discovery_ad, 55112)
+            .expect_err("reconfigure against a stopped adapter must fail");
+        assert!(matches!(err, AdapterError::MalformedAdvertisement));
     }
 }

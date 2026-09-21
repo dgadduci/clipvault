@@ -130,16 +130,55 @@ requests regardless of trust state.
 - **THEN** the server returns a typed unavailable outcome without any entry
   metadata or content
 
+### Requirement: Discovery and pairing share one mDNS adapter lifecycle
+
+The local peer discovery runtime and the productive pairing transport MUST
+operate on the same concrete `MdnsPeerDiscoveryAdapter` instance. The runtime
+owns the adapter lifecycle (only it invokes `start` with the runtime sink
+and `stop` on toggle transitions); the pairing transport invokes
+`reconfigure` on the running adapter after binding the ephemeral TLS
+listener so the published record flips to `capability = pairing` with the
+real port WITHOUT restarting the browse loop, WITHOUT replacing the sink
+and WITHOUT forcing the runtime to re-install its worker. The browse loop
+must keep feeding `DiscoveryEvent::Observed` and `DiscoveryEvent::Removed`
+to the runtime while pairing is active so a remote peer becomes present
+on both sides regardless of which host toggled first. `withdraw` MUST
+reconfigure the adapter back to `capability = discovery_only` with the
+discovery-only port placeholder; it MUST NOT call `stop` on the adapter
+because the runtime owns the lifecycle. A pairing `publish` or
+`reconfigure` against a stopped adapter MUST surface the typed reason
+the runtime already documents (`MalformedAdvertisement` /
+`AlreadyRunning`) instead of silently downgrading the published record.
+
+#### Scenario: Toggle ON keeps the discovery browse loop alive
+
+- **WHEN** the user toggles `Compartir en red local` ON and the runtime is
+  already running OR starts first
+- **THEN** the pairing transport flips the published record via
+  `reconfigure`, the runtime's browse loop continues feeding events into
+  the runtime sink and a remote peer becomes `available` in the local
+  presence table while the pairing listener is bound
+
+#### Scenario: Toggle OFF leaves the adapter under runtime control
+
+- **WHEN** the user toggles sharing OFF
+- **THEN** the runtime stops the adapter, the pairing transport's `withdraw`
+  collapses to a no-op because the adapter is already stopped and the
+  pairing listener is torn down without disturbing any other adapter
+  lifecycle
+
 ### Requirement: Restart with toggle active reinstalls the pairing listener
 
 When the persisted `local_peer_sharing_enabled` setting is `true` at startup,
 the bootstrap MUST reinstall the productive pairing transport (listener,
 advertisement and mDNS resolver) in addition to the discovery runtime so the
-toggle contract remains consistent across restarts. The toggle response
-returned by `clipvault_peer_sharing_toggle_get` MUST reflect both the
-discovery runtime state and the productive pairing listener state; a
-toggle reported as `active` while the pairing listener never bound is a
-contract violation.
+toggle contract remains consistent across restarts. The bootstrap MUST start
+the discovery runtime BEFORE the pairing transport so the shared mDNS
+adapter is running with the runtime sink when the pairing install path
+calls `reconfigure`. The toggle response returned by
+`clipvault_peer_sharing_toggle_get` MUST reflect both the discovery runtime
+state and the productive pairing listener state; a toggle reported as
+`active` while the pairing listener never bound is a contract violation.
 
 #### Scenario: Toggle active survives a restart
 
