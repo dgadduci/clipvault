@@ -15,6 +15,7 @@
     PasteResponse,
     PeerPairingSessionSnapshot,
     PeerRow,
+    PeerSnapshot,
     PlatformGuidance,
     SearchResponse,
     SourceAppFilter,
@@ -40,6 +41,8 @@
     entryTagsSetCommand,
     organizationSnapshotCommand,
     platformCapabilitiesCommand,
+    peerHistoryForgetCommand,
+    peerSnapshotCommand,
     recentEntriesFilteredCommand,
     refreshCapabilitiesCommand,
     searchEntriesCommand,
@@ -104,6 +107,7 @@
   import PrivacyModal from "./PrivacyModal.svelte";
   import PeerSharingModal from "./PeerSharingModal.svelte";
   import PeerPairingModal from "./PeerPairingModal.svelte";
+  import RemoteHistoryRail from "./RemoteHistoryRail.svelte";
   import RetentionModal from "./RetentionModal.svelte";
   import QuickPasteShortcutModal from "./QuickPasteShortcutModal.svelte";
   import AboutModal from "./AboutModal.svelte";
@@ -293,6 +297,23 @@
    * drift apart.
    */
   let railSelectedEntryId: number | null = null;
+  /**
+   * Latest `peer_snapshot` the desktop fetched. The
+   * `peer-text-history-browser` change drives the
+   * `Equipos vinculados` list below the user-defined
+   * collections and the trust / active cache the history
+   * rail consults before projecting a page. The App polls the
+   * snapshot on its existing refresh cadence; the linked list
+   * and the rail never open a snapshot round-trip of their own.
+   */
+  let peerSnapshot: PeerSnapshot | null = null;
+  /**
+   * Peer id the user selected from the `Equipos vinculados`
+   * list. When `null` the main panel renders the local rail /
+   * collection surface; when set, the panel renders the
+   * remote history rail of that peer.
+   */
+  let activePeerId: string | null = null;
   let entryOrganization: Map<number, { tags: Tag[]; collections: Collection[] }> =
     new Map();
   type EntryOrganizationHydration = "pending" | "loaded" | "error";
@@ -387,6 +408,32 @@
   $: visibleEntries, entries, bumpPreviewScope();
 
   /**
+   * Select a peer from the `Equipos vinculados` list. The helper
+   * flips `activePeerId` so the main panel renders the remote
+   * history rail instead of the local rail / collection. The
+   * local selection (`selectedCollectionId`, search query,
+   * source / tag filters) is preserved so closing the peer
+   * rail restores the user's previous context.
+   */
+  function selectPeer(peerId: string): void {
+    if (peerId === activePeerId) return;
+    activePeerId = peerId;
+  }
+
+  /**
+   * Close the remote history rail. The helper also forgets the
+   * runtime cache entry the peer-pairing commands consult so a
+   * subsequent re-selection refetches the page.
+   */
+  function closePeerRail(): void {
+    const previous = activePeerId;
+    activePeerId = null;
+    if (previous !== null) {
+      void peerHistoryForgetCommand({ peer_id: previous });
+    }
+  }
+
+  /**
    * Document-level Escape handler the Desktop installs while the
    * preview overlay is open. The contract the
    * `preview-interaction-regressions` change pins:
@@ -462,6 +509,15 @@
       await refreshEntries();
       await refreshSourceAppOptions();
       await refreshUnorganizedClearableCount();
+      // Refresh the peer snapshot the linked list + history
+      // rail consume. The call is metadata-only (no content /
+      // tags / collections); a failure collapses silently so
+      // a misbehaving peer runtime never breaks the desktop.
+      try {
+        peerSnapshot = await peerSnapshotCommand();
+      } catch (err) {
+        void err;
+      }
       // Bootstrap hydration: walk the freshly-loaded entries and
       // ask the conservative detector for a canonical language. The
       // round-trip is anchored on its own token, runs in the
@@ -873,6 +929,14 @@
     // selected after the user switches collection. The rail will
     // also drop the value if it falls outside the visible scope.
     railSelectedEntryId = null;
+    // Selecting a local collection (or `Historial` via `null`)
+    // MUST clear the active peer id so the rail local vuelve
+    // a renderizar sin esperar otra interacción. La presencia
+    // del peer queda intacta; sólo el panel principal vuelve
+    // a su superficie local.
+    if (activePeerId !== null) {
+      closePeerRail();
+    }
     // Reload the combobox options for the new scope and refresh
     // the rail so the cards reflect the new active collection
     // without stale options or stale rows.
@@ -1610,6 +1674,24 @@
     }
     pairingRow = null;
     closeModal();
+    void refreshPeerSnapshot();
+  }
+
+  /**
+   * Explicit peer-snapshot refresh the desktop fires after the
+   * pairing modal closes. The change pins that closing the modal
+   * MUST refresh the linked-list surface so a freshly trusted
+   * peer appears in `Equipos vinculados` without forcing the user
+   * to select it. The refresh is metadata-only (no content /
+   * tags / collections); a failure collapses silently so a
+   * misbehaving peer runtime never breaks the desktop.
+   */
+  async function refreshPeerSnapshot(): Promise<void> {
+    try {
+      peerSnapshot = await peerSnapshotCommand();
+    } catch (err) {
+      void err;
+    }
   }
 
   function onOpenRetention(event: MouseEvent): void {
@@ -1864,12 +1946,15 @@
       <OrganizationSidebar
         collections={organization?.collections ?? []}
         activeCollectionId={selectedCollectionId}
+        linkedPeers={peerSnapshot}
+        activePeerId={activePeerId}
         on:select={(e) => selectCollectionFromSidebar(e)}
         on:create={(e) => handleCreateCollection(e)}
         on:rename={(e) => handleRenameCollection(e)}
         on:delete={(e) => handleDeleteCollection(e)}
         on:card-drop={(e) => handleCardDrop(e)}
         on:set-color={(e) => handleSetCollectionColor(e)}
+        on:select-peer={(e) => selectPeer(e.detail.peerId)}
       />
       <div class="layout-main" data-testid="layout-main">
         <DesktopToolbar
@@ -1916,25 +2001,33 @@
           {/if}
         </p>
 
-        <HistoryCardRail
-          entries={visibleEntries}
-          allTags={organization?.tags ?? []}
-          allCollections={organization?.collections ?? []}
-          activeCollectionId={selectedCollectionId}
-          entryOrganization={entryOrganization}
-          entryOrganizationHydration={entryOrganizationHydration}
-          isFiltering={isFiltering}
-          bind:selectedEntryId={railSelectedEntryId}
-          onTogglePin={(entry) => toggleFavorite(entry)}
-          onRequestDelete={requestDelete}
-          onAfterMutation={(entry) => handleAfterMutation(entry)}
-          onAssignTags={(entry, tagIds) => handleAssignTags(entry, tagIds)}
-          onAssignCollections={(entry, collectionIds) =>
-            handleAssignCollections(entry, collectionIds)}
-          onRemoveFromCollection={(entry, collectionId) =>
-            handleRemoveFromCollection(entry, collectionId)}
-          onRequestPreview={(entry) => requestPreview(entry, document.activeElement instanceof HTMLElement ? document.activeElement : null)}
-        />
+        {#if activePeerId !== null}
+          <RemoteHistoryRail
+            snapshot={peerSnapshot}
+            peerId={activePeerId}
+            onClose={() => closePeerRail()}
+          />
+        {:else}
+          <HistoryCardRail
+            entries={visibleEntries}
+            allTags={organization?.tags ?? []}
+            allCollections={organization?.collections ?? []}
+            activeCollectionId={selectedCollectionId}
+            entryOrganization={entryOrganization}
+            entryOrganizationHydration={entryOrganizationHydration}
+            isFiltering={isFiltering}
+            bind:selectedEntryId={railSelectedEntryId}
+            onTogglePin={(entry) => toggleFavorite(entry)}
+            onRequestDelete={requestDelete}
+            onAfterMutation={(entry) => handleAfterMutation(entry)}
+            onAssignTags={(entry, tagIds) => handleAssignTags(entry, tagIds)}
+            onAssignCollections={(entry, collectionIds) =>
+              handleAssignCollections(entry, collectionIds)}
+            onRemoveFromCollection={(entry, collectionId) =>
+              handleRemoveFromCollection(entry, collectionId)}
+            onRequestPreview={(entry) => requestPreview(entry, document.activeElement instanceof HTMLElement ? document.activeElement : null)}
+          />
+        {/if}
       </div>
     </div>
   {/if}
@@ -2260,6 +2353,10 @@
    *     the cards stay at their fixed `--cv-card-size` (the `0`
    *     minimum prevents the grid track from growing to fit every
    *     card, which would defeat the rail's horizontal scroll).
+   *   - The grid hosts EXACTLY two children: the sidebar and the
+   *     main panel. The `Equipos vinculados` list lives INSIDE
+   *     the sidebar as a separate vertical scroller so adding a
+   *     third column cannot displace the panel principal.
    *   - `flex: 1 1 auto` + `min-height: 0` makes the panel consume
    *     the vertical space `<main>` reserves through `100vh`.
    *     Together with `overflow: hidden` this guarantees that
@@ -2272,6 +2369,10 @@
    *     rather than from the number of collections the user has
    *     defined. The header (`flex: 0 0 auto`) and the new-icon
    *     control stay pinned above the list at every list length.
+   *     The `Equipos vinculados` section is a sibling scroller
+   *     with `min-height: 0; overflow-y: auto` so a long list of
+   *     trusted peers does not steal height from the collection
+   *     list and vice versa.
    *   - The rail inside `.layout-main` keeps its fixed
    *     `height: var(--cv-card-rail-height)` plus its horizontal
    *     overflow contract, so the workspace does not introduce a

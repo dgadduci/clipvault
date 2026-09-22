@@ -3328,3 +3328,166 @@ fn peer_full_fingerprint_for(
 fn map_pairing_error(error: clipvault_core::PairingError) -> CommandError {
     CommandError::new("pairing_error", format!("pairing failed: {error}"))
 }
+
+// ---------------------------------------------------------------------------
+// `peer-text-history-browser` bridge.
+//
+// The command is a metadata-only thin adapter over
+// [`clipvault_core::peer_text_history`]. The shell calls it
+// whenever the user opens the `Equipos vinculados` row of a
+// paired peer; the runtime consults the in-memory trust /
+// active cache, projects the bounded transferable text page
+// and returns a discriminated union the renderer branches on
+// (`Ok` / `InvalidCursor` / `PeerUnavailable` / `PersistenceUnavailable`).
+// The command never opens a network call by itself: the
+// trust / active check happens locally against the cache the
+// shell populated on every snapshot / health probe, and the
+// projection only reads from SQLite.
+// ---------------------------------------------------------------------------
+
+/// Wire representation of
+/// [`clipvault_core::peer_text_history::PeerHistoryOutcome`]. The
+/// frontend branches on `kind` to render the matching copy
+/// without inspecting the inner list. The bridge never returns
+/// a `CommandError` for the page request: every typed failure
+/// collapses into a discriminated variant so the renderer
+/// stays a thin adapter over the union.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerHistoryBrowseResponse {
+    /// The host returned a bounded transferable text page.
+    /// `rows` carries the metadata-only DTOs the renderer
+    /// renders; `next_cursor` is the opaque cursor the renderer
+    /// must submit to fetch the next page (empty when the page
+    /// is the last one); `snapshot_id` is the stable fingerprint
+    /// the renderer can compare across page requests to detect
+    /// a local capture that landed between the two.
+    Ok {
+        rows: Vec<PeerHistoryRow>,
+        next_cursor: String,
+        snapshot_id: String,
+    },
+    /// The cursor the renderer submitted was not minted by this
+    /// host. The runtime never retries; the renderer surfaces a
+    /// typed reason and asks the user to restart the browse.
+    InvalidCursor,
+    /// The peer is not currently eligible to serve a page
+    /// (no known row, not trusted, or not active). The runtime
+    /// never opened a network call; the renderer surfaces the
+    /// stable reason copy.
+    PeerUnavailable { reason: &'static str },
+    /// The underlying persistence layer rejected the page
+    /// request. The renderer surfaces a typed failure copy
+    /// without retrying blindly.
+    PersistenceUnavailable,
+}
+
+/// Metadata-only row the renderer renders. The struct mirrors
+/// [`clipvault_core::peer_text_history::RemoteTextPreview`];
+/// the bridge keeps the wire shape stable by serialising the
+/// `content_type` as the canonical snake_case string the local
+/// SQLite layer persists.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PeerHistoryRow {
+    pub remote_entry_id: String,
+    pub title: Option<String>,
+    pub content_type: String,
+    pub created_at: String,
+    pub preview: String,
+}
+
+impl PeerHistoryBrowseResponse {
+    fn from_outcome(outcome: clipvault_core::peer_text_history::PeerHistoryOutcome) -> Self {
+        match outcome {
+            clipvault_core::peer_text_history::PeerHistoryOutcome::Ok { page, snapshot_id } => {
+                PeerHistoryBrowseResponse::Ok {
+                    rows: page
+                        .rows
+                        .into_iter()
+                        .map(|row| PeerHistoryRow {
+                            remote_entry_id: row.remote_entry_id,
+                            title: row.title,
+                            content_type: row.content_type,
+                            created_at: row.created_at,
+                            preview: row.preview,
+                        })
+                        .collect(),
+                    next_cursor: page
+                        .next_cursor
+                        .map(|cursor| cursor.as_str().to_string())
+                        .unwrap_or_default(),
+                    snapshot_id,
+                }
+            }
+            clipvault_core::peer_text_history::PeerHistoryOutcome::InvalidCursor => {
+                PeerHistoryBrowseResponse::InvalidCursor
+            }
+            clipvault_core::peer_text_history::PeerHistoryOutcome::PeerUnavailable { reason } => {
+                PeerHistoryBrowseResponse::PeerUnavailable { reason }
+            }
+            clipvault_core::peer_text_history::PeerHistoryOutcome::PersistenceUnavailable => {
+                PeerHistoryBrowseResponse::PersistenceUnavailable
+            }
+        }
+    }
+}
+
+/// Browse the transferable text history of `peer_id`. The
+/// runtime consults the in-memory trust / active cache and
+/// refuses to project when the peer is not trusted, not
+/// present or unknown. The command never opens a network
+/// call: the trust / active check happens locally against
+/// the cache the shell populated on every snapshot / health
+/// probe, and the projection only reads from SQLite. The
+/// command never mutates SQLite in response to a browsing
+/// call (the projection is read-only) and never emits a
+/// `history-updated` event.
+#[tauri::command]
+pub fn clipvault_peer_history_browse(
+    state: State<'_, SharedState>,
+    peer_id: String,
+    cursor: Option<String>,
+) -> PeerHistoryBrowseResponse {
+    let context = state.context();
+    let service = context.peer_text_history();
+    let cursor = cursor
+        .filter(|value| !value.is_empty())
+        .map(clipvault_core::peer_text_history::RemoteHistoryCursor::from_string);
+    let outcome = service.browse(&peer_id, cursor.as_ref());
+    PeerHistoryBrowseResponse::from_outcome(outcome)
+}
+
+/// Best-effort sync hook the shell calls after every peer
+/// snapshot / health probe so the in-memory trust / active
+/// cache the [`clipvault_peer_history_browse`] command
+/// consults cannot outrun the runtime transition that should
+/// invalidate it. The hook is metadata-only: it never mutates
+/// SQLite, never opens a network call, and never emits a
+/// `history-updated` event.
+#[tauri::command]
+pub fn clipvault_peer_history_record_state(
+    state: State<'_, SharedState>,
+    peer_id: String,
+    trusted: bool,
+    active: bool,
+) {
+    let context = state.context();
+    let service = context.peer_text_history();
+    service.record_peer_state(
+        &peer_id,
+        clipvault_core::peer_text_history::PeerActiveState { trusted, active },
+    );
+}
+
+/// Forget the cache entry for `peer_id`. The shell calls this
+/// after `Desvincular`, `Bloquear` and `Desbloquear` so a
+/// subsequent browse collapses to
+/// [`PeerHistoryBrowseResponse::PeerUnavailable`] without a
+/// network round-trip.
+#[tauri::command]
+pub fn clipvault_peer_history_forget(state: State<'_, SharedState>, peer_id: String) {
+    let context = state.context();
+    let service = context.peer_text_history();
+    service.forget_peer(&peer_id);
+}

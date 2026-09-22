@@ -31,6 +31,7 @@ pub mod paste_suppression;
 pub mod peer_discovery;
 pub mod peer_identity;
 pub mod peer_pairing;
+pub mod peer_text_history;
 pub mod platform;
 pub mod platform_adapters;
 pub mod privacy;
@@ -152,6 +153,13 @@ pub use peer_pairing::{
     PairingSessionSnapshot, TrustOperationOutcome, PAIRING_CAPABILITY,
     PAIRING_MAX_IN_FLIGHT_SESSIONS, PAIRING_MAX_PAYLOAD_BYTES, PAIRING_PROTOCOL_MAJOR,
     PAIRING_RATE_LIMIT_PER_MINUTE, PAIRING_SESSION_TIMEOUT, PAIRING_WIRE_VERSION,
+};
+pub use peer_text_history::{
+    build_preview, entry_is_transferable, project_row, sanitize_remote_title,
+    EntryRepositoryPeerHistoryProjection, InMemoryPeerHistoryProjection, PeerActiveState,
+    PeerHistoryCursorError, PeerHistoryOutcome, PeerHistoryPersistenceError, PeerHistoryProjection,
+    PeerTextHistoryService, RemoteHistoryCursor, RemoteTextHistoryPage, RemoteTextPreview,
+    DEFAULT_PAGE_ROWS, MAX_PAGE_ROWS, PREVIEW_MAX_CHARS, PREVIEW_MAX_LINES,
 };
 pub use platform_adapters::PlatformAdapters;
 pub use privacy::{CaptureDecision, CoreBlacklistMatcher, PrivacyGate};

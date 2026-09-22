@@ -31,6 +31,7 @@ import type {
   PeerPairingHealthResponse,
   PeerPairingOutcomeResponse,
   PeerPairingSessionSnapshot,
+  PeerHistoryBrowseResponse,
   PeerTrustOperationResponse,
   PickAndAddResponse,
   PlatformSettingsTarget,
@@ -434,6 +435,61 @@ export const peerPairingHealthCommand: ClipvaultCommandArg<
   { peer_id: string }
 > = (args) =>
   invoke<PeerPairingHealthResponse>("clipvault_peer_pairing_health", {
+    peerId: args.peer_id,
+  });
+
+/**
+ * Bridge for the `peer-text-history-browser` change. The command
+ * returns the bounded metadata-only text page the host projects
+ * for the supplied `peer_id`; the cursor is the opaque value
+ * the renderer submitted verbatim on the previous page request
+ * (empty string for the first page). The discriminated union
+ * keeps the wire contract stable: the renderer branches on
+ * `kind` (`ok` / `invalid_cursor` / `peer_unavailable` /
+ * `persistence_unavailable`) without inspecting free-form
+ * strings or content bytes. The bridge never returns a typed
+ * `CommandError` for the page request — every typed failure
+ * collapses into a variant.
+ */
+export const peerHistoryBrowseCommand: ClipvaultCommandArg<
+  PeerHistoryBrowseResponse,
+  { peer_id: string; cursor?: string }
+> = (args) =>
+  invoke<PeerHistoryBrowseResponse>("clipvault_peer_history_browse", {
+    peerId: args.peer_id,
+    cursor: args.cursor ?? null,
+  });
+
+/**
+ * Best-effort sync hook the shell calls after every peer
+ * snapshot / health probe so the in-memory trust / active cache
+ * the [`peerHistoryBrowseCommand`] consults cannot outrun the
+ * runtime transition that should invalidate it. The hook is
+ * metadata-only: it never mutates SQLite, never opens a network
+ * call, and never emits a `history-updated` event.
+ */
+export const peerHistoryRecordStateCommand: ClipvaultCommandArg<
+  void,
+  { peer_id: string; trusted: boolean; active: boolean }
+> = (args) =>
+  invoke<void>("clipvault_peer_history_record_state", {
+    peerId: args.peer_id,
+    trusted: args.trusted,
+    active: args.active,
+  });
+
+/**
+ * Forget the cache entry for `peer_id`. The shell calls this
+ * after `Desvincular`, `Bloquear` and `Desbloquear` so a
+ * subsequent browse collapses to
+ * [`PeerHistoryBrowseResponse.peer_unavailable`] without a
+ * network round-trip.
+ */
+export const peerHistoryForgetCommand: ClipvaultCommandArg<
+  void,
+  { peer_id: string }
+> = (args) =>
+  invoke<void>("clipvault_peer_history_forget", {
     peerId: args.peer_id,
   });
 

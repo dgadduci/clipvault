@@ -640,6 +640,69 @@ export type PeerPairingHealthFailureReason =
   | "rate_limited";
 
 /**
+ * Wire representation of the metadata-only transferable text
+ * page the `peer-text-history-browser` change ships. The
+ * discriminated union keeps the wire contract stable: the
+ * renderer branches on `kind` (`ok` / `invalid_cursor` /
+ * `peer_unavailable` / `persistence_unavailable`) without
+ * inspecting free-form strings or content bytes.
+ */
+export type PeerHistoryBrowseResponse =
+  | {
+      kind: "ok";
+      rows: PeerHistoryRow[];
+      /**
+       * Opaque cursor the renderer submits verbatim to fetch the
+       * next page. Empty string when the host has no more rows.
+       */
+      next_cursor: string;
+      /**
+       * Stable fingerprint the renderer compares across page
+       * requests to detect a local capture that landed between
+       * the two. The runtime never inspects the value beyond
+       * the equality check.
+       */
+      snapshot_id: string;
+    }
+  | { kind: "invalid_cursor" }
+  | {
+      kind: "peer_unavailable";
+      /**
+       * Stable reason the renderer maps to copy
+       * (`no_known_peer` / `not_trusted` / `not_active`).
+       */
+      reason: "no_known_peer" | "not_trusted" | "not_active";
+    }
+  | { kind: "persistence_unavailable" };
+
+/**
+ * Metadata-only row the renderer renders when the user opens a
+ * paired, active peer. The struct carries only the fields the
+ * spec and the design authorise: an opaque remote entry id,
+ * the optional validated title, the content type, the RFC 3339
+ * timestamp and an escaped bounded preview. The row never
+ * carries the entry body, the row hash, the source-app
+ * metadata, the favourite flag, tags, collections or asset
+ * references.
+ */
+export interface PeerHistoryRow {
+  /** Opaque remote entry id the host minted. */
+  remote_entry_id: string;
+  /**
+   * Validated, trimmed user-supplied title. `null` when the
+   * entry has no custom title or the persisted value fails the
+   * same validation the local UI applies.
+   */
+  title: string | null;
+  /** Canonical snake_case string the local SQLite layer persists. */
+  content_type: string;
+  /** RFC 3339 timestamp of the entry's `created_at`. */
+  created_at: string;
+  /** Bounded, escaped preview. Always trimmed and never longer than 300 chars. */
+  preview: string;
+}
+
+/**
  * Augmented metadata-only row the `Equipos` view renders when
  * the pairing change is enabled. The DTO extends the discovery
  * snapshot entry with the trust state the pairing runtime

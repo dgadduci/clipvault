@@ -248,6 +248,9 @@ fn main() {
             commands::clipvault_peer_pairing_block,
             commands::clipvault_peer_pairing_unblock,
             commands::clipvault_peer_pairing_health,
+            commands::clipvault_peer_history_browse,
+            commands::clipvault_peer_history_record_state,
+            commands::clipvault_peer_history_forget,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ClipVault")

@@ -2033,6 +2033,35 @@ pub fn health_check(
     Ok(())
 }
 
+/// Metadata-only `list_recent_text` dial driver the
+/// `peer-text-history-browser` change exposes through the
+/// productive transport. The transport dials the remote
+/// listener over mTLS, exchanges the bounded `ListRecentText`
+/// envelope and returns either the metadata-only
+/// [`super::PeerHistorySnapshot`] the host emitted or one of the
+/// typed [`super::TransportError`] variants the runtime already
+/// branches on (`UnknownPeer`, `KeyMismatch`, `Revoked`,
+/// `Blocked`, `Unavailable`, `IncompatibleProtocol`, `Malformed`).
+///
+/// The current implementation returns
+/// [`super::TransportError::Unavailable`] so the trait signature
+/// compiles while the future `peer-text-import` change ships the
+/// full mTLS path. The runtime core (`peer_text_history`) carries
+/// the full projection, cursor and preview logic; the transport
+/// is intentionally a thin envelope that the eventual dial loop
+/// only needs to forward.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub fn list_recent_text(
+    _transport: &super::TlsPeerTransport,
+    peer_id: &str,
+    cert_fingerprint: &str,
+    cursor: &str,
+    limit: u32,
+) -> Result<super::PeerHistorySnapshot, super::TransportError> {
+    let _ = (peer_id, cert_fingerprint, cursor, limit);
+    Err(super::TransportError::Unavailable)
+}
+
 /// Synchronous helper used by the outbound flow to dial the
 /// remote listener over mTLS and drive the protocol. Returns
 /// the metadata-only observation the transport delivered to the

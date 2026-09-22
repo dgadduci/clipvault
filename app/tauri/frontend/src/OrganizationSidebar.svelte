@@ -21,7 +21,7 @@
    * with the rest of the desktop.
    */
   import { createEventDispatcher, onDestroy, onMount, tick } from "svelte";
-  import type { Collection } from "./types";
+  import type { Collection, PeerSnapshot } from "./types";
   import {
     COLLECTION_DROP_TARGET_VALUE,
     createCollectionDropZoneHandlers,
@@ -30,9 +30,25 @@
   import { POINTER_DRAG_END_EVENT } from "./lib/pointerDragAndDrop";
   import Modal from "./Modal.svelte";
   import CollectionColorModal from "./CollectionColorModal.svelte";
+  import LinkedPeers from "./LinkedPeers.svelte";
 
   export let collections: Collection[] = [];
   export let activeCollectionId: number | null = null;
+  /**
+   * Snapshot the parent polls on every refresh / pairing close so
+   * the `Equipos vinculados` scroller below the collection list
+   * stays in lockstep with the runtime. The sidebar renders the
+   * trusted peers only; the rest of the snapshot stays inside
+   * `PeerSharingModal` where pairing / revocation / blocking
+   * actually live.
+   */
+  export let linkedPeers: PeerSnapshot | null = null;
+  /**
+   * Currently-selected peer id. The sidebar forwards it through
+   * `LinkedPeers` so the row reflects the active panel without
+   * owning any of the panel state itself.
+   */
+  export let activePeerId: string | null = null;
 
   type DispatchEvents = {
     select: { collectionId: number | null };
@@ -41,8 +57,15 @@
     delete: { collectionId: number };
     "card-drop": { entryId: number; collectionId: number };
     "set-color": { collectionId: number; colorHex: string };
+    "select-peer": { peerId: string };
   };
   const dispatch = createEventDispatcher<DispatchEvents>();
+
+  function forwardPeerSelection(
+    event: CustomEvent<{ peerId: string }>,
+  ): void {
+    dispatch("select-peer", { peerId: event.detail.peerId });
+  }
 
   let creating = false;
   let newCollectionName = "";
@@ -674,6 +697,21 @@
       </li>
     {/each}
   </ul>
+  <!--
+    `Equipos vinculados` lives INSIDE the sidebar so the desktop
+    grid keeps exactly two columns (sidebar + main panel). The
+    scroller is bounded by `min-height: 0; overflow-y: auto` so a
+    long list of trusted peers does not steal height from the
+    collection list and vice versa. Selecting a peer re-emits the
+    `select-peer` event the parent flips through the main panel;
+    selecting a collection (or `Historial`) clears the active
+    peer at the parent so the rail local vuelve a renderizar.
+  -->
+  <LinkedPeers
+    snapshot={linkedPeers}
+    {activePeerId}
+    on:select-peer={forwardPeerSelection}
+  />
 </aside>
 
 <Modal

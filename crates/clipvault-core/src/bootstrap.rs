@@ -233,6 +233,16 @@ pub struct AppContext {
     /// persistence adapter that delegates to
     /// [`clipvault_db::KnownPeerRepository`].
     peer_pairing: crate::peer_pairing::PairingRuntime,
+    /// Metadata-only browser for the transferable text history
+    /// of a trusted, active peer. The shell drives
+    /// [`PeerTextHistoryService::browse`] from the
+    /// `peer-text-history-browser` Tauri command and reads
+    /// [`PeerTextHistoryService::record_peer_state`] to keep the
+    /// in-memory trust / active cache aligned with the
+    /// discovery + pairing runtimes. The service is metadata-only
+    /// by construction: it never mutates SQLite in response to a
+    /// browsing call and never emits a `history-updated` event.
+    peer_text_history: crate::peer_text_history::PeerTextHistoryService,
     /// Concrete mDNS adapter the bootstrap installed for
     /// discovery. The toggle command wires this handle into the
     /// `PairingAdvertisement` the productive pairing transport
@@ -522,6 +532,13 @@ impl AppContext {
     /// modal renders.
     pub fn peer_pairing(&self) -> crate::peer_pairing::PairingRuntime {
         self.peer_pairing.clone()
+    }
+
+    /// Accessor the shell drives to render the metadata-only
+    /// transferable text history of a trusted, active peer. The
+    /// service is cheap to clone (every field is `Arc`-shared).
+    pub fn peer_text_history(&self) -> &crate::peer_text_history::PeerTextHistoryService {
+        &self.peer_text_history
     }
 
     /// Best-effort wire of the local peer identity the runtime
@@ -1124,6 +1141,23 @@ impl AppBootstrap {
         let pairing_transport = crate::peer_pairing::default_peer_transport();
         let peer_pairing =
             crate::peer_pairing::PairingRuntime::new(pairing_transport, pairing_persistence);
+        // Build the metadata-only transferable-text browser. The
+        // service borrows the shared database handle the bootstrap
+        // already holds and is therefore read-only by construction:
+        // every browsing call goes through the SQL projection and
+        // never opens a SQLite write transaction. The shell drives
+        // the per-peer `trusted` / `active` cache through
+        // [`PeerTextHistoryService::record_peer_state`] on every
+        // snapshot / health probe so a stale cache cannot outlive
+        // the runtime transition that should invalidate it.
+        let peer_text_history_projection: Arc<dyn crate::peer_text_history::PeerHistoryProjection> =
+            Arc::new(
+                crate::peer_text_history::EntryRepositoryPeerHistoryProjection::new(Arc::clone(
+                    &database_handle,
+                )),
+            );
+        let peer_text_history =
+            crate::peer_text_history::PeerTextHistoryService::new(peer_text_history_projection);
         // Keep the concrete mDNS adapter the bootstrap installed
         // so the toggle command can wire it into the
         // [`crate::peer_pairing::PairingAdvertisement`] the
@@ -1173,6 +1207,7 @@ impl AppBootstrap {
             paste_suppression,
             peer_discovery,
             peer_pairing,
+            peer_text_history,
             // The capture-debug sink is either the caller-supplied
             // handle (tests) or the production wiring that consults
             // `CLIPVAULT_DEBUG_CAPTURE` exactly once at startup. When

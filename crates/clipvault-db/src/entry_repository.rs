@@ -441,6 +441,94 @@ impl<'a> EntryRepository<'a> {
         Ok(records)
     }
 
+    /// Cursor-paginated transferable text page.
+    ///
+    /// `peer-text-history-browser` projects a bounded preview of
+    /// the local text history for a remote peer. The projection
+    /// filters on the textual taxonomy plus the image /
+    /// rich-text predicates the core layer enforces, sorts
+    /// newest-first and breaks ties with `id DESC`. The cursor
+    /// is the `(created_at, id)` pair of the last row the
+    /// previous page returned; the query pages strictly after
+    /// the cursor with a `<` comparison so a future row that
+    /// shares the same `created_at` (a batch import) stays
+    /// correctly ordered by the stable `id`.
+    ///
+    /// The repository intentionally exposes a `text_entries_after`
+    /// helper instead of a `text_entries_with_preview` projection:
+    /// the cursor projection lives in `clipvault-core` because the
+    /// preview escaping, the cursor encoding and the wire shaping
+    /// are the core's responsibility, not the SQL layer's.
+    pub fn text_entries_after(
+        &self,
+        created_at: &str,
+        id: i64,
+        limit: usize,
+    ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
+        let limit = limit as i64;
+        let placeholders = TEXTUAL_CONTENT_TYPES
+            .iter()
+            .map(|c| format!("'{}'", c.as_str()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT {ENTRY_COLUMNS}
+             FROM clipboard_entries
+             WHERE content_type IN ({placeholders})
+               AND asset_ref IS NULL
+               AND mime_type IS NULL
+               AND payload_width IS NULL
+               AND payload_height IS NULL
+               AND rich_text_hash IS NULL
+               AND rich_html_ref IS NULL
+               AND rich_rtf_ref IS NULL
+               AND (created_at < ?1 OR (created_at = ?1 AND id < ?2))
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![created_at, id, limit], row_to_record)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    /// Stable `(created_at, id)` pair the cursor projection uses as
+    /// the snapshot fingerprint. `None` when no transferable text
+    /// row exists yet.
+    pub fn latest_transferable_text_snapshot(
+        &self,
+    ) -> Result<Option<(String, i64)>, EntryRepositoryError> {
+        let placeholders = TEXTUAL_CONTENT_TYPES
+            .iter()
+            .map(|c| format!("'{}'", c.as_str()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT created_at, id FROM clipboard_entries
+             WHERE content_type IN ({placeholders})
+               AND asset_ref IS NULL
+               AND mime_type IS NULL
+               AND payload_width IS NULL
+               AND payload_height IS NULL
+               AND rich_text_hash IS NULL
+               AND (rich_html_ref IS NULL AND rich_rtf_ref IS NULL)
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(params![])?;
+        if let Some(row) = rows.next()? {
+            let created_at: String = row.get(0)?;
+            let id: i64 = row.get(1)?;
+            Ok(Some((created_at, id)))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Every text entry currently stored. Used by the in-memory search
     /// engine. No N+1: a single `SELECT` feeds the result vector.
     ///
@@ -4531,5 +4619,98 @@ mod tests {
         let stored = repo.find_by_id(id).unwrap().unwrap();
         assert_eq!(stored.content, "after restart");
         assert_eq!(stored.updated_at, format_timestamp(later));
+    }
+
+    #[test]
+    fn text_entries_after_pages_strictly_after_cursor() {
+        let (_dir, mut db) = open_temp_db();
+        for (i, content) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+            let when = datetime!(2026-01-02 03:04:05 UTC) + time::Duration::seconds(i as i64);
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_entry(content, when))
+                .expect("insert");
+        }
+        let repo = EntryRepository::new(db.connection_mut());
+        // Sanity: text_entries() should return all 5 inserted rows.
+        let all = repo.text_entries().expect("text_entries");
+        let all_contents: Vec<&str> = all.iter().map(|r| r.content.as_str()).collect();
+        assert_eq!(all_contents, vec!["e", "d", "c", "b", "a"]);
+
+        // First page returns the three newest rows strictly after
+        // a far-future sentinel cursor (sits before every
+        // persisted row in newest-first order).
+        let sentinel_ts = "9999-12-31T23:59:59Z".to_string();
+        let page = repo
+            .text_entries_after(&sentinel_ts, i64::MAX, 3)
+            .expect("page");
+        let contents: Vec<&str> = page.iter().map(|r| r.content.as_str()).collect();
+        assert_eq!(contents, vec!["e", "d", "c"]);
+
+        // Next page continues strictly after the last row.
+        let last = page.last().unwrap();
+        let next_page = repo
+            .text_entries_after(&last.created_at, last.id, 3)
+            .expect("next page");
+        let next_contents: Vec<&str> = next_page.iter().map(|r| r.content.as_str()).collect();
+        assert_eq!(next_contents, vec!["b", "a"]);
+    }
+
+    #[test]
+    fn text_entries_after_excludes_image_and_rich_text() {
+        let (_dir, mut db) = open_temp_db();
+        let mut repo = EntryRepository::new(db.connection_mut());
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        repo.insert_or_touch(new_entry("text", when)).expect("text");
+        repo.insert_or_touch(new_image_entry("img-hash", 1, 1, when))
+            .expect("image");
+        repo.insert_or_touch(new_rich_entry(
+            "rich",
+            "rich-hash",
+            Some("<b>rich</b>"),
+            None,
+            when,
+        ))
+        .expect("rich");
+        let repo = EntryRepository::new(db.connection_mut());
+        let sentinel_ts = "9999-12-31T23:59:59Z".to_string();
+        let page = repo
+            .text_entries_after(&sentinel_ts, i64::MAX, 10)
+            .expect("page");
+        let contents: Vec<&str> = page.iter().map(|r| r.content.as_str()).collect();
+        assert_eq!(contents, vec!["text"]);
+    }
+
+    #[test]
+    fn latest_transferable_text_snapshot_returns_top_id() {
+        let (_dir, mut db) = open_temp_db();
+        let mut repo = EntryRepository::new(db.connection_mut());
+        for (i, content) in ["a", "b", "c"].iter().enumerate() {
+            let when = datetime!(2026-01-02 03:04:05 UTC) + time::Duration::seconds(i as i64);
+            repo.insert_or_touch(new_entry(content, when))
+                .expect("insert");
+        }
+        // Insert an image at the latest timestamp; it must NOT
+        // be returned by the snapshot because the cursor
+        // projection only sees transferable text.
+        let image_when = datetime!(2026-01-02 03:10:00 UTC);
+        repo.insert_or_touch(new_image_entry("img", 1, 1, image_when))
+            .expect("image");
+        let repo = EntryRepository::new(db.connection_mut());
+        let snapshot = repo.latest_transferable_text_snapshot().expect("snapshot");
+        let (created_at, id) = snapshot.expect("non-empty");
+        // The newest textual row is "c" (the image comes later
+        // but is excluded by the predicate).
+        assert_eq!(id, 3);
+        // The "c" entry sits at +2 seconds from the base timestamp.
+        let expected_ts = format_timestamp(datetime!(2026-01-02 03:04:07 UTC));
+        assert_eq!(created_at, expected_ts);
+    }
+
+    #[test]
+    fn latest_transferable_text_snapshot_returns_none_when_empty() {
+        let (_dir, mut db) = open_temp_db();
+        let repo = EntryRepository::new(db.connection_mut());
+        let snapshot = repo.latest_transferable_text_snapshot().expect("snapshot");
+        assert!(snapshot.is_none());
     }
 }

@@ -101,6 +101,20 @@ pub use super::peer_identity::{LocalPeerIdentity, PeerFingerprint, PeerId};
 /// branch).
 pub const PAIRING_WIRE_VERSION: u32 = 1;
 
+/// Wire-protocol major version the `peer-text-history-browser`
+/// change ships. The pairing runtime keeps the legacy constant for
+/// backwards compatibility with the pairing surface, but the
+/// history wire uses its own discriminator so a future text /
+/// import change can ship a different major without breaking the
+/// pairing path.
+pub const HISTORY_WIRE_VERSION: u32 = 1;
+
+/// Maximum number of metadata-only rows the host returns in a single
+/// `list_recent_text` response. The runtime enforces the cap on both
+/// ends so a malicious cursor cannot trick the projection into
+/// streaming more rows than the contract allows.
+pub const HISTORY_MAX_PAGE_ROWS: usize = 50;
+
 /// Maximum length of an incoming pairing wire envelope. The pairing
 /// surface only ever exchanges nonces, fingerprints, SAS confirmations
 /// and signed approvals — the cap is generous and stays well below
@@ -487,6 +501,35 @@ pub trait PeerTransport: Send + Sync {
         peer_id: &str,
         cert_fingerprint: &str,
     ) -> Result<PeerHealthSnapshot, TransportError>;
+
+    /// Open a metadata-only `list_recent_text` request against the
+    /// pinned peer. The transport dials the remote listener over
+    /// mTLS, exchanges the bounded `list_recent_text` envelope and
+    /// returns either the typed [`PeerHistorySnapshot`] the host
+    /// emitted or one of the typed [`TransportError`] variants
+    /// the runtime already branches on (`UnknownPeer`,
+    /// `KeyMismatch`, `Revoked`, `Blocked`, `Unavailable`,
+    /// `IncompatibleProtocol`, `Malformed`). The host never
+    /// accepts a cursor the listener did not mint and the
+    /// response payload is the bounded metadata-only page
+    /// (`history.rs` documents the cursor / preview rules).
+    ///
+    /// The default implementation returns
+    /// [`TransportError::Unavailable`] so a transport that does
+    /// not yet wire the productive history envelope still
+    /// compiles — the shell surfaces the typed reason the
+    /// runtime already uses for the discovery-only contract.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn list_recent_text(
+        &self,
+        peer_id: &str,
+        cert_fingerprint: &str,
+        cursor: &str,
+        limit: u32,
+    ) -> Result<PeerHistorySnapshot, TransportError> {
+        let _ = (peer_id, cert_fingerprint, cursor, limit);
+        Err(TransportError::Unavailable)
+    }
 }
 
 /// Metadata-only response the transport returns from
@@ -498,6 +541,23 @@ pub struct PeerHealthSnapshot {
     pub peer_id: String,
     pub protocol_major: i64,
     pub reached_at_unix_secs: i64,
+}
+
+/// Metadata-only response the transport returns from
+/// [`PeerTransport::list_recent_text`]. The struct is the
+/// bounded page the host projected through the
+/// `peer-text-history-browser` runtime: only the
+/// [`wire::ListRecentTextRow`] entries the host minted, the
+/// opaque `next_cursor` the renderer must submit verbatim to
+/// fetch the next page, and the `snapshot_id` the runtime
+/// surfaces as a stable tie-breaker. The transport never
+/// inspects the row payload beyond the type check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerHistorySnapshot {
+    pub peer_id: String,
+    pub rows: Vec<wire::ListRecentTextRow>,
+    pub next_cursor: String,
+    pub snapshot_id: String,
 }
 
 /// Platform-neutral handle the platform layer exposes to the
@@ -711,6 +771,21 @@ impl PeerTransport for NoopPeerTransport {
         _peer_id: &str,
         _cert_fingerprint: &str,
     ) -> Result<PeerHealthSnapshot, TransportError> {
+        Err(TransportError::Unavailable)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn list_recent_text(
+        &self,
+        _peer_id: &str,
+        _cert_fingerprint: &str,
+        _cursor: &str,
+        _limit: u32,
+    ) -> Result<PeerHistorySnapshot, TransportError> {
+        // The noop transport never opens a real session, so a
+        // history probe collapses to the typed `Unavailable`
+        // outcome the runtime already surfaces for the
+        // discovery-only contract.
         Err(TransportError::Unavailable)
     }
 }
@@ -1058,6 +1133,17 @@ impl PeerTransport for TlsPeerTransport {
     ) -> Result<PeerHealthSnapshot, TransportError> {
         super::peer_transport::tls::health_probe(self, peer_id, cert_fingerprint)
     }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn list_recent_text(
+        &self,
+        peer_id: &str,
+        cert_fingerprint: &str,
+        cursor: &str,
+        limit: u32,
+    ) -> Result<PeerHistorySnapshot, TransportError> {
+        super::peer_transport::tls::list_recent_text(self, peer_id, cert_fingerprint, cursor, limit)
+    }
 }
 
 #[cfg(feature = "local-peer-pairing-tls")]
@@ -1178,6 +1264,92 @@ pub mod wire {
             protocol_major: i64,
             present: bool,
         },
+        /// Metadata-only request the local peer opens over the
+        /// pinned mTLS session once the trust promotion completes.
+        /// The envelope carries only the protocol major, the
+        /// canonical `peer_id` and the opaque cursor the host
+        /// minted (empty for the first page); the listener rejects
+        /// the request when the row is not trusted or the cursor
+        /// does not match a previous mint, returning
+        /// [`PairingMessage::ListRecentTextInvalid`] before any
+        /// entry data crosses the wire.
+        ListRecentText {
+            version: u32,
+            peer_id: String,
+            cursor: String,
+            limit: u32,
+        },
+        /// Metadata-only reply the listener pushes back with the
+        /// bounded page the host projected. The rows are the
+        /// metadata-only DTOs the bridge forwards to the renderer;
+        /// the transport never inspects the payload beyond the
+        /// type check. The `next_cursor` field is the opaque
+        /// cursor the renderer must submit to fetch the next page
+        /// (empty when this page is the last one).
+        ListRecentTextAck {
+            version: u32,
+            peer_id: String,
+            rows: Vec<ListRecentTextRow>,
+            next_cursor: String,
+            snapshot_id: String,
+        },
+        /// Typed rejection the listener pushes back when the
+        /// caller submitted an opaque cursor the host did not
+        /// mint. The `reason` field is a stable snake_case
+        /// identifier (`invalid_cursor`) the renderer can switch
+        /// on; the transport never inspects the payload beyond
+        /// the type check and never echoes the rejected cursor
+        /// bytes back.
+        ListRecentTextInvalid {
+            version: u32,
+            peer_id: String,
+            reason: String,
+        },
+        /// Typed rejection the listener pushes back when the
+        /// caller asked for history while the row is not in the
+        /// trusted state or the peer is not currently active.
+        /// The `reason` field is a stable snake_case identifier
+        /// the renderer can switch on; the transport never
+        /// inspects the payload beyond the type check and never
+        /// echoes the rejected cursor bytes back.
+        ListRecentTextUnavailable {
+            version: u32,
+            peer_id: String,
+            reason: String,
+        },
+    }
+
+    /// Metadata-only row the host returns in
+    /// [`PairingMessage::ListRecentTextAck`]. The struct carries
+    /// only the fields the spec and the design authorise: an
+    /// opaque remote entry id, the optional validated title, the
+    /// content type, the RFC 3339 timestamp and an escaped
+    /// bounded preview. The row never carries the entry body,
+    /// the row hash, the source-app metadata, the favourite flag,
+    /// tags, collections or asset references.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub struct ListRecentTextRow {
+        /// Opaque remote entry id the host minted. The id is
+        /// bound to the local `entries.id` of the source row but
+        /// encoded so the renderer can never inspect the local
+        /// primary key.
+        pub remote_entry_id: String,
+        /// Validated, trimmed user-supplied title. `None` when
+        /// the entry has no custom title or the persisted value
+        /// fails the same validation the local UI applies (so
+        /// the renderer can fall back to the content-type label
+        /// without surfacing garbage).
+        pub title: Option<String>,
+        /// Canonical snake_case string the local SQLite layer
+        /// persists. The bridge surfaces the value verbatim so
+        /// the renderer can switch on a stable wire contract.
+        pub content_type: String,
+        /// RFC 3339 timestamp of the entry's `created_at`.
+        pub created_at: String,
+        /// Bounded, escaped preview. Always trimmed and never
+        /// longer than 300 Unicode scalar values / two lines.
+        pub preview: String,
     }
 
     impl PairingMessage {
@@ -1187,7 +1359,11 @@ pub mod wire {
                 | PairingMessage::HelloAck { version, .. }
                 | PairingMessage::Approve { version, .. }
                 | PairingMessage::Health { version, .. }
-                | PairingMessage::HealthAck { version, .. } => *version,
+                | PairingMessage::HealthAck { version, .. }
+                | PairingMessage::ListRecentText { version, .. }
+                | PairingMessage::ListRecentTextAck { version, .. }
+                | PairingMessage::ListRecentTextInvalid { version, .. }
+                | PairingMessage::ListRecentTextUnavailable { version, .. } => *version,
             }
         }
 
@@ -1197,7 +1373,11 @@ pub mod wire {
                 | PairingMessage::HelloAck { peer_id, .. }
                 | PairingMessage::Approve { peer_id, .. }
                 | PairingMessage::Health { peer_id, .. }
-                | PairingMessage::HealthAck { peer_id, .. } => peer_id,
+                | PairingMessage::HealthAck { peer_id, .. }
+                | PairingMessage::ListRecentText { peer_id, .. }
+                | PairingMessage::ListRecentTextAck { peer_id, .. }
+                | PairingMessage::ListRecentTextInvalid { peer_id, .. }
+                | PairingMessage::ListRecentTextUnavailable { peer_id, .. } => peer_id,
             }
         }
 
@@ -1213,7 +1393,11 @@ pub mod wire {
                 } => public_key_fingerprint,
                 PairingMessage::Approve { .. }
                 | PairingMessage::Health { .. }
-                | PairingMessage::HealthAck { .. } => "",
+                | PairingMessage::HealthAck { .. }
+                | PairingMessage::ListRecentText { .. }
+                | PairingMessage::ListRecentTextAck { .. }
+                | PairingMessage::ListRecentTextInvalid { .. }
+                | PairingMessage::ListRecentTextUnavailable { .. } => "",
             }
         }
     }
@@ -1422,6 +1606,104 @@ mod tests {
         assert_eq!(hello.version(), PAIRING_WIRE_VERSION);
         assert_eq!(hello.peer_id(), "peer-aaaa");
         assert_eq!(hello.public_key_fingerprint(), "fp");
+    }
+
+    /// The `ListRecentText` envelope shape is the metadata-only
+    /// request the `peer-text-history-browser` change ships over
+    /// the productive mTLS transport. The wire shape must round-
+    /// trip through JSON so the renderer / core can introspect
+    /// it in tests without standing up the full TLS stack.
+    #[test]
+    fn list_recent_text_envelope_round_trips_through_json() {
+        let request = PairingMessage::ListRecentText {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            cursor: String::new(),
+            limit: HISTORY_MAX_PAGE_ROWS as u32,
+        };
+        assert_eq!(request.version(), HISTORY_WIRE_VERSION);
+        assert_eq!(request.peer_id(), "peer-aaaa");
+        let serialised = serde_json::to_string(&request).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, request);
+    }
+
+    /// The `ListRecentTextAck` envelope shape is the bounded
+    /// metadata-only page the host emits. The renderer / core
+    /// depend on the field names matching the snake_case wire
+    /// contract documented in the spec; a future refactor that
+    /// accidentally drops a field must surface as a test failure
+    /// here before the production build ships.
+    #[test]
+    fn list_recent_text_ack_envelope_round_trips_through_json() {
+        use wire::ListRecentTextRow;
+        let response = PairingMessage::ListRecentTextAck {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            rows: vec![ListRecentTextRow {
+                remote_entry_id: "entry-7".to_string(),
+                title: Some("hello".to_string()),
+                content_type: "text".to_string(),
+                created_at: "2026-01-02T03:04:05Z".to_string(),
+                preview: "&lt;b&gt;safe&lt;/b&gt;".to_string(),
+            }],
+            next_cursor: "next".to_string(),
+            snapshot_id: "snapshot".to_string(),
+        };
+        let serialised = serde_json::to_string(&response).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, response);
+    }
+
+    /// The `ListRecentTextInvalid` and `ListRecentTextUnavailable`
+    /// rejections surface typed reasons the renderer maps to copy.
+    /// Pinning the wire shape here means a future refactor that
+    /// drops the `reason` field fails the test before the build
+    /// can ship.
+    #[test]
+    fn list_recent_text_invalid_envelope_round_trips_through_json() {
+        let invalid = PairingMessage::ListRecentTextInvalid {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            reason: "invalid_cursor".to_string(),
+        };
+        let serialised = serde_json::to_string(&invalid).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, invalid);
+
+        let unavailable = PairingMessage::ListRecentTextUnavailable {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            reason: "not_active".to_string(),
+        };
+        let serialised = serde_json::to_string(&unavailable).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, unavailable);
+    }
+
+    /// `PairingMessage::ListRecentText` does NOT carry the public
+    /// key fingerprint — the envelope is metadata-only and the
+    /// runtime never inspects the field. Pinning the empty string
+    /// here means a future contributor who accidentally re-exposes
+    /// the fingerprint fails the test before the build can ship.
+    #[test]
+    fn list_recent_text_does_not_expose_public_key_fingerprint() {
+        let request = PairingMessage::ListRecentText {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            cursor: String::new(),
+            limit: HISTORY_MAX_PAGE_ROWS as u32,
+        };
+        assert_eq!(request.public_key_fingerprint(), "");
+
+        let response = PairingMessage::ListRecentTextAck {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            rows: Vec::new(),
+            next_cursor: String::new(),
+            snapshot_id: String::new(),
+        };
+        assert_eq!(response.public_key_fingerprint(), "");
     }
 
     /// Capture-only sink used by the noop tests so they can build
