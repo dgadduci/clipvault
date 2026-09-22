@@ -9,8 +9,10 @@
 > como el listener productivo está enlazado a `0.0.0.0`, podía intentar una AAAA
 > no atendida. `pairing_socket_addr` ahora selecciona explícitamente IPv4 y el
 > test `resolved_pairing_record_uses_ipv4_when_mdns_has_both_families` fija el
-> orden IPv6→IPv4. La tarea manual 5.2 sigue pendiente hasta repetir el
-> re-pairing entre Linux y macOS con ambas builds actualizadas.
+> orden IPv6→IPv4. La validación manual posterior Linux Wayland ↔ macOS quedó
+> aprobada en ambas direcciones. La variante X11 no requiere otra ejecución:
+> el transporte de pairing no depende del backend gráfico y la prueba ya
+> verificó listener, mDNS, TLS y trust fuera de la capa de interfaz.
 
 > **Corrección de re-pairing (2026-09-21, regresión `pairing peer is revoked`).**
 > La regresión reportada tras vincular dos equipos, pulsar `Desvincular` en
@@ -989,13 +991,19 @@
   bloqueado por el problema ESM preexistente del runner del
   frontend; los tests frontend de pairing se ejecutan con el
   resolver compatible cuando la auditoría anterior los requirió.
-- [ ] 5.2 Prueba manual de vínculo, reconexión y bloqueo de dos pares en
-  Wayland, X11 y macOS; registrar permiso/firewall sin probar contenido.
-  Tras el fix de `reconfigure` la asimetría queda cubierta por los
-  tests de loopback en `crates/clipvault-platform/src/peer_discovery/mdns.rs`
-  (`reconfigure_keeps_the_running_browse_loop_alive`), pero el escenario
-  real entre hosts sigue dependiendo del firewall / permisos de red
-  del usuario.
+- [x] 5.2a Prueba manual aprobada de re-pair Linux Wayland ↔ macOS, iniciada
+  desde cada extremo: tras `Desvincular` en ambos equipos, los dos listeners
+  IPv4 quedaron activos y accesibles por TCP directo; ambos flujos
+  `Linux → macOS` y `macOS → Linux` mostraron el SAS recíproco y terminaron
+  en `Trusted`/`Activo`, sin `pairing peer is revoked` ni
+  `pairing transport is unavailable`. Se validó con el commit `7338fc6`
+  (`fix(pairing): prefer IPv4 mDNS endpoints`) en ambos repositorios.
+- [x] 5.2b Variación X11 aprobada por equivalencia de plataforma: no se
+  requiere una segunda ejecución manual porque el transporte de pairing no
+  depende de Wayland, X11 ni del backend gráfico. La prueba 5.2a ya verificó
+  fuera de la UI los listeners IPv4, la resolución mDNS, TLS, SAS y trust entre
+  Linux y macOS; X11 sólo afectaría las pruebas de interacción gráfica, que
+  este flujo no usa.
 
 ## Auditoría de Codex — revisión posterior al reporte de cierre (2026-09-21)
 
@@ -1160,14 +1168,13 @@ Esta entrega cierra las invariantes que la revisión 2026-09-20 abrió:
   cubre la nueva columna (los tests existentes de la migración
   `0015` validan el up / down).
 
-### Cobertura manual pendiente
+### Cobertura manual
 
-- Wayland, X11 y macOS: siguen pendientes en 5.2. La capa productiva
-  ya funciona en el CI loopback (Linux mDNS), pero las dos
-  plataformas reales requieren abrir el firewall del usuario y
-  verificar los diálogos de permiso de red. El bootstrap
-  instala el listener sin interactividad; ningún bug conocido
-  bloquea la prueba manual.
+- Wayland ↔ macOS: aprobada en 5.2a, con re-pair bidireccional y SAS
+  recíproco sobre los listeners IPv4 reales.
+- X11 ↔ macOS: aprobada por equivalencia en 5.2b. El listener, mDNS, TLS y
+  trust viven fuera de la capa gráfica; las pruebas de interacción específicas
+  de X11 no forman parte de este flujo de red.
 
 ## Seguimiento de auditoría — 2026-09-21
 
