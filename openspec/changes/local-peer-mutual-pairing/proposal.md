@@ -37,4 +37,6 @@ silenciosamente por TLS. Bloquear/revocar uno no altera a los demás pares ni
 revela contenido a un cliente no confiado. Una fila en `Revoked` debe seguir
 permitiendo iniciar una sesión SAS recíproca nueva; la doble aprobación sigue
 siendo el único camino que restablece `Trusted`. `Blocked` sí sigue siendo
-terminal hasta `Desbloquear`.
+terminal hasta `Desbloquear`. La ruta resuelta por mDNS debe ser compatible
+con la familia IP del listener TLS para que un anuncio dual-stack no vuelva
+indeterminista el re-pairing.

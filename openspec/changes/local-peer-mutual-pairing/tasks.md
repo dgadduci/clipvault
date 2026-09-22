@@ -2,6 +2,16 @@
 
 ## Notas de implementación
 
+> **Corrección de interoperabilidad dual-stack (2026-09-22).** La prueba
+> manual Linux → macOS confirmó que ambos listeners TLS IPv4 estaban activos y
+> eran alcanzables por TCP directo, pero la invitación no llegaba al proceso
+> remoto. El resolver mDNS tomaba el primer elemento de un `HashSet` de A/AAAA;
+> como el listener productivo está enlazado a `0.0.0.0`, podía intentar una AAAA
+> no atendida. `pairing_socket_addr` ahora selecciona explícitamente IPv4 y el
+> test `resolved_pairing_record_uses_ipv4_when_mdns_has_both_families` fija el
+> orden IPv6→IPv4. La tarea manual 5.2 sigue pendiente hasta repetir el
+> re-pairing entre Linux y macOS con ambas builds actualizadas.
+
 > **Corrección de re-pairing (2026-09-21, regresión `pairing peer is revoked`).**
 > La regresión reportada tras vincular dos equipos, pulsar `Desvincular` en
 > ambos y luego `Volver a parear` era que `start_outbound` (y los caminos

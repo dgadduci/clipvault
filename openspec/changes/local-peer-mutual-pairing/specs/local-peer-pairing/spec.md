@@ -67,7 +67,10 @@ compatible live-capability upgrade, storing the full fingerprint and current
 capability rather than reporting an identity conflict. The reverse transition
 updates the current capability without erasing the learned full fingerprint;
 the renderer SHALL offer a new pairing attempt only while a detected peer is
-currently advertising `pairing`.
+currently advertising `pairing`. While the productive listener is IPv4-only,
+the private mDNS resolver SHALL select an advertised IPv4 address for the
+pairing route; it SHALL NOT choose an arbitrary AAAA record merely because it
+appears first in the resolver's unordered address set.
 
 #### Scenario: Renderer cannot forge remote approval
 
@@ -90,6 +93,14 @@ currently advertising `pairing`.
 - **THEN** its persisted row is upgraded with that full fingerprint and the
   renderer can offer Vincular; withdrawing back to `discovery_only` removes
   that offer until a fresh pairing advertisement arrives
+
+#### Scenario: Dual-stack discovery dials the IPv4 listener
+
+- **WHEN** a pairing-capable peer advertises both A and AAAA records while its
+  productive listener is bound only to IPv4
+- **THEN** the resolver selects its advertised IPv4 address and the pairing
+  attempt reaches the listener instead of failing due to arbitrary address-set
+  iteration order
 
 ### Requirement: Inbound pairing registers the session before approval
 

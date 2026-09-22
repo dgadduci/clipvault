@@ -75,6 +75,14 @@ al runtime únicamente un evento de pairing ya autenticado (identidad pública,
 transcript verificado, aprobación remota verificada y huella del certificado).
 No entrega envelopes crudos y ningún evento de red atraviesa IPC.
 
+El listener productivo actual se enlaza explícitamente a IPv4 (`0.0.0.0`). Un
+registro DNS-SD puede contener A y AAAA y la colección de direcciones que
+entrega el daemon no tiene orden estable; por eso el resolver de pairing debe
+seleccionar una dirección IPv4, nunca la primera dirección arbitraria. Los
+registros AAAA siguen siendo válidos para descubrimiento/presencia. El soporte
+IPv6 futuro debe cambiar en conjunto el bind y la política de selección, no
+probar una ruta IPv6 contra un listener sólo IPv4.
+
 ### Frontera del adapter mDNS compartido (descubrimiento + pairing)
 
 El `MdnsPeerDiscoveryAdapter` que el bootstrap construye es **una sola

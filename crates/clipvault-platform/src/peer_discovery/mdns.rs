@@ -27,6 +27,7 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -581,12 +582,7 @@ pub(super) fn process_event(
             let fullname = info.get_fullname().to_string();
             if let Some(record) = translate_resolved(info) {
                 let peer_id = record.peer_id.clone();
-                let address = info
-                    .get_addresses()
-                    .iter()
-                    .copied()
-                    .next()
-                    .and_then(|ip| std::net::SocketAddr::new(ip, info.get_port()).into());
+                let address = pairing_socket_addr(info);
                 peer_registry
                     .lock()
                     .expect("peer registry")
@@ -621,6 +617,21 @@ pub(super) fn process_event(
             // events.
         }
     }
+}
+
+/// Select the endpoint compatible with the productive pairing listener.
+///
+/// The listener currently binds [`crate::peer_transport::tls::PAIRING_BIND_ADDR`],
+/// which is IPv4 (`0.0.0.0`). `mdns-sd` exposes resolved addresses as a
+/// `HashSet`, so choosing its first item made the dial target nondeterministic:
+/// a peer advertising both families could be dialled over IPv6 even though its
+/// pairing listener accepts only IPv4. Discovery still consumes A and AAAA for
+/// presence; only the private pairing route must match the listener family.
+fn pairing_socket_addr(info: &mdns_sd::ServiceInfo) -> Option<SocketAddr> {
+    info.get_addresses().iter().find_map(|ip| match ip {
+        IpAddr::V4(ipv4) => Some(SocketAddr::new(IpAddr::V4(*ipv4), info.get_port())),
+        IpAddr::V6(_) => None,
+    })
 }
 
 /// Detect whether the `flume::RecvTimeoutError` reported by the
@@ -843,6 +854,45 @@ mod tests {
             mdns_sd::ServiceInfo::new(SERVICE_TYPE, "Studio", "studio.local.", "", 0, properties)
                 .unwrap();
         assert!(translate_resolved(&info).is_none());
+    }
+
+    #[test]
+    fn resolved_pairing_record_uses_ipv4_when_mdns_has_both_families() {
+        let peer_id = "11111111111111111111111111111111";
+        let advertisement = DiscoveryAdvertisement::new_pairing(
+            peer_id,
+            "aaaaaaaaaaaaaaaa",
+            &"b".repeat(64),
+            "Studio",
+            1,
+        );
+        let properties = build_txt_properties(&advertisement);
+        let info = mdns_sd::ServiceInfo::new(
+            SERVICE_TYPE,
+            "Studio",
+            "studio.local.",
+            "fe80::1,192.0.2.42",
+            65000,
+            &properties[..],
+        )
+        .expect("service info");
+        let registry: Arc<StdMutex<HashMap<String, String>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
+        let addresses: Arc<StdMutex<HashMap<String, SocketAddr>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
+        let sink: Arc<dyn DiscoverySink> = Arc::new(CapturingSink::default());
+
+        process_event(
+            &mdns_sd::ServiceEvent::ServiceResolved(info),
+            &sink,
+            &registry,
+            &addresses,
+        );
+
+        assert_eq!(
+            addresses.lock().expect("peer addresses").get(peer_id),
+            Some(&SocketAddr::from(([192, 0, 2, 42], 65000)))
+        );
     }
 
     #[test]
