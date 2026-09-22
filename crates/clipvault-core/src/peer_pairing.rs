@@ -998,10 +998,15 @@ impl PairingRuntime {
             PairingMessage::Approve { peer_id, .. } => {
                 self.observe_approve(&peer_id, cert_fingerprint)
             }
-            PairingMessage::Health { .. } | PairingMessage::HealthAck { .. } => {
-                // The metadata-only health probe never reaches the
-                // runtime state machine. The productive pairing
-                // transport handles it inside the listener loop
+            PairingMessage::Health { .. }
+            | PairingMessage::HealthAck { .. }
+            | PairingMessage::ListRecentText { .. }
+            | PairingMessage::ListRecentTextAck { .. }
+            | PairingMessage::ListRecentTextInvalid { .. }
+            | PairingMessage::ListRecentTextUnavailable { .. } => {
+                // The metadata-only history / health probes never
+                // reach the runtime state machine. The productive
+                // transport handles them inside the listener loop
                 // and surfaces the typed outcome directly; the
                 // runtime only sees `observe_pairing` events for
                 // pairing / approval transitions.
