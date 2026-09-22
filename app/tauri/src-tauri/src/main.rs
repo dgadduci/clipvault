@@ -24,7 +24,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use crate::bootstrap::{
     build_state, install_capture_loop, refresh_active_app_cached, register_default_hotkey,
-    QUICK_SEARCH_EVENT,
+    stop_network_subsystems, QUICK_SEARCH_EVENT,
 };
 use crate::commands::run_retention;
 use crate::state::SharedState;
@@ -300,6 +300,19 @@ fn cleanup<R: tauri::Runtime>(app: &AppHandle<R>) {
     if let Some(tray) = app.tray_by_id("clipvault-tray") {
         let _ = tray.set_menu(None::<tauri::menu::Menu<R>>);
     }
+    // Best-effort shutdown of the local-network subsystems. The
+    // helper stops the pairing transport FIRST so the productive
+    // mDNS advertisement retracts before the discovery adapter
+    // emits the goodbye packet; the desktop then reflects
+    // `No disponible` for the remote peer within the bounded
+    // window the design pins instead of waiting for the mDNS TTL
+    // to expire. See `peer-text-history-browser/design.md`
+    // §"Descubrimiento, presencia y compatibilidad" and the
+    // regression test in `bootstrap::tests`. Both closures are
+    // idempotent and best-effort: a failure logs a metadata-only
+    // warning and the helper returns without blocking the
+    // process exit.
+    stop_network_subsystems(shared.context());
     // Best-effort retention pass on shutdown so a long-running
     // session cleans up expired rows before the next start.
     run_retention(shared.context());

@@ -123,6 +123,25 @@ No se modifica `MdnsPeerDiscoveryAdapter`, `PeerDiscoveryRuntime`, el TTL,
 el pareado ni mTLS: la transición tras un cierre abrupto sigue dependiendo
 del TTL vigente.
 
+La salida normal del shell (`⌘Q`, *tray Salir*, `Ctrl-C`) llama al
+helper `stop_network_subsystems(&AppContext)` antes de la pasada
+de retention: el orden es primero `stop_pairing_transport()` y
+después `PeerDiscoveryRuntime::stop()`. El pairing comparte el
+`MdnsPeerDiscoveryAdapter` con la runtime de discovery a través
+del `MdnsPairingAdvertisementSink`; detenerlo primero retira el
+registro `pairing` antes de que el adapter publique el `goodbye`
+final, así un peer remoto observa `ServiceRemoved` en ≤ 5 s y
+el desktop refleja `No disponible` sin esperar al TTL de mDNS
+(120 s). Ambas paradas son best-effort: un fallo en una de las
+dos sólo registra un `warn!` sin IP, puerto, `peer_id` ni
+contenido, y nunca impide la salida. La regresión del orden vive
+en `app/tauri/src-tauri/src/bootstrap.rs::tests` con un adapter
+de discovery y un transporte de pairing instrumentados, y un
+segundo test estático verifica que `main.rs::cleanup` invoca el
+helper antes de `run_retention`. Una caída abrupta, una
+suspensión, Wi-Fi apagado o `kill -9` siguen dependiendo del
+TTL vigente — el helper solo cambia el cierre normal.
+
 Seleccionar un peer activo reemplaza en el mismo panel principal la lista de
 historial o colección que estaba visible. No existe una ruta ni página
 `RemoteHistory` independiente. No hay un botón `Volver` como navegación

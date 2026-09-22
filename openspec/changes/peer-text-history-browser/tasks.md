@@ -20,6 +20,9 @@
 > - 3.1 — Comando Tauri invoca el transporte autenticado (no SQLite local).
 > - 3.3 — Selección de peer dispara el dial real; rechazo tipado para
 >   revoked / blocked / not trusted / cursor fabricado.
+> - 3.5 — Apagado correcto de los subsistemas de red en el cierre
+>   normal del shell para que el peer remoto reciba el `goodbye`
+>   en lugar de esperar al TTL de mDNS.
 > - 4.1 — Validación final del bloque 1 + 2 (fmt, tests Rust, npm
 >   check/build, regression `pointerDragAndDrop`, e2e TLS A/B,
 >   OpenSpec strict, git diff --check).
@@ -97,6 +100,21 @@
   rechazo para revoked / blocked / not trusted / pin inválido / peer
   ausente / cursor fabricado; respuesta tardía no puede sobrescribir
   el panel del peer activo.
+- [x] 3.5 El cierre normal del shell (`⌘Q`, *tray Salir*, `Ctrl-C`)
+  llama a `stop_network_subsystems` antes de la pasada de
+  retention: primero `stop_pairing_transport()` y después
+  `PeerDiscoveryRuntime::stop()`. El peer remoto observa el
+  `ServiceRemoved` en ≤ 5 s y el desktop refleja `No disponible`
+  sin esperar al TTL de mDNS (120 s). Ambas paradas son
+  best-effort: un fallo en una de las dos sólo registra un
+  `warn!` sin IP, puerto, `peer_id` ni contenido; nunca impide
+  la salida. La regresión vive en
+  `app/tauri/src-tauri/src/bootstrap.rs::tests` y combina un
+  adapter de discovery y un transporte de pairing instrumentados
+  para asegurar el orden y la idempotencia. El TTL, el
+  protocolo mDNS, el pairing y mTLS no se tocan; una caída
+  abrupta, una suspensión, Wi-Fi apagado o `kill -9` siguen
+  dependiendo del TTL vigente.
 - [ ] 3.4 `RemotePreviewCard` con esqueleto visual de card local pero
   sin reutilizar `HistoryCard` ni habilitar drag/drop, pin, editar,
   copy/paste o acciones locales. El único menú muestra `Importar

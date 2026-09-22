@@ -143,6 +143,18 @@ pub struct BootstrapOptions {
         feature = "local-peer-pairing-tls"
     ))]
     pub peer_discovery_concrete: Option<Arc<clipvault_platform::MdnsPeerDiscoveryAdapter>>,
+    /// Optional productive pairing transport the bootstrap
+    /// installs. When `None`, the bootstrap resolves
+    /// [`clipvault_platform::default_peer_transport`] which links
+    /// the TLS-backed adapter on `local-peer-pairing-tls` builds
+    /// and the noop stub otherwise. Tests inject a custom
+    /// [`clipvault_platform::PeerTransport`] through
+    /// [`AppBootstrap::with_pairing_transport`] so they can
+    /// verify the shell shutdown order without standing up a real
+    /// TLS listener. The production shell always leaves the slot
+    /// empty so the bootstrap reaches the documented default.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub pairing_transport: Option<Arc<dyn crate::peer_pairing::PeerTransport>>,
 }
 
 impl Default for BootstrapOptions {
@@ -159,6 +171,8 @@ impl Default for BootstrapOptions {
                 feature = "local-peer-pairing-tls"
             ))]
             peer_discovery_concrete: None,
+            #[cfg(feature = "local-peer-pairing-tls")]
+            pairing_transport: None,
         }
     }
 }
@@ -848,6 +862,23 @@ impl AppBootstrap {
         self
     }
 
+    /// Inject the productive pairing transport the bootstrap
+    /// installs in place of [`clipvault_platform::default_peer_transport`].
+    /// Tests use this hook to wire a scriptable
+    /// [`clipvault_platform::PeerTransport`] so the shell's
+    /// shutdown order can be asserted without standing up a real
+    /// TLS listener. The production shell MUST leave the slot
+    /// empty so the bootstrap reaches the documented TLS-backed
+    /// default.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub fn with_pairing_transport(
+        mut self,
+        transport: Arc<dyn crate::peer_pairing::PeerTransport>,
+    ) -> Self {
+        self.options.pairing_transport = Some(transport);
+        self
+    }
+
     /// Inject a `PlatformAdapters` bundle built from the host's
     /// detected platform — the bundle the production Tauri shell
     /// wires against `~/.clipvault` at first launch. The method
@@ -1138,7 +1169,13 @@ impl AppBootstrap {
                 database_handle_for_closure,
             ))
         };
-        let pairing_transport = crate::peer_pairing::default_peer_transport();
+        let pairing_transport: Arc<dyn crate::peer_pairing::PeerTransport> =
+            resolve_pairing_transport(
+                #[cfg(feature = "local-peer-pairing-tls")]
+                self.options.pairing_transport.clone(),
+                #[cfg(not(feature = "local-peer-pairing-tls"))]
+                None,
+            );
         let peer_pairing =
             crate::peer_pairing::PairingRuntime::new(pairing_transport, pairing_persistence);
         // Build the metadata-only transferable-text browser. The
@@ -1232,6 +1269,22 @@ impl Default for AppBootstrap {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Resolve the [`crate::peer_pairing::PeerTransport`] the
+/// bootstrap installs. Production shells always leave the slot
+/// empty so the helper falls through to
+/// [`crate::peer_pairing::default_peer_transport`]; tests inject
+/// a scriptable transport through
+/// [`AppBootstrap::with_pairing_transport`] so they can verify the
+/// shell shutdown order without standing up a real TLS listener.
+fn resolve_pairing_transport(
+    injected: Option<Arc<dyn crate::peer_pairing::PeerTransport>>,
+) -> Arc<dyn crate::peer_pairing::PeerTransport> {
+    if let Some(transport) = injected {
+        return transport;
+    }
+    crate::peer_pairing::default_peer_transport()
 }
 
 /// Helper used by the Tauri shell. Mirrors

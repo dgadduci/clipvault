@@ -333,6 +333,54 @@ fn sync_pairing_transport_on_startup(
     Ok(0)
 }
 
+/// Best-effort network shutdown for the Tauri `cleanup` path.
+///
+/// The desktop shell closes the pairing transport *before* stopping
+/// the discovery runtime so a remote peer observes the goodbye
+/// packet the `MdnsPeerDiscoveryAdapter` documents and the desktop
+/// reflects `No disponible` within the bounded window the design
+/// pins (`peer-text-history-browser/design.md` §"Descubrimiento,
+/// presencia y compatibilidad"), instead of having to wait for the
+/// mDNS TTL (~120 s) to expire.
+///
+/// The order matters: the pairing transport installs the productive
+/// pairing advertisement through the shared `MdnsPairingAdvertisementSink`
+/// (which `reconfigure`s the same `MdnsPeerDiscoveryAdapter` the
+/// discovery runtime owns). Stopping the pairing transport first
+/// retracts the pairing-capability record so the discovery adapter
+/// can publish the final `goodbye` for the discovery-only record
+/// without leaving the pairing record dangling for the TTL window.
+///
+/// Both subsystems are best-effort:
+/// - `stop_pairing_transport` collapses to the typed
+///   [`clipvault_core::peer_pairing::TransportOutcome::Unavailable`]
+///   when the productive listener never bound (cross-compile,
+///   Windows build, no keychain); the helper swallows the variant.
+/// - `PeerDiscoveryRuntime::stop` is idempotent: a no-op when the
+///   runtime never started (e.g. sharing toggle off) and a normal
+///   stop otherwise.
+///
+/// Failures are reported through `tracing::warn!` only — the helper
+/// MUST NOT propagate. The `cleanup` path must let the process exit
+/// even when the mDNS adapter or the pairing transport surfaces a
+/// transient error so a stuck goodbye cannot wedge the shell. The
+/// diagnostic message intentionally omits the IP, the bound port,
+/// the `peer_id` and any other secret so the log stays safe to share.
+pub fn stop_network_subsystems(context: &AppContext) {
+    if let Err(outcome) = context.stop_pairing_transport() {
+        warn!(
+            outcome = ?outcome,
+            "pairing transport stop failed during shutdown; continuing"
+        );
+    }
+    if let Err(error) = context.peer_discovery().stop() {
+        warn!(
+            error = ?error,
+            "peer discovery stop failed during shutdown; continuing"
+        );
+    }
+}
+
 /// Stable identifier for the platform the shell is currently
 /// building against. Mirrors [`clipvault_platform::OsFamily`] but
 /// collapses to a single `Other` arm for Windows / custom
@@ -5498,6 +5546,474 @@ mod tests {
         assert!(
             bootstrap_source.contains("capabilities.global_hotkey = false"),
             "build_state must drop capabilities.global_hotkey when the Xlib preflight failed"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `stop_network_subsystems` — ordered shutdown of pairing and
+    // discovery so the desktop reflects `No disponible` within the
+    // bounded window the design pins instead of waiting for the
+    // mDNS TTL.
+    // -----------------------------------------------------------------
+
+    use std::sync::atomic::Ordering as StopOrdering;
+    use std::sync::Mutex;
+
+    use clipvault_core::{
+        FakeClipboard, FakeClipboardBackend, FakeHotkeyManager, FakePasteController,
+        FakeSettingsNavigator, FakeTrayController, NoopApplicationMetadataProvider,
+        PeerFingerprint, PeerId, PlatformAdapters, SystemClock,
+    };
+    use clipvault_db::builtin_migrations;
+    use clipvault_platform::peer_discovery::{
+        AdapterError, DiscoveryAdvertisement, DiscoverySink, PeerDiscoveryAdapter,
+    };
+    use clipvault_platform::peer_transport::{
+        LocalPeerIdentity, OutboundSessionDescriptor, PairingAdvertisement, PairingOutbound,
+        PairingSessionId, PeerHealthSnapshot, PeerHistorySnapshot, PeerTransport,
+        RemotePeerResolver, TransportError, TransportSink,
+    };
+    use clipvault_platform::{
+        ActiveApplicationProbe, ApplicationMetadataProvider, Capabilities, ClipboardBackend,
+        DisplayServer, HotkeyManager, OsFamily, PasteController, PlatformInfo, SettingsNavigator,
+        TrayController,
+    };
+
+    /// Adapter that records every `stop` call into a shared counter
+    /// the assertion reads after the helper finishes. It also
+    /// appends the literal label `"discovery"` to a shared order log
+    /// when the running → stopped transition fires so the regression
+    /// can pin the relative order between pairing and discovery. The
+    /// adapter reports a running state on `start` so the runtime
+    /// keeps it alive and the helper actually exercises the `stop`
+    /// path.
+    struct ScriptedDiscoveryAdapter {
+        stop_count: Arc<AtomicUsize>,
+        running: Arc<AtomicBool>,
+        order_log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ScriptedDiscoveryAdapter {
+        fn new(
+            stop_count: Arc<AtomicUsize>,
+            running: Arc<AtomicBool>,
+            order_log: Arc<Mutex<Vec<&'static str>>>,
+        ) -> Self {
+            Self {
+                stop_count,
+                running,
+                order_log,
+            }
+        }
+    }
+
+    impl PeerDiscoveryAdapter for ScriptedDiscoveryAdapter {
+        fn start(
+            &self,
+            _advertisement: &DiscoveryAdvertisement,
+            _sink: Arc<dyn DiscoverySink>,
+        ) -> Result<(), AdapterError> {
+            self.running.store(true, StopOrdering::SeqCst);
+            Ok(())
+        }
+
+        fn stop(&self) -> Result<(), AdapterError> {
+            // Mirror `ScriptedPairingTransport` so the script-level
+            // counter and order log stay consistent across both
+            // fixtures; a second `stop` after the runtime already
+            // shut the adapter down must not re-emit the label or
+            // inflate the counter.
+            if self
+                .running
+                .compare_exchange(true, false, StopOrdering::SeqCst, StopOrdering::SeqCst)
+                .is_ok()
+            {
+                self.stop_count.fetch_add(1, StopOrdering::SeqCst);
+                self.order_log
+                    .lock()
+                    .expect("order log")
+                    .push("discovery");
+            }
+            Ok(())
+        }
+
+        fn is_running(&self) -> bool {
+            self.running.load(StopOrdering::SeqCst)
+        }
+    }
+
+    /// Transport that records its `stop` call into a shared counter
+    /// and reports itself running until `stop` runs. It also appends
+    /// the literal label `"pairing"` to a shared order log on the
+    /// running → stopped transition so the regression can pin the
+    /// relative order between pairing and discovery. The transport
+    /// only exists for the duration of the test, so the `start`
+    /// paths intentionally stay unreachable — the bootstrap wires
+    /// it via `with_pairing_transport` and we never ask the runtime
+    /// to install a listener here. `stop` is the only operation the
+    /// shell exercises during shutdown; the rest of the trait
+    /// surface stays at the typed `Unavailable` outcome the
+    /// production noop transport surfaces so a stray call from a
+    /// future test does not silently succeed.
+    struct ScriptedPairingTransport {
+        stop_count: Arc<AtomicUsize>,
+        running: Arc<AtomicBool>,
+        order_log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ScriptedPairingTransport {
+        fn new(
+            stop_count: Arc<AtomicUsize>,
+            running: Arc<AtomicBool>,
+            order_log: Arc<Mutex<Vec<&'static str>>>,
+        ) -> Self {
+            Self {
+                stop_count,
+                running,
+                order_log,
+            }
+        }
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    impl PeerTransport for ScriptedPairingTransport {
+        fn start(
+            &self,
+            _identity: &LocalPeerIdentity,
+            _sink: Arc<dyn TransportSink>,
+        ) -> Result<u16, TransportError> {
+            self.running.store(true, StopOrdering::SeqCst);
+            Ok(0)
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn start_with_material(
+            &self,
+            _material: clipvault_platform::LocalIdentityMaterial,
+            _sink: Arc<dyn TransportSink>,
+            _advertisement: Arc<dyn PairingAdvertisement>,
+        ) -> Result<u16, TransportError> {
+            self.running.store(true, StopOrdering::SeqCst);
+            Ok(0)
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn start_with_material_and_display_name(
+            &self,
+            _material: clipvault_platform::LocalIdentityMaterial,
+            _sink: Arc<dyn TransportSink>,
+            _advertisement: Arc<dyn PairingAdvertisement>,
+            _display_name: &str,
+        ) -> Result<u16, TransportError> {
+            self.running.store(true, StopOrdering::SeqCst);
+            Ok(0)
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn start_with_material_and_resolver(
+            &self,
+            _material: clipvault_platform::LocalIdentityMaterial,
+            _sink: Arc<dyn TransportSink>,
+            _advertisement: Arc<dyn PairingAdvertisement>,
+            _resolver: Option<Arc<dyn RemotePeerResolver>>,
+            _display_name: &str,
+        ) -> Result<u16, TransportError> {
+            self.running.store(true, StopOrdering::SeqCst);
+            Ok(0)
+        }
+
+        fn stop(&self) -> Result<(), TransportError> {
+            // The `PeerTransport::stop` contract is idempotent:
+            // a second call after the listener already shut down
+            // is a no-op. We mirror that by only incrementing the
+            // counter on the running → stopped transition so the
+            // regression test can re-invoke the helper without
+            // inflating the pairing stop counter. The shared order
+            // log is appended on the same transition so the
+            // regression can pin the relative order between
+            // pairing and discovery.
+            if self
+                .running
+                .compare_exchange(true, false, StopOrdering::SeqCst, StopOrdering::SeqCst)
+                .is_ok()
+            {
+                self.stop_count.fetch_add(1, StopOrdering::SeqCst);
+                self.order_log
+                    .lock()
+                    .expect("order log")
+                    .push("pairing");
+            }
+            Ok(())
+        }
+
+        fn is_running(&self) -> bool {
+            self.running.load(StopOrdering::SeqCst)
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn arm_pin(&self, _peer_id: &str, _cert_fingerprint: &str) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn disarm_pin(&self, _peer_id: &str) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn health_check(
+            &self,
+            _peer_id: &str,
+            _cert_fingerprint: &str,
+        ) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn start_outbound(
+            &self,
+            _descriptor: OutboundSessionDescriptor,
+        ) -> Result<PairingOutbound, TransportError> {
+            Err(TransportError::Unavailable)
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn approve_local(&self, _session_id: PairingSessionId) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn approve_inbound_session(
+            &self,
+            _session_id: PairingSessionId,
+        ) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn cancel_session(&self, _session_id: PairingSessionId) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn disconnect_peer(&self, _peer_id: &str) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn health_probe(
+            &self,
+            _peer_id: &str,
+            _cert_fingerprint: &str,
+        ) -> Result<PeerHealthSnapshot, TransportError> {
+            Err(TransportError::Unavailable)
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn list_recent_text(
+            &self,
+            _peer_id: &str,
+            _cert_fingerprint: &str,
+            _cursor: &str,
+            _limit: u32,
+        ) -> Result<PeerHistorySnapshot, TransportError> {
+            Err(TransportError::Unavailable)
+        }
+    }
+
+    /// Build a `tempfile::TempDir` + `AppContext` with the scriptable
+    /// discovery adapter and the scriptable pairing transport wired
+    /// in. The context runs through the standard isolated harness
+    /// (no keychain, no mdns-sd) so the regression does not depend on
+    /// platform capabilities.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn shutdown_harness(
+        discovery_stop_count: Arc<AtomicUsize>,
+        discovery_running: Arc<AtomicBool>,
+        pairing_stop_count: Arc<AtomicUsize>,
+        pairing_running: Arc<AtomicBool>,
+        order_log: Arc<Mutex<Vec<&'static str>>>,
+    ) -> (tempfile::TempDir, AppContext) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        {
+            let mut db =
+                clipvault_db::Database::open(dir.path().join("clipvault.db")).expect("open");
+            db.run_migrations(&builtin_migrations()).expect("migrate");
+        }
+        let info = PlatformInfo {
+            home_dir: std::path::PathBuf::from("/tmp"),
+            data_dir: dir.path().to_path_buf(),
+            os_family: OsFamily::Macos,
+            display_server: DisplayServer::Unknown,
+        };
+        let adapters = PlatformAdapters::new(
+            Arc::new(FakeClipboardBackend::new()) as Arc<dyn ClipboardBackend>,
+            Arc::new(FakeHotkeyManager::new()) as Arc<dyn HotkeyManager>,
+            Arc::new(NoopActiveApplicationProbe) as Arc<dyn ActiveApplicationProbe>,
+            Arc::new(FakePasteController::new()) as Arc<dyn PasteController>,
+            Arc::new(FakeTrayController::new()) as Arc<dyn TrayController>,
+            Arc::new(FakeSettingsNavigator::new()) as Arc<dyn SettingsNavigator>,
+            Arc::new(NoopApplicationMetadataProvider) as Arc<dyn ApplicationMetadataProvider>,
+            Capabilities::ALL_AVAILABLE,
+            info,
+        );
+        let discovery_adapter = Arc::new(ScriptedDiscoveryAdapter::new(
+            Arc::clone(&discovery_stop_count),
+            Arc::clone(&discovery_running),
+            Arc::clone(&order_log),
+        ));
+        let pairing_transport = Arc::new(ScriptedPairingTransport::new(
+            Arc::clone(&pairing_stop_count),
+            Arc::clone(&pairing_running),
+            Arc::clone(&order_log),
+        ));
+        let context = AppBootstrap::new()
+            .with_clock(Arc::new(SystemClock) as Arc<dyn clipvault_core::Clock>)
+            .with_clipboard(Arc::new(FakeClipboard::new()) as Arc<dyn clipvault_core::Clipboard>)
+            .with_platform_adapters(adapters)
+            .with_peer_discovery_adapter(discovery_adapter)
+            .with_pairing_transport(pairing_transport)
+            .bootstrap_at(dir.path().join("clipvault.db"))
+            .expect("bootstrap");
+        (dir, context)
+    }
+
+    /// The Tauri `cleanup` path MUST stop the pairing transport
+    /// before the discovery runtime so the shared
+    /// `MdnsPeerDiscoveryAdapter` publishes the goodbye packet
+    /// AFTER the productive pairing record retracts. The previous
+    /// implementation never invoked `stop_network_subsystems`; the
+    /// peer only expired via the mDNS TTL (~120 s) instead of the
+    /// bounded window the design pins. The regression injects
+    /// scripted fixtures for both halves and asserts the order,
+    /// state and idempotency of the helper.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn stop_network_subsystems_calls_pairing_then_discovery_in_order() {
+        let discovery_stop_count = Arc::new(AtomicUsize::new(0));
+        let discovery_running = Arc::new(AtomicBool::new(false));
+        let pairing_stop_count = Arc::new(AtomicUsize::new(0));
+        let pairing_running = Arc::new(AtomicBool::new(false));
+        // Shared order log both scripts append to on the
+        // running → stopped transition; pinning the relative order
+        // (`pairing` first, `discovery` second) is exactly what the
+        // counters alone cannot express.
+        let order_log: Arc<Mutex<Vec<&'static str>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let (dir, context) = shutdown_harness(
+            Arc::clone(&discovery_stop_count),
+            Arc::clone(&discovery_running),
+            Arc::clone(&pairing_stop_count),
+            Arc::clone(&pairing_running),
+            Arc::clone(&order_log),
+        );
+
+        // Seed a local identity and start the discovery runtime so
+        // both subsystems are running when the helper executes.
+        // Mark the pairing transport as running too so the
+        // transport's idempotent `stop` records the
+        // running → stopped transition; without this marker the
+        // scripted transport would short-circuit its counter and
+        // the regression would miss the pairing half entirely.
+        pairing_running.store(true, StopOrdering::SeqCst);
+        let discovery = context.peer_discovery();
+        discovery.set_local_identity(Some(
+            clipvault_core::peer_discovery::LocalPeerIdentitySnapshot::new(
+                PeerId::from_public_key(b"0123456789abcdef0123456789abcdef"),
+                PeerFingerprint::from_public_key(b"0123456789abcdef"),
+                "Studio".to_string(),
+            ),
+        ));
+        discovery
+            .start()
+            .expect("start the scripted discovery adapter");
+
+        // The helper MUST call both `stop` methods. We assert the
+        // counters first to keep the regression obvious when the
+        // helper forgets a half.
+        stop_network_subsystems(&context);
+
+        assert_eq!(
+            discovery_stop_count.load(StopOrdering::SeqCst),
+            1,
+            "discovery adapter.stop must be called exactly once"
+        );
+        assert_eq!(
+            pairing_stop_count.load(StopOrdering::SeqCst),
+            1,
+            "pairing transport.stop must be called exactly once"
+        );
+        assert!(
+            !context.peer_discovery().is_running(),
+            "discovery runtime must report stopped after the helper"
+        );
+        assert!(
+            !pairing_running.load(StopOrdering::SeqCst),
+            "pairing transport must report stopped after the helper"
+        );
+
+        // Pin the relative order: pairing retires the productive
+        // record BEFORE discovery publishes the goodbye packet.
+        // The shared log captures the call sequence in real time;
+        // `pairing` must precede `discovery` and nothing else must
+        // have been appended yet.
+        assert_eq!(
+            *order_log.lock().expect("order log"),
+            vec!["pairing", "discovery"],
+            "stop_network_subsystems must call pairing.stop before discovery.stop",
+        );
+
+        // The order invariant (pairing first, discovery second) is
+        // also pinned by the static check that reads
+        // `main.rs::cleanup` and verifies the helper is invoked
+        // BEFORE `run_retention`. We re-execute the helper here
+        // (idempotent) and check the counters stay at 1 each and
+        // the shared log does not grow — the helper MUST NOT
+        // double-stop either subsystem on a second invocation.
+        stop_network_subsystems(&context);
+        assert_eq!(
+            discovery_stop_count.load(StopOrdering::SeqCst),
+            1,
+            "second helper invocation must be a no-op for the discovery adapter"
+        );
+        assert_eq!(
+            pairing_stop_count.load(StopOrdering::SeqCst),
+            1,
+            "second helper invocation must be a no-op for the pairing transport"
+        );
+        assert_eq!(
+            *order_log.lock().expect("order log"),
+            vec!["pairing", "discovery"],
+            "second helper invocation must not append to the shared order log",
+        );
+
+        drop(dir);
+    }
+
+    /// The order matters even when the productive feature pair is
+    /// not enabled: pairing stops first, then discovery. We verify
+    /// the order via the shared `cleanup` source so a refactor
+    /// that reorders the calls (or removes one of them) surfaces
+    /// here instead of silently reproducing the TTL-wait
+    /// regression on hosts / builds without `local-peer-pairing-tls`.
+    #[test]
+    fn cleanup_invokes_stop_network_subsystems_before_retention() {
+        let source_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+        let source = std::fs::read_to_string(&source_path)
+            .unwrap_or_else(|error| panic!("read main.rs: {error}"));
+        let stop_idx = source
+            .find("stop_network_subsystems(shared.context())")
+            .unwrap_or_else(|| {
+                panic!("main.rs::cleanup must invoke stop_network_subsystems before retention")
+            });
+        let retention_idx = source
+            .find("run_retention(shared.context())")
+            .unwrap_or_else(|| {
+                panic!("main.rs::cleanup must run retention after network shutdown")
+            });
+        assert!(
+            stop_idx < retention_idx,
+            "network shutdown must precede the retention pass"
         );
     }
 }
