@@ -302,9 +302,14 @@
    * `peer-text-history-browser` change drives the
    * `Equipos vinculados` list below the user-defined
    * collections and the trust / active cache the history
-   * rail consults before projecting a page. The App polls the
-   * snapshot on its existing refresh cadence; the linked list
-   * and the rail never open a snapshot round-trip of their own.
+   * rail consults before projecting a page. App.svelte owns the
+   * snapshot exclusively: it runs an initial refresh on mount,
+   * polls it on a short cadence while the desktop is mounted,
+   * refreshes it again when the pairing modal closes, and routes
+   * every call through the single-flight `refreshPeerSnapshot`
+   * helper. The linked list and the rail never open a snapshot
+   * round-trip of their own; they only render the snapshot the
+   * parent supplies.
    */
   let peerSnapshot: PeerSnapshot | null = null;
   /**
@@ -509,15 +514,13 @@
       await refreshEntries();
       await refreshSourceAppOptions();
       await refreshUnorganizedClearableCount();
-      // Refresh the peer snapshot the linked list + history
-      // rail consume. The call is metadata-only (no content /
-      // tags / collections); a failure collapses silently so
-      // a misbehaving peer runtime never breaks the desktop.
-      try {
-        peerSnapshot = await peerSnapshotCommand();
-      } catch (err) {
-        void err;
-      }
+      // Refresh the peer snapshot the linked list + history rail
+      // consume. The call routes through the single-flight
+      // helper so it coalesces with the polling tick and the
+      // post-pairing refresh; a failure collapses silently and
+      // the previous snapshot is preserved so a misbehaving
+      // peer runtime never breaks the desktop.
+      await refreshPeerSnapshot();
       // Bootstrap hydration: walk the freshly-loaded entries and
       // ask the conservative detector for a canonical language. The
       // round-trip is anchored on its own token, runs in the
@@ -1678,20 +1681,85 @@
   }
 
   /**
-   * Explicit peer-snapshot refresh the desktop fires after the
-   * pairing modal closes. The change pins that closing the modal
-   * MUST refresh the linked-list surface so a freshly trusted
-   * peer appears in `Equipos vinculados` without forcing the user
-   * to select it. The refresh is metadata-only (no content /
-   * tags / collections); a failure collapses silently so a
-   * misbehaving peer runtime never breaks the desktop.
+   * Single-flight guard for the peer-snapshot round trip. The
+   * bootstrap refresh, the post-pairing refresh and the polling
+   * tick all funnel through `refreshPeerSnapshot`; this promise
+   * caches the in-flight request so a second caller that fires
+   * before the first resolves reuses the same bridge call
+   * instead of opening a duplicate one. The latch clears in
+   * `finally` so a rejected refresh cannot lock the guard
+   * forever and starve the next caller.
    */
-  async function refreshPeerSnapshot(): Promise<void> {
-    try {
-      peerSnapshot = await peerSnapshotCommand();
-    } catch (err) {
-      void err;
+  let peerSnapshotRefresh: Promise<void> | null = null;
+  /**
+   * Cadence (milliseconds) the desktop polls the metadata-only
+   * snapshot while mounted. 2 s matches the cadence
+   * `PeerSharingModal` uses internally so a fresh `Observed` /
+   * `Removed` event the discovery worker drained reaches the
+   * linked list and the remote rail without reopening the modal
+   * or restarting the app. The interval lives entirely on
+   * `App.svelte`; the linked list and the rail never start
+   * their own timers.
+   */
+  const PEER_SNAPSHOT_REFRESH_MS = 2_000;
+  let peerSnapshotTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * Explicit peer-snapshot refresh the desktop fires on demand
+   * (initial mount, post-pairing close, polling tick) and routes
+   * through a single-flight guard so overlapping calls coalesce.
+   * The bridge call is metadata-only (no content / tags /
+   * collections); a failure collapses silently and the previous
+   * snapshot is preserved so a misbehaving peer runtime never
+   * breaks the desktop or surfaces an intrusive error.
+   *
+   * The helper is the ONLY call site of `peerSnapshotCommand()`
+   * in `App.svelte`. Direct bridge calls anywhere else would
+   * bypass the single-flight contract this module pins.
+   */
+  function refreshPeerSnapshot(): Promise<void> {
+    if (peerSnapshotRefresh !== null) {
+      return peerSnapshotRefresh;
     }
+    peerSnapshotRefresh = (async () => {
+      try {
+        peerSnapshot = await peerSnapshotCommand();
+      } catch (err) {
+        void err;
+      } finally {
+        peerSnapshotRefresh = null;
+      }
+    })();
+    return peerSnapshotRefresh;
+  }
+
+  /**
+   * Start the bounded polling cadence the desktop uses to pick
+   * up `Observed` / `Removed` events the discovery runtime
+   * drained without reopening any modal. The interval is
+   * idempotent: a second call is a no-op so `onMount` can
+   * invoke it unconditionally. Each tick routes through
+   * `refreshPeerSnapshot` so the single-flight guard still
+   * coalesces the tick with any concurrent refresh.
+   */
+  function startPeerSnapshotRefresh(): void {
+    if (peerSnapshotTimer !== null) return;
+    peerSnapshotTimer = setInterval(() => {
+      void refreshPeerSnapshot();
+    }, PEER_SNAPSHOT_REFRESH_MS);
+  }
+
+  /**
+   * Halt the polling cadence the desktop owns. The helper is
+   * idempotent so `onDestroy` can invoke it unconditionally;
+   * it MUST run as part of the unmount path so a hot reload or
+   * a remount never leaks a timer that keeps the bridge call
+   * alive in the background.
+   */
+  function stopPeerSnapshotRefresh(): void {
+    if (peerSnapshotTimer === null) return;
+    clearInterval(peerSnapshotTimer);
+    peerSnapshotTimer = null;
   }
 
   function onOpenRetention(event: MouseEvent): void {
@@ -1848,6 +1916,14 @@
   onMount(() => {
     void refresh();
     startPairingInvitationRefresh();
+    // Boot the desktop-owned snapshot polling cadence so a fresh
+    // `Observed` / `Removed` event the discovery runtime drained
+    // reaches the linked list and the remote rail without the
+    // user reopening the modal or restarting the app. The
+    // initial refresh inside `refresh()` already coalesces with
+    // this tick through the single-flight helper, so the first
+    // round trip is not duplicated.
+    startPeerSnapshotRefresh();
     registerQuickSearch(handleQuickSearchActivation)
       .then((unlisten) => {
         unlistenQuickSearch = unlisten;
@@ -1892,6 +1968,10 @@
 
   onDestroy(() => {
     stopPairingInvitationRefresh();
+    // Halt the desktop-owned snapshot polling cadence so the
+    // unmount path never leaks a timer that keeps the bridge
+    // call alive in the background.
+    stopPeerSnapshotRefresh();
     if (unlistenQuickSearch) {
       unlistenQuickSearch();
       unlistenQuickSearch = null;

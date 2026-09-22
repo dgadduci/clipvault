@@ -55,6 +55,19 @@ unavailable state without sending a history request. There SHALL NOT be a
 primary `Volver` button — return happens by selecting `Historial` or a local
 collection.
 
+The desktop shell (`App.svelte`) SHALL be the sole owner of the peer snapshot
+the linked list and the remote history rail consume. It SHALL poll
+`peerSnapshotCommand` on a bounded, locally-defined cadence while the desktop
+is mounted, starting on `onMount` and stopping on `onDestroy`, and SHALL run
+an initial refresh as soon as the desktop mounts. The `LinkedPeers` and
+`RemoteHistoryRail` components SHALL NOT open `peerSnapshotCommand` (or any
+equivalent peer-snapshot bridge call) on their own — they SHALL only render
+the snapshot the parent supplies. The shared refresh SHALL be coalesced
+through a single-flight guard so overlapping refresh requests (initial
+refresh, post-pairing refresh, polling tick) reuse the same in-flight round
+trip; a failed refresh SHALL keep the previous snapshot and MUST NOT break
+the desktop or surface an intrusive error.
+
 #### Scenario: New pairing updates the desktop list
 
 - **WHEN** reciprocal approval promotes a peer to `trusted`, including when
@@ -63,6 +76,15 @@ collection.
   closes, the peer appears below collections in the sidebar without reload,
   with green or gray status derived from its current `trusted && is_present`
   state
+
+#### Scenario: Remote presence flip is reflected on the desktop
+
+- **WHEN** a paired peer's remote announcement arrives or disappears and the
+  peer discovery runtime updates `is_present` for a row already marked as
+  `trusted`
+- **THEN** the linked list and the remote history rail update to reflect
+  the new presence within the desktop's polling interval, without the user
+  reopening the pairing modal or reloading the application
 
 #### Scenario: Peer becomes unavailable
 

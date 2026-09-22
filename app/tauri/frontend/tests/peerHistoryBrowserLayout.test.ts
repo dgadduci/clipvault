@@ -302,7 +302,7 @@ test("App.svelte refreshes peerSnapshot when the pairing modal closes", () => {
   );
 
   const refresherMatch = appSource.match(
-    /async function refreshPeerSnapshot\(\)[\s\S]*?\n {2}\}/,
+    /function refreshPeerSnapshot[\s\S]*?\n {2}\}/,
   );
   assert.ok(
     refresherMatch,

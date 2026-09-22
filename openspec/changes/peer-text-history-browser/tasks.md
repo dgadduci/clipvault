@@ -71,6 +71,28 @@
   cerrar `PeerPairingModal`. Punto verde sólo para
   `trusted && is_present`; gris para trusted no disponible. Sin
   llamada de red al seleccionar peer gris. Sin botón `Volver`.
+
+  > Reapertura: la implementación original cubrió el snapshot inicial
+  > y el refresh post-pairing, pero NO la actualización reactiva
+  > cuando llega o desaparece un anuncio remoto (`Observed` /
+  > `Removed`). El desktop (`App.svelte`) es el único propietario del
+  > snapshot compartido por `LinkedPeers` y `RemoteHistoryRail`, así
+  > que la corrección es local al shell:
+  >
+  > - Centralizar `refreshPeerSnapshot()` con un guard single-flight
+  >   (módulo / closure) y reusarlo desde `refresh()` y
+  >   `onPairingClosed()`. Eliminar las llamadas directas a
+  >   `peerSnapshotCommand()` que quedan fuera del helper. Una falla
+  >   conserva el snapshot anterior y nunca rompe el desktop.
+  > - Añadir un polling de 2 s (constante local, consistente con
+  >   `PeerSharingModal`) en `App.svelte`, arrancado en `onMount` y
+  >   detenido en `onDestroy`. Ejecutar una actualización inicial al
+  >   montar. `LinkedPeers` y `RemoteHistoryRail` siguen recibiendo el
+  >   snapshot reactivo y NO abren `peerSnapshotCommand()` por su
+  >   cuenta.
+  > - Alcance: NO se modifica `MdnsPeerDiscoveryAdapter`,
+  >   `PeerDiscoveryRuntime`, TTL, pairing ni mTLS. La transición
+  >   tras un cierre abrupto sigue dependiendo del TTL vigente.
 - [ ] 3.3 Selección de peer dispara el dial real con outcomes tipados;
   rechazo para revoked / blocked / not trusted / pin inválido / peer
   ausente / cursor fabricado; respuesta tardía no puede sobrescribir

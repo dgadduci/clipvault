@@ -108,6 +108,21 @@ snapshot; un vínculo nuevo aparece sin recargar la aplicación. El refresh
 post-pairing dispara `peerSnapshotCommand` explícitamente al cerrarse el
 `PeerPairingModal`, sin depender de la siguiente selección del peer.
 
+El shell (`App.svelte`) es el único propietario del snapshot compartido por
+la lista y la `RemoteHistoryRail`. La implementación centraliza el refresh
+detrás de un helper con guard single-flight (mismo patrón que
+`PeerSharingModal.refreshSnapshot`) para que la actualización inicial, la
+post-pairing y cualquier otra ruta coaleszan en un único round-trip cuando
+coincidan en el tiempo. El shell además ejecuta un polling de metadatos
+con cadencia corta y local (2 s, constante del shell, consistente con la del
+modal de Compartir) iniciado en `onMount` y detenido en `onDestroy`. La
+lista y la rail consumen el snapshot reactivo; no abren
+`peerSnapshotCommand` por su cuenta. Una falla del bridge conserva el
+snapshot anterior y no interrumpe el desktop ni muestra un error intrusivo.
+No se modifica `MdnsPeerDiscoveryAdapter`, `PeerDiscoveryRuntime`, el TTL,
+el pareado ni mTLS: la transición tras un cierre abrupto sigue dependiendo
+del TTL vigente.
+
 Seleccionar un peer activo reemplaza en el mismo panel principal la lista de
 historial o colección que estaba visible. No existe una ruta ni página
 `RemoteHistory` independiente. No hay un botón `Volver` como navegación
