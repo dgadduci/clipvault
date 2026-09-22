@@ -218,6 +218,22 @@ deriva sólo de discovery reciente más health TLS mTLS correcto. Desvincular
 pasa a revoked y cierra sesiones; Bloquear pasa a blocked y rechaza pairing y
 health. Desbloquear deja unverified, nunca restaura trust automáticamente.
 
+`Revoked` corta el acceso productivo (la fila pierde el pin, las sesiones en
+curso se cierran, `health_probe` falla con `PairingError::Revoked`) pero
+**no** bloquea la invitación de re-pairing: el usuario debe poder iniciar una
+sesión SAS recíproca para restablecer la confianza. La promoción a `trusted`
+sigue requiriendo las dos aprobaciones SAS de la sesión nueva, así que la
+fila nunca se reactiva silenciosamente. `Blocked` sí sigue siendo terminal
+hasta que el usuario ejecuta `Desbloquear`: pairing, inbound y health siguen
+rechazándose.
+
+`observe_approve` no consulta directamente el `trust_state`: como `revoke` ya
+limpia la tabla de sesiones en memoria, una aprobación que llegue tras un
+revoke no encuentra sesión coincidente y devuelve
+`PairingError::UnknownOrKeyMismatch` — la garantía de "no resurrect" recae en
+el cierre de sesión que `revoke` ejecuta, no en una rama dedicada dentro del
+camino de aprobación.
+
 El endpoint tras mTLS permite únicamente health con versión y presencia
 metadata-only. Todas las otras rutas se rechazan como not_available; browser e
 import entran en cambios posteriores.

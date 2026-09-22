@@ -149,6 +149,60 @@ import records of any other peer.
   armed for the now-blocked peer is disarmed and the other peers keep their
   independent trusted availability
 
+### Requirement: Revoked peers can be re-paired with a fresh reciprocal SAS
+
+`Revoked` SHALL cut productive access (disarm the per-peer cert fingerprint
+pin, close every open session, deny `health_probe`) so the revoked peer cannot
+keep using the previously-pinned identity. The runtime SHALL still permit a
+brand-new pairing invitation from the revoked peer through the same flow a
+freshly-discovered peer would use: `start_outbound` and the inbound
+`register_inbound` / `register_inbound_from_metadata` paths accept the row,
+generate a fresh session id, compute a brand-new SAS and arm the same
+dual-approval gate. Promotion to `Trusted` only happens after both sides
+approve the new SAS over a fresh mTLS transcript — the revoke never
+short-circuits the gate and the previous pin is never silently resurrected.
+
+Because `revoke` already tears down the in-memory session table,
+`observe_approve` does not need a dedicated `Revoked` guard: an approval that
+arrives after a revoke finds no matching session and surfaces
+`PairingError::UnknownOrKeyMismatch`, so the revoke's intent (no silent
+resurrection) holds without an extra branch in the approval path.
+
+`Blocked` SHALL remain terminal until the user runs "Desbloquear": the runtime
+rejects every pairing attempt, inbound invitation and health probe from a
+blocked peer. Health probes against a `Revoked` peer also keep returning
+`PairingError::Revoked` until the new pairing completes.
+
+#### Scenario: Revoked peer starts a new pairing session
+
+- **WHEN** a user invokes "Volver a parear" against a peer whose row is
+  `revoked` from a previous "Desvincular"
+- **THEN** `start_outbound` returns a session awaiting the reciprocal
+  approval; the row stays `revoked` until both sides approve the new SAS
+  over a fresh mTLS transcript
+
+#### Scenario: Revoked peer sends an inbound pairing invitation
+
+- **WHEN** a revoked peer dials this host and the mTLS handshake authenticates
+  the Hello envelope
+- **THEN** the runtime registers the inbound invitation, surfaces it as
+  awaiting local approval and keeps the row in `revoked` until the reciprocal
+  approval lands
+
+#### Scenario: Revoked peer cannot keep health access without a fresh pairing
+
+- **WHEN** a user invokes `health_probe` against a peer whose row is
+  `revoked`
+- **THEN** the probe fails with `PairingError::Revoked` until the new
+  pairing completes and promotes the row back to `trusted`
+
+#### Scenario: Blocked peer remains terminal for every pairing attempt
+
+- **WHEN** a user invokes `start_outbound`, receives an inbound invitation or
+  runs `health_probe` against a peer whose row is `blocked`
+- **THEN** the runtime rejects every attempt with `PairingError::Blocked`
+  regardless of which side initiated the pairing
+
 ### Requirement: Pairing transport exposes no history content
 
 Before the history-browser change, the local peer listener SHALL expose only

@@ -2,6 +2,68 @@
 
 ## Notas de implementación
 
+> **Corrección de re-pairing (2026-09-21, regresión `pairing peer is revoked`).**
+> La regresión reportada tras vincular dos equipos, pulsar `Desvincular` en
+> ambos y luego `Volver a parear` era que `start_outbound` (y los caminos
+> inbound `register_inbound` / `register_inbound_from_metadata`) rechazaban
+> al peer revocado con `PairingError::Revoked`, contradiciendo el contrato:
+> un revoke debe cortar el acceso y los pins activos, pero el usuario debe
+> poder iniciar un pairing nuevo para restablecer la confianza. La causa
+> confirmada era un self-filter en el runtime que trataba `Revoked` igual
+> que `Blocked` para las invitaciones de pairing.
+>
+> El fix elimina la rama `Revoked` de los tres caminos de invitación
+> (`start_outbound`, `register_inbound`, `register_inbound_from_metadata`)
+> y conserva `Blocked` como rechazo terminal. `Revoked` sigue cortando el
+> acceso productivo: `health_probe`, `mark_trusted` no se llama hasta que
+> ambas partes aprueben el SAS nuevo, `revoke`/`block` siguen llamando a
+> `disarm_pin` + `disconnect_peer`, y el doc comment de
+> `PairingError::Revoked` ahora documenta la asimetría (la invitación se
+> permite, la API productiva no). La promoción a `Trusted` se mantiene
+> exclusivamente tras la doble aprobación de la sesión nueva — la fila
+> nunca se reactiva silenciosamente.
+>
+> Cobertura nueva:
+>
+> - `start_outbound_after_revoke_starts_a_session_not_a_failure` (core):
+>   `start_outbound` sobre una fila `revoked` ya no devuelve
+>   `PairingError::Revoked`; produce `AwaitingRemoteApproval` y la fila
+>   sigue en `Revoked` hasta la doble aprobación.
+> - `register_inbound_after_revoke_does_not_change_trust_state` (core):
+>   el listener puede registrar una invitación inbound de un peer revocado
+>   sin tocar el `trust_state`.
+> - `register_inbound_rejects_blocked_peer` (core): `Blocked` sigue
+>   terminal incluso para invitaciones inbound.
+> - `health_probe_rejects_revoked_peer` (core): el health probe sigue
+>   rechazando `Revoked` antes de completar el re-pairing.
+> - `revoked_then_re_pair_brings_both_real_peers_back_to_trusted` (core):
+>   test end-to-end con dos runtimes/listeners reales que repite el
+>   escenario reportado — `trusted → revoked → re-pair → trusted` en
+>   ambos lados, con la SAS coincidente y el health probe de por medio
+>   para confirmar que el acceso productivo sigue denegado durante la
+>   ventana de re-pairing.
+>
+> Verificación reproducible:
+>
+> - `cargo test --package clipvault-core --lib --features
+>   local-peer-identity-keychain,local-peer-discovery-mdns,local-peer-pairing-tls
+>   peer_pairing` → 21/21 verde (los 16 previos + 5 nuevos).
+> - `cargo test --package clipvault-core --lib` (sin el feature TLS) → 16/16
+>   verde.
+> - `cargo test --package clipvault-db --lib` → 161/161 verde.
+> - `cargo test -p clipvault-platform --lib --features
+>   local-peer-identity-keychain,local-peer-discovery-mdns,local-peer-pairing-tls
+>   peer_transport` → 33/33 verde.
+> - `cargo test -p clipvault-platform --lib --features
+>   local-peer-identity-keychain,local-peer-discovery-mdns,local-peer-pairing-tls
+>   peer_discovery` → 21/21 verde.
+> - `cargo fmt --all -- --check` y `git diff --check` limpios.
+> - `openspec validate local-peer-mutual-pairing --strict` válido.
+>
+> Limitaciones: 5.2 (prueba manual entre Wayland, X11 y macOS) sigue
+> pendiente para verificación humana; la lógica de re-pairing ya está
+> cubierta por el test de doble listener real dentro de CI.
+
 > **Corrección de integración (2026-09-21, conclusión visible de aprobación).**
 > El protocolo real ya completaba la promoción después de que las dos personas
 > aceptaran, pero `approve_local` devuelve antes de que la tarea asíncrona lea

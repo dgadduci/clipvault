@@ -33,5 +33,8 @@ sólo health autenticado; ningún historial ni contenido se expone aún.
 ## Criterio de aceptación
 
 Dos pares detectados pueden completar el código recíproco y luego reconocerse
-silenciosamente por TLS. Bloquear/revocar uno no altera otros pares ni revela
-contenido a un cliente no confiado.
+silenciosamente por TLS. Bloquear/revocar uno no altera a los demás pares ni
+revela contenido a un cliente no confiado. Una fila en `Revoked` debe seguir
+permitiendo iniciar una sesión SAS recíproca nueva; la doble aprobación sigue
+siendo el único camino que restablece `Trusted`. `Blocked` sí sigue siendo
+terminal hasta `Desbloquear`.

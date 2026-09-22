@@ -153,8 +153,18 @@ pub enum PairingError {
     #[error("pairing peer is blocked")]
     Blocked,
     /// The remote peer is in the [`TrustState::Revoked`] state.
-    /// The runtime rejects the connection; the user must
-    /// explicitly re-pair to clear the revoke.
+    /// The runtime rejects **productive** calls (health probe,
+    /// any pre-existing session) so a revoked peer cannot
+    /// regain access without a fresh pairing. The error is
+    /// intentionally NOT raised by
+    /// [`Self::start_outbound`] /
+    /// [`Self::register_inbound`] /
+    /// [`Self::register_inbound_from_metadata`]: a revoke cuts
+    /// access and disarms the pin, but the user must still be
+    /// able to start a new reciprocal SAS session to restore
+    /// trust. The promotion to `Trusted` still requires both
+    /// approvals over a brand-new mTLS transcript — the revoke
+    /// never short-circuits the dual-approval gate.
     #[error("pairing peer is revoked")]
     Revoked,
     /// The session hit the
@@ -810,6 +820,19 @@ impl PairingRuntime {
     /// is observed through [`Self::observe_approve`]; the
     /// runtime refuses to mark `Trusted` until both sides have
     /// approved.
+    ///
+    /// A peer in [`TrustState::Revoked`] is intentionally
+    /// allowed: a revoke cuts productive access and disarms the
+    /// pin, but the user must still be able to start a brand-new
+    /// pairing session to restore trust. The promotion to
+    /// `Trusted` still requires the reciprocal SAS approval over
+    /// a fresh mTLS transcript — the previous row is never
+    /// silently resurrected and any stale `tls_cert_fingerprint`
+    /// is overwritten only after both approvals land. A peer in
+    /// [`TrustState::Blocked`] is rejected with
+    /// [`PairingError::Blocked`] because the block is the user's
+    /// explicit intent to deny every pairing attempt until they
+    /// run "Desbloquear".
     pub fn start_outbound(
         &self,
         remote_peer_id: &str,
@@ -820,8 +843,20 @@ impl PairingRuntime {
             return Err(PairingError::UnknownOrKeyMismatch);
         }
         // The runtime self-filters against the trust-state
-        // persisted row so a blocked / revoked peer is rejected
-        // before any cryptographic work runs.
+        // persisted row so a **blocked** peer is rejected before
+        // any cryptographic work runs. A peer in
+        // [`TrustState::Revoked`] is intentionally allowed here:
+        // the revoke cuts productive access (health, the previous
+        // pin, any open session) but the user must still be able
+        // to start a brand-new pairing session to restore trust.
+        // Promotion to `Trusted` still requires the reciprocal
+        // SAS approval over a fresh mTLS transcript — the
+        // previous link is not silently resurrected. The
+        // `Revoked` state remains terminal for every productive
+        // API (health probe, observed approval against a stale
+        // session) and for any inbound invitation that is not
+        // backed by a fresh `Hello` envelope from the
+        // authenticated transport.
         match self
             .inner
             .persistence
@@ -830,9 +865,6 @@ impl PairingRuntime {
         {
             Some(row) if row.trust_state == TrustState::Blocked => {
                 return Err(PairingError::Blocked);
-            }
-            Some(row) if row.trust_state == TrustState::Revoked => {
-                return Err(PairingError::Revoked);
             }
             _ => {}
         }
@@ -1365,9 +1397,14 @@ impl PairingRuntime {
             Some(row) if row.trust_state == TrustState::Blocked => {
                 return Err(PairingError::Blocked);
             }
-            Some(row) if row.trust_state == TrustState::Revoked => {
-                return Err(PairingError::Revoked);
-            }
+            // A `Revoked` row is intentionally allowed here for
+            // the same reason [`Self::start_outbound`] permits
+            // it: the revoke cuts productive access but the
+            // user must still be able to complete a brand-new
+            // reciprocal SAS exchange to restore trust. The
+            // transport only delivers `Hello` envelopes the
+            // mTLS handshake authenticated, so this path is the
+            // legitimate entry point for re-pairing.
             _ => {}
         }
         if !self.inner.rate.write().allow() {
@@ -1444,15 +1481,17 @@ impl PairingRuntime {
         &self,
         metadata: clipvault_platform::peer_transport::InboundSessionMetadata,
     ) {
-        // Trust-state pre-flight (blocked / revoked) stays
-        // identical to the legacy `register_inbound` path so a
-        // stale blocked row never silently resurrects through an
-        // inbound pairing attempt.
+        // Trust-state pre-flight stays aligned with [`Self::register_inbound`]:
+        // a stale **blocked** row never silently resurrects through an
+        // inbound pairing attempt. A `Revoked` row is intentionally
+        // allowed: the listener already authenticated the inbound
+        // `Hello` envelope over mTLS, and a revoke cuts productive
+        // access but does not forbid the user from completing a fresh
+        // reciprocal SAS exchange. Promotion to `Trusted` still
+        // requires both approvals over the new transcript — the revoke
+        // never short-circuits the dual-approval gate.
         if let Ok(Some(row)) = self.inner.persistence.load(&metadata.remote_peer_id) {
             if row.trust_state == TrustState::Blocked {
-                return;
-            }
-            if row.trust_state == TrustState::Revoked {
                 return;
             }
         }
@@ -1602,6 +1641,28 @@ mod tests {
     use super::*;
     use crate::peer_identity::{LocalPeerIdentity, PeerFingerprint, PeerId};
 
+    #[cfg(feature = "local-peer-pairing-tls")]
+    use clipvault_platform::peer_transport::tls::full_public_key_fingerprint;
+    #[cfg(feature = "local-peer-pairing-tls")]
+    use clipvault_platform::peer_transport::{RemotePeerResolver, TlsPeerTransport};
+    #[cfg(feature = "local-peer-pairing-tls")]
+    use std::net::SocketAddr;
+    #[cfg(feature = "local-peer-pairing-tls")]
+    use std::sync::atomic::{AtomicU16, Ordering as AtomicOrdering};
+
+    /// The two e2e tests each install two real TLS listeners. Keep
+    /// only those fixtures serial; all fake-transport tests remain
+    /// parallel.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    static TWO_REAL_LISTENER_E2E_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn lock_two_real_listener_e2e() -> std::sync::MutexGuard<'static, ()> {
+        TWO_REAL_LISTENER_E2E_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn local_identity() -> LocalPeerIdentity {
         LocalPeerIdentity {
             peer_id: PeerId::from_public_key(&[1u8; 32]),
@@ -1628,6 +1689,188 @@ mod tests {
         }
     }
 
+    /// Loopback `MaterialLoader` the two-listener tests use to
+    /// hand the runtime a deterministic local identity without
+    /// exercising the keychain adapter. Cloning is cheap because
+    /// the underlying material is just bytes.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[derive(Clone)]
+    struct FixedMaterialLoader(clipvault_platform::LocalIdentityMaterial);
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    impl MaterialLoader for FixedMaterialLoader {
+        fn load(
+            &self,
+        ) -> Result<clipvault_platform::LocalIdentityMaterial, PairingPersistenceError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// No-op advertisement sink the tests install so the
+    /// productive transport install path completes without an
+    /// mDNS adapter. The transport still binds an ephemeral
+    /// listener; the test only needs the local bound port.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    struct NoopAdvertisement;
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    impl PairingAdvertisement for NoopAdvertisement {
+        fn publish(&self, _bound_port: u16) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn withdraw(&self) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
+
+    /// Resolver the outbound dialer uses to translate a remote
+    /// `peer_id` into a loopback `SocketAddr`. The helper
+    /// depends on the inbound listener having stored its bound
+    /// port through the `port` `AtomicU16` before the outbound
+    /// call begins — each installer publishes its own bound port
+    /// before either side starts an outbound pairing session.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    struct LoopbackResolver {
+        expected_peer_id: String,
+        port: Arc<AtomicU16>,
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    impl RemotePeerResolver for LoopbackResolver {
+        fn resolve(&self, peer_id: &str) -> Option<SocketAddr> {
+            if peer_id != self.expected_peer_id {
+                return None;
+            }
+            let port = self.port.load(AtomicOrdering::Acquire);
+            (port != 0).then_some(([127, 0, 0, 1], port).into())
+        }
+    }
+
+    /// Build the `KnownPeer` row a freshly-discovered peer would
+    /// carry, projecting the canonical full public-key fingerprint
+    /// the mDNS listener eventually advertises. Tests seed each
+    /// runtime with the row that corresponds to the *other* side
+    /// so the production discovery branch is fully exercised.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn pairing_row(
+        identity: &clipvault_platform::LocalPeerIdentity,
+        display_name: &str,
+    ) -> KnownPeer {
+        let mut row = known_peer(
+            &identity.peer_id.to_string(),
+            &identity.fingerprint.to_string(),
+            display_name,
+        );
+        row.full_public_key_fingerprint = full_public_key_fingerprint(&identity.public_key);
+        row.capability = PAIRING_CAPABILITY.to_string();
+        row
+    }
+
+    /// Install the productive pairing transport on the supplied
+    /// runtime. The loopback resolver translates
+    /// `remote_peer_id` into the bound port stored in
+    /// `remote_port` (the OTHER side's listener); the local bound
+    /// port is published into `local_port` so the other side's
+    /// resolver can read it later. The resolver is queried lazily
+    /// by the dialer, so calling the helpers in either order is
+    /// safe as long as both runtimes publish their bound port
+    /// before any `start_outbound` is invoked.
+    ///
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_pairing_listener(
+        runtime: &PairingRuntime,
+        local_port: &Arc<AtomicU16>,
+        remote_port: &Arc<AtomicU16>,
+        remote_peer_id: &str,
+        display_name: &str,
+        kind: &str,
+    ) {
+        let resolver: Arc<dyn RemotePeerResolver> = Arc::new(LoopbackResolver {
+            expected_peer_id: remote_peer_id.to_string(),
+            port: Arc::clone(remote_port),
+        });
+        let sink: Arc<dyn TransportSink> = Arc::new(runtime.clone());
+        let advertisement: Arc<dyn PairingAdvertisement> = Arc::new(NoopAdvertisement);
+        let bound = runtime
+            .install_pairing_transport_with_resolver(sink, advertisement, resolver, display_name)
+            .unwrap_or_else(|error| panic!("install {kind}: {error:?}"));
+        local_port.store(bound, AtomicOrdering::Release);
+        // Sanity-check the install: the transport MUST report
+        // itself running and the bound port MUST be non-zero.
+        // The pairing runtime never sees a port 0 listener, and
+        // the previous panic path could only surface the
+        // collapsed `Unavailable` outcome.
+        assert!(
+            runtime.pairing_transport_is_running(),
+            "install {kind}: transport must report is_running() after start",
+        );
+        assert!(bound > 0, "install {kind}: bound port must be non-zero");
+    }
+
+    /// Run a full reciprocal pairing cycle: the outbound runtime
+    /// starts the session, the inbound runtime registers the
+    /// listener-side invitation, both SAS snapshots are asserted
+    /// to match, and both runtimes approve the local user side.
+    /// `outbound_first` toggles the order in which the two
+    /// approvals land so the test exercises both interleavings
+    /// reported from the field. The promotion to `Trusted` is
+    /// asserted by the caller via [`wait_for_trusted`].
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn drive_full_pair(
+        outbound: &PairingRuntime,
+        inbound: &PairingRuntime,
+        peer_id_b: &str,
+        fingerprint_b: &str,
+        outbound_first: bool,
+    ) -> PairingSessionId {
+        let outbound_id = match outbound
+            .start_outbound(peer_id_b, fingerprint_b, "Peer B")
+            .expect("outbound must accept revoked row (regression)")
+        {
+            PairingOutcome::AwaitingRemoteApproval(id) => id,
+            outcome => panic!("expected AwaitingRemoteApproval, got {outcome:?}"),
+        };
+        let inbound_id = wait_for_pairing_session(inbound, true)
+            .expect("listener runtime must register its inbound invitation");
+        let outbound_sas = outbound
+            .snapshot()
+            .into_iter()
+            .find(|session| session.session_id == outbound_id)
+            .expect("outbound snapshot")
+            .sas;
+        let inbound_sas = inbound
+            .snapshot()
+            .into_iter()
+            .find(|session| session.session_id == inbound_id)
+            .expect("inbound snapshot")
+            .sas;
+        assert_eq!(
+            outbound_sas, inbound_sas,
+            "both users must review the same SAS",
+        );
+        if outbound_first {
+            assert!(matches!(
+                outbound.approve_local(outbound_id),
+                PairingOutcome::AwaitingRemoteApproval(_)
+            ));
+            assert!(matches!(
+                inbound.approve_local(inbound_id),
+                PairingOutcome::AwaitingRemoteApproval(_)
+            ));
+        } else {
+            assert!(matches!(
+                inbound.approve_local(inbound_id),
+                PairingOutcome::AwaitingRemoteApproval(_)
+            ));
+            assert!(matches!(
+                outbound.approve_local(outbound_id),
+                PairingOutcome::AwaitingRemoteApproval(_)
+            ));
+        }
+        outbound_id
+    }
+
     /// Covers the exact manual sequence used by the desktop UI:
     /// the listener-side user approves first, then the dialer-side
     /// user approves. Both runtimes must receive the authenticated
@@ -1638,65 +1881,7 @@ mod tests {
     #[cfg(feature = "local-peer-pairing-tls")]
     #[test]
     fn reciprocal_runtime_approvals_promote_both_real_peers_to_trusted() {
-        use std::net::SocketAddr;
-        use std::sync::atomic::{AtomicU16, Ordering as AtomicOrdering};
-
-        use clipvault_platform::peer_transport::{
-            tls::full_public_key_fingerprint, RemotePeerResolver, TlsPeerTransport,
-        };
-
-        #[derive(Clone)]
-        struct FixedMaterialLoader(clipvault_platform::LocalIdentityMaterial);
-
-        impl MaterialLoader for FixedMaterialLoader {
-            fn load(
-                &self,
-            ) -> Result<clipvault_platform::LocalIdentityMaterial, PairingPersistenceError>
-            {
-                Ok(self.0.clone())
-            }
-        }
-
-        struct NoopAdvertisement;
-
-        impl PairingAdvertisement for NoopAdvertisement {
-            fn publish(&self, _bound_port: u16) -> Result<(), TransportError> {
-                Ok(())
-            }
-
-            fn withdraw(&self) -> Result<(), TransportError> {
-                Ok(())
-            }
-        }
-
-        struct LoopbackResolver {
-            expected_peer_id: String,
-            port: Arc<AtomicU16>,
-        }
-
-        impl RemotePeerResolver for LoopbackResolver {
-            fn resolve(&self, peer_id: &str) -> Option<SocketAddr> {
-                if peer_id != self.expected_peer_id {
-                    return None;
-                }
-                let port = self.port.load(AtomicOrdering::Acquire);
-                (port != 0).then_some(([127, 0, 0, 1], port).into())
-            }
-        }
-
-        fn pairing_row(
-            identity: &clipvault_platform::LocalPeerIdentity,
-            display_name: &str,
-        ) -> KnownPeer {
-            let mut row = known_peer(
-                &identity.peer_id.to_string(),
-                &identity.fingerprint.to_string(),
-                display_name,
-            );
-            row.full_public_key_fingerprint = full_public_key_fingerprint(&identity.public_key);
-            row.capability = PAIRING_CAPABILITY.to_string();
-            row
-        }
+        let _e2e_guard = lock_two_real_listener_e2e();
 
         let material_a =
             clipvault_platform::LocalIdentityMaterial::from_seed([41u8; 32]).expect("material A");
@@ -1719,75 +1904,154 @@ mod tests {
 
         let port_a = Arc::new(AtomicU16::new(0));
         let port_b = Arc::new(AtomicU16::new(0));
-        let resolver_a: Arc<dyn RemotePeerResolver> = Arc::new(LoopbackResolver {
-            expected_peer_id: material_b.identity().peer_id.to_string(),
-            port: Arc::clone(&port_b),
-        });
-        let resolver_b: Arc<dyn RemotePeerResolver> = Arc::new(LoopbackResolver {
-            expected_peer_id: material_a.identity().peer_id.to_string(),
-            port: Arc::clone(&port_a),
-        });
-
-        let sink_a: Arc<dyn TransportSink> = Arc::new(runtime_a.clone());
-        let sink_b: Arc<dyn TransportSink> = Arc::new(runtime_b.clone());
-        let advertisement_a: Arc<dyn PairingAdvertisement> = Arc::new(NoopAdvertisement);
-        let advertisement_b: Arc<dyn PairingAdvertisement> = Arc::new(NoopAdvertisement);
-        let bound_a = runtime_a
-            .install_pairing_transport_with_resolver(sink_a, advertisement_a, resolver_a, "Peer A")
-            .expect("install A");
-        port_a.store(bound_a, AtomicOrdering::Release);
-        let bound_b = runtime_b
-            .install_pairing_transport_with_resolver(sink_b, advertisement_b, resolver_b, "Peer B")
-            .expect("install B");
-        port_b.store(bound_b, AtomicOrdering::Release);
-
-        let remote_b_fingerprint = full_public_key_fingerprint(&material_b.identity().public_key);
-        let outbound_id = match runtime_a
-            .start_outbound(
-                &material_b.identity().peer_id.to_string(),
-                &remote_b_fingerprint,
-                "Peer B",
-            )
-            .expect("start outbound")
-        {
-            PairingOutcome::AwaitingRemoteApproval(id) => id,
-            outcome => panic!("expected awaiting approval, got {outcome:?}"),
-        };
-
-        let inbound_id = wait_for_pairing_session(&runtime_b, true)
-            .expect("listener runtime must register its inbound invitation");
-        let outbound_sas = runtime_a
-            .snapshot()
-            .into_iter()
-            .find(|session| session.session_id == outbound_id)
-            .expect("outbound snapshot")
-            .sas;
-        let inbound_sas = runtime_b
-            .snapshot()
-            .into_iter()
-            .find(|session| session.session_id == inbound_id)
-            .expect("inbound snapshot")
-            .sas;
-        assert_eq!(
-            outbound_sas, inbound_sas,
-            "both users must review the same SAS"
+        install_pairing_listener(
+            &runtime_a,
+            &port_a,
+            &port_b,
+            &material_b.identity().peer_id.to_string(),
+            "Peer A",
+            "A",
         );
-
+        install_pairing_listener(
+            &runtime_b,
+            &port_b,
+            &port_a,
+            &material_a.identity().peer_id.to_string(),
+            "Peer B",
+            "B",
+        );
         // This is deliberately the order the user exercised: the
         // receiving (inbound) host accepts before the initiating host.
-        assert!(matches!(
-            runtime_b.approve_local(inbound_id),
-            PairingOutcome::AwaitingRemoteApproval(_)
-        ));
-        assert!(matches!(
-            runtime_a.approve_local(outbound_id),
-            PairingOutcome::AwaitingRemoteApproval(_)
-        ));
-
+        drive_full_pair(
+            &runtime_a,
+            &runtime_b,
+            &material_b.identity().peer_id.to_string(),
+            &full_public_key_fingerprint(&material_b.identity().public_key),
+            false,
+        );
         wait_for_trusted(&persistence_a, &material_b.identity().peer_id.to_string())
             .expect("dialer runtime must become trusted");
         wait_for_trusted(&persistence_b, &material_a.identity().peer_id.to_string())
             .expect("listener runtime must become trusted");
+        assert!(runtime_a.snapshot().is_empty());
+        assert!(runtime_b.snapshot().is_empty());
+
+        transport_a.stop().expect("stop A");
+        transport_b.stop().expect("stop B");
+    }
+
+    /// Reproduces the manual regression reported on the
+    /// `local-peer-mutual-pairing` change: Linux + macOS were
+    /// `trusted`, both users pressed "Desvincular" so both rows
+    /// landed in `revoked`, and pressing "Volver a parear"
+    /// failed with `pairing failed: pairing peer is revoked`.
+    /// The spec requires that a revoked row allow a brand-new
+    /// pairing session that still requires the reciprocal SAS
+    /// approval before promoting back to `Trusted`. This test
+    /// installs two real runtimes + listeners, drives a full
+    /// reciprocal pairing to `Trusted`, marks both rows
+    /// `revoked`, restarts the cycle and asserts both rows
+    /// become `Trusted` again. It is the e2e pin the user
+    /// provided.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn revoked_then_re_pair_brings_both_real_peers_back_to_trusted() {
+        let _e2e_guard = lock_two_real_listener_e2e();
+
+        let material_a =
+            clipvault_platform::LocalIdentityMaterial::from_seed([51u8; 32]).expect("material A");
+        let material_b =
+            clipvault_platform::LocalIdentityMaterial::from_seed([52u8; 32]).expect("material B");
+
+        let transport_a = Arc::new(TlsPeerTransport::new());
+        let persistence_a = Arc::new(InMemoryPairingPersistence::new());
+        persistence_a.seed(pairing_row(material_b.identity(), "Peer B"));
+        let runtime_a = PairingRuntime::new(transport_a.clone(), persistence_a.clone());
+        runtime_a.set_material_loader(Arc::new(FixedMaterialLoader(material_a.clone())));
+        runtime_a.set_local_identity(Some(material_a.identity().clone()));
+
+        let transport_b = Arc::new(TlsPeerTransport::new());
+        let persistence_b = Arc::new(InMemoryPairingPersistence::new());
+        persistence_b.seed(pairing_row(material_a.identity(), "Peer A"));
+        let runtime_b = PairingRuntime::new(transport_b.clone(), persistence_b.clone());
+        runtime_b.set_material_loader(Arc::new(FixedMaterialLoader(material_b.clone())));
+        runtime_b.set_local_identity(Some(material_b.identity().clone()));
+
+        let port_a = Arc::new(AtomicU16::new(0));
+        let port_b = Arc::new(AtomicU16::new(0));
+        install_pairing_listener(
+            &runtime_a,
+            &port_a,
+            &port_b,
+            &material_b.identity().peer_id.to_string(),
+            "Peer A",
+            "A",
+        );
+        install_pairing_listener(
+            &runtime_b,
+            &port_b,
+            &port_a,
+            &material_a.identity().peer_id.to_string(),
+            "Peer B",
+            "B",
+        );
+        // First cycle: drive the runtimes to `Trusted`.
+        drive_full_pair(
+            &runtime_a,
+            &runtime_b,
+            &material_b.identity().peer_id.to_string(),
+            &full_public_key_fingerprint(&material_b.identity().public_key),
+            false,
+        );
+        wait_for_trusted(&persistence_a, &material_b.identity().peer_id.to_string())
+            .expect("dialer runtime must become trusted (first cycle)");
+        wait_for_trusted(&persistence_b, &material_a.identity().peer_id.to_string())
+            .expect("listener runtime must become trusted (first cycle)");
+
+        // Both users press "Desvincular": rows land in
+        // `revoked`, sessions close, pins are disarmed. The
+        // previous regression rejected the next "Volver a
+        // parear" with `PairingError::Revoked`.
+        let revoke_a = runtime_a.revoke(&material_b.identity().peer_id.to_string());
+        let revoke_b = runtime_b.revoke(&material_a.identity().peer_id.to_string());
+        assert!(matches!(revoke_a, TrustOperationOutcome::Stored(_)));
+        assert!(matches!(revoke_b, TrustOperationOutcome::Stored(_)));
+        let row_a = persistence_a
+            .load(&material_b.identity().peer_id.to_string())
+            .expect("load")
+            .expect("present");
+        let row_b = persistence_b
+            .load(&material_a.identity().peer_id.to_string())
+            .expect("load")
+            .expect("present");
+        assert_eq!(row_a.trust_state, TrustState::Revoked);
+        assert_eq!(row_b.trust_state, TrustState::Revoked);
+
+        // Health probe MUST still reject the revoked peer: a
+        // revoke cuts productive access even though a re-pair
+        // session is permitted.
+        let health = runtime_a.health_probe(
+            &material_b.identity().peer_id.to_string(),
+            &full_public_key_fingerprint(&material_b.identity().public_key),
+        );
+        assert!(matches!(health, Err(PairingError::Revoked)));
+
+        // Second cycle: `start_outbound` MUST accept the
+        // revoked row (the regression under test). The
+        // reciprocal approval brings both rows back to
+        // `Trusted` — the dual-approval gate is the only path
+        // that restores trust.
+        drive_full_pair(
+            &runtime_a,
+            &runtime_b,
+            &material_b.identity().peer_id.to_string(),
+            &full_public_key_fingerprint(&material_b.identity().public_key),
+            true,
+        );
+        wait_for_trusted(&persistence_a, &material_b.identity().peer_id.to_string())
+            .expect("dialer runtime must become trusted (re-pair cycle)");
+        wait_for_trusted(&persistence_b, &material_a.identity().peer_id.to_string())
+            .expect("listener runtime must become trusted (re-pair cycle)");
         assert!(runtime_a.snapshot().is_empty());
         assert!(runtime_b.snapshot().is_empty());
 
@@ -1865,6 +2129,142 @@ mod tests {
             .start_outbound("peer-bbbb", "fp-bbbb", "Studio B")
             .expect_err("blocked peer must be rejected");
         assert!(matches!(err, PairingError::Blocked));
+    }
+
+    /// `start_outbound` against a `revoked` peer MUST yield a
+    /// session that requires the reciprocal approval — the
+    /// previous wiring rejected the call with
+    /// `PairingError::Revoked`, which contradicted the spec
+    /// ("un revoke debe cortar el acceso y los pins activos,
+    /// pero el usuario debe poder iniciar un pairing nuevo para
+    /// restablecer la confianza"). The promotion to `Trusted`
+    /// still requires the dual SAS approval; the runtime does
+    /// not auto-promote the row.
+    #[test]
+    fn start_outbound_after_revoke_starts_a_session_not_a_failure() {
+        let persistence = Arc::new(InMemoryPairingPersistence::new());
+        let mut revoked = known_peer("peer-bbbb", "fp-bbbb", "Studio B");
+        revoked.trust_state = TrustState::Revoked;
+        persistence.seed(revoked);
+        let transport: Arc<dyn PeerTransport> = Arc::new(FakeTransport::new());
+        let runtime = PairingRuntime::new(transport, persistence.clone());
+        seed_local_identity(&runtime);
+        let outcome = runtime
+            .start_outbound("peer-bbbb", "fp-bbbb", "Studio B")
+            .expect("revoked peer must accept a fresh pairing session");
+        let session_id = match outcome {
+            PairingOutcome::AwaitingRemoteApproval(id) => id,
+            other => panic!("expected AwaitingRemoteApproval, got {other:?}"),
+        };
+        // Row stays `Revoked` until BOTH sides approve.
+        let row = persistence
+            .load("peer-bbbb")
+            .expect("load")
+            .expect("present");
+        assert_eq!(
+            row.trust_state,
+            TrustState::Revoked,
+            "start_outbound alone must not auto-promote a revoked row",
+        );
+        // The session is pending — only the local user has not
+        // approved yet, the remote approval is what triggers
+        // promotion.
+        let snapshot = runtime.snapshot();
+        let session = snapshot
+            .iter()
+            .find(|s| s.session_id == session_id)
+            .expect("session present");
+        assert!(!session.local_approved);
+        assert!(!session.remote_approved);
+    }
+
+    /// `register_inbound` (the listener-side handshake path)
+    /// MUST also accept a `revoked` peer so a user who lost
+    /// trust on one host can still receive a fresh reciprocal
+    /// pairing invitation from the other. The transport only
+    /// delivers `Hello` envelopes the mTLS handshake already
+    /// authenticated, so this is the legitimate entry point for
+    /// re-pairing — the row stays `revoked` until both sides
+    /// approve.
+    #[test]
+    fn register_inbound_after_revoke_does_not_change_trust_state() {
+        let persistence = Arc::new(InMemoryPairingPersistence::new());
+        let mut revoked = known_peer("peer-bbbb", "fp-bbbb", "Studio B");
+        revoked.trust_state = TrustState::Revoked;
+        persistence.seed(revoked);
+        let transport: Arc<dyn PeerTransport> = Arc::new(FakeTransport::new());
+        let runtime = PairingRuntime::new(transport, persistence.clone());
+        seed_local_identity(&runtime);
+        let outcome = runtime.observe_pairing(
+            PairingMessage::Hello {
+                version: PAIRING_WIRE_VERSION,
+                peer_id: "peer-bbbb".to_string(),
+                public_key_fingerprint: "fp-bbbb".to_string(),
+                display_name: "Studio B".to_string(),
+                nonce_a: "nonce-a".to_string(),
+            },
+            "fingerprint-aaaa",
+        );
+        assert!(matches!(outcome, PairingOutcome::AwaitingRemoteApproval(_)));
+        // The session is registered, but the row is still
+        // `revoked` — promotion requires the reciprocal approval.
+        let row = persistence
+            .load("peer-bbbb")
+            .expect("load")
+            .expect("present");
+        assert_eq!(row.trust_state, TrustState::Revoked);
+        assert_eq!(runtime.snapshot().len(), 1);
+    }
+
+    /// `register_inbound` MUST still refuse a `blocked` peer —
+    /// blocking is the user's explicit intent to deny every
+    /// pairing attempt, including fresh inbound invitations,
+    /// until they run "Desbloquear".
+    #[test]
+    fn register_inbound_rejects_blocked_peer() {
+        let persistence = Arc::new(InMemoryPairingPersistence::new());
+        let mut blocked = known_peer("peer-bbbb", "fp-bbbb", "Studio B");
+        blocked.trust_state = TrustState::Blocked;
+        persistence.seed(blocked);
+        let transport: Arc<dyn PeerTransport> = Arc::new(FakeTransport::new());
+        let runtime = PairingRuntime::new(transport, persistence);
+        seed_local_identity(&runtime);
+        let outcome = runtime.observe_pairing(
+            PairingMessage::Hello {
+                version: PAIRING_WIRE_VERSION,
+                peer_id: "peer-bbbb".to_string(),
+                public_key_fingerprint: "fp-bbbb".to_string(),
+                display_name: "Studio B".to_string(),
+                nonce_a: "nonce-a".to_string(),
+            },
+            "fingerprint-aaaa",
+        );
+        assert!(matches!(
+            outcome,
+            PairingOutcome::Failed(PairingError::Blocked)
+        ));
+        assert!(runtime.snapshot().is_empty());
+    }
+
+    /// The health probe MUST continue to refuse a `revoked`
+    /// peer: revoking is the user's explicit intent to deny
+    /// productive access. A re-pairing promotion to `Trusted`
+    /// is the ONLY path that restores health access.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn health_probe_rejects_revoked_peer() {
+        let persistence = Arc::new(InMemoryPairingPersistence::new());
+        let mut revoked = known_peer("peer-bbbb", "fp-bbbb", "Studio B");
+        revoked.trust_state = TrustState::Revoked;
+        revoked.tls_cert_fingerprint = "f".repeat(64);
+        persistence.seed(revoked);
+        let transport: Arc<dyn PeerTransport> = Arc::new(FakeTransport::new());
+        let runtime = PairingRuntime::new(transport, persistence);
+        seed_local_identity(&runtime);
+        let err = runtime
+            .health_probe("peer-bbbb", &"f".repeat(64))
+            .expect_err("revoked peer must remain denied by health probe");
+        assert!(matches!(err, PairingError::Revoked));
     }
 
     #[test]

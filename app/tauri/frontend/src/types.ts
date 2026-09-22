@@ -536,10 +536,14 @@ export type PeerDisplayNameErrorCode =
  *   not started (or has rejected / cancelled) a pairing session.
  * - `trusted`: the reciprocal SAS exchange completed; health
  *   probes are accepted on the mTLS-pinned channel.
- * - `revoked`: the user disconnected. A fresh pairing is required
- *   to restore trust.
+ * - `revoked`: the user disconnected. Productive access
+ *   (health probes, the previous pin) is denied, but the user
+ *   can still start a fresh reciprocal SAS pairing to restore
+ *   trust. The dual-approval gate is the only path that
+ *   promotes the row back to `trusted`.
  * - `blocked`: the user blocked the peer. Pairing and health
- *   probes are rejected before any cryptographic work runs.
+ *   probes are rejected before any cryptographic work runs;
+ *   `blocked` stays terminal until "Desbloquear".
  */
 export type PeerTrustState =
   | "unverified"
