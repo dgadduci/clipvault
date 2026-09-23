@@ -71,6 +71,13 @@
   > toggle (no por el helper de test que recibe manualmente el
   > handler) y verifica que un `ListRecentText` autenticado llega al
   > handler sin devolver `not_available`.
+  >
+  > Reapertura: los pins mTLS de `TlsPeerTransport` son volátiles. El
+  > bootstrap restaura antes del listener cada fingerprint canónico
+  > persistido de un peer `trusted`, mediante `PairingRuntime`; filas
+  > no trusted, vacías o malformadas no se arman. Una regresión usa el
+  > transporte TLS real para verificar que el pin restaurado pasa
+  > `health_check` y que las otras filas siguen como `UnknownPeer`.
 - [x] 2.4 Reemplazar el cursor percent-encoded por HMAC-SHA256 sobre
   `(peer_id, created_at, id)` con secreto de 32 bytes por peer; rotar el
   secreto en `Revoked`; persistir el secreto ligado al peer; devolver
@@ -238,6 +245,10 @@
   > vuelve a pasar `cargo check --workspace`, `cargo fmt`,
   > `git diff --check` y `npx openspec validate` antes de cerrar el
   > cambio.
+  >
+  > Reapertura: se revalida el preload de pins mTLS persistidos tras
+  > reinicio, junto con el test focalizado de restauración y la
+  > batería Rust relevante. La prueba humana 4.2 continúa pendiente.
 - [ ] 4.2 Prueba manual en Wayland, X11 y macOS: lista reactiva de
   pares, puntos activo/no disponible, reemplazo del panel principal,
   previews horizontales, páginas, falla de red, menú Importar

@@ -136,6 +136,26 @@ productiva ya no envía `None`.
 La plataforma se mantiene libre de SQLite y Tauri; el frontend se
 mantiene libre de lógica de negocio: el cambio vive en core + platform.
 
+### Restauración de pins mTLS tras reinicio
+
+El fingerprint SHA-256 del certificado de un par `trusted` ya se
+persiste en `known_peers.tls_cert_fingerprint`, pero los mapas que el
+transporte TLS usa para verificar el certificado son deliberadamente
+volátiles. Al reiniciar ClipVault, dejar esos mapas vacíos convertiría
+un par válido en `UnknownPeer` antes de abrir la conexión de historial.
+
+Durante el bootstrap y antes de iniciar el listener, el core recorre
+únicamente filas `Trusted` con fingerprint SHA-256 canónico (64 hex en
+minúsculas) y rearma el pin a través de `PairingRuntime`. Filas no
+trusted, vacías o malformadas se omiten. Un fallo al listar o armar un
+pin no impide iniciar ClipVault ni revela identificadores, fingerprints,
+endpoints, SQL o contenido en logs; el par afectado permanece con el
+outcome tipado `not_trusted` hasta volver a vincularse.
+
+Una regresión con un transporte TLS real pero sin red verifica que un
+pin trusted restaurado pasa `health_check`, mientras que filas
+unverified o con fingerprint malformado no entran al verifier map.
+
 ### Outcomes tipados: `not_active` vs `not_trusted`
 
 El runtime debe distinguir con precisión por qué un par remoto rechaza

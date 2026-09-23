@@ -37,6 +37,15 @@ transferable set even when it is textual.
   present
 - **THEN** the host returns a typed unavailability outcome and no rows
 
+#### Scenario: Trusted peer survives an application restart
+
+- **GIVEN** a peer is `trusted` and its canonical TLS certificate
+  fingerprint is persisted locally
+- **WHEN** ClipVault restarts and local sharing starts again
+- **THEN** ClipVault restores that pin before accepting or dialing mTLS
+  history sessions, and browsing the trusted active peer does not fail
+  solely because the verifier map was recreated
+
 ### Requirement: Linked peers are a reactive desktop source inside the sidebar
 
 The desktop SHALL render a `Linked peers` list **inside** the sidebar, below

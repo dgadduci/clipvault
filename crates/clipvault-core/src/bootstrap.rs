@@ -1271,6 +1271,21 @@ impl AppBootstrap {
                 );
             }
         }
+        // Restore the mTLS pins persisted by earlier successful
+        // pairing sessions before the shell starts the listener.
+        // `TlsPeerTransport` deliberately keeps its verifier map
+        // in memory, so without this preload a trusted peer would
+        // become `UnknownPeer` after every application restart even
+        // though its certificate fingerprint remains in SQLite.
+        #[cfg(feature = "local-peer-pairing-tls")]
+        {
+            let mut db = database_handle.lock();
+            if preload_trusted_peer_pins(&mut db, &peer_pairing).is_err() {
+                tracing::warn!(
+                    "known_peers pin preload failed; trusted peer history remains unavailable until pairing is renewed"
+                );
+            }
+        }
         // Build the metadata-only transferable-text browser. The
         // service borrows the shared database handle the bootstrap
         // already holds and is therefore read-only by construction:
@@ -1540,6 +1555,56 @@ pub(super) fn preload_cursor_secrets(
         }
     }
     Ok(())
+}
+
+/// Restore persisted certificate pins for trusted peers before a new
+/// productive TLS listener starts. Pairing persists the SHA-256
+/// fingerprint across launches, whereas the transport intentionally
+/// keeps its verifier map in memory. Restoring only canonical trusted
+/// rows keeps a restart from downgrading an existing pairing into an
+/// `UnknownPeer` history outcome without accepting malformed or
+/// untrusted metadata.
+///
+/// A failure to list the rows propagates to the bootstrap, which logs
+/// a fixed phrase and keeps starting the application. An individual
+/// arm failure is likewise logged with a fixed phrase and does not
+/// prevent other trusted peers from being restored. Neither path logs
+/// peer identifiers, fingerprints, endpoints, SQL, or clipboard data.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub(super) fn preload_trusted_peer_pins(
+    database: &mut clipvault_db::Database,
+    pairing: &crate::peer_pairing::PairingRuntime,
+) -> Result<(), clipvault_db::KnownPeersError> {
+    let repo = clipvault_db::KnownPeerRepository::new(database.connection_mut());
+    let rows = repo.list()?;
+    for row in rows {
+        if row.trust_state != clipvault_db::TrustState::Trusted
+            || !is_canonical_cert_fingerprint(&row.tls_cert_fingerprint)
+        {
+            continue;
+        }
+        if pairing
+            .restore_trusted_pin(&row.peer_id, &row.tls_cert_fingerprint)
+            .is_err()
+        {
+            tracing::warn!(
+                "trusted peer pin restore failed; the affected peer remains unavailable until pairing is renewed"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A certificate fingerprint is a canonical lower-case SHA-256 hex
+/// projection. The pairing handshake is the sole producer of this
+/// value; rejecting anything else prevents a corrupt persisted row
+/// from entering the mTLS verifier map during startup.
+#[cfg(feature = "local-peer-pairing-tls")]
+fn is_canonical_cert_fingerprint(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
 }
 
 /// Adapter the bootstrap installs as the
@@ -1967,5 +2032,82 @@ mod tests {
         );
         let cached = service.cursor_secret_hex(malformed_id).expect("cache hit");
         assert_eq!(cached, row.cursor_secret);
+    }
+
+    /// Certificate pins live in the productive TLS transport's
+    /// in-memory verifier map, while the pairing runtime persists
+    /// them in `known_peers`. A restart must restore every canonical
+    /// trusted pin before the listener starts, and must leave
+    /// untrusted or malformed rows absent from that map.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn preload_trusted_peer_pins_restores_only_canonical_trusted_rows() {
+        use clipvault_db::{builtin_migrations, Database};
+        use clipvault_platform::peer_transport::PeerTransport as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut db = Database::open(dir.path().join("clipvault.db")).expect("open");
+        db.run_migrations(&builtin_migrations()).expect("migrate");
+        let trusted_id = "peer-trusted-pin";
+        let malformed_id = "peer-malformed-pin";
+        let unverified_id = "peer-unverified-pin";
+        let trusted_pin = "a".repeat(64);
+
+        {
+            let conn = db.connection_mut();
+            let mut repo = clipvault_db::KnownPeerRepository::new(conn);
+            for peer_id in [trusted_id, malformed_id, unverified_id] {
+                repo.upsert_observation(&clipvault_db::PeerObservation {
+                    peer_id: peer_id.to_string(),
+                    public_key_fingerprint: "f".repeat(16),
+                    full_public_key_fingerprint: Some("f".repeat(64)),
+                    display_name: "Studio".to_string(),
+                    protocol_major: 1,
+                    capability: "pairing".to_string(),
+                    observed_at: time::OffsetDateTime::UNIX_EPOCH,
+                })
+                .expect("seed observation");
+            }
+            repo.mark_trusted(
+                trusted_id,
+                &trusted_pin,
+                time::OffsetDateTime::UNIX_EPOCH,
+                1,
+            )
+            .expect("mark trusted");
+            repo.mark_trusted(
+                malformed_id,
+                "not-a-certificate-fingerprint",
+                time::OffsetDateTime::UNIX_EPOCH,
+                1,
+            )
+            .expect("mark malformed trusted");
+        }
+
+        let transport = Arc::new(clipvault_platform::peer_transport::TlsPeerTransport::new());
+        let pairing = crate::peer_pairing::PairingRuntime::new(
+            transport.clone(),
+            Arc::new(crate::peer_pairing::InMemoryPairingPersistence::new()),
+        );
+        preload_trusted_peer_pins(&mut db, &pairing).expect("preload pins");
+
+        assert!(
+            transport.health_check(trusted_id, &trusted_pin).is_ok(),
+            "a canonical trusted fingerprint must be restored into the verifier map"
+        );
+        assert!(
+            matches!(
+                transport.health_check(malformed_id, "b".repeat(64).as_str()),
+                Err(clipvault_platform::peer_transport::TransportError::UnknownPeer)
+            ),
+            "a malformed trusted fingerprint must not enter the verifier map"
+        );
+        assert!(
+            matches!(
+                transport.health_check(unverified_id, "c".repeat(64).as_str()),
+                Err(clipvault_platform::peer_transport::TransportError::UnknownPeer)
+            ),
+            "an untrusted peer must not enter the verifier map"
+        );
     }
 }

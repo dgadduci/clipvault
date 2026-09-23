@@ -806,6 +806,32 @@ impl PairingRuntime {
         self.inner.history_handler.read().clone()
     }
 
+    /// Restore a certificate pin persisted by an earlier successful
+    /// pairing. The bootstrap calls this before starting the TLS
+    /// listener so a trusted peer remains authenticated after an
+    /// application restart; the transport verifier itself is
+    /// intentionally in-memory and never reads SQLite directly.
+    ///
+    /// Only the canonical SHA-256 projection produced by the pairing
+    /// handshake is accepted. The caller has already checked the
+    /// peer's persisted `Trusted` state, while this boundary keeps a
+    /// malformed value from entering the transport's pin map.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub(crate) fn restore_trusted_pin(
+        &self,
+        peer_id: &str,
+        cert_fingerprint: &str,
+    ) -> Result<(), clipvault_platform::peer_transport::TransportError> {
+        let is_canonical_fingerprint = cert_fingerprint.len() == 64
+            && cert_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase());
+        if peer_id.is_empty() || !is_canonical_fingerprint {
+            return Err(clipvault_platform::peer_transport::TransportError::Malformed);
+        }
+        self.inner.transport.arm_pin(peer_id, cert_fingerprint)
+    }
+
     /// Cache the local identity the runtime uses to compute the
     /// SAS with the real `peer_id` / fingerprint. The bootstrap
     /// refreshes this whenever the secure store hands out (or
