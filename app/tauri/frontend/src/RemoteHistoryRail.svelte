@@ -89,7 +89,10 @@
   let loading = false;
   let error: string | null = null;
   let exhausted = false;
-  let activePeerId: string | null = peerId;
+  // Start detached from the prop so the initial reactive pass treats an
+  // already-selected peer exactly like a later selection. Initialising this
+  // from `peerId` skipped the only branch that loads the first remote page.
+  let activePeerId: string | null = null;
 
   /**
    * Per-peer sequence number the rail uses to discard responses
@@ -147,7 +150,7 @@
       loading = false;
       error = null;
       exhausted = false;
-      void refreshPeerState();
+      void refreshPeerState(peerId).catch(() => undefined);
     } else {
       const cached = pageCache.get(peerId);
       if (cached) {
@@ -157,6 +160,7 @@
         loading = cached.loading;
         error = cached.error;
         exhausted = cached.exhausted;
+        void refreshPeerState(peerId).catch(() => undefined);
       } else {
         rows = [];
         cursor = "";
@@ -164,8 +168,7 @@
         loading = false;
         error = null;
         exhausted = false;
-        void refreshPeerState();
-        void requestFirstPage();
+        void loadInitialPage(peerId, loadGeneration);
       }
     }
   }
@@ -178,14 +181,45 @@
    * fresh snapshot guarantees a stale `trust_state` flip can
    * never resurrect a revoked peer.
    */
-  function refreshPeerState(): void {
-    if (peerId === null) return;
-    const entry = activeEntry;
-    void peerHistoryRecordStateCommand({
-      peer_id: peerId,
+  async function refreshPeerState(targetPeerId: string): Promise<void> {
+    const entry = (snapshot?.entries ?? []).find(
+      (candidate) => candidate.peer_id === targetPeerId,
+    );
+    await peerHistoryRecordStateCommand({
+      peer_id: targetPeerId,
       trusted: entry?.trust_state === "trusted",
       active: entry?.is_present ?? false,
     });
+  }
+
+  /**
+   * Populate the runtime's local trust/presence gate before the first browse.
+   * The two Tauri commands are independent IPC requests, so firing them in
+   * parallel could let `browse` observe an empty cache and reject a healthy
+   * peer. The generation check retains the stale-response protection when the
+   * user changes selection while the state sync is in flight.
+   */
+  async function loadInitialPage(
+    targetPeerId: string,
+    generation: number,
+  ): Promise<void> {
+    try {
+      await refreshPeerState(targetPeerId);
+    } catch (err) {
+      if (generation !== loadGeneration || peerId !== targetPeerId) return;
+      loading = false;
+      error = err instanceof Error ? err.message : String(err);
+      persistCache();
+      return;
+    }
+    if (
+      generation !== loadGeneration ||
+      peerId !== targetPeerId ||
+      railShouldShowUnavailable
+    ) {
+      return;
+    }
+    await requestPage(null, { append: false });
   }
 
   /**
