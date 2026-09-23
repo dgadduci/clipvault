@@ -269,9 +269,15 @@
         persistCache();
         break;
       }
-      case "persistence_unavailable": {
+      case "transport_unavailable": {
+        // The productive mTLS transport rejected the page
+        // request. The previous page (if any) is preserved so a
+        // transient failure does not blank the rail; the user
+        // can retry by clicking `Reintentar`. The transport
+        // reason is metadata-only — never a content byte, an
+        // IP, a port or a cert fingerprint.
         loading = false;
-        error = "persistence_unavailable";
+        error = `transport_unavailable:${response.reason}`;
         persistCache();
         break;
       }

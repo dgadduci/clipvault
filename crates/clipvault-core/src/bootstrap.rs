@@ -1141,6 +1141,7 @@ impl AppBootstrap {
                             tls_cert_fingerprint: String::new(),
                             paired_at: String::new(),
                             paired_protocol_major: 0,
+                            cursor_secret: String::new(),
                         })
                     }
                 }
@@ -1176,25 +1177,119 @@ impl AppBootstrap {
                 #[cfg(not(feature = "local-peer-pairing-tls"))]
                 None,
             );
+        // Borrow the pairing transport again (the `pairing_runtime`
+        // call above already cloned it into the runtime) so the
+        // `peer_text_history` service can piggy-back on the same
+        // mTLS dial loop. Cloning the `Arc` keeps both surfaces
+        // pointed at the same listener the bootstrap installs.
+        let peer_text_history_transport: Arc<dyn crate::peer_text_history::PeerHistoryTransport> =
+            peer_text_history_transport_for(
+                #[cfg(feature = "local-peer-pairing-tls")]
+                Arc::clone(&pairing_transport),
+            );
+        let peer_text_history =
+            crate::peer_text_history::PeerTextHistoryService::new(peer_text_history_transport);
         let peer_pairing =
             crate::peer_pairing::PairingRuntime::new(pairing_transport, pairing_persistence);
+        // Install the in-memory cursor-secret cache the pairing
+        // runtime updates every time it persists a trust
+        // transition. The cache lives behind the
+        // [`crate::peer_pairing::PeerCursorSecretCache`] trait so
+        // the runtime stays decoupled from the platform crate's
+        // listener wiring; the productive adapter forwards every
+        // mint / clear to the [`PeerTextHistoryService`] the
+        // listener already consults when serving `list_recent_text`.
+        #[cfg(feature = "local-peer-pairing-tls")]
+        peer_pairing.install_cursor_secret_cache(Arc::new(
+            crate::peer_text_history::PeerTextHistoryCursorSecretCache::new(
+                peer_text_history.clone(),
+            ),
+        ));
+        // Build the productive host-side history handler the
+        // listener drives when an authenticated peer asks for
+        // `list_recent_text`. The bootstrap installs the adapter
+        // *before* the very first inbound connection so the wire
+        // contract stays stable across rebuilds: a productive host
+        // always serves the first page, a build without the
+        // productive feature pair collapses to the documented
+        // `not_available` reason without ever exposing a half-
+        // configured listener. The source borrows the same shared
+        // database handle the runtime already holds, so SQLite
+        // never reaches across the platform boundary.
+        #[cfg(feature = "local-peer-pairing-tls")]
+        {
+            let host_source: Arc<dyn crate::peer_text_history::HostHistorySource> = Arc::new(
+                crate::peer_text_history::EntryRepositoryHostHistorySource::new(Arc::clone(
+                    &database_handle,
+                )),
+            );
+            let handler = crate::peer_pairing::PeerTextHistoryHostHandlerAdapter::new(
+                peer_text_history.clone(),
+                Arc::clone(&host_source),
+            );
+            // The productive install path persists the handler so a
+            // follow-up `start_with_material_and_resolver` already
+            // has the wiring in place. The `install_history_handler`
+            // API is idempotent and refuses to bind to a transport
+            // that is not running, so the call collapses to a
+            // logged warning instead of breaking the bootstrap.
+            if let Err(error) = peer_pairing.install_history_handler_inner(Arc::new(handler)) {
+                tracing::warn!(
+                    ?error,
+                    "productive history handler install failed; bootstrap continues with no host history"
+                );
+            }
+        }
+        // Pre-populate the per-peer HMAC secret cache from the
+        // persisted `known_peers.cursor_secret` rows. The cache is
+        // the only place the runtime stores the secret; the
+        // listener signs and verifies cursors with the value the
+        // bootstrap loaded so a restart never invalidates cursors
+        // the peer already holds. The preload is best-effort: a
+        // row that misses the column (the legacy pre-migration
+        // shape) is silently skipped and the next trust promotion
+        // will mint a fresh secret.
+        {
+            let mut db = database_handle.lock();
+            let conn = db.connection_mut();
+            let repo = clipvault_db::KnownPeerRepository::new(conn);
+            match repo.list() {
+                Ok(rows) => {
+                    for row in rows {
+                        if row.trust_state == clipvault_db::TrustState::Trusted
+                            && !row.cursor_secret.is_empty()
+                        {
+                            peer_text_history
+                                .install_cursor_secret_hex(&row.peer_id, &row.cursor_secret);
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        "known_peers preload failed; cursor secrets will mint on next trust promotion"
+                    );
+                }
+            }
+        }
         // Build the metadata-only transferable-text browser. The
         // service borrows the shared database handle the bootstrap
         // already holds and is therefore read-only by construction:
         // every browsing call goes through the SQL projection and
-        // never opens a SQLite write transaction. The shell drives
-        // the per-peer `trusted` / `active` cache through
+        // The bootstrap wires the productive mTLS-backed
+        // [`PeerHistoryTransport`] the productive pairing transport
+        // already installed (see the borrow above for the
+        // `peer_text_history_transport_for` helper). The
+        // client-side facade dials the remote listener over mTLS
+        // through the runtime and forwards the typed outcome the
+        // transport returns; the host-side projection lives behind
+        // the [`crate::peer_text_history::HostHistorySource`] trait
+        // the listener drives when an authenticated peer asks for
+        // `list_recent_text`. The shell drives the per-peer
+        // `trusted` / `active` cache through
         // [`PeerTextHistoryService::record_peer_state`] on every
         // snapshot / health probe so a stale cache cannot outlive
         // the runtime transition that should invalidate it.
-        let peer_text_history_projection: Arc<dyn crate::peer_text_history::PeerHistoryProjection> =
-            Arc::new(
-                crate::peer_text_history::EntryRepositoryPeerHistoryProjection::new(Arc::clone(
-                    &database_handle,
-                )),
-            );
-        let peer_text_history =
-            crate::peer_text_history::PeerTextHistoryService::new(peer_text_history_projection);
         // Keep the concrete mDNS adapter the bootstrap installed
         // so the toggle command can wire it into the
         // [`crate::peer_pairing::PairingAdvertisement`] the
@@ -1285,6 +1380,31 @@ fn resolve_pairing_transport(
         return transport;
     }
     crate::peer_pairing::default_peer_transport()
+}
+
+/// Resolve the [`crate::peer_text_history::PeerHistoryTransport`]
+/// the bootstrap installs behind the client-side facade. The
+/// productive install path piggy-backs on the productive pairing
+/// transport the bootstrap already wired; cross-compiles and
+/// unsupported targets fall back to a noop transport that surfaces
+/// [`crate::peer_text_history::PeerHistoryTransportError::Unavailable`]
+/// so the runtime never reaches for half-broken transport state.
+fn peer_text_history_transport_for(
+    #[cfg(feature = "local-peer-pairing-tls")] pairing_transport: Arc<
+        dyn crate::peer_pairing::PeerTransport,
+    >,
+) -> Arc<dyn crate::peer_text_history::PeerHistoryTransport> {
+    #[cfg(feature = "local-peer-pairing-tls")]
+    {
+        Arc::new(
+            crate::peer_text_history::PeerPairingHistoryTransportAdapter::new(pairing_transport),
+        )
+    }
+    #[cfg(not(feature = "local-peer-pairing-tls"))]
+    {
+        let _ = ();
+        Arc::new(crate::peer_text_history::NoopPeerHistoryTransport)
+    }
 }
 
 /// Helper used by the Tauri shell. Mirrors
@@ -1479,6 +1599,27 @@ impl crate::peer_pairing::PairingPersistence for KnownPeerPairingPersistence {
         let mut db = self.database.lock();
         let repo = clipvault_db::KnownPeerRepository::new(db.connection_mut());
         repo.get(peer_id)
+            .map_err(|_| crate::peer_pairing::PairingPersistenceError::Unavailable)
+    }
+
+    fn set_cursor_secret(
+        &self,
+        peer_id: &str,
+        secret_hex: &str,
+    ) -> Result<(), crate::peer_pairing::PairingPersistenceError> {
+        let mut db = self.database.lock();
+        let mut repo = clipvault_db::KnownPeerRepository::new(db.connection_mut());
+        repo.set_cursor_secret(peer_id, secret_hex)
+            .map_err(|_| crate::peer_pairing::PairingPersistenceError::Unavailable)
+    }
+
+    fn clear_cursor_secret(
+        &self,
+        peer_id: &str,
+    ) -> Result<(), crate::peer_pairing::PairingPersistenceError> {
+        let mut db = self.database.lock();
+        let mut repo = clipvault_db::KnownPeerRepository::new(db.connection_mut());
+        repo.clear_cursor_secret(peer_id)
             .map_err(|_| crate::peer_pairing::PairingPersistenceError::Unavailable)
     }
 }

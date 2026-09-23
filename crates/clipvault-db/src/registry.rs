@@ -757,6 +757,64 @@ const MIGRATION_0015_KNOWN_PEERS_PAIRING_FULL_FINGERPRINT: Migration = Migration
         ON known_peers (trust_state);",
 };
 
+/// `peer-text-history-browser`: persist the 32-byte per-peer HMAC
+/// secret the host uses to sign and verify the
+/// `RemoteHistoryCursor` exchanged over mTLS. The column is
+/// nullable + empty by default so every pre-existing
+/// `known_peers` row keeps matching the schema without a
+/// backfill cascade; the runtime mints a fresh secret exactly
+/// once per `trust_state = trusted` transition through
+/// [`KnownPeerRepository::set_cursor_secret`] and clears it on
+/// every revoke / block / unblock so a stale cursor cannot
+/// resurrect the link.
+///
+/// The runtime is the only writer: the column carries 64
+/// lowercase-hex chars (the SHA-256-sized key the HMAC scheme
+/// mandates) or an empty string. The secret is never sent over
+/// the wire, never logged and never leaves the host. The
+/// `down` step rebuilds the table through the SQLite
+/// table-rebuild pattern so a rollback drops the column
+/// without losing the pre-existing trust metadata.
+const MIGRATION_0016_KNOWN_PEERS_CURSOR_SECRET: Migration = Migration {
+    version: 16,
+    description: "peer-text-history-browser: persist per-peer HMAC cursor secret in known_peers",
+    up_sql: "ALTER TABLE known_peers ADD COLUMN cursor_secret TEXT NOT NULL DEFAULT '';",
+    down_sql: "DROP INDEX IF EXISTS idx_known_peers_trust_state;
+    CREATE TABLE known_peers_cursor_secret_rollback (
+        peer_id TEXT PRIMARY KEY,
+        public_key_fingerprint TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        protocol_major INTEGER NOT NULL,
+        capability TEXT NOT NULL,
+        first_seen_at TEXT NOT NULL,
+        last_discovered_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        trust_state TEXT NOT NULL DEFAULT 'unverified',
+        tls_cert_fingerprint TEXT NOT NULL DEFAULT '',
+        paired_at TEXT NOT NULL DEFAULT '',
+        paired_protocol_major INTEGER NOT NULL DEFAULT 0,
+        full_public_key_fingerprint TEXT NOT NULL DEFAULT ''
+    );
+    INSERT INTO known_peers_cursor_secret_rollback
+        (peer_id, public_key_fingerprint, display_name, protocol_major,
+         capability, first_seen_at, last_discovered_at, updated_at,
+         trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major,
+         full_public_key_fingerprint)
+    SELECT peer_id, public_key_fingerprint, display_name, protocol_major,
+           capability, first_seen_at, last_discovered_at, updated_at,
+           trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major,
+           full_public_key_fingerprint
+    FROM known_peers;
+    DROP TABLE known_peers;
+    ALTER TABLE known_peers_cursor_secret_rollback RENAME TO known_peers;
+    CREATE INDEX idx_known_peers_last_discovered_at
+        ON known_peers (last_discovered_at DESC);
+    CREATE INDEX idx_known_peers_first_seen_at
+        ON known_peers (first_seen_at);
+    CREATE INDEX idx_known_peers_trust_state
+        ON known_peers (trust_state);",
+};
+
 /// Returns the migrations shipped with ClipVault. Each new migration is
 /// appended to this slice to keep ordering deterministic.
 pub fn builtin_migrations() -> Vec<Migration> {
@@ -776,6 +834,7 @@ pub fn builtin_migrations() -> Vec<Migration> {
         MIGRATION_0013_KNOWN_PEERS,
         MIGRATION_0014_KNOWN_PEERS_PAIRING,
         MIGRATION_0015_KNOWN_PEERS_PAIRING_FULL_FINGERPRINT,
+        MIGRATION_0016_KNOWN_PEERS_CURSOR_SECRET,
     ]
 }
 

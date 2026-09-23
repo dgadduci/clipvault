@@ -5629,10 +5629,7 @@ mod tests {
                 .is_ok()
             {
                 self.stop_count.fetch_add(1, StopOrdering::SeqCst);
-                self.order_log
-                    .lock()
-                    .expect("order log")
-                    .push("discovery");
+                self.order_log.lock().expect("order log").push("discovery");
             }
             Ok(())
         }
@@ -5738,10 +5735,7 @@ mod tests {
                 .is_ok()
             {
                 self.stop_count.fetch_add(1, StopOrdering::SeqCst);
-                self.order_log
-                    .lock()
-                    .expect("order log")
-                    .push("pairing");
+                self.order_log.lock().expect("order log").push("pairing");
             }
             Ok(())
         }
@@ -5818,6 +5812,14 @@ mod tests {
             _limit: u32,
         ) -> Result<PeerHistorySnapshot, TransportError> {
             Err(TransportError::Unavailable)
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn install_history_handler(
+            &self,
+            _handler: Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+        ) -> Result<(), TransportError> {
+            Ok(())
         }
     }
 
@@ -5898,8 +5900,7 @@ mod tests {
         // running → stopped transition; pinning the relative order
         // (`pairing` first, `discovery` second) is exactly what the
         // counters alone cannot express.
-        let order_log: Arc<Mutex<Vec<&'static str>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let order_log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
         let (dir, context) = shutdown_harness(
             Arc::clone(&discovery_stop_count),
             Arc::clone(&discovery_running),

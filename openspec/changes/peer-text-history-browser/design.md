@@ -42,12 +42,14 @@ ruta `list_recent_text` que vive en `clipvault-platform::peer_transport`:
 
 ## Cursor firmado
 
-`RemoteHistoryCursor` no es opaco: deja de ser `timestamp|id` percent-encoded
-y pasa a ser una firma HMAC-SHA256 sobre la concatenación canónica
-`peer_id || "\n" || created_at_rfc3339 || "\n" || entry_id` con un secreto de
-32 bytes que el host genera al promover el peer a `trusted`. El secreto se
-almacena ligado al peer en `known_peers` (la migración explícita se documenta
-en el cambio y se cubre con tests de migración).
+`RemoteHistoryCursor` sigue siendo opaco para el renderer y el cliente: deja
+de ser `timestamp|id` percent-encoded y pasa a ser una firma HMAC-SHA256
+sobre la concatenación canónica `peer_id || "\n" || created_at_rfc3339 ||
+"\n" || entry_id` con un secreto de 32 bytes que sólo el host que la
+emitió valida. El secreto se genera al promover el peer a `trusted`, se
+almacena ligado al peer en `known_peers` (la migración explícita se
+documenta en el cambio y se cubre con tests de migración) y se rota al
+revocar o re-vincular.
 
 El host:
 
@@ -119,9 +121,12 @@ modal de Compartir) iniciado en `onMount` y detenido en `onDestroy`. La
 lista y la rail consumen el snapshot reactivo; no abren
 `peerSnapshotCommand` por su cuenta. Una falla del bridge conserva el
 snapshot anterior y no interrumpe el desktop ni muestra un error intrusivo.
-No se modifica `MdnsPeerDiscoveryAdapter`, `PeerDiscoveryRuntime`, el TTL,
-el pareado ni mTLS: la transición tras un cierre abrupto sigue dependiendo
-del TTL vigente.
+No se modifica `MdnsPeerDiscoveryAdapter`, `PeerDiscoveryRuntime`, el pareado
+ni mTLS: la transición tras un cierre abrupto está anclada en el cambio
+archivado `local-peer-presence-liveness`. El adaptador publica `Removed`
+(goodbye, expiración de caché o verificación DNS-SD acotada) como
+transición autoritativa; `PRESENCE_TTL = 120 s` ya no decide la
+disponibilidad.
 
 La salida normal del shell (`⌘Q`, *tray Salir*, `Ctrl-C`) llama al
 helper `stop_network_subsystems(&AppContext)` antes de la pasada
@@ -131,16 +136,19 @@ después `PeerDiscoveryRuntime::stop()`. El pairing comparte el
 del `MdnsPairingAdvertisementSink`; detenerlo primero retira el
 registro `pairing` antes de que el adapter publique el `goodbye`
 final, así un peer remoto observa `ServiceRemoved` en ≤ 5 s y
-el desktop refleja `No disponible` sin esperar al TTL de mDNS
-(120 s). Ambas paradas son best-effort: un fallo en una de las
-dos sólo registra un `warn!` sin IP, puerto, `peer_id` ni
-contenido, y nunca impide la salida. La regresión del orden vive
-en `app/tauri/src-tauri/src/bootstrap.rs::tests` con un adapter
-de discovery y un transporte de pairing instrumentados, y un
-segundo test estático verifica que `main.rs::cleanup` invoca el
-helper antes de `run_retention`. Una caída abrupta, una
-suspensión, Wi-Fi apagado o `kill -9` siguen dependiendo del
-TTL vigente — el helper solo cambia el cierre normal.
+el desktop refleja `No disponible` gracias al evento autoritativo
+`Removed` que el cambio archivado `local-peer-presence-liveness`
+introdujo; el adapter mDNS es la única fuente de transición, no
+se reintroduce el `PRESENCE_TTL = 120 s`. Ambas paradas son
+best-effort: un fallo en una de las dos sólo registra un `warn!`
+sin IP, puerto, `peer_id` ni contenido, y nunca impide la salida.
+La regresión del orden vive en `app/tauri/src-tauri/src/bootstrap.rs::tests`
+con un adapter de discovery y un transporte de pairing
+instrumentados, y un segundo test estático verifica que
+`main.rs::cleanup` invoca el helper antes de `run_retention`. Una
+caída abrupta, una suspensión, Wi-Fi apagado o `kill -9` siguen
+dependiendo del goodbye/expiración que publica el adapter, no de
+un TTL — el helper solo cambia el cierre normal.
 
 Seleccionar un peer activo reemplaza en el mismo panel principal la lista de
 historial o colección que estaba visible. No existe una ruta ni página

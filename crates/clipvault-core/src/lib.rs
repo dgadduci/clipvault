@@ -155,11 +155,13 @@ pub use peer_pairing::{
     PAIRING_RATE_LIMIT_PER_MINUTE, PAIRING_SESSION_TIMEOUT, PAIRING_WIRE_VERSION,
 };
 pub use peer_text_history::{
-    build_preview, entry_is_transferable, project_row, sanitize_remote_title,
-    EntryRepositoryPeerHistoryProjection, InMemoryPeerHistoryProjection, PeerActiveState,
-    PeerHistoryCursorError, PeerHistoryOutcome, PeerHistoryPersistenceError, PeerHistoryProjection,
-    PeerTextHistoryService, RemoteHistoryCursor, RemoteTextHistoryPage, RemoteTextPreview,
-    DEFAULT_PAGE_ROWS, MAX_PAGE_ROWS, PREVIEW_MAX_CHARS, PREVIEW_MAX_LINES,
+    build_preview, compute_page_fingerprint, entry_is_transferable, project_row,
+    sanitize_remote_title, EntryRepositoryHostHistorySource, HostHistoryResponse,
+    HostHistorySource, InMemoryHostHistorySource, ListRecentTextRequest, PeerActiveState,
+    PeerCursorSecret, PeerHistoryCursorError, PeerHistoryOutcome, PeerHistoryPersistenceError,
+    PeerHistoryTransport, PeerHistoryTransportError, PeerTextHistoryService, RemoteHistoryCursor,
+    RemoteTextHistoryPage, RemoteTextPreview, CURSOR_SECRET_BYTES, DEFAULT_PAGE_ROWS,
+    MAX_PAGE_ROWS, PREVIEW_MAX_CHARS, PREVIEW_MAX_LINES,
 };
 pub use platform_adapters::PlatformAdapters;
 pub use privacy::{CaptureDecision, CoreBlacklistMatcher, PrivacyGate};

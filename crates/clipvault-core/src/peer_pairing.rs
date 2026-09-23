@@ -261,6 +261,25 @@ pub trait PairingPersistence: Send + Sync {
     fn unblock(&self, peer_id: &str) -> Result<TrustTransitionOutcome, PairingPersistenceError>;
 
     fn load(&self, peer_id: &str) -> Result<Option<KnownPeer>, PairingPersistenceError>;
+
+    /// Persist a fresh per-peer HMAC cursor secret. The runtime
+    /// calls this exactly once per `mark_trusted` transition so a
+    /// future `revoke` / `block` rotation invalidates every cursor
+    /// the previous secret minted. `secret_hex` MUST be the
+    /// 64-lowercase-hex representation of the 32-byte key. The
+    /// runtime never inspects the secret content; the repository
+    /// writes the column verbatim.
+    fn set_cursor_secret(
+        &self,
+        peer_id: &str,
+        secret_hex: &str,
+    ) -> Result<(), PairingPersistenceError>;
+
+    /// Drop the persisted HMAC cursor secret for `peer_id`. The
+    /// runtime calls this on `revoke`, `block` and `unblock` so a
+    /// stale cursor signed under the previous secret cannot
+    /// resurrect the link after the trust state changes.
+    fn clear_cursor_secret(&self, peer_id: &str) -> Result<(), PairingPersistenceError>;
 }
 
 /// Typed persistence error the runtime surfaces. Every adapter
@@ -395,6 +414,31 @@ impl PairingPersistence for InMemoryPairingPersistence {
             .get(peer_id)
             .cloned())
     }
+
+    fn set_cursor_secret(
+        &self,
+        peer_id: &str,
+        secret_hex: &str,
+    ) -> Result<(), PairingPersistenceError> {
+        if secret_hex.len() != 64 || !secret_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(PairingPersistenceError::Failed);
+        }
+        let mut guard = self.inner.lock().expect("persistence lock");
+        let Some(row) = guard.get_mut(peer_id) else {
+            return Err(PairingPersistenceError::Failed);
+        };
+        row.cursor_secret = secret_hex.to_string();
+        Ok(())
+    }
+
+    fn clear_cursor_secret(&self, peer_id: &str) -> Result<(), PairingPersistenceError> {
+        let mut guard = self.inner.lock().expect("persistence lock");
+        let Some(row) = guard.get_mut(peer_id) else {
+            return Err(PairingPersistenceError::Failed);
+        };
+        row.cursor_secret = String::new();
+        Ok(())
+    }
 }
 
 fn format_rfc3339(ts: OffsetDateTime) -> String {
@@ -485,6 +529,38 @@ struct PairingRuntimeInner {
     /// instead of trusting a renderer-supplied payload.
     #[cfg(feature = "local-peer-pairing-tls")]
     inbound_sink: parking_lot::Mutex<Option<Arc<dyn InboundApprovalSink>>>,
+    /// Optional cache the runtime consults every time it
+    /// persists a trust transition. The cache mirrors the
+    /// persisted `known_peers.cursor_secret` so the listener can
+    /// serve the next `list_recent_text` request without having
+    /// to reload from SQLite. The bootstrap wires the productive
+    /// [`crate::peer_text_history::PeerTextHistoryService`]
+    /// through this slot; tests can leave it empty to verify the
+    /// persistence side of the contract in isolation.
+    cursor_secret_cache: RwLock<Option<Arc<dyn PeerCursorSecretCache>>>,
+}
+
+/// In-memory mirror of the persisted `known_peers.cursor_secret`
+/// column. The runtime mints a fresh secret on every trust
+/// promotion, persists it through [`PairingPersistence::set_cursor_secret`]
+/// and updates the cache through this trait so the listener can
+/// serve the next `list_recent_text` request without re-reading
+/// SQLite. The cache is the single place the listener consults;
+/// keeping it behind a trait lets tests substitute an in-memory
+/// fake and lets the bootstrap wire the productive
+/// [`crate::peer_text_history::PeerTextHistoryService`] without
+/// creating a circular dependency between the two modules.
+pub trait PeerCursorSecretCache: Send + Sync {
+    /// Install or replace the cached secret for `peer_id`. The
+    /// runtime calls this exactly once per successful trust
+    /// promotion; the cache accepts the secret as the canonical
+    /// 32-byte array so the runtime never inspects the bytes.
+    fn install(&self, peer_id: &str, secret: crate::peer_text_history::PeerCursorSecret);
+
+    /// Drop the cached secret for `peer_id`. The runtime calls
+    /// this on revoke / block / unblock so a stale cursor signed
+    /// under the previous secret cannot resurrect the link.
+    fn clear(&self, peer_id: &str);
 }
 
 /// Callback that returns the keychain-backed
@@ -591,6 +667,14 @@ fn map_transport_error_to_pairing_error(
         TransportError::Blocked => PairingError::Blocked,
         TransportError::Revoked => PairingError::Revoked,
         TransportError::IncompatibleProtocol => PairingError::IncompatibleProtocol,
+        // The history cursor rejection only lands on the
+        // dedicated `InvalidCursor` mapping the
+        // `peer-text-history-browser` change installs; for the
+        // pairing flow itself the variant collapses into the
+        // generic `TransportUnavailable` so a future caller that
+        // ever routes a history cursor through the pairing API
+        // does not get a phantom pairing-specific typed error.
+        TransportError::InvalidCursor => PairingError::TransportUnavailable,
         TransportError::Unavailable
         | TransportError::AlreadyRunning
         | TransportError::NotRunning
@@ -644,10 +728,23 @@ impl PairingRuntime {
             local_identity: RwLock::new(None),
             #[cfg(feature = "local-peer-pairing-tls")]
             inbound_sink: parking_lot::Mutex::new(None),
+            cursor_secret_cache: RwLock::new(None),
         };
         Self {
             inner: Arc::new(inner),
         }
+    }
+
+    /// Install the in-memory [`PeerCursorSecretCache`] the
+    /// runtime updates every time it persists a trust
+    /// transition. The bootstrap wires the productive
+    /// [`crate::peer_text_history::PeerTextHistoryService`]
+    /// through this slot so the listener can serve the next
+    /// `list_recent_text` request without re-reading SQLite.
+    /// Tests can leave the slot empty to verify the persistence
+    /// side of the contract in isolation.
+    pub fn install_cursor_secret_cache(&self, cache: Arc<dyn PeerCursorSecretCache>) {
+        *self.inner.cursor_secret_cache.write() = Some(cache);
     }
 
     /// Install the material loader the production transport uses
@@ -656,6 +753,25 @@ impl PairingRuntime {
     #[cfg(feature = "local-peer-pairing-tls")]
     pub fn set_material_loader(&self, loader: Arc<dyn MaterialLoader>) {
         *self.inner.material_loader.write() = Some(loader);
+    }
+
+    /// Forward the typed handler the listener drives when an
+    /// authenticated peer asks for `list_recent_text`. The
+    /// bootstrap calls this before binding the very first
+    /// productive listener so a `ListRecentText` envelope that
+    /// lands on the very first inbound connection can already be
+    /// served without falling back to the documented
+    /// `not_available` reason. The transport is NOT required to
+    /// be running before the call: the productive install path
+    /// will pick up the handler when it boots, and a second call
+    /// replaces the previous one so a future re-wire cannot leak
+    /// events to a stale sink.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub fn install_history_handler_inner(
+        &self,
+        handler: Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+    ) -> Result<(), clipvault_platform::peer_transport::TransportError> {
+        self.inner.transport.install_history_handler(handler)
     }
 
     /// Cache the local identity the runtime uses to compute the
@@ -1143,6 +1259,28 @@ impl PairingRuntime {
         );
         let outcome = match result {
             Ok(TrustTransitionOutcome::Stored(row)) => {
+                // Mint a fresh HMAC cursor secret for the newly
+                // trusted peer. The secret signs and verifies the
+                // `RemoteHistoryCursor` envelopes the host and
+                // peer exchange over mTLS; rotating it on every
+                // trust promotion invalidates every cursor the
+                // previous secret minted. A persistence failure is
+                // logged and collapses to `TransportUnavailable`
+                // because the host can never serve a page whose
+                // secret it cannot reach.
+                let cursor_secret = crate::peer_text_history::PeerCursorSecret::generate();
+                if let Err(error) = self
+                    .inner
+                    .persistence
+                    .set_cursor_secret(&row.peer_id, &cursor_secret.to_hex())
+                {
+                    warn!(
+                        error = ?error,
+                        "cursor secret persist failed; the next list_recent_text call collapses to unavailable"
+                    );
+                } else {
+                    self.update_cursor_secret_cache(&row.peer_id, Some(cursor_secret));
+                }
                 // Clean up the in-memory session so the next
                 // pairing attempt against the same peer starts
                 // from a clean slate.
@@ -1278,6 +1416,9 @@ impl PairingRuntime {
     /// per-peer cert fingerprint pin and closes every open
     /// pairing socket so the revoked peer cannot keep an active
     /// session alive after the row leaves the trusted state.
+    /// The cursor secret is rotated (cleared) so a stale cursor
+    /// the peer already holds cannot validate after the row
+    /// leaves the trusted state.
     pub fn revoke(&self, peer_id: &str) -> TrustOperationOutcome {
         self.clear_sessions_for(peer_id);
         #[cfg(feature = "local-peer-pairing-tls")]
@@ -1285,12 +1426,14 @@ impl PairingRuntime {
             let _ = self.inner.transport.disconnect_peer(peer_id);
             let _ = self.inner.transport.disarm_pin(peer_id);
         }
-        match self.inner.persistence.mark_revoked(peer_id) {
+        let outcome = match self.inner.persistence.mark_revoked(peer_id) {
             Ok(TrustTransitionOutcome::Stored(row)) => TrustOperationOutcome::Stored(row),
             Ok(TrustTransitionOutcome::Conflict(row)) => TrustOperationOutcome::Conflict(row),
             Ok(TrustTransitionOutcome::Unknown) => TrustOperationOutcome::Unknown,
             Err(_) => TrustOperationOutcome::Unknown,
-        }
+        };
+        self.rotate_cursor_secret_on_trust_loss(peer_id);
+        outcome
     }
 
     /// Block a peer. The runtime delegates to the persistence
@@ -1299,6 +1442,8 @@ impl PairingRuntime {
     /// path, the runtime also disarms the per-peer cert
     /// fingerprint pin and closes every open pairing socket so
     /// the blocked peer cannot keep an active session alive.
+    /// The cursor secret is cleared so a subsequent
+    /// `ListRecentText` from a stale cursor cannot validate.
     pub fn block(&self, peer_id: &str) -> TrustOperationOutcome {
         self.clear_sessions_for(peer_id);
         #[cfg(feature = "local-peer-pairing-tls")]
@@ -1306,18 +1451,23 @@ impl PairingRuntime {
             let _ = self.inner.transport.disconnect_peer(peer_id);
             let _ = self.inner.transport.disarm_pin(peer_id);
         }
-        match self.inner.persistence.mark_blocked(peer_id) {
+        let outcome = match self.inner.persistence.mark_blocked(peer_id) {
             Ok(TrustTransitionOutcome::Stored(row)) => TrustOperationOutcome::Stored(row),
             Ok(TrustTransitionOutcome::Conflict(row)) => TrustOperationOutcome::Conflict(row),
             Ok(TrustTransitionOutcome::Unknown) => TrustOperationOutcome::Unknown,
             Err(_) => TrustOperationOutcome::Unknown,
-        }
+        };
+        self.rotate_cursor_secret_on_trust_loss(peer_id);
+        outcome
     }
 
     /// Unblock a previously-blocked peer. The runtime delegates to
     /// the persistence layer; the cert fingerprint and paired_at
     /// columns are cleared by the persistence adapter so a
-    /// re-detection cannot claim the previous trust state.
+    /// re-detection cannot claim the previous trust state. The
+    /// cursor secret is cleared too: the user has to start a
+    /// fresh pairing session to bring the row back to
+    /// `trusted`, and that promotion mints a brand-new secret.
     pub fn unblock(&self, peer_id: &str) -> TrustOperationOutcome {
         self.clear_sessions_for(peer_id);
         #[cfg(feature = "local-peer-pairing-tls")]
@@ -1325,11 +1475,51 @@ impl PairingRuntime {
             let _ = self.inner.transport.disconnect_peer(peer_id);
             let _ = self.inner.transport.disarm_pin(peer_id);
         }
-        match self.inner.persistence.unblock(peer_id) {
+        let outcome = match self.inner.persistence.unblock(peer_id) {
             Ok(TrustTransitionOutcome::Stored(row)) => TrustOperationOutcome::Stored(row),
             Ok(TrustTransitionOutcome::Conflict(row)) => TrustOperationOutcome::Conflict(row),
             Ok(TrustTransitionOutcome::Unknown) => TrustOperationOutcome::Unknown,
             Err(_) => TrustOperationOutcome::Unknown,
+        };
+        self.rotate_cursor_secret_on_trust_loss(peer_id);
+        outcome
+    }
+
+    /// Persist the cursor-secret rotation that mirrors every
+    /// trust-state transition that takes the row away from
+    /// `trusted`. The helper is shared by [`Self::revoke`],
+    /// [`Self::block`] and [`Self::unblock`] so a stale cursor
+    /// the peer already holds can never validate after the trust
+    /// state changes. Persistence failures collapse to a
+    /// `warn!` without IP / port / peer_id / content; the cache
+    /// is still cleared so the listener cannot serve a page
+    /// signed under the previous secret.
+    fn rotate_cursor_secret_on_trust_loss(&self, peer_id: &str) {
+        if let Err(error) = self.inner.persistence.clear_cursor_secret(peer_id) {
+            warn!(
+                error = ?error,
+                "cursor secret clear failed; in-memory cache still dropped"
+            );
+        }
+        self.update_cursor_secret_cache(peer_id, None);
+    }
+
+    /// Mirror a cursor-secret update through the in-memory cache
+    /// the listener consults. Passing `None` clears the entry
+    /// (revoke / block / unblock); passing `Some(secret)`
+    /// installs the freshly minted secret (mark_trusted).
+    fn update_cursor_secret_cache(
+        &self,
+        peer_id: &str,
+        secret: Option<crate::peer_text_history::PeerCursorSecret>,
+    ) {
+        let cache = self.inner.cursor_secret_cache.read().clone();
+        let Some(cache) = cache else {
+            return;
+        };
+        match secret {
+            Some(secret) => cache.install(peer_id, secret),
+            None => cache.clear(peer_id),
         }
     }
 
@@ -1641,6 +1831,122 @@ fn generate_nonce() -> String {
     out
 }
 
+/// Productive adapter that implements
+/// [`clipvault_platform::peer_transport::HistoryHostHandler`] and
+/// delegates every inbound `list_recent_text` request to the
+/// [`crate::peer_text_history::PeerTextHistoryService::serve`]
+/// projection the bootstrap already wired. The bootstrap installs
+/// this adapter through the productive
+/// [`clipvault_platform::peer_transport::PeerTransport::install_history_handler`]
+/// API on every pairing transport start / restart so the
+/// very first `ListRecentText` envelope that lands after a fresh
+/// mTLS handshake can already be served without falling back to
+/// the documented `not_available` reason.
+///
+/// The adapter deliberately does NOT consult SQLite or Tauri —
+/// the host-side history projection lives behind the
+/// [`crate::peer_text_history::HostHistorySource`] trait the
+/// runtime owns. The platform crate never reaches across the
+/// boundary to the SQLite handle and the adapter never inspects
+/// the cursor payload beyond the typed call into the runtime.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub struct PeerTextHistoryHostHandlerAdapter {
+    service: crate::peer_text_history::PeerTextHistoryService,
+    source: Arc<dyn crate::peer_text_history::HostHistorySource>,
+}
+
+#[cfg(feature = "local-peer-pairing-tls")]
+impl PeerTextHistoryHostHandlerAdapter {
+    /// Build an adapter that drives the supplied
+    /// [`PeerTextHistoryService`] through the supplied
+    /// [`HostHistorySource`]. The service and the source live in
+    /// the runtime; the adapter is the thin translation layer the
+    /// platform crate's `HistoryHostHandler` trait expects.
+    pub fn new(
+        service: crate::peer_text_history::PeerTextHistoryService,
+        source: Arc<dyn crate::peer_text_history::HostHistorySource>,
+    ) -> Self {
+        Self { service, source }
+    }
+}
+
+#[cfg(feature = "local-peer-pairing-tls")]
+impl clipvault_platform::peer_transport::HistoryHostHandler for PeerTextHistoryHostHandlerAdapter {
+    fn list_recent_text(
+        &self,
+        peer_id: &str,
+        cursor: &str,
+        limit: u32,
+    ) -> clipvault_platform::peer_transport::HistoryHostResponse {
+        // Clamp the requested limit to `[1, MAX_PAGE_ROWS]` and
+        // forward it to `PeerTextHistoryService::serve` so the
+        // host projection honors the page size the caller asked
+        // for. A malicious or buggy caller cannot trick the
+        // projection into streaming more than the contract
+        // allows. The host re-validates the cursor against the
+        // per-peer HMAC secret; a forged, rotated or replayed
+        // cursor therefore collapses to `InvalidCursor` without
+        // leaking the decoded timestamp / id back to the caller.
+        let clamped_limit = crate::peer_text_history::clamp_history_limit(limit) as u32;
+        let cursor_opt: Option<crate::peer_text_history::RemoteHistoryCursor> = if cursor.is_empty()
+        {
+            None
+        } else {
+            Some(crate::peer_text_history::RemoteHistoryCursor::from_string(
+                cursor.to_string(),
+            ))
+        };
+        let response = self.service.serve(
+            peer_id,
+            cursor_opt.as_ref(),
+            clamped_limit,
+            self.source.as_ref(),
+        );
+        match response {
+            crate::peer_text_history::HostHistoryResponse::Ok(page, snapshot_id) => {
+                // The host honored the clamped limit and the
+                // lookahead probe; surface at most `clamped_limit`
+                // rows even if the persistence layer accidentally
+                // returned one extra. The renderer should never
+                // see an off-by-one entry because of how the
+                // projection trimmed the lookahead internally; the
+                // `.take()` is a defence-in-depth guard against a
+                // future regression that bypasses the projection
+                // loop entirely.
+                let rows: Vec<clipvault_platform::peer_transport::wire::ListRecentTextRow> = page
+                    .rows
+                    .into_iter()
+                    .take(clamped_limit as usize)
+                    .map(
+                        |row| clipvault_platform::peer_transport::wire::ListRecentTextRow {
+                            remote_entry_id: row.remote_entry_id,
+                            title: row.title,
+                            content_type: row.content_type,
+                            created_at: row.created_at,
+                            preview: row.preview,
+                        },
+                    )
+                    .collect();
+                let next_cursor = page
+                    .next_cursor
+                    .map(|c| c.as_str().to_string())
+                    .unwrap_or_default();
+                clipvault_platform::peer_transport::HistoryHostResponse::Ok {
+                    rows,
+                    next_cursor,
+                    snapshot_id,
+                }
+            }
+            crate::peer_text_history::HostHistoryResponse::InvalidCursor => {
+                clipvault_platform::peer_transport::HistoryHostResponse::InvalidCursor
+            }
+            crate::peer_text_history::HostHistoryResponse::Unavailable(reason) => {
+                clipvault_platform::peer_transport::HistoryHostResponse::Unavailable { reason }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1691,6 +1997,7 @@ mod tests {
             tls_cert_fingerprint: String::new(),
             paired_at: String::new(),
             paired_protocol_major: 0,
+            cursor_secret: String::new(),
         }
     }
 
@@ -2634,6 +2941,41 @@ mod tests {
                 reached_at_unix_secs: 0,
             })
         }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn install_history_handler(
+            &self,
+            _handler: Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+        ) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn list_recent_text(
+            &self,
+            _peer_id: &str,
+            _cert_fingerprint: &str,
+            _cursor: &str,
+            _limit: u32,
+        ) -> Result<clipvault_platform::peer_transport::PeerHistorySnapshot, TransportError>
+        {
+            Err(TransportError::Unavailable)
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn start_with_material_resolver_and_history(
+            &self,
+            _material: clipvault_platform::LocalIdentityMaterial,
+            _sink: Arc<dyn TransportSink>,
+            _advertisement: Arc<dyn PairingAdvertisement>,
+            _resolver: Option<Arc<dyn clipvault_platform::peer_transport::RemotePeerResolver>>,
+            _display_name: &str,
+            _history_handler: Option<
+                Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+            >,
+        ) -> Result<u16, TransportError> {
+            Err(TransportError::Unavailable)
+        }
     }
 
     /// Cache the local identity the runtime expects on every
@@ -2819,6 +3161,38 @@ mod tests {
                     reached_at_unix_secs: 0,
                 })
             }
+            #[cfg(feature = "local-peer-pairing-tls")]
+            fn install_history_handler(
+                &self,
+                _handler: Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            #[cfg(feature = "local-peer-pairing-tls")]
+            fn list_recent_text(
+                &self,
+                _peer_id: &str,
+                _cert_fingerprint: &str,
+                _cursor: &str,
+                _limit: u32,
+            ) -> Result<clipvault_platform::peer_transport::PeerHistorySnapshot, TransportError>
+            {
+                Err(TransportError::Unavailable)
+            }
+            #[cfg(feature = "local-peer-pairing-tls")]
+            fn start_with_material_resolver_and_history(
+                &self,
+                _material: clipvault_platform::LocalIdentityMaterial,
+                _sink: Arc<dyn TransportSink>,
+                _advertisement: Arc<dyn PairingAdvertisement>,
+                _resolver: Option<Arc<dyn clipvault_platform::peer_transport::RemotePeerResolver>>,
+                _display_name: &str,
+                _history_handler: Option<
+                    Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+                >,
+            ) -> Result<u16, TransportError> {
+                Err(TransportError::Unavailable)
+            }
         }
 
         let transport = Arc::new(RecordingTransport::default());
@@ -2859,6 +3233,153 @@ mod tests {
                 "revoke must disarm the per-peer pin"
             );
         }
+    }
+
+    /// Trust promotion must persist a fresh HMAC cursor secret
+    /// and install it in the in-memory cache the listener
+    /// consults. `revoke`, `block` and `unblock` must clear both
+    /// the persisted secret and the cache so a stale cursor
+    /// cannot resurrect the link after the trust state changes.
+    /// The test pins every transition the productive pairing
+    /// runtime drives.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn trust_transitions_rotate_the_cursor_secret() {
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct RecordingCache {
+            installs: StdMutex<Vec<(String, crate::peer_text_history::PeerCursorSecret)>>,
+            clears: StdMutex<Vec<String>>,
+        }
+
+        impl crate::peer_pairing::PeerCursorSecretCache for RecordingCache {
+            fn install(&self, peer_id: &str, secret: crate::peer_text_history::PeerCursorSecret) {
+                self.installs
+                    .lock()
+                    .expect("installs")
+                    .push((peer_id.to_string(), secret));
+            }
+            fn clear(&self, peer_id: &str) {
+                self.clears
+                    .lock()
+                    .expect("clears")
+                    .push(peer_id.to_string());
+            }
+        }
+
+        let transport: Arc<dyn PeerTransport> = Arc::new(FakeTransport::default());
+        let persistence = Arc::new(InMemoryPairingPersistence::new());
+        persistence.seed(known_peer("peer-bbbb", "fp-bbbb", "Studio B"));
+        let runtime = PairingRuntime::new(transport.clone(), persistence.clone());
+        seed_local_identity(&runtime);
+        let cache = Arc::new(RecordingCache::default());
+        runtime.install_cursor_secret_cache(cache.clone());
+
+        // Trust promotion mints and persists a fresh secret. The
+        // cache receives a typed `PeerCursorSecret` value (not raw
+        // bytes); the persistence layer receives the
+        // 64-lowercase-hex projection the migration documents.
+        let outcome = runtime
+            .start_outbound("peer-bbbb", "fp-bbbb", "Studio B")
+            .expect("start");
+        let session_id = match outcome {
+            PairingOutcome::AwaitingRemoteApproval(id) => id,
+            other => panic!("expected AwaitingRemoteApproval, got {other:?}"),
+        };
+        let _ = runtime.approve_local(session_id);
+        let promote = runtime.observe_approve("peer-bbbb", "fingerprint-aaaa");
+        assert!(matches!(promote, PairingOutcome::Trusted(_)));
+
+        {
+            let installs = cache.installs.lock().expect("installs");
+            assert_eq!(
+                installs.len(),
+                1,
+                "trust promotion must install one cache entry"
+            );
+            assert_eq!(installs[0].0, "peer-bbbb");
+        }
+        let persisted = persistence
+            .load("peer-bbbb")
+            .expect("load")
+            .expect("present");
+        assert_eq!(
+            persisted.cursor_secret.len(),
+            crate::peer_text_history::CURSOR_SECRET_BYTES * 2,
+            "persisted cursor secret must be the 64-hex projection",
+        );
+        let minted = cache.installs.lock().expect("installs")[0].1;
+        assert_eq!(
+            minted.to_hex(),
+            persisted.cursor_secret,
+            "in-memory cache and persisted secret must agree",
+        );
+
+        // `revoke` clears both the cache and the persisted secret.
+        let revoke = runtime.revoke("peer-bbbb");
+        assert!(matches!(revoke, TrustOperationOutcome::Stored(_)));
+        {
+            let clears = cache.clears.lock().expect("clears");
+            assert!(
+                clears.iter().any(|id| id == "peer-bbbb"),
+                "revoke must clear the cache",
+            );
+        }
+        let persisted = persistence
+            .load("peer-bbbb")
+            .expect("load")
+            .expect("present");
+        assert!(
+            persisted.cursor_secret.is_empty(),
+            "revoke must clear the persisted secret",
+        );
+
+        // `block` and `unblock` follow the same rotation contract.
+        // The row needs a `trusted` state for the transition to
+        // apply; re-add the row, drive a second promotion, then
+        // exercise `block` + `unblock`.
+        persistence.seed({
+            let mut row = known_peer("peer-bbbb", "fp-bbbb", "Studio B");
+            row.trust_state = TrustState::Trusted;
+            row.cursor_secret = "0".repeat(64);
+            row
+        });
+        let outcome = runtime
+            .start_outbound("peer-bbbb", "fp-bbbb", "Studio B")
+            .expect("start second cycle");
+        let session_id = match outcome {
+            PairingOutcome::AwaitingRemoteApproval(id) => id,
+            other => panic!("expected AwaitingRemoteApproval, got {other:?}"),
+        };
+        let _ = runtime.approve_local(session_id);
+        let promote = runtime.observe_approve("peer-bbbb", "fingerprint-aaaa");
+        assert!(matches!(promote, PairingOutcome::Trusted(_)));
+
+        let block = runtime.block("peer-bbbb");
+        assert!(matches!(block, TrustOperationOutcome::Stored(_)));
+        let persisted = persistence
+            .load("peer-bbbb")
+            .expect("load")
+            .expect("present");
+        assert!(
+            persisted.cursor_secret.is_empty(),
+            "block must clear the persisted secret",
+        );
+
+        // After `block`, the runtime refuses another trust
+        // promotion until `unblock` resets the row. The flow
+        // validates `unblock` clears the secret too.
+        let unblock = runtime.unblock("peer-bbbb");
+        assert!(matches!(unblock, TrustOperationOutcome::Stored(_)));
+        let persisted = persistence
+            .load("peer-bbbb")
+            .expect("load")
+            .expect("present");
+        assert!(
+            persisted.cursor_secret.is_empty(),
+            "unblock must clear the persisted secret",
+        );
     }
 
     /// `approve_local` for a session registered by the listener
@@ -2997,6 +3518,38 @@ mod tests {
                     protocol_major: PAIRING_PROTOCOL_MAJOR,
                     reached_at_unix_secs: 0,
                 })
+            }
+            #[cfg(feature = "local-peer-pairing-tls")]
+            fn install_history_handler(
+                &self,
+                _handler: Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            #[cfg(feature = "local-peer-pairing-tls")]
+            fn list_recent_text(
+                &self,
+                _peer_id: &str,
+                _cert_fingerprint: &str,
+                _cursor: &str,
+                _limit: u32,
+            ) -> Result<clipvault_platform::peer_transport::PeerHistorySnapshot, TransportError>
+            {
+                Err(TransportError::Unavailable)
+            }
+            #[cfg(feature = "local-peer-pairing-tls")]
+            fn start_with_material_resolver_and_history(
+                &self,
+                _material: clipvault_platform::LocalIdentityMaterial,
+                _sink: Arc<dyn TransportSink>,
+                _advertisement: Arc<dyn PairingAdvertisement>,
+                _resolver: Option<Arc<dyn clipvault_platform::peer_transport::RemotePeerResolver>>,
+                _display_name: &str,
+                _history_handler: Option<
+                    Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+                >,
+            ) -> Result<u16, TransportError> {
+                Err(TransportError::Unavailable)
             }
         }
 

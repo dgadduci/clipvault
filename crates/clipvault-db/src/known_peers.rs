@@ -83,6 +83,17 @@ pub struct KnownPeer {
     /// Lets a future protocol bump surface an `IncompatibleProtocol`
     /// outcome before the cert pinning is consulted again.
     pub paired_protocol_major: i64,
+    /// Per-peer 32-byte HMAC secret the host uses to sign and
+    /// verify `RemoteHistoryCursor` envelopes for this peer.
+    /// Stored as 64 lowercase-hex chars (the canonical SHA-256-sized
+    /// key the HMAC-SHA256 scheme mandates) so the column never
+    /// carries raw bytes, never appears in renderer payloads and
+    /// never crosses the wire. Empty until the
+    /// `peer-text-history-browser` runtime mints a fresh secret on
+    /// the next `trust_state = trusted` transition; cleared by
+    /// every revoke / block / unblock so a stale cursor cannot
+    /// resurrect the link after the trust state changes.
+    pub cursor_secret: String,
 }
 
 /// Trust state the pairing runtime persists alongside every
@@ -240,7 +251,7 @@ impl<'a> KnownPeerRepository<'a> {
             let mut stmt = tx.prepare(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret \
                  FROM known_peers WHERE peer_id = ?1",
             )?;
             stmt.query_row(params![observation.peer_id], |row| Ok(read_row(row)?))
@@ -270,7 +281,7 @@ impl<'a> KnownPeerRepository<'a> {
                     .query_row(
                         "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                                 capability, first_seen_at, last_discovered_at, updated_at, \
-                                trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major \
+                                trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret \
                          FROM known_peers WHERE peer_id = ?1",
                         params![observation.peer_id],
                         |row| read_row(row),
@@ -339,7 +350,7 @@ impl<'a> KnownPeerRepository<'a> {
                         .query_row(
                             "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                                     capability, first_seen_at, last_discovered_at, updated_at, \
-                                    trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major \
+                                    trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret \
                              FROM known_peers WHERE peer_id = ?1",
                             params![observation.peer_id],
                             |row| read_row(row),
@@ -360,7 +371,7 @@ impl<'a> KnownPeerRepository<'a> {
             .query_row(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret \
                  FROM known_peers WHERE peer_id = ?1",
                 params![peer_id],
                 |row| read_row(row),
@@ -376,7 +387,7 @@ impl<'a> KnownPeerRepository<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                     capability, first_seen_at, last_discovered_at, updated_at, \
-                    trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major \
+                    trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret \
              FROM known_peers ORDER BY last_discovered_at DESC",
         )?;
         let rows = stmt
@@ -423,7 +434,7 @@ impl<'a> KnownPeerRepository<'a> {
             let mut stmt = tx.prepare(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret \
                  FROM known_peers WHERE peer_id = ?1",
             )?;
             stmt.query_row(params![peer_id], |row| read_row(row))
@@ -454,7 +465,7 @@ impl<'a> KnownPeerRepository<'a> {
             .query_row(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret \
                  FROM known_peers WHERE peer_id = ?1",
                 params![peer_id],
                 |row| read_row(row),
@@ -480,7 +491,7 @@ impl<'a> KnownPeerRepository<'a> {
             let mut stmt = tx.prepare(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret \
                  FROM known_peers WHERE peer_id = ?1",
             )?;
             stmt.query_row(params![peer_id], |row| read_row(row))
@@ -505,7 +516,7 @@ impl<'a> KnownPeerRepository<'a> {
             .query_row(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret \
                  FROM known_peers WHERE peer_id = ?1",
                 params![peer_id],
                 |row| read_row(row),
@@ -531,7 +542,7 @@ impl<'a> KnownPeerRepository<'a> {
             let mut stmt = tx.prepare(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret \
                  FROM known_peers WHERE peer_id = ?1",
             )?;
             stmt.query_row(params![peer_id], |row| read_row(row))
@@ -556,7 +567,7 @@ impl<'a> KnownPeerRepository<'a> {
             .query_row(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret \
                  FROM known_peers WHERE peer_id = ?1",
                 params![peer_id],
                 |row| read_row(row),
@@ -577,7 +588,7 @@ impl<'a> KnownPeerRepository<'a> {
             let mut stmt = tx.prepare(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret \
                  FROM known_peers WHERE peer_id = ?1",
             )?;
             stmt.query_row(params![peer_id], |row| read_row(row))
@@ -605,7 +616,7 @@ impl<'a> KnownPeerRepository<'a> {
             .query_row(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret \
                  FROM known_peers WHERE peer_id = ?1",
                 params![peer_id],
                 |row| read_row(row),
@@ -613,6 +624,68 @@ impl<'a> KnownPeerRepository<'a> {
             .map_err(KnownPeersError::Sqlite)?;
         tx.commit()?;
         Ok(TrustTransitionOutcome::Stored(refreshed))
+    }
+
+    /// Persist a fresh HMAC cursor secret the host uses to sign and
+    /// verify `RemoteHistoryCursor` envelopes for `peer_id`. The
+    /// runtime mints the value through
+    /// [`crate::peer_pairing::PeerCursorSecret::generate`] (or the
+    /// core's `PeerCursorSecret` helper) exactly once per trust
+    /// promotion so a rotated secret invalidates every cursor the
+    /// previous secret minted. `secret_hex` MUST be the
+    /// 64-lowercase-hex representation of the 32-byte key; the
+    /// repository refuses any other length so a corrupted value
+    /// cannot leak through the HMAC pipeline.
+    ///
+    /// The repository never inspects the secret content: it just
+    /// writes the column and updates `updated_at`. No raw key bytes
+    /// ever cross the API boundary; the helper hides the
+    /// conversion behind the hex projection so the runtime cannot
+    /// accidentally log the raw bytes.
+    pub fn set_cursor_secret(
+        &mut self,
+        peer_id: &str,
+        secret_hex: &str,
+    ) -> Result<(), KnownPeersError> {
+        if secret_hex.len() != 64 || !secret_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(KnownPeersError::Sqlite(rusqlite::Error::InvalidQuery));
+        }
+        let now = format_timestamp(OffsetDateTime::now_utc());
+        let updated = self.conn.execute(
+            "UPDATE known_peers \
+             SET cursor_secret = ?1, updated_at = ?2 \
+             WHERE peer_id = ?3",
+            params![secret_hex, now, peer_id],
+        )?;
+        if updated == 0 {
+            return Err(KnownPeersError::Sqlite(
+                rusqlite::Error::QueryReturnedNoRows,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Drop the persisted HMAC cursor secret for `peer_id`. The
+    /// runtime calls this on revoke / block / unblock so a stale
+    /// cursor signed under the previous secret cannot resurrect
+    /// the link after the trust state changes. The repository
+    /// writes an empty string (the documented sentinel for
+    /// "no secret") rather than `NULL` so the column keeps the
+    /// `NOT NULL` contract the migration pins.
+    pub fn clear_cursor_secret(&mut self, peer_id: &str) -> Result<(), KnownPeersError> {
+        let now = format_timestamp(OffsetDateTime::now_utc());
+        let updated = self.conn.execute(
+            "UPDATE known_peers \
+             SET cursor_secret = '', updated_at = ?1 \
+             WHERE peer_id = ?2",
+            params![now, peer_id],
+        )?;
+        if updated == 0 {
+            return Err(KnownPeersError::Sqlite(
+                rusqlite::Error::QueryReturnedNoRows,
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -635,6 +708,7 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnownPeer> {
         tls_cert_fingerprint: row.get(10)?,
         paired_at: row.get(11)?,
         paired_protocol_major: row.get(12)?,
+        cursor_secret: row.get(13)?,
     })
 }
 

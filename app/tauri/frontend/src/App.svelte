@@ -2037,49 +2037,63 @@
         on:select-peer={(e) => selectPeer(e.detail.peerId)}
       />
       <div class="layout-main" data-testid="layout-main">
-        <DesktopToolbar
-          searchQuery={searchQuery}
-          searching={searching}
-          searchShortcut={searchShortcutLabelText}
-          searchShortcutAccessible={searchShortcutAccessibleText}
-          showClearHistory={activeCollectionIsHistory}
-          sourceAppFilter={sourceAppFilter}
-          sourceAppOptions={sourceAppOptions}
-          tagFilter={tagFilter}
-          tagFilterOptions={tagFilterOptions}
-          onSearchInput={handleSearchInput}
-          onOpenDevelopment={onOpenDevelopment}
-          onOpenPrivacy={onOpenPrivacy}
-          onOpenPeerSharing={onOpenPeerSharing}
-          onOpenRetention={onOpenRetention}
-          onOpenShortcut={onOpenShortcut}
-          onOpenAbout={onOpenAbout}
-          onRequestClearHistory={onRequestClearHistory}
-          onSourceAppFilterChange={(next) => handleSourceAppFilterChange(next)}
-          onTagFilterChange={(next) => handleTagFilterChange(next)}
-        />
-        <p
-          class="search-status muted"
-          data-testid="search-status"
-          data-search-status={searchStatus}
-          aria-live="polite"
-        >
-          {#if searchError}
-            <span class="error" data-testid="search-status-error">
-              Búsqueda fallida: {searchError}
-            </span>
-          {:else if isFiltering && searching}
-            <span data-testid="search-status-loading">Buscando…</span>
-          {:else if isFiltering && searchStatus === "no_matches"}
-            <span data-testid="search-status-no-matches">
-              Sin coincidencias para "{searchQuery}".
-            </span>
-          {:else if isFiltering}
-            <span data-testid="search-status-results">
-              {visibleEntries.length} resultado{visibleEntries.length === 1 ? "" : "s"} para "{searchQuery}".
-            </span>
-          {/if}
-        </p>
+        {#if activePeerId !== null}
+          <!--
+            The remote rail replaces the local history rail while a
+            peer is open. The toolbar — search / source-app / tag /
+            configuration menu / trash — applies to the LOCAL
+            history and would mislead the user if it stayed visible
+            next to the remote previews (the local filters cannot
+            affect the host page). The toolbar therefore stays in
+            the DOM only for the local rail; it is hidden without
+            animation so the layout shift is minimal and the focus
+            order (linked peers → remote rail) stays linear.
+          -->
+        {:else}
+          <DesktopToolbar
+            searchQuery={searchQuery}
+            searching={searching}
+            searchShortcut={searchShortcutLabelText}
+            searchShortcutAccessible={searchShortcutAccessibleText}
+            showClearHistory={activeCollectionIsHistory}
+            sourceAppFilter={sourceAppFilter}
+            sourceAppOptions={sourceAppOptions}
+            tagFilter={tagFilter}
+            tagFilterOptions={tagFilterOptions}
+            onSearchInput={handleSearchInput}
+            onOpenDevelopment={onOpenDevelopment}
+            onOpenPrivacy={onOpenPrivacy}
+            onOpenPeerSharing={onOpenPeerSharing}
+            onOpenRetention={onOpenRetention}
+            onOpenShortcut={onOpenShortcut}
+            onOpenAbout={onOpenAbout}
+            onRequestClearHistory={onRequestClearHistory}
+            onSourceAppFilterChange={(next) => handleSourceAppFilterChange(next)}
+            onTagFilterChange={(next) => handleTagFilterChange(next)}
+          />
+          <p
+            class="search-status muted"
+            data-testid="search-status"
+            data-search-status={searchStatus}
+            aria-live="polite"
+          >
+            {#if searchError}
+              <span class="error" data-testid="search-status-error">
+                Búsqueda fallida: {searchError}
+              </span>
+            {:else if isFiltering && searching}
+              <span data-testid="search-status-loading">Buscando…</span>
+            {:else if isFiltering && searchStatus === "no_matches"}
+              <span data-testid="search-status-no-matches">
+                Sin coincidencias para "{searchQuery}".
+              </span>
+            {:else if isFiltering}
+              <span data-testid="search-status-results">
+                {visibleEntries.length} resultado{visibleEntries.length === 1 ? "" : "s"} para "{searchQuery}".
+              </span>
+            {/if}
+          </p>
+        {/if}
 
         {#if activePeerId !== null}
           <RemoteHistoryRail

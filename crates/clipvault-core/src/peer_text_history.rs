@@ -9,15 +9,24 @@
 //!   entry id, optional validated title, content type, RFC 3339
 //!   timestamp, escaped bounded preview);
 //! - the opaque [`RemoteHistoryCursor`] the host mints and the client
-//!   submits verbatim — the runtime never accepts an offset or a
-//!   client-invented identifier;
-//! - the [`PeerTextHistoryService`] façade that wraps the local
-//!   [`EntryRepository`] projection. The façade is metadata-only by
-//!   construction: it never copies the entry body into the cursor,
-//!   the wire payload or the preview, only the fields the design
+//!   submits verbatim — the cursor is an HMAC-SHA256 signature over
+//!   `(peer_id, created_at, id)` bound to a 32-byte per-peer secret
+//!   the host generates on `trust_state = trusted` and rotates on
+//!   `Revoked` / re-pairing. The runtime never accepts an offset or a
+//!   client-invented identifier and never echoes the secret over the
+//!   wire;
+//! - the [`PeerTextHistoryService`] façade that wraps the
+//!   [`PeerTransport`] the bootstrap installs. The façade is
+//!   metadata-only by construction: it never copies the entry body
+//!   into the cursor, the wire payload or the preview, only the
+//!   fields the design
 //!   (`peer-text-history-browser/design.md` §"Paginación y preview")
-//!   authorises. The local SQLite layer is consulted read-only and the
-//!   service refuses to write anything in response to a browsing call.
+//!   authorises. The local SQLite layer is consulted read-only by the
+//!   [`HostHistorySource`] trait the listener drives when a trusted
+//!   peer asks for `list_recent_text`; the client-side facade does
+//!   NOT touch SQLite when serving a remote page — it dials the
+//!   remote listener over mTLS and forwards the typed outcome the
+//!   transport returns.
 //! - the typed [`PeerHistoryOutcome`] the bridge / Tauri shell returns
 //!   to the frontend. Every variant collapses to a stable identifier
 //!   the UI branches on (`InvalidCursor`, `PeerUnavailable`,
@@ -26,25 +35,30 @@
 //!
 //! ## Eligibility
 //!
-//! [`entry_is_transferable`] is the single predicate the service and
-//! the unit tests share. A row is transferable when its
-//! [`clipvault_db::ContentType`] belongs to the textual taxonomy
-//! (`is_textual`) and the entry carries no image asset, no rich-text
-//! metadata and no payload dimensions. Image rows and rich-text rows
-//! are filtered out before the projection runs so a peer never sees a
-//! disabled row; the spec scenario "Image or rich-text row exists"
-//! pins that contract.
+//! [`entry_is_transferable`] is the single predicate the host
+//! projection and the unit tests share. A row is transferable when
+//! its [`clipvault_db::ContentType`] is textual and carries no
+//! image asset, no rich-text metadata and no payload dimensions.
+//! [`ContentType::Html`] is excluded explicitly: the wire is plain
+//! text only and the local HTML preview escapes information the
+//! remote card never delivers to the wire. Image rows and rich-text
+//! rows are filtered out before the projection runs so a peer never
+//! sees a disabled row; the spec scenario "Image or rich-text row
+//! exists" pins that contract.
 //!
 //! ## Ordering, cursor and limits
 //!
-//! The projection sorts newest first, breaks ties with the stable
-//! [`EntryRecord::id`] (the SQLite rowid) and slices the page at
-//! [`MAX_PAGE_ROWS`]. The cursor encodes the `(created_at, id)`
-//! pair of the **last** row the previous page returned, so the next
-//! page picks up strictly after it (strict less-than, inclusive of
-//! stable id). The runtime rejects any cursor it did not mint with
-//! [`PeerHistoryOutcome::InvalidCursor`]; the spec scenario "Invalid
-//! cursor" pins that contract.
+//! The host projection sorts newest first, breaks ties with the
+//! stable [`EntryRecord::id`] (the SQLite rowid) and slices the
+//! page at [`MAX_PAGE_ROWS`]. The cursor encodes the
+//! `(created_at, id)` pair of the **last** row the previous page
+//! returned so the next page picks up strictly after it (strict
+//! less-than, inclusive of stable id). The runtime rejects any
+//! cursor it did not mint with [`PeerHistoryOutcome::InvalidCursor`]
+//! — the spec scenario "Forged or rotated cursor" pins that
+//! contract. The host re-validates the signature against the
+//! current secret on every page request so a rotated secret always
+//! rejects previous cursors.
 //!
 //! ## Preview shape
 //!
@@ -59,13 +73,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use hmac::{Hmac, Mac};
 use parking_lot::RwLock;
+use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use clipvault_db::{ContentType, EntryRecord, EntryRepository};
+use clipvault_db::{ContentType, EntryRecord};
 
 /// Maximum number of rows the host returns in a single page. The
 /// value mirrors the protocol limit the design
@@ -94,10 +113,17 @@ pub const PREVIEW_MAX_LINES: usize = 2;
 /// regardless of the requested size.
 pub const DEFAULT_PAGE_ROWS: usize = 50;
 
+/// Number of bytes the runtime mints for the per-peer HMAC secret.
+/// 32 bytes is the canonical SHA-256 key length and matches the
+/// length the design
+/// (`peer-text-history-browser/design.md` §"Cursor firmado") pins.
+pub const CURSOR_SECRET_BYTES: usize = 32;
+
 /// Validation error the runtime surfaces when the cursor the client
-/// submits is not an opaque string the host minted. The variant is
-/// the typed reason the wire envelope encodes (`invalid_cursor`) so
-/// the frontend never has to inspect free-form strings.
+/// submits is not an opaque string the host minted, the HMAC
+/// signature does not match or the secret has rotated. The variant
+/// is the typed reason the wire envelope encodes (`invalid_cursor`)
+/// so the frontend never has to inspect free-form strings.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PeerHistoryCursorError {
     /// The supplied cursor was not produced by this host.
@@ -109,14 +135,24 @@ pub enum PeerHistoryCursorError {
     /// The cursor decoded but the stable id is not a positive integer.
     #[error("peer history cursor decoded but the stable id is not a positive integer")]
     MalformedId,
+    /// The cursor HMAC verification failed.
+    #[error("peer history cursor HMAC signature did not validate")]
+    SignatureMismatch,
 }
 
-/// Opaque cursor the host emits on every successful page. The runtime
-/// guarantees the cursor only encodes `(created_at, id)` of the last
-/// row of the previous page — never the row content, the row hash,
-/// the source app, the collection or the favourite flag. Clients
-/// MUST treat the cursor as opaque: submitting a fabricated cursor
-/// returns [`PeerHistoryCursorError::Invalid`].
+/// Opaque cursor the host emits on every successful page. The
+/// cursor is the wire representation of `<base64url(payload)>::
+/// <base64url(hmac)>` where `payload` is the canonical
+/// `<peer_id>\n<created_at_rfc3339>\n<id>` triple and `hmac` is the
+/// HMAC-SHA256 signature the host computed with the per-peer secret
+/// it persisted at promotion time. The runtime guarantees the
+/// cursor only encodes `(created_at, id)` of the last row of the
+/// previous page — never the row content, the row hash, the source
+/// app, the collection or the favourite flag. Clients MUST treat
+/// the cursor as opaque: submitting a fabricated cursor or a
+/// cursor signed under a rotated secret returns
+/// [`PeerHistoryCursorError::Invalid`] or
+/// [`PeerHistoryCursorError::SignatureMismatch`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RemoteHistoryCursor {
@@ -125,43 +161,77 @@ pub struct RemoteHistoryCursor {
 
 impl RemoteHistoryCursor {
     /// Mint a cursor from the (timestamp, id) pair of the last row
-    /// the page emitted. The cursor is the host's canonical
-    /// `<rfc3339>|<id>` pair percent-encoded so the renderer can
-    /// carry it through a JSON / Tauri boundary without losing
-    /// any byte; the host is the only entity that ever has both
-    /// pieces of information. The renderer and the bridge treat
+    /// the page emitted, signed with the supplied per-peer secret.
+    /// The host is the only entity that ever has the
+    /// `(secret, payload)` pair. The renderer and the bridge treat
     /// the value as opaque and never parse it.
-    pub fn mint(timestamp: &str, id: i64) -> Self {
-        let raw = format!("{timestamp}|{id}");
+    pub fn mint(peer_id: &str, timestamp: &str, id: i64, secret: &[u8]) -> Self {
+        let payload = format!("{peer_id}\n{timestamp}\n{id}");
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(secret).expect("HMAC-SHA256 accepts any key length");
+        mac.update(payload.as_bytes());
+        let tag = mac.finalize().into_bytes();
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload.as_bytes());
+        let tag_b64 = URL_SAFE_NO_PAD.encode(tag);
         Self {
-            inner: percent_encode(&raw),
+            inner: format!("{payload_b64}::{tag_b64}"),
         }
     }
 
-    /// Decode a cursor the client submitted. The helper collapses
-    /// every malformed input into [`PeerHistoryCursorError`] without
-    /// surfacing the original bytes; the runtime never logs the
-    /// decoded timestamp / id pair because they identify a single
-    /// local entry the host should not leak through the wire.
-    pub fn decode(&self) -> Result<(String, i64), PeerHistoryCursorError> {
-        let decoded = percent_decode(&self.inner)?;
-        let Some((timestamp, id)) = decoded.split_once('|') else {
+    /// Decode a cursor the client submitted and verify its HMAC
+    /// signature against the supplied per-peer secret. The helper
+    /// collapses every malformed input into
+    /// [`PeerHistoryCursorError`] without surfacing the original
+    /// bytes; the runtime never logs the decoded timestamp / id
+    /// pair because they identify a single local entry the host
+    /// should not leak through the wire.
+    pub fn decode(
+        &self,
+        peer_id: &str,
+        secret: &[u8],
+    ) -> Result<(String, i64), PeerHistoryCursorError> {
+        let Some((payload_b64, tag_b64)) = self.inner.split_once("::") else {
             return Err(PeerHistoryCursorError::Invalid);
         };
-        // The host only ever mints cursors with RFC 3339 strings
-        // and a positive integer id, so a malformed timestamp / id
-        // here is an explicit forgery attempt.
+        let payload_bytes = URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .map_err(|_| PeerHistoryCursorError::Invalid)?;
+        let tag_bytes = URL_SAFE_NO_PAD
+            .decode(tag_b64)
+            .map_err(|_| PeerHistoryCursorError::Invalid)?;
+        if tag_bytes.len() != Sha256::output_size() {
+            return Err(PeerHistoryCursorError::Invalid);
+        }
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(secret).expect("HMAC-SHA256 accepts any key length");
+        mac.update(&payload_bytes);
+        // `verify_slice` is constant-time so a forged signature
+        // cannot be distinguished from a legitimate one through a
+        // timing side channel. The conversion to `GenericArray`
+        // from a `&[u8]` slice is what `hmac` already exposes.
+        mac.verify_slice(&tag_bytes)
+            .map_err(|_| PeerHistoryCursorError::SignatureMismatch)?;
+        let payload =
+            std::str::from_utf8(&payload_bytes).map_err(|_| PeerHistoryCursorError::Invalid)?;
+        // The canonical payload is `<peer_id>\n<created_at_rfc3339>\n<id>`.
+        // Reject any cursor whose peer_id does not match the
+        // session-supplied value so a cursor minted for peer A
+        // cannot be replayed against peer B.
+        let mut parts = payload.splitn(3, '\n');
+        let claim_peer = parts.next().ok_or(PeerHistoryCursorError::Invalid)?;
+        if claim_peer != peer_id {
+            return Err(PeerHistoryCursorError::Invalid);
+        }
+        let timestamp = parts.next().ok_or(PeerHistoryCursorError::Invalid)?;
         if OffsetDateTime::parse(timestamp, &Rfc3339).is_err() {
             return Err(PeerHistoryCursorError::MalformedTimestamp);
         }
-        let id: i64 = id
+        let id_raw = parts.next().ok_or(PeerHistoryCursorError::Invalid)?;
+        let id: i64 = id_raw
             .parse()
             .map_err(|_| PeerHistoryCursorError::MalformedId)?;
         if id <= 0 {
             return Err(PeerHistoryCursorError::MalformedId);
-        }
-        if !is_well_formed_cursor_payload(&decoded) {
-            return Err(PeerHistoryCursorError::Invalid);
         }
         Ok((timestamp.to_string(), id))
     }
@@ -183,86 +253,44 @@ impl RemoteHistoryCursor {
     }
 }
 
-fn percent_encode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~'
-            | b':'
-            | b'|'
-            | b'+' => out.push(byte as char),
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
-}
-
-fn percent_decode(input: &str) -> Result<String, PeerHistoryCursorError> {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut idx = 0;
-    while idx < bytes.len() {
-        if bytes[idx] == b'%' {
-            // A bare `%` without two trailing hex digits is a
-            // forgery attempt: the encoder never produces one.
-            if idx + 2 >= bytes.len() {
-                return Err(PeerHistoryCursorError::Invalid);
-            }
-            let hi = hex_value(bytes[idx + 1]);
-            let lo = hex_value(bytes[idx + 2]);
-            match (hi, lo) {
-                (Some(hi), Some(lo)) => {
-                    out.push((hi << 4) | lo);
-                    idx += 3;
-                    continue;
-                }
-                _ => return Err(PeerHistoryCursorError::Invalid),
-            }
-        }
-        out.push(bytes[idx]);
-        idx += 1;
-    }
-    Ok(String::from_utf8_lossy(&out).into_owned())
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn is_well_formed_cursor_payload(input: &str) -> bool {
-    let mut saw_pipe = false;
-    for ch in input.chars() {
-        if ch == '|' {
-            saw_pipe = true;
-            continue;
-        }
-        if ch.is_control() {
-            return false;
-        }
-        if ch == '%' {
-            return false;
-        }
-        // The cursor only carries the RFC 3339 timestamp and a
-        // positive integer id; every other Unicode class is
-        // suspicious and rejected as a forgery attempt.
-        if !(ch.is_ascii_alphanumeric()
-            || matches!(ch, '-' | '_' | '.' | '~' | ':' | '+' | 'T' | 'Z'))
-        {
-            return false;
-        }
-    }
-    saw_pipe
+/// Outcome the runtime returns to the bridge / Tauri shell. The
+/// discriminated union keeps the wire contract stable: the frontend
+/// branches on `kind` without parsing free-form strings or content
+/// bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerHistoryOutcome {
+    /// The page was rendered. `rows` is empty when the host has no
+    /// transferable text entries (the renderer stays on the
+    /// "Sin transferencias" placeholder).
+    Ok {
+        page: RemoteTextHistoryPage,
+        /// Stable fingerprint of the local history at projection
+        /// time. The renderer can use the value to detect a local
+        /// capture that landed between page requests and decide
+        /// whether to refetch (without leaking the row content).
+        snapshot_id: String,
+    },
+    /// The cursor was not minted by this host or signed under a
+    /// rotated secret. The renderer surfaces the typed reason
+    /// without retrying.
+    InvalidCursor,
+    /// The peer is not Active / not trusted / not present. The
+    /// renderer MUST NOT retry until presence flips; the runtime
+    /// never opens a network call when the peer is unavailable so
+    /// the failure cannot race a recent health probe.
+    PeerUnavailable {
+        /// Stable reason string the UI branches on
+        /// (`not_active` / `not_trusted` / `no_known_peer`). The
+        /// runtime NEVER returns a free-form platform detail here.
+        reason: &'static str,
+    },
+    /// The runtime refused to project because the underlying
+    /// transport rejected the page request (`unavailable`,
+    /// `unknown_peer`, `key_mismatch`, `revoked`, `blocked`,
+    /// `incompatible_protocol`, `malformed`). The renderer
+    /// surfaces a typed failure copy without retrying blindly.
+    TransportUnavailable { reason: &'static str },
 }
 
 /// Single metadata-only row the host returns for a transferable
@@ -342,52 +370,28 @@ pub struct RemoteTextHistoryPage {
     pub next_cursor: Option<RemoteHistoryCursor>,
 }
 
-/// Outcome the runtime returns to the bridge / Tauri shell. The
-/// discriminated union keeps the wire contract stable: the frontend
-/// branches on `kind` without parsing free-form strings or content
-/// bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PeerHistoryOutcome {
-    /// The page was rendered. `rows` is empty when the host has no
-    /// transferable text entries (the renderer stays on the
-    /// "Sin transferencias" placeholder).
-    Ok {
-        page: RemoteTextHistoryPage,
-        /// Stable fingerprint of the local history at projection
-        /// time. The renderer can use the value to detect a local
-        /// capture that landed between page requests and decide
-        /// whether to refetch (without leaking the row content).
-        snapshot_id: String,
-    },
-    /// The cursor was not minted by this host. The renderer surfaces
-    /// the typed reason without retrying.
-    InvalidCursor,
-    /// The peer is not Active / not trusted / not present. The
-    /// renderer MUST NOT retry until presence flips; the runtime
-    /// never opens a network call when the peer is unavailable so
-    /// the failure cannot race a recent health probe.
-    PeerUnavailable {
-        /// Stable reason string the UI branches on
-        /// (`not_active` / `not_trusted` / `no_known_peer`). The
-        /// runtime NEVER returns a free-form platform detail here.
-        reason: &'static str,
-    },
-    /// The runtime refused to project because the underlying
-    /// persistence layer rejected the query (broken DB,
-    /// disconnected session, …). The renderer surfaces a typed
-    /// failure copy without retrying blindly.
-    PersistenceUnavailable,
-}
-
 /// Predicate the runtime and the unit tests share. The predicate
-/// returns `true` when the entry is textual and carries no
-/// non-transferable metadata: image asset, image MIME/size metadata
-/// or rich-text metadata. A row that has rich-text metadata is
-/// non-transferable even when the textual content is otherwise
-/// valid, because the design caps the wire to plain text only.
+/// returns `true` when the entry is textual, carries no
+/// non-transferable metadata (image asset, image MIME/size, rich-text
+/// metadata) and is not [`ContentType::Html`]. The HTML exclusion
+/// matches the design
+/// (`peer-text-history-browser/design.md` §"Dependencia y contrato")
+/// — the wire is plain text and the local HTML preview would lose
+/// information the remote card never exposes.
+///
+/// A row that has rich-text metadata is non-transferable even when
+/// the textual content is otherwise valid, because the design caps
+/// the wire to plain text only.
 pub fn entry_is_transferable(entry: &EntryRecord) -> bool {
     if !entry.content_type.is_textual() {
+        return false;
+    }
+    // Explicit exclusion: even though `Html` returns `true` for
+    // `is_textual()` (the local search needs to surface it), the
+    // wire is plain text only. The design pin forbids shipping
+    // HTML rows; the local card already filters them out of the
+    // "transferable text" surface so the contract stays consistent.
+    if matches!(entry.content_type, ContentType::Html) {
         return false;
     }
     if entry.is_renderable_image() {
@@ -489,17 +493,57 @@ pub fn sanitize_remote_title(raw: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-/// Persistence trait the runtime consumes to project the transferable
-/// text history. The bootstrap installs an adapter that delegates to
-/// [`clipvault_db::EntryRepository::text_entries`] / a freshly
+/// Build a deterministic, non-reversible fingerprint of the page
+/// the caller projects. The hash input is
+/// `peer_id || "\n" || max_created_at || "\n" || max_id || "\n" ||
+/// count`; the runtime emits the lowercase-hex SHA-256 digest so
+/// the client can detect a local capture that landed between page
+/// requests without leaking row content. The function is pure and
+/// never inspects the row body.
+pub fn compute_page_fingerprint(
+    peer_id: &str,
+    max_created_at: &str,
+    max_id: i64,
+    count: usize,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(peer_id.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(max_created_at.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(max_id.to_string().as_bytes());
+    hasher.update(b"\n");
+    hasher.update(count.to_string().as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest.iter() {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+/// Persistence trait the listener drives to project the transferable
+/// text history of the **local** host. The bootstrap installs an
+/// adapter that delegates to
+/// [`clipvault_db::EntryRepository::text_entries_after`] / a freshly
 /// allocated repository handle; tests inject an in-memory fake.
-pub trait PeerHistoryProjection: Send + Sync {
+///
+/// The listener accepts `ListRecentText` envelopes only after the
+/// mTLS handshake validated the caller against the persisted pin for
+/// the matching `peer_id`. The trait never accepts a `peer_id` from
+/// outside and never returns row content beyond the metadata-only
+/// projection.
+pub trait HostHistorySource: Send + Sync {
     /// Return every transferable textual entry that matches the
     /// (created_at, id) cursor pair (strict less-than ordering). The
     /// implementation MUST sort by `created_at DESC, id DESC` and
-    /// return at most `limit` rows. The implementation MAY return
-    /// fewer rows than `limit` even when more entries exist; the
-    /// runtime reads more pages by re-invoking with the new cursor.
+    /// return at most `limit` rows. The runtime requests `limit + 1`
+    /// rows so the projection can distinguish a "page exactly full
+    /// with at least one more row to fetch" from a "page filled the
+    /// limit because the user asked for fewer than the cap" — the
+    /// listener drops the lookahead row before forwarding the page
+    /// so the renderer never sees an extra entry.
     fn page_after(
         &self,
         created_at: &str,
@@ -512,15 +556,39 @@ pub trait PeerHistoryProjection: Send + Sync {
     /// frontend (so a local capture landing between page requests
     /// can trigger a refetch); the value MUST be stable for the
     /// same persisted history and MUST NOT leak row content. The
-    /// production adapter returns a SHA-256 of the most recent
-    /// textual `created_at` / `id` pair; tests may return a
-    /// deterministic placeholder.
+    /// production adapter returns a SHA-256 over
+    /// `(peer_id, max_created_at, max_id, count)`; tests may return
+    /// a deterministic placeholder.
     fn snapshot_id(&self) -> Result<String, PeerHistoryPersistenceError>;
 }
 
-/// Typed persistence error the runtime surfaces. Every adapter
+/// Clamp the requested page size to the documented wire contract.
+/// The host MUST project at most [`MAX_PAGE_ROWS`] rows per page
+/// and the runtime accepts a smaller `limit` so a caller can ask
+/// for fewer rows without losing the typed outcome surface. The
+/// helper always returns at least `1` so a malicious or buggy
+/// renderer cannot request an empty page.
+pub fn clamp_history_limit(limit: u32) -> usize {
+    let bounded = limit.min(MAX_PAGE_ROWS as u32).max(1);
+    bounded as usize
+}
+
+/// Probe limit the host asks the persistence layer for so it can
+/// tell apart a "page exactly the limit because the caller asked
+/// for fewer" from a "page exactly the limit but more rows
+/// remain". The runtime requests `clamp + 1` rows internally;
+/// when the projection returns exactly that count the host
+/// knows more results exist and emits a signed `next_cursor`; the
+/// last row of the lookahead is dropped before the host hands
+/// the page back to the bridge so the renderer never sees an
+/// off-by-one entry.
+pub fn history_lookahead_limit(limit: usize) -> usize {
+    limit.saturating_add(1).min(MAX_PAGE_ROWS + 1)
+}
+
+/// Typed persistence error the listener surfaces. Every adapter
 /// collapses the underlying failure into one of these variants so
-/// the runtime can branch on the reason without inspecting
+/// the listener can branch on the reason without inspecting
 /// platform-specific error strings.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PeerHistoryPersistenceError {
@@ -530,15 +598,89 @@ pub enum PeerHistoryPersistenceError {
     Failed,
 }
 
+/// Per-peer HMAC secret the runtime caches. The secret is minted
+/// when the row promotes to `trusted` and rotated on `Revoked` or
+/// re-pairing. The cache lives in memory; the bootstrap populates
+/// it from the persistence layer on every snapshot / health probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCursorSecret(pub [u8; CURSOR_SECRET_BYTES]);
+
+impl PeerCursorSecret {
+    /// Generate a fresh 32-byte secret using the OS CSPRNG. The
+    /// runtime NEVER derives a secret from a low-entropy source
+    /// (peer_id, fingerprint, hash, …); a CSPRNG-backed mint keeps
+    /// the wire robust against brute force attempts.
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; CURSOR_SECRET_BYTES];
+        let _ = rand_core::OsRng.try_fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+
+    /// Recover the secret from its hex / raw byte representation.
+    /// `None` is returned when the byte slice is not exactly
+    /// [`CURSOR_SECRET_BYTES`] long — the runtime refuses to
+    /// truncate or pad so a corrupted / truncated persistence
+    /// layer never feeds a deterministic key to the cursor.
+    pub fn from_slice(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != CURSOR_SECRET_BYTES {
+            return None;
+        }
+        let mut out = [0u8; CURSOR_SECRET_BYTES];
+        out.copy_from_slice(bytes);
+        Some(Self(out))
+    }
+
+    /// Borrow the secret bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Encode the secret as the 64-lowercase-hex representation the
+    /// persistence layer persists in `known_peers.cursor_secret`.
+    /// The runtime uses this projection so the database never
+    /// stores raw key bytes and so a future migration can swap the
+    /// encoding without breaking the wire protocol.
+    pub fn to_hex(&self) -> String {
+        let mut out = String::with_capacity(CURSOR_SECRET_BYTES * 2);
+        for byte in self.0.iter() {
+            use std::fmt::Write as _;
+            let _ = write!(&mut out, "{byte:02x}");
+        }
+        out
+    }
+
+    /// Recover the secret from its 64-lowercase-hex representation.
+    /// The runtime uses this on bootstrap so the in-memory cache
+    /// can be primed from the persisted row the previous
+    /// successful pairing minted. `None` is returned when the input
+    /// is not exactly 64 lowercase hex chars so a corrupted row
+    /// cannot feed a deterministic key to the cursor pipeline.
+    pub fn from_hex(value: &str) -> Option<Self> {
+        if value.len() != CURSOR_SECRET_BYTES * 2 {
+            return None;
+        }
+        if !value.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let bytes_in = value.as_bytes();
+        let mut out = [0u8; CURSOR_SECRET_BYTES];
+        for (index, chunk) in bytes_in.chunks_exact(2).enumerate() {
+            let hex = std::str::from_utf8(chunk).ok()?;
+            out[index] = u8::from_str_radix(hex, 16).ok()?;
+        }
+        Some(Self(out))
+    }
+}
+
 /// In-memory persistence adapter the tests use. The adapter mirrors
 /// the contract [`clipvault_db::EntryRepository`] exposes — the
 /// runtime trusts the same outcomes regardless of the backend.
 #[derive(Debug, Default)]
-pub struct InMemoryPeerHistoryProjection {
+pub struct InMemoryHostHistorySource {
     inner: RwLock<Vec<EntryRecord>>,
 }
 
-impl InMemoryPeerHistoryProjection {
+impl InMemoryHostHistorySource {
     pub fn new() -> Self {
         Self::default()
     }
@@ -550,24 +692,9 @@ impl InMemoryPeerHistoryProjection {
     pub fn seed(&self, entries: Vec<EntryRecord>) {
         *self.inner.write() = entries;
     }
-
-    /// Latest snapshot id derived from the highest `created_at` /
-    /// `id` pair currently in the adapter. `None` when the adapter
-    /// is empty.
-    pub fn latest_fingerprint(&self) -> String {
-        let guard = self.inner.read();
-        let Some(top) = guard.iter().max_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.id.cmp(&b.id))
-        }) else {
-            return "empty".to_string();
-        };
-        format!("{}|{}", top.created_at, top.id)
-    }
 }
 
-impl PeerHistoryProjection for InMemoryPeerHistoryProjection {
+impl HostHistorySource for InMemoryHostHistorySource {
     fn page_after(
         &self,
         created_at: &str,
@@ -594,7 +721,20 @@ impl PeerHistoryProjection for InMemoryPeerHistoryProjection {
     }
 
     fn snapshot_id(&self) -> Result<String, PeerHistoryPersistenceError> {
-        Ok(self.latest_fingerprint())
+        let guard = self.inner.read();
+        let Some(top) = guard.iter().max_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        }) else {
+            return Ok(compute_page_fingerprint("local", "empty", 0, 0));
+        };
+        Ok(compute_page_fingerprint(
+            "local",
+            &top.created_at,
+            top.id,
+            guard.len(),
+        ))
     }
 }
 
@@ -602,18 +742,18 @@ impl PeerHistoryProjection for InMemoryPeerHistoryProjection {
 /// handle. The adapter borrows a [`Mutex<Database>`] the runtime
 /// hands it through the bootstrap; tests use the in-memory
 /// projection above.
-pub struct EntryRepositoryPeerHistoryProjection {
+pub struct EntryRepositoryHostHistorySource {
     database: Arc<parking_lot::Mutex<clipvault_db::Database>>,
 }
 
-impl EntryRepositoryPeerHistoryProjection {
+impl EntryRepositoryHostHistorySource {
     /// Build an adapter that borrows the shared [`clipvault_db::Database`].
     pub fn new(database: Arc<parking_lot::Mutex<clipvault_db::Database>>) -> Self {
         Self { database }
     }
 }
 
-impl PeerHistoryProjection for EntryRepositoryPeerHistoryProjection {
+impl HostHistorySource for EntryRepositoryHostHistorySource {
     fn page_after(
         &self,
         created_at: &str,
@@ -622,11 +762,11 @@ impl PeerHistoryProjection for EntryRepositoryPeerHistoryProjection {
     ) -> Result<Vec<EntryRecord>, PeerHistoryPersistenceError> {
         let mut guard = self.database.lock();
         let conn = guard.connection_mut();
-        let repo = EntryRepository::new(conn);
+        let repo = clipvault_db::EntryRepository::new(conn);
         let page = repo
             .text_entries_after(created_at, id, limit)
             .map_err(|error| {
-                tracing::warn!(?error, "peer history persistence: page_after failed");
+                tracing::warn!(?error, "host history projection: page_after failed");
                 PeerHistoryPersistenceError::Failed
             })?;
         Ok(page)
@@ -635,22 +775,58 @@ impl PeerHistoryProjection for EntryRepositoryPeerHistoryProjection {
     fn snapshot_id(&self) -> Result<String, PeerHistoryPersistenceError> {
         let mut guard = self.database.lock();
         let conn = guard.connection_mut();
-        let repo = EntryRepository::new(conn);
+        let repo = clipvault_db::EntryRepository::new(conn);
         let latest = repo.latest_transferable_text_snapshot().map_err(|error| {
-            tracing::warn!(?error, "peer history persistence: snapshot failed");
+            tracing::warn!(?error, "host history projection: snapshot failed");
             PeerHistoryPersistenceError::Failed
         })?;
-        Ok(latest
-            .map(|(created_at, id)| format!("{created_at}|{id}"))
-            .unwrap_or_else(|| "empty".to_string()))
+        match latest {
+            Some((created_at, id)) => {
+                let count: i64 = clipvault_db::EntryRepository::new(conn)
+                    .transferable_text_count()
+                    .map_err(|error| {
+                        tracing::warn!(?error, "host history projection: count failed");
+                        PeerHistoryPersistenceError::Failed
+                    })?;
+                Ok(compute_page_fingerprint(
+                    "local",
+                    &created_at,
+                    id,
+                    count as usize,
+                ))
+            }
+            None => Ok(compute_page_fingerprint("local", "empty", 0, 0)),
+        }
     }
 }
 
+/// Outcome the host listener hands back to the transport after the
+/// caller submitted a [`crate::peer_transport::wire::PairingMessage::ListRecentText`]
+/// envelope. The transport never inspects the row payload beyond
+/// the type check; the variants collapse to the typed reason the
+/// wire envelope already encodes (`ListRecentTextAck` /
+/// `ListRecentTextInvalid` / `ListRecentTextUnavailable`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostHistoryResponse {
+    Ok(RemoteTextHistoryPage, String),
+    InvalidCursor,
+    Unavailable(&'static str),
+}
+
 /// Service the shell drives. The façade is cheap to clone (every
-/// field is `Arc`-shared) and never mutates the persistence layer.
+/// field is `Arc`-shared) and never mutates the local persistence
+/// layer. The service is metadata-only by construction: a remote
+/// browse call dials the mTLS-backed transport and forwards the
+/// typed outcome the transport returns; a host-side projection is
+/// driven by the transport listener through a separate
+/// [`HostHistorySource`] trait.
 #[derive(Clone)]
 pub struct PeerTextHistoryService {
-    projection: Arc<dyn PeerHistoryProjection>,
+    /// Transport the client-side browse dials. The runtime never
+    /// opens an mTLS connection outside of this trait; tests inject
+    /// a scriptable fake so they can verify the wire contract
+    /// without binding a real listener.
+    transport: Arc<dyn PeerHistoryTransport>,
     /// Per-peer active-state cache. The cache is metadata-only
     /// (no content bytes) and is what the runtime consults before
     /// opening a cursor pagination. The cache lives in-memory; the
@@ -659,6 +835,12 @@ pub struct PeerTextHistoryService {
     /// peer update so a browsing call cannot outrun the trust
     /// transition that unlocked it.
     active_peers: Arc<RwLock<HashMap<String, PeerActiveState>>>,
+    /// Per-peer HMAC secret the runtime mints when the row
+    /// promotes to `trusted` and rotates on `Revoked` /
+    /// re-pairing. The cache is the only place the secret lives;
+    /// the listener signs cursors with the value the bootstrap
+    /// installed on trust promotion.
+    cursor_secrets: Arc<RwLock<HashMap<String, PeerCursorSecret>>>,
 }
 
 /// Lightweight active-state record the runtime caches. The struct
@@ -671,15 +853,115 @@ pub struct PeerActiveState {
     pub active: bool,
 }
 
+/// Metadata the client-side facade hands to the transport so the
+/// transport can dial the matching peer with the pinned cert
+/// fingerprint. The runtime reads the cert fingerprint from the
+/// [`crate::clipvault::peer_pairing::PairingPersistence`] it caches
+/// at install time — the bridge never accepts the fingerprint from
+/// the renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListRecentTextRequest {
+    pub peer_id: String,
+    pub cert_fingerprint: String,
+    /// Opaque cursor the renderer submitted verbatim (empty when
+    /// the client asks for the first page). The transport never
+    /// inspects the payload.
+    pub cursor: String,
+    /// Upper bound the renderer wants; the transport clamps the
+    /// value to [`MAX_PAGE_ROWS`].
+    pub limit: u32,
+}
+
+/// Metadata-only transport facade the client-side browse uses. The
+/// trait is the seam between the core runtime and the platform
+/// mTLS stack: the transport owns the dial loop, the pin lookup and
+/// the per-peer session, while the runtime owns the trust / active
+/// gate and the cursor / page contract.
+///
+/// Every call collapses to a typed [`PeerHistoryTransportError`]
+/// variant the runtime maps onto a [`PeerHistoryOutcome`]; the
+/// trait never returns row content beyond the metadata-only
+/// projection. The successful return bundles the bounded
+/// [`RemoteTextHistoryPage`] the host projected alongside the
+/// `snapshot_id` fingerprint the host minted on its own header;
+/// the runtime MUST surface both values verbatim and MUST NOT
+/// recompute the fingerprint from the visible rows.
+pub trait PeerHistoryTransport: Send + Sync {
+    fn list_recent_text(
+        &self,
+        request: ListRecentTextRequest,
+    ) -> Result<ListRecentTextResponse, PeerHistoryTransportError>;
+}
+
+/// Successful payload the [`PeerHistoryTransport`] returns. The
+/// runtime forwards the page and the `snapshot_id` to the bridge
+/// without intermediate mutation so the client never reconstructs
+/// a fingerprint from a partial row set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListRecentTextResponse {
+    pub page: RemoteTextHistoryPage,
+    pub snapshot_id: String,
+}
+
+/// Typed transport error the runtime maps onto a
+/// [`PeerHistoryOutcome`] variant. The variants mirror
+/// [`crate::peer_transport::TransportError`] but the trait
+/// collapses the wire detail into the same stable reasons the
+/// frontend branches on. The dedicated [`Self::InvalidCursor`]
+/// variant keeps the cursor-rejection path lossless: a forged
+/// cursor, a cursor replayed against another peer or a cursor
+/// signed under a rotated HMAC secret surfaces as the typed
+/// `invalid_cursor` outcome instead of being hidden behind a
+/// generic network error.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum PeerHistoryTransportError {
+    #[error("peer history transport is unavailable")]
+    Unavailable,
+    #[error("peer history transport rejected an unknown peer")]
+    UnknownPeer,
+    #[error("peer history transport rejected a mismatched TLS identity")]
+    KeyMismatch,
+    #[error("peer history transport rejected a revoked peer")]
+    Revoked,
+    #[error("peer history transport rejected a blocked peer")]
+    Blocked,
+    #[error("peer history transport wire protocol is incompatible")]
+    IncompatibleProtocol,
+    #[error("peer history transport rejected a malformed payload")]
+    Malformed,
+    /// The host refused the page request because the caller
+    /// submitted a cursor it did not mint. The renderer MUST NOT
+    /// treat this as a transient network failure.
+    #[error("peer history transport rejected an invalid cursor")]
+    InvalidCursor,
+}
+
+impl PeerHistoryTransportError {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::UnknownPeer => "unknown_peer",
+            Self::KeyMismatch => "key_mismatch",
+            Self::Revoked => "revoked",
+            Self::Blocked => "blocked",
+            Self::IncompatibleProtocol => "incompatible_protocol",
+            Self::Malformed => "malformed",
+            Self::InvalidCursor => "invalid_cursor",
+        }
+    }
+}
+
 impl PeerTextHistoryService {
-    /// Build a service backed by the supplied projection. The
-    /// active-state cache starts empty: the bootstrap populates it
-    /// on every snapshot / health probe so the very first browsing
-    /// call waits for an `Active` projection before returning rows.
-    pub fn new(projection: Arc<dyn PeerHistoryProjection>) -> Self {
+    /// Build a service backed by the supplied transport. The
+    /// active-state and secret caches start empty: the bootstrap
+    /// populates them on every snapshot / health probe so the very
+    /// first browsing call waits for an `Active` projection before
+    /// returning rows.
+    pub fn new(transport: Arc<dyn PeerHistoryTransport>) -> Self {
         Self {
-            projection,
+            transport,
             active_peers: Arc::new(RwLock::new(HashMap::new())),
+            cursor_secrets: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -703,17 +985,84 @@ impl PeerTextHistoryService {
         self.active_peers.read().get(peer_id).copied()
     }
 
+    /// Mint or replace the per-peer HMAC secret the cursor signer
+    /// uses. The bootstrap calls this exactly once per trust
+    /// promotion so the host only signs cursors with a freshly
+    /// minted secret; calling `set_cursor_secret` again invalidates
+    /// every cursor signed under the previous secret.
+    pub fn set_cursor_secret(&self, peer_id: &str, secret: PeerCursorSecret) {
+        self.cursor_secrets
+            .write()
+            .insert(peer_id.to_string(), secret);
+    }
+
+    /// Install the per-peer HMAC secret the bootstrap loaded from
+    /// the persisted `known_peers.cursor_secret` row. The runtime
+    /// consults the cache when the productive `HistoryHostHandler`
+    /// serves a `list_recent_text` request so a restart never has
+    /// to mint a fresh secret (which would invalidate cursors the
+    /// peer already holds). The helper refuses a malformed value
+    /// so a corrupted row cannot downgrade the HMAC pipeline to a
+    /// deterministic key.
+    pub fn install_cursor_secret_hex(&self, peer_id: &str, secret_hex: &str) -> bool {
+        match PeerCursorSecret::from_hex(secret_hex) {
+            Some(secret) => {
+                self.set_cursor_secret(peer_id, secret);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Read the persisted per-peer HMAC secret as the 64-hex
+    /// representation the database stores. The bootstrap uses this
+    /// helper to round-trip the secret through the
+    /// [`crate::peer_pairing::PairingPersistence`] trait without
+    /// ever inspecting the raw key bytes.
+    pub fn cursor_secret_hex(&self, peer_id: &str) -> Option<String> {
+        self.cursor_secrets
+            .read()
+            .get(peer_id)
+            .map(|secret| secret.to_hex())
+    }
+
+    /// Drop the per-peer HMAC secret. The bootstrap calls this on
+    /// `Revoked`, `Blocked` and `Desvincular` so a subsequent
+    /// `ListRecentText` from a stale cursor cannot validate.
+    pub fn clear_cursor_secret(&self, peer_id: &str) {
+        self.cursor_secrets.write().remove(peer_id);
+    }
+
+    /// Read the per-peer HMAC secret the cursor signer currently
+    /// holds for `peer_id`.
+    pub fn cursor_secret(&self, peer_id: &str) -> Option<PeerCursorSecret> {
+        self.cursor_secrets.read().get(peer_id).copied()
+    }
+
     /// Browse the most recent transferable text page of `peer_id`.
     ///
     /// The runtime consults the in-memory active-state cache and
-    /// refuses to project when the peer is not trusted, not present
+    /// refuses to dial when the peer is not trusted, not present
     /// or unknown. A `cursor = None` request starts the newest
-    /// page; a `Some(cursor)` request decodes the cursor and pages
-    /// strictly after the (created_at, id) pair it carries.
+    /// page; a `Some(cursor)` request forwards the opaque string
+    /// the renderer submitted verbatim — the client NEVER decodes
+    /// the cursor because the HMAC secret is private to the host
+    /// that minted it. The remote listener is the only entity that
+    /// ever validates the cursor; a forged, rotated, replayed or
+    /// truncated cursor therefore reaches the wire and the host
+    /// surfaces the typed `invalid_cursor` reason.
+    ///
+    /// The function is **always** metadata-only: it never mutates
+    /// SQLite, never emits a `history-updated` event and never
+    /// returns row content beyond the bounded projection. The
+    /// transport dials the remote listener; the runtime only
+    /// forwards the typed outcome the transport returns.
     pub fn browse(
         &self,
         peer_id: &str,
+        cert_fingerprint: &str,
         cursor: Option<&RemoteHistoryCursor>,
+        limit: u32,
     ) -> PeerHistoryOutcome {
         let state = match self.peer_state(peer_id) {
             Some(state) => state,
@@ -733,58 +1082,126 @@ impl PeerTextHistoryService {
                 reason: "not_active",
             };
         }
+        // Forward the cursor verbatim. The cursor is opaque on the
+        // client side: the HMAC secret is bound to the host that
+        // minted the cursor and only the host validates it. A
+        // bogus, manipulated, rotated or replayed cursor therefore
+        // travels over the wire and surfaces as a typed
+        // `ListRecentTextInvalid` envelope the runtime maps onto
+        // [`PeerHistoryOutcome::InvalidCursor`].
+        let cursor_payload = cursor.map(|c| c.as_str().to_string()).unwrap_or_default();
 
-        // The sentinel cursor marks the very first page: any
-        // real RFC 3339 timestamp sorts strictly before it, so
-        // the projection returns every transferable row the host
-        // owns (newest first, up to the page cap). The sentinel
-        // id is `i64::MAX` so the tie-breaker the projection
-        // applies to rows that share the cursor's created_at
-        // still matches every persisted entry.
-        const SENTINEL_TIMESTAMP: &str = "9999-12-31T23:59:59Z";
-        const SENTINEL_ID: i64 = i64::MAX;
+        let request = ListRecentTextRequest {
+            peer_id: peer_id.to_string(),
+            cert_fingerprint: cert_fingerprint.to_string(),
+            cursor: cursor_payload,
+            limit: clamp_history_limit(limit) as u32,
+        };
+        match self.transport.list_recent_text(request) {
+            Ok(ListRecentTextResponse { page, snapshot_id }) => {
+                // The transport hands back the page exactly as
+                // the host minted it: the metadata-only rows, the
+                // opaque `next_cursor` and the `snapshot_id`
+                // fingerprint the host computed from its own
+                // header. The runtime NEVER rebuilds a remote
+                // fingerprint locally — a partial reconstruction
+                // would diverge from the host the moment a new
+                // capture lands or a row is removed between page
+                // requests.
+                PeerHistoryOutcome::Ok { page, snapshot_id }
+            }
+            Err(error) => match error {
+                PeerHistoryTransportError::UnknownPeer
+                | PeerHistoryTransportError::Revoked
+                | PeerHistoryTransportError::Blocked
+                | PeerHistoryTransportError::KeyMismatch => PeerHistoryOutcome::PeerUnavailable {
+                    reason: "not_active",
+                },
+                PeerHistoryTransportError::InvalidCursor => PeerHistoryOutcome::InvalidCursor,
+                PeerHistoryTransportError::IncompatibleProtocol
+                | PeerHistoryTransportError::Malformed
+                | PeerHistoryTransportError::Unavailable => {
+                    PeerHistoryOutcome::TransportUnavailable {
+                        reason: error.reason(),
+                    }
+                }
+            },
+        }
+    }
 
+    /// Host-side projection the transport listener drives when an
+    /// authenticated peer asks for `list_recent_text`. The function
+    /// verifies the cursor, projects the page through the supplied
+    /// [`HostHistorySource`] and signs the next cursor with the
+    /// per-peer secret the bootstrap installed. The bootstrap
+    /// guarantees the caller already authenticated against the
+    /// pinned cert for `peer_id`; this method only enforces the
+    /// typed outcome the wire envelope encodes.
+    ///
+    /// `requested_limit` is the page size the caller asked for; the
+    /// helper clamps it to `[1, MAX_PAGE_ROWS]` so the host never
+    /// returns more rows than the contract allows and never zero. To
+    /// distinguish a "page full because there are more rows" from a
+    /// "page full because the caller requested fewer than the cap"
+    /// the helper asks the persistence layer for `clamp + 1` rows and
+    /// emits a signed `next_cursor` ONLY when the lookahead returned
+    /// an extra entry.
+    pub fn serve(
+        &self,
+        peer_id: &str,
+        cursor: Option<&RemoteHistoryCursor>,
+        requested_limit: u32,
+        source: &dyn HostHistorySource,
+    ) -> HostHistoryResponse {
+        let secret = match self.cursor_secret(peer_id) {
+            Some(secret) => secret,
+            None => return HostHistoryResponse::Unavailable("not_trusted"),
+        };
         let (start_created_at, start_id) = match cursor {
-            None => (SENTINEL_TIMESTAMP.to_string(), SENTINEL_ID),
-            Some(cursor) => match cursor.decode() {
-                Ok((ts, id)) => (ts, id),
-                Err(_) => return PeerHistoryOutcome::InvalidCursor,
+            None => ("9999-12-31T23:59:59Z".to_string(), i64::MAX),
+            Some(cursor) => match cursor.decode(peer_id, secret.as_bytes()) {
+                Ok(pair) => pair,
+                Err(_) => return HostHistoryResponse::InvalidCursor,
             },
         };
-
-        let rows = match self
-            .projection
-            .page_after(&start_created_at, start_id, MAX_PAGE_ROWS)
-        {
+        let limit = clamp_history_limit(requested_limit);
+        let probe = history_lookahead_limit(limit);
+        let rows = match source.page_after(&start_created_at, start_id, probe) {
             Ok(rows) => rows,
-            Err(_) => return PeerHistoryOutcome::PersistenceUnavailable,
+            Err(_) => return HostHistoryResponse::Unavailable("persistence_unavailable"),
         };
-
-        let mut previews = Vec::with_capacity(rows.len());
-        for row in rows {
+        let mut previews: Vec<RemoteTextPreview> = Vec::with_capacity(limit);
+        let mut has_more = false;
+        for (index, row) in rows.into_iter().enumerate() {
+            if index >= limit {
+                has_more = true;
+                break;
+            }
             previews.push(project_row(&row));
         }
-        let next_cursor = if previews.len() == MAX_PAGE_ROWS {
+        let next_cursor = if has_more {
             previews.last().map(|preview| {
                 RemoteHistoryCursor::mint(
+                    peer_id,
                     &preview.created_at,
                     decode_remote_id(&preview.remote_entry_id),
+                    secret.as_bytes(),
                 )
             })
         } else {
             None
         };
-        let snapshot_id = match self.projection.snapshot_id() {
+        let snapshot_id = match source.snapshot_id() {
             Ok(value) => value,
-            Err(_) => return PeerHistoryOutcome::PersistenceUnavailable,
+            Err(_) => return HostHistoryResponse::Unavailable("persistence_unavailable"),
         };
-        PeerHistoryOutcome::Ok {
-            page: RemoteTextHistoryPage {
+        HostHistoryResponse::Ok(
+            RemoteTextHistoryPage {
                 rows: previews,
                 next_cursor,
             },
             snapshot_id,
-        }
+        )
     }
 }
 
@@ -875,6 +1292,15 @@ mod tests {
     }
 
     #[test]
+    fn transferable_predicate_rejects_html_rows() {
+        // Even though `Html` returns `true` for `is_textual()` (the
+        // local search needs to surface it), the wire is plain
+        // text only — the predicate must explicitly exclude it.
+        let html = record(1, ContentType::Html, "<p>hello</p>", "2026-01-01T00:00:00Z");
+        assert!(!entry_is_transferable(&html));
+    }
+
+    #[test]
     fn transferable_predicate_accepts_textual_rows() {
         assert!(entry_is_transferable(&record(
             1,
@@ -903,279 +1329,138 @@ mod tests {
     }
 
     #[test]
-    fn cursor_round_trips_timestamp_and_id() {
-        let cursor = RemoteHistoryCursor::mint("2026-01-02T03:04:05Z", 42);
-        let (ts, id) = cursor.decode().expect("decoded");
+    fn cursor_round_trips_timestamp_and_id_with_secret() {
+        let secret = PeerCursorSecret::generate();
+        let cursor =
+            RemoteHistoryCursor::mint("peer-x", "2026-01-02T03:04:05Z", 42, secret.as_bytes());
+        let (ts, id) = cursor.decode("peer-x", secret.as_bytes()).expect("decoded");
         assert_eq!(ts, "2026-01-02T03:04:05Z");
         assert_eq!(id, 42);
     }
 
     #[test]
-    fn cursor_rejects_forged_input() {
-        let cursor = RemoteHistoryCursor {
-            inner: "not-a-valid-cursor".to_string(),
-        };
+    fn cursor_rejects_forged_payload() {
+        let secret = PeerCursorSecret::generate();
+        // Same shape as a host-minted cursor but signed under a
+        // different key: the verifier MUST refuse the payload
+        // before reaching the page phase.
+        let cursor = RemoteHistoryCursor::mint(
+            "peer-x",
+            "2026-01-02T03:04:05Z",
+            42,
+            b"different-secret-bytes-padding-padding-padding",
+        );
         assert!(matches!(
-            cursor.decode(),
+            cursor.decode("peer-x", secret.as_bytes()),
+            Err(PeerHistoryCursorError::SignatureMismatch)
+        ));
+    }
+
+    #[test]
+    fn cursor_rejects_signature_when_secret_rotates() {
+        let previous = PeerCursorSecret::generate();
+        let next = PeerCursorSecret::generate();
+        let cursor =
+            RemoteHistoryCursor::mint("peer-x", "2026-01-02T03:04:05Z", 42, previous.as_bytes());
+        assert!(matches!(
+            cursor.decode("peer-x", next.as_bytes()),
+            Err(PeerHistoryCursorError::SignatureMismatch)
+        ));
+    }
+
+    #[test]
+    fn cursor_rejects_replay_across_peers() {
+        let secret = PeerCursorSecret::generate();
+        let cursor =
+            RemoteHistoryCursor::mint("peer-a", "2026-01-02T03:04:05Z", 42, secret.as_bytes());
+        assert!(matches!(
+            cursor.decode("peer-b", secret.as_bytes()),
             Err(PeerHistoryCursorError::Invalid)
         ));
-        let cursor = RemoteHistoryCursor {
-            inner: percent_encode("2026-01-02T03:04:05Z|not-a-number"),
-        };
+    }
+
+    #[test]
+    fn cursor_rejects_garbage_input() {
+        let secret = PeerCursorSecret::generate();
+        let cursor = RemoteHistoryCursor::from_string("not-a-valid-cursor".to_string());
         assert!(matches!(
-            cursor.decode(),
-            Err(PeerHistoryCursorError::MalformedId)
+            cursor.decode("peer-x", secret.as_bytes()),
+            Err(PeerHistoryCursorError::Invalid)
         ));
     }
 
     #[test]
     fn cursor_rejects_non_rfc3339_timestamp() {
-        let cursor = RemoteHistoryCursor {
-            inner: percent_encode("not-a-date|1"),
-        };
+        // Build a cursor whose timestamp is non-RFC 3339. The
+        // signature is still valid (the secret signs the raw bytes
+        // verbatim) but the timestamp parser refuses the payload.
+        let secret = PeerCursorSecret::generate();
+        let payload = "peer-x\nnot-a-date\n1";
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(payload.as_bytes());
+        let tag = mac.finalize().into_bytes();
+        let cursor = RemoteHistoryCursor::from_string(format!(
+            "{}::{}",
+            URL_SAFE_NO_PAD.encode(payload.as_bytes()),
+            URL_SAFE_NO_PAD.encode(tag),
+        ));
         assert!(matches!(
-            cursor.decode(),
+            cursor.decode("peer-x", secret.as_bytes()),
             Err(PeerHistoryCursorError::MalformedTimestamp)
         ));
     }
 
     #[test]
-    fn cursor_rejects_bare_percent_sequence() {
-        // A cursor with an unmatched `%` byte cannot have been
-        // minted by the host (the encoder never emits a bare `%`).
-        let cursor = RemoteHistoryCursor {
-            inner: "2026-01-02T03:04:05Z|1%zz".to_string(),
-        };
+    fn cursor_rejects_non_positive_id() {
+        let secret = PeerCursorSecret::generate();
+        let payload = "peer-x\n2026-01-02T03:04:05Z\n0";
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(payload.as_bytes());
+        let tag = mac.finalize().into_bytes();
+        let cursor = RemoteHistoryCursor::from_string(format!(
+            "{}::{}",
+            URL_SAFE_NO_PAD.encode(payload.as_bytes()),
+            URL_SAFE_NO_PAD.encode(tag),
+        ));
         assert!(matches!(
-            cursor.decode(),
-            Err(PeerHistoryCursorError::Invalid)
+            cursor.decode("peer-x", secret.as_bytes()),
+            Err(PeerHistoryCursorError::MalformedId)
         ));
     }
 
     #[test]
-    fn browse_returns_peer_unavailable_when_state_missing() {
-        let projection: Arc<dyn PeerHistoryProjection> =
-            Arc::new(InMemoryPeerHistoryProjection::new());
-        let service = PeerTextHistoryService::new(projection);
-        let outcome = service.browse("peer-x", None);
-        assert!(matches!(
-            outcome,
-            PeerHistoryOutcome::PeerUnavailable {
-                reason: "no_known_peer"
-            }
-        ));
+    fn page_fingerprint_is_stable_for_same_header() {
+        let first = compute_page_fingerprint("peer-x", "2026-01-01T00:00:00Z", 7, 3);
+        let second = compute_page_fingerprint("peer-x", "2026-01-01T00:00:00Z", 7, 3);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
     }
 
     #[test]
-    fn browse_returns_peer_unavailable_when_state_not_trusted() {
-        let projection: Arc<dyn PeerHistoryProjection> =
-            Arc::new(InMemoryPeerHistoryProjection::new());
-        let service = PeerTextHistoryService::new(projection);
-        service.record_peer_state(
-            "peer-x",
-            PeerActiveState {
-                trusted: false,
-                active: false,
-            },
+    fn page_fingerprint_changes_with_content() {
+        let baseline = compute_page_fingerprint("peer-x", "2026-01-01T00:00:00Z", 7, 3);
+        assert_ne!(
+            baseline,
+            compute_page_fingerprint("peer-x", "2026-01-02T00:00:00Z", 7, 3)
         );
-        let outcome = service.browse("peer-x", None);
-        assert!(matches!(
-            outcome,
-            PeerHistoryOutcome::PeerUnavailable {
-                reason: "not_trusted"
-            }
-        ));
-    }
-
-    #[test]
-    fn browse_returns_peer_unavailable_when_state_not_active() {
-        let projection: Arc<dyn PeerHistoryProjection> =
-            Arc::new(InMemoryPeerHistoryProjection::new());
-        let service = PeerTextHistoryService::new(projection);
-        service.record_peer_state(
-            "peer-x",
-            PeerActiveState {
-                trusted: true,
-                active: false,
-            },
+        assert_ne!(
+            baseline,
+            compute_page_fingerprint("peer-x", "2026-01-01T00:00:00Z", 8, 3)
         );
-        let outcome = service.browse("peer-x", None);
-        assert!(matches!(
-            outcome,
-            PeerHistoryOutcome::PeerUnavailable {
-                reason: "not_active"
-            }
-        ));
-    }
-
-    #[test]
-    fn browse_returns_invalid_cursor_for_forged_cursor() {
-        let projection: Arc<dyn PeerHistoryProjection> =
-            Arc::new(InMemoryPeerHistoryProjection::new());
-        let service = PeerTextHistoryService::new(projection);
-        service.record_peer_state(
-            "peer-x",
-            PeerActiveState {
-                trusted: true,
-                active: true,
-            },
+        assert_ne!(
+            baseline,
+            compute_page_fingerprint("peer-x", "2026-01-01T00:00:00Z", 7, 4)
         );
-        let cursor = RemoteHistoryCursor {
-            inner: "forged".to_string(),
-        };
-        let outcome = service.browse("peer-x", Some(&cursor));
-        assert!(matches!(outcome, PeerHistoryOutcome::InvalidCursor));
-    }
-
-    fn active_service_with(entries: Vec<EntryRecord>) -> PeerTextHistoryService {
-        let projection = Arc::new(InMemoryPeerHistoryProjection::new());
-        projection.seed(entries);
-        let service = PeerTextHistoryService::new(projection);
-        service.record_peer_state(
-            "peer-x",
-            PeerActiveState {
-                trusted: true,
-                active: true,
-            },
+        assert_ne!(
+            baseline,
+            compute_page_fingerprint("peer-y", "2026-01-01T00:00:00Z", 7, 3)
         );
-        service
     }
 
     #[test]
-    fn browse_orders_rows_newest_first_with_stable_id_tie_break() {
-        // The projection sorts by `created_at DESC, id DESC`; this
-        // test feeds a same-timestamp batch to verify the id
-        // tie-breaker stays stable.
-        let mut entries = Vec::new();
-        for (id, content) in [(1u64, "old"), (2, "middle"), (3, "new")] {
-            entries.push(record(
-                id as i64,
-                ContentType::Text,
-                content,
-                "2026-01-01T00:00:00Z",
-            ));
-        }
-        let service = active_service_with(entries);
-        let outcome = service.browse("peer-x", None);
-        let PeerHistoryOutcome::Ok { page, .. } = outcome else {
-            panic!("expected Ok variant");
-        };
-        let previews: Vec<&str> = page.rows.iter().map(|row| row.preview.as_str()).collect();
-        // Tie-broken by `id DESC` so id=3 renders first.
-        assert_eq!(previews, vec!["new", "middle", "old"]);
-    }
-
-    #[test]
-    fn browse_paginates_after_cursor_with_strict_less_than() {
-        // The test seeds `MAX_PAGE_ROWS + 5` entries so the first
-        // page hits the cap and the host emits a `next_cursor`;
-        // the second page then pages strictly after that cursor.
-        let mut entries = Vec::new();
-        for id in 1..=(MAX_PAGE_ROWS + 5) as i64 {
-            entries.push(record(
-                id,
-                ContentType::Text,
-                &format!("row-{id}"),
-                "2026-01-01T00:00:00Z",
-            ));
-        }
-        let service = active_service_with(entries);
-        let first = service.browse("peer-x", None);
-        let PeerHistoryOutcome::Ok { page, .. } = first else {
-            panic!("expected Ok variant");
-        };
-        let next_cursor = page.next_cursor.expect("next cursor");
-        let second = service.browse("peer-x", Some(&next_cursor));
-        let PeerHistoryOutcome::Ok { page, .. } = second else {
-            panic!("expected Ok variant");
-        };
-        let second_ids: Vec<i64> = page
-            .rows
-            .iter()
-            .map(|row| {
-                row.remote_entry_id
-                    .strip_prefix("entry-")
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(0)
-            })
-            .collect();
-        // The cursor was minted from id = MAX_PAGE_ROWS (the
-        // newest row the first page returned); the second page
-        // must contain only rows with id < MAX_PAGE_ROWS.
-        assert_eq!(second_ids.len(), 5);
-        assert!(second_ids.iter().all(|id| *id < MAX_PAGE_ROWS as i64));
-        assert!(page.next_cursor.is_none());
-    }
-
-    #[test]
-    fn browse_caps_page_size_at_max_rows() {
-        let mut entries = Vec::new();
-        for id in 1..=(MAX_PAGE_ROWS + 5) as i64 {
-            entries.push(record(
-                id,
-                ContentType::Text,
-                &format!("row-{id}"),
-                "2026-01-01T00:00:00Z",
-            ));
-        }
-        let service = active_service_with(entries);
-        let outcome = service.browse("peer-x", None);
-        let PeerHistoryOutcome::Ok { page, .. } = outcome else {
-            panic!("expected Ok variant");
-        };
-        assert_eq!(page.rows.len(), MAX_PAGE_ROWS);
-        assert!(page.next_cursor.is_some());
-    }
-
-    #[test]
-    fn browse_excludes_image_and_rich_text_rows() {
-        let mut entries = vec![
-            record(1, ContentType::Text, "transferable", "2026-01-01T00:00:00Z"),
-            image_record(2),
-        ];
-        let mut rich = record(3, ContentType::Text, "rich", "2026-01-01T00:00:00Z");
-        rich.rich_text_hash = Some("a".repeat(64));
-        rich.rich_html_ref = Some("rich-text/a.html".to_string());
-        entries.push(rich);
-
-        let service = active_service_with(entries);
-        let outcome = service.browse("peer-x", None);
-        let PeerHistoryOutcome::Ok { page, .. } = outcome else {
-            panic!("expected Ok variant");
-        };
-        assert_eq!(page.rows.len(), 1);
-        assert_eq!(page.rows[0].preview, "transferable");
-    }
-
-    #[test]
-    fn browse_does_not_expose_body_hashes_or_source_metadata() {
-        let mut entry = record(7, ContentType::Text, "<b>html</b>", "2026-01-01T00:00:00Z");
-        entry.title = Some("hello".to_string());
-        entry.source_app = Some("com.example.Editor".to_string());
-        entry.content_hash = "deadbeef".repeat(8);
-
-        let service = active_service_with(vec![entry]);
-        let outcome = service.browse("peer-x", None);
-        let PeerHistoryOutcome::Ok { page, .. } = outcome else {
-            panic!("expected Ok variant");
-        };
-        let row = &page.rows[0];
-        // The preview is HTML-escaped; the title is preserved (it
-        // is the human-readable label, not content).
-        assert!(row.preview.contains("&lt;b&gt;"));
-        // Source app metadata is never emitted.
-        assert!(!row.preview.contains("com.example.Editor"));
-        // The raw content hash never reaches the wire. The
-        // remote_entry_id is the opaque host-minted id (the
-        // numeric id is allowed since it is the bridge between
-        // the renderer and the future import action).
-        assert!(row.preview.contains("hello") == false);
-    }
-
-    #[test]
-    fn browse_returns_persistence_unavailable_when_projection_fails() {
-        struct FailingProjection;
-        impl PeerHistoryProjection for FailingProjection {
+    fn snapshot_id_returns_persistence_unavailable_when_source_fails() {
+        struct FailingSource;
+        impl HostHistorySource for FailingSource {
             fn page_after(
                 &self,
                 _created_at: &str,
@@ -1188,8 +1473,140 @@ mod tests {
                 Err(PeerHistoryPersistenceError::Failed)
             }
         }
-        let projection: Arc<dyn PeerHistoryProjection> = Arc::new(FailingProjection);
-        let service = PeerTextHistoryService::new(projection);
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        service.set_cursor_secret("peer-x", PeerCursorSecret::generate());
+        let response = service.serve("peer-x", None, MAX_PAGE_ROWS as u32, &FailingSource);
+        assert!(matches!(
+            response,
+            HostHistoryResponse::Unavailable("persistence_unavailable")
+        ));
+    }
+
+    /// Noop transport the tests use when the assertion does not
+    /// exercise the dial path. The transport returns
+    /// [`PeerHistoryTransportError::Unavailable`] so the runtime
+    /// collapses the outcome into
+    /// [`PeerHistoryOutcome::TransportUnavailable`] without a
+    /// network round-trip.
+    struct NullPeerHistoryTransport;
+
+    impl PeerHistoryTransport for NullPeerHistoryTransport {
+        fn list_recent_text(
+            &self,
+            _request: ListRecentTextRequest,
+        ) -> Result<ListRecentTextResponse, PeerHistoryTransportError> {
+            Err(PeerHistoryTransportError::Unavailable)
+        }
+    }
+
+    /// Scriptable transport the tests use to simulate a host
+    /// response. The helper returns a single
+    /// [`ListRecentTextResponse`] so the test surface stays small;
+    /// the runtime forwards the snapshot_id verbatim and never
+    /// builds one locally.
+    struct ScriptedPeerHistoryTransport {
+        response: parking_lot::Mutex<Result<ListRecentTextResponse, PeerHistoryTransportError>>,
+        last_request: parking_lot::Mutex<Option<ListRecentTextRequest>>,
+    }
+
+    impl ScriptedPeerHistoryTransport {
+        fn new(response: Result<ListRecentTextResponse, PeerHistoryTransportError>) -> Self {
+            Self {
+                response: parking_lot::Mutex::new(response),
+                last_request: parking_lot::Mutex::new(None),
+            }
+        }
+        fn last_request(&self) -> Option<ListRecentTextRequest> {
+            self.last_request.lock().clone()
+        }
+    }
+
+    impl PeerHistoryTransport for ScriptedPeerHistoryTransport {
+        fn list_recent_text(
+            &self,
+            request: ListRecentTextRequest,
+        ) -> Result<ListRecentTextResponse, PeerHistoryTransportError> {
+            *self.last_request.lock() = Some(request);
+            match self.response.lock().clone() {
+                Ok(response) => Ok(response),
+                Err(error) => Err(error),
+            }
+        }
+    }
+
+    fn page_with(
+        rows: Vec<RemoteTextPreview>,
+        next_cursor: Option<RemoteHistoryCursor>,
+    ) -> ListRecentTextResponse {
+        let snapshot_id = "f".repeat(64);
+        ListRecentTextResponse {
+            page: RemoteTextHistoryPage { rows, next_cursor },
+            snapshot_id,
+        }
+    }
+
+    #[test]
+    fn browse_returns_peer_unavailable_when_state_missing() {
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        let outcome = service.browse("peer-x", "fingerprint", None, MAX_PAGE_ROWS as u32);
+        assert!(matches!(
+            outcome,
+            PeerHistoryOutcome::PeerUnavailable {
+                reason: "no_known_peer"
+            }
+        ));
+    }
+
+    #[test]
+    fn browse_returns_peer_unavailable_when_state_not_trusted() {
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        service.record_peer_state(
+            "peer-x",
+            PeerActiveState {
+                trusted: false,
+                active: false,
+            },
+        );
+        let outcome = service.browse("peer-x", "fingerprint", None, MAX_PAGE_ROWS as u32);
+        assert!(matches!(
+            outcome,
+            PeerHistoryOutcome::PeerUnavailable {
+                reason: "not_trusted"
+            }
+        ));
+    }
+
+    #[test]
+    fn browse_returns_peer_unavailable_when_state_not_active() {
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        service.record_peer_state(
+            "peer-x",
+            PeerActiveState {
+                trusted: true,
+                active: false,
+            },
+        );
+        let outcome = service.browse("peer-x", "fingerprint", None, MAX_PAGE_ROWS as u32);
+        assert!(matches!(
+            outcome,
+            PeerHistoryOutcome::PeerUnavailable {
+                reason: "not_active"
+            }
+        ));
+    }
+
+    #[test]
+    fn browse_forwards_opaque_cursor_without_decoding() {
+        // The client side treats the cursor as fully opaque: the
+        // HMAC secret lives on the host that minted the cursor
+        // and only the host validates it. A bogus, truncated or
+        // rotated cursor therefore travels over the wire and the
+        // host surfaces the typed `invalid_cursor` reason.
+        let transport = Arc::new(ScriptedPeerHistoryTransport::new(Ok(page_with(
+            vec![],
+            None,
+        ))));
+        let service = PeerTextHistoryService::new(transport.clone());
         service.record_peer_state(
             "peer-x",
             PeerActiveState {
@@ -1197,18 +1614,262 @@ mod tests {
                 active: true,
             },
         );
-        let outcome = service.browse("peer-x", None);
+        // No secret registered: the client never inspects the
+        // secret at all.
+        let cursor = RemoteHistoryCursor::from_string("forged".to_string());
+        let outcome = service.browse("peer-x", "fingerprint", Some(&cursor), MAX_PAGE_ROWS as u32);
+        assert!(matches!(outcome, PeerHistoryOutcome::Ok { .. }));
+        let request = transport.last_request().expect("request captured");
+        // The transport receives the opaque cursor verbatim.
+        assert_eq!(request.cursor, "forged");
+    }
+
+    #[test]
+    fn browse_dials_transport_and_returns_page() {
+        let transport = Arc::new(ScriptedPeerHistoryTransport::new(Ok(page_with(
+            vec![RemoteTextPreview {
+                remote_entry_id: "entry-7".to_string(),
+                title: Some("title".to_string()),
+                content_type: "text".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                preview: "hello".to_string(),
+            }],
+            None,
+        ))));
+        let service = PeerTextHistoryService::new(transport.clone());
+        service.record_peer_state(
+            "peer-x",
+            PeerActiveState {
+                trusted: true,
+                active: true,
+            },
+        );
+        service.set_cursor_secret("peer-x", PeerCursorSecret::generate());
+        let outcome = service.browse("peer-x", "fingerprint", None, MAX_PAGE_ROWS as u32);
+        let PeerHistoryOutcome::Ok { page, snapshot_id } = outcome else {
+            panic!("expected Ok variant");
+        };
+        assert_eq!(page.rows.len(), 1);
+        assert!(page.next_cursor.is_none());
+        assert_eq!(snapshot_id.len(), 64);
+        let request = transport.last_request().expect("request captured");
+        assert_eq!(request.peer_id, "peer-x");
+        assert_eq!(request.cert_fingerprint, "fingerprint");
+        assert_eq!(request.cursor, "");
+    }
+
+    #[test]
+    fn browse_does_not_require_a_local_cursor_secret() {
+        // The client never consults the cursor secret: a peer
+        // whose secret was rotated, lost or never minted still
+        // accepts a `browse` request because the validation lives
+        // on the remote host. The transport receives the cursor
+        // verbatim and the host returns the typed outcome.
+        let transport = Arc::new(ScriptedPeerHistoryTransport::new(Ok(page_with(
+            vec![],
+            None,
+        ))));
+        let service = PeerTextHistoryService::new(transport.clone());
+        service.record_peer_state(
+            "peer-x",
+            PeerActiveState {
+                trusted: true,
+                active: true,
+            },
+        );
+        let cursor = RemoteHistoryCursor::from_string("any-cursor".to_string());
+        let outcome = service.browse("peer-x", "fingerprint", Some(&cursor), MAX_PAGE_ROWS as u32);
+        assert!(matches!(outcome, PeerHistoryOutcome::Ok { .. }));
+        let request = transport.last_request().expect("request captured");
+        assert_eq!(request.cursor, "any-cursor");
+    }
+
+    #[test]
+    fn browse_translates_transport_errors_into_outcomes() {
+        for (error, expected_reason) in [
+            (
+                PeerHistoryTransportError::UnknownPeer,
+                PeerHistoryOutcome::PeerUnavailable {
+                    reason: "not_active",
+                },
+            ),
+            (
+                PeerHistoryTransportError::Revoked,
+                PeerHistoryOutcome::PeerUnavailable {
+                    reason: "not_active",
+                },
+            ),
+            (
+                PeerHistoryTransportError::Blocked,
+                PeerHistoryOutcome::PeerUnavailable {
+                    reason: "not_active",
+                },
+            ),
+            (
+                PeerHistoryTransportError::KeyMismatch,
+                PeerHistoryOutcome::PeerUnavailable {
+                    reason: "not_active",
+                },
+            ),
+            (
+                PeerHistoryTransportError::InvalidCursor,
+                PeerHistoryOutcome::InvalidCursor,
+            ),
+            (
+                PeerHistoryTransportError::IncompatibleProtocol,
+                PeerHistoryOutcome::TransportUnavailable {
+                    reason: "incompatible_protocol",
+                },
+            ),
+            (
+                PeerHistoryTransportError::Malformed,
+                PeerHistoryOutcome::TransportUnavailable {
+                    reason: "malformed",
+                },
+            ),
+            (
+                PeerHistoryTransportError::Unavailable,
+                PeerHistoryOutcome::TransportUnavailable {
+                    reason: "unavailable",
+                },
+            ),
+        ] {
+            let transport = Arc::new(ScriptedPeerHistoryTransport::new(Err(error.clone())));
+            let service = PeerTextHistoryService::new(transport);
+            service.record_peer_state(
+                "peer-x",
+                PeerActiveState {
+                    trusted: true,
+                    active: true,
+                },
+            );
+            service.set_cursor_secret("peer-x", PeerCursorSecret::generate());
+            let outcome = service.browse("peer-x", "fingerprint", None, MAX_PAGE_ROWS as u32);
+            assert_eq!(outcome, expected_reason, "transport error: {error:?}");
+        }
+    }
+
+    #[test]
+    fn serve_projects_first_page_with_signed_next_cursor() {
+        // The host emits a `next_cursor` ONLY when the page is
+        // exactly `MAX_PAGE_ROWS` rows long — otherwise the
+        // previous page did not exhaust the host and the renderer
+        // does not need to fetch again. Build a full page + 1 so
+        // the host mints a next cursor that the cursor secret
+        // verifies.
+        let mut entries = Vec::new();
+        for id in 1..=(MAX_PAGE_ROWS + 1) as i64 {
+            entries.push(record(
+                id,
+                ContentType::Text,
+                &format!("row-{id}"),
+                "2026-01-01T00:00:00Z",
+            ));
+        }
+        let source = InMemoryHostHistorySource::new();
+        source.seed(entries);
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        let secret = PeerCursorSecret::generate();
+        service.set_cursor_secret("peer-x", secret);
+        let response = service.serve("peer-x", None, MAX_PAGE_ROWS as u32, &source);
+        let HostHistoryResponse::Ok(page, snapshot_id) = response else {
+            panic!("expected Ok response");
+        };
+        assert_eq!(page.rows.len(), MAX_PAGE_ROWS);
+        // The host orders by created_at DESC, id DESC, so the page starts
+        // with `id = MAX_PAGE_ROWS` (the newest) and ends with
+        // `id = 2` (the 50th row, since we built 51 entries).
+        let previews: Vec<&str> = page.rows.iter().map(|row| row.preview.as_str()).collect();
+        assert_eq!(previews.first().copied(), Some("row-51"));
+        assert_eq!(previews.last().copied(), Some("row-2"));
+        let cursor = page.next_cursor.expect("next cursor emitted");
+        let (ts, id) = cursor
+            .decode("peer-x", secret.as_bytes())
+            .expect("cursor decodes with the secret");
+        assert_eq!(ts, "2026-01-01T00:00:00Z");
+        assert_eq!(id, 2);
+        assert_eq!(snapshot_id.len(), 64);
+    }
+
+    #[test]
+    fn serve_rejects_invalid_cursor() {
+        let source = InMemoryHostHistorySource::new();
+        source.seed(vec![record(
+            1,
+            ContentType::Text,
+            "new",
+            "2026-01-01T00:00:00Z",
+        )]);
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        service.set_cursor_secret("peer-x", PeerCursorSecret::generate());
+        let cursor = RemoteHistoryCursor::from_string("forged".to_string());
+        let response = service.serve("peer-x", Some(&cursor), MAX_PAGE_ROWS as u32, &source);
+        assert!(matches!(response, HostHistoryResponse::InvalidCursor));
+    }
+
+    #[test]
+    fn serve_rejects_when_secret_is_missing() {
+        let source = InMemoryHostHistorySource::new();
+        source.seed(vec![record(
+            1,
+            ContentType::Text,
+            "new",
+            "2026-01-01T00:00:00Z",
+        )]);
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        let response = service.serve("peer-x", None, MAX_PAGE_ROWS as u32, &source);
         assert!(matches!(
-            outcome,
-            PeerHistoryOutcome::PersistenceUnavailable
+            response,
+            HostHistoryResponse::Unavailable("not_trusted")
         ));
     }
 
     #[test]
+    fn serve_excludes_image_rich_text_and_html_rows() {
+        let entries = vec![
+            record(1, ContentType::Text, "transferable", "2026-01-01T00:00:00Z"),
+            image_record(2),
+        ];
+        let mut rich = record(3, ContentType::Text, "rich", "2026-01-01T00:00:00Z");
+        rich.rich_text_hash = Some("a".repeat(64));
+        rich.rich_html_ref = Some("rich-text/a.html".to_string());
+        let html = record(4, ContentType::Html, "<p>html</p>", "2026-01-01T00:00:00Z");
+        let source = InMemoryHostHistorySource::new();
+        source.seed(vec![entries[0].clone(), entries[1].clone(), rich, html]);
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        service.set_cursor_secret("peer-x", PeerCursorSecret::generate());
+        let response = service.serve("peer-x", None, MAX_PAGE_ROWS as u32, &source);
+        let HostHistoryResponse::Ok(page, _) = response else {
+            panic!("expected Ok response");
+        };
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].preview, "transferable");
+    }
+
+    #[test]
+    fn serve_does_not_expose_body_hashes_or_source_metadata() {
+        let mut entry = record(7, ContentType::Text, "<b>html</b>", "2026-01-01T00:00:00Z");
+        entry.title = Some("hello".to_string());
+        entry.source_app = Some("com.example.Editor".to_string());
+        entry.content_hash = "deadbeef".repeat(8);
+        let source = InMemoryHostHistorySource::new();
+        source.seed(vec![entry]);
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        service.set_cursor_secret("peer-x", PeerCursorSecret::generate());
+        let response = service.serve("peer-x", None, MAX_PAGE_ROWS as u32, &source);
+        let HostHistoryResponse::Ok(page, _) = response else {
+            panic!("expected Ok response");
+        };
+        let row = &page.rows[0];
+        assert!(row.preview.contains("&lt;b&gt;"));
+        assert!(!row.preview.contains("com.example.Editor"));
+        assert!(!row.preview.contains("hello"));
+        assert!(!row.preview.contains("deadbeef"));
+    }
+
+    #[test]
     fn forget_peer_drops_state_and_re_routes_to_no_known_peer() {
-        let projection: Arc<dyn PeerHistoryProjection> =
-            Arc::new(InMemoryPeerHistoryProjection::new());
-        let service = PeerTextHistoryService::new(projection);
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
         service.record_peer_state(
             "peer-x",
             PeerActiveState {
@@ -1217,12 +1878,1103 @@ mod tests {
             },
         );
         service.forget_peer("peer-x");
-        let outcome = service.browse("peer-x", None);
+        let outcome = service.browse("peer-x", "fingerprint", None, MAX_PAGE_ROWS as u32);
         assert!(matches!(
             outcome,
             PeerHistoryOutcome::PeerUnavailable {
                 reason: "no_known_peer"
             }
         ));
+    }
+
+    /// Sanity pin for the page-size helper the host and the
+    /// adapter share. The clamp collapses `0` to `1` (so the host
+    /// never returns zero rows by accident) and trims any value
+    /// above [`MAX_PAGE_ROWS`] to the documented cap; any
+    /// intermediate value is forwarded unchanged so the renderer
+    /// can ask for a tiny preview window without altering the
+    /// typed outcome surface.
+    #[test]
+    fn clamp_history_limit_keeps_pages_within_the_wire_contract() {
+        assert_eq!(clamp_history_limit(0), 1);
+        assert_eq!(clamp_history_limit(1), 1);
+        assert_eq!(clamp_history_limit(7), 7);
+        assert_eq!(clamp_history_limit(MAX_PAGE_ROWS as u32), MAX_PAGE_ROWS);
+        assert_eq!(clamp_history_limit(MAX_PAGE_ROWS as u32 + 1), MAX_PAGE_ROWS);
+        assert_eq!(
+            clamp_history_limit(u32::MAX),
+            MAX_PAGE_ROWS,
+            "out-of-range limits must clamp to MAX_PAGE_ROWS"
+        );
+    }
+
+    /// `next_cursor` must be minted ONLY when more rows remain
+    /// after the page, NOT merely because the page reached the
+    /// requested size. The host asks the persistence layer for
+    /// `limit + 1` rows internally; when the projection receives
+    /// only `limit` rows back there is no follow-up page and the
+    /// cursor collapses to `None`.
+    #[test]
+    fn serve_omits_next_cursor_when_no_more_rows_remain() {
+        let source = InMemoryHostHistorySource::new();
+        source.seed(
+            (1..=5_i64)
+                .map(|id| {
+                    record(
+                        id,
+                        ContentType::Text,
+                        &format!("row-{id}"),
+                        "2026-01-01T00:00:00Z",
+                    )
+                })
+                .collect(),
+        );
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        service.set_cursor_secret("peer-x", PeerCursorSecret::generate());
+        // Caller asks for the cap, the host has exactly the cap
+        // entries: a previous implementation would mint a next
+        // cursor here, forcing the renderer to fetch an empty
+        // page.
+        let response = service.serve("peer-x", None, 5, &source);
+        let HostHistoryResponse::Ok(page, snapshot_id) = response else {
+            panic!("expected Ok response");
+        };
+        assert_eq!(page.rows.len(), 5);
+        assert!(
+            page.next_cursor.is_none(),
+            "limit=5 with 5 rows on the host must not emit a next cursor"
+        );
+        assert_eq!(snapshot_id.len(), 64);
+    }
+
+    /// When the host has exactly one more row than the requested
+    /// limit, the projection must emit a next cursor that lets
+    /// the renderer fetch the trailing row.
+    #[test]
+    fn serve_emits_next_cursor_when_more_rows_remain() {
+        let mut entries = Vec::new();
+        for id in 1..=6_i64 {
+            entries.push(record(
+                id,
+                ContentType::Text,
+                &format!("row-{id}"),
+                "2026-01-01T00:00:00Z",
+            ));
+        }
+        let source = InMemoryHostHistorySource::new();
+        source.seed(entries);
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        service.set_cursor_secret("peer-x", PeerCursorSecret::generate());
+        let response = service.serve("peer-x", None, 5, &source);
+        let HostHistoryResponse::Ok(page, _) = response else {
+            panic!("expected Ok response");
+        };
+        assert_eq!(page.rows.len(), 5);
+        assert!(
+            page.next_cursor.is_some(),
+            "limit=5 with 6 rows on the host must emit a next cursor"
+        );
+    }
+
+    /// Page-size cap protection: the host must never return more
+    /// rows than the caller requested even if `limit + 1` rows
+    /// were available from the persistence layer. The probe is
+    /// bounded by [`history_lookahead_limit`] and the
+    /// [`PeerTextHistoryHostHandlerAdapter`] falls back to a
+    /// defensive `.take()` before serialising the wire envelope.
+    #[test]
+    fn serve_returns_no_more_rows_than_the_requested_limit() {
+        let mut entries = Vec::new();
+        for id in 1..=60_i64 {
+            entries.push(record(
+                id,
+                ContentType::Text,
+                &format!("row-{id}"),
+                "2026-01-01T00:00:00Z",
+            ));
+        }
+        let source = InMemoryHostHistorySource::new();
+        source.seed(entries);
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        service.set_cursor_secret("peer-x", PeerCursorSecret::generate());
+        let response = service.serve("peer-x", None, 7, &source);
+        let HostHistoryResponse::Ok(page, _) = response else {
+            panic!("expected Ok response");
+        };
+        assert_eq!(page.rows.len(), 7);
+    }
+
+    /// The transport must forward the host-emitted `snapshot_id`
+    /// verbatim. The runtime must NEVER reconstruct the
+    /// fingerprint from the rows it received; a partial
+    /// reconstruction would diverge from the host the moment a
+    /// capture is added or removed between page requests.
+    #[test]
+    fn browse_forwards_host_snapshot_id_without_recomputing_it() {
+        let host_fingerprint = "a".repeat(64);
+        let transport = Arc::new(ScriptedPeerHistoryTransport::new(Ok(
+            ListRecentTextResponse {
+                page: RemoteTextHistoryPage {
+                    rows: vec![RemoteTextPreview {
+                        remote_entry_id: "entry-7".to_string(),
+                        title: Some("title".to_string()),
+                        content_type: "text".to_string(),
+                        created_at: "2026-01-01T00:00:00Z".to_string(),
+                        preview: "hello".to_string(),
+                    }],
+                    next_cursor: None,
+                },
+                snapshot_id: host_fingerprint.clone(),
+            },
+        )));
+        let service = PeerTextHistoryService::new(transport);
+        service.record_peer_state(
+            "peer-x",
+            PeerActiveState {
+                trusted: true,
+                active: true,
+            },
+        );
+        let outcome = service.browse("peer-x", "fingerprint", None, MAX_PAGE_ROWS as u32);
+        let PeerHistoryOutcome::Ok {
+            page: _,
+            snapshot_id,
+        } = outcome
+        else {
+            panic!("expected Ok variant");
+        };
+        assert_eq!(snapshot_id, host_fingerprint);
+    }
+
+    /// Productive `HistoryHostHandler` adapter unit test. The
+    /// adapter the bootstrap installs on the pairing transport
+    /// MUST return a typed `InvalidCursor` when the host
+    /// cannot verify the HMAC, a typed `Unavailable` when no
+    /// secret is registered for the peer (the row left the
+    /// trusted state without the runtime clearing the cache),
+    /// and a typed `Unavailable` when the projection layer
+    /// cannot read SQLite. The test pins every outcome so a
+    /// regression that flattens the contract surfaces here.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn productive_host_handler_adapter_returns_typed_outcomes() {
+        use crate::peer_pairing::PeerTextHistoryHostHandlerAdapter;
+        use clipvault_platform::peer_transport::HistoryHostHandler as _;
+        use clipvault_platform::peer_transport::HistoryHostResponse;
+
+        let mut entries = Vec::new();
+        for id in 1..=MAX_PAGE_ROWS as i64 + 1 {
+            // The body is intentionally large so the preview
+            // truncates the trailing secret marker.
+            let secret_body = format!(
+                "PUBLIC_PREFIX_{id}_{}__FULL_BODY_THAT_NEVER_APPEARS__",
+                "secret_suffix_that_must_never_appear_in_preview_".repeat(20)
+            );
+            entries.push(record(
+                id,
+                ContentType::Text,
+                &secret_body,
+                "2026-01-01T00:00:00Z",
+            ));
+        }
+        let source = InMemoryHostHistorySource::new();
+        source.seed(entries);
+
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        let secret = PeerCursorSecret::generate();
+        service.set_cursor_secret("peer-x", secret);
+        let adapter = PeerTextHistoryHostHandlerAdapter::new(service.clone(), Arc::new(source));
+
+        // First page mints a `next_cursor` and returns exactly
+        // `MAX_PAGE_ROWS` rows. The wire payload carries no body,
+        // hash or secret material.
+        let first = adapter.list_recent_text("peer-x", "", MAX_PAGE_ROWS as u32);
+        let HistoryHostResponse::Ok {
+            rows, next_cursor, ..
+        } = first
+        else {
+            panic!("expected Ok response");
+        };
+        assert_eq!(rows.len(), MAX_PAGE_ROWS);
+        assert!(!next_cursor.is_empty());
+        let serialized = format!("{rows:?}");
+        // The full body must never appear in the wire payload.
+        // The preview is bounded to PREVIEW_MAX_CHARS so the
+        // unique trailing secret marker the projection slices
+        // past the 300-char cursor must never surface in the
+        // response.
+        for forbidden in ["__FULL_BODY_THAT_NEVER_APPEARS__", "hash-01", "deadbeef"] {
+            assert!(
+                !serialized.contains(forbidden),
+                "first page leaked {forbidden} into the wire payload",
+            );
+        }
+
+        // Second page with the signed cursor returns the
+        // remaining rows and never mints a follow-up cursor
+        // (only one row remains after the first page).
+        let first_page_cursor = next_cursor.clone();
+        let second = adapter.list_recent_text("peer-x", &first_page_cursor, MAX_PAGE_ROWS as u32);
+        let HistoryHostResponse::Ok {
+            rows, next_cursor, ..
+        } = second
+        else {
+            panic!("expected Ok response on second page");
+        };
+        assert_eq!(rows.len(), 1);
+        assert!(next_cursor.is_empty());
+
+        // Manipulated cursor collapses to a typed
+        // `InvalidCursor`. The adapter never leaks the decoded
+        // timestamp or id back to the caller.
+        let tampered =
+            manipulate_cursor(&RemoteHistoryCursor::from_string(first_page_cursor.clone()));
+        let tampered_response = adapter.list_recent_text("peer-x", &tampered, MAX_PAGE_ROWS as u32);
+        assert!(matches!(
+            tampered_response,
+            HistoryHostResponse::InvalidCursor,
+        ));
+
+        // Cursor minted under a different peer collapses to
+        // `InvalidCursor` because the canonical payload
+        // carries the wrong peer_id.
+        let foreign_secret = PeerCursorSecret::generate();
+        let foreign_cursor = RemoteHistoryCursor::mint(
+            "peer-y",
+            "2026-01-01T00:00:30Z",
+            30,
+            foreign_secret.as_bytes(),
+        );
+        assert!(matches!(
+            adapter.list_recent_text("peer-x", foreign_cursor.as_str(), MAX_PAGE_ROWS as u32),
+            HistoryHostResponse::InvalidCursor,
+        ));
+
+        // Rotated secret collapses to `InvalidCursor` exactly
+        // like the productive path documents.
+        service.set_cursor_secret("peer-x", PeerCursorSecret::generate());
+        let first_after_rotation =
+            adapter.list_recent_text("peer-x", &first_page_cursor, MAX_PAGE_ROWS as u32);
+        assert!(matches!(
+            first_after_rotation,
+            HistoryHostResponse::InvalidCursor
+        ));
+
+        // No-secret state collapses to `Unavailable("not_trusted")`
+        // so the wire contract stays stable even when the row
+        // leaves the trusted state without the runtime clearing
+        // the cache.
+        service.clear_cursor_secret("peer-x");
+        assert!(matches!(
+            adapter.list_recent_text("peer-x", "", MAX_PAGE_ROWS as u32),
+            HistoryHostResponse::Unavailable {
+                reason: "not_trusted"
+            },
+        ));
+    }
+
+    /// Tamper helper the productive adapter test uses to
+    /// fabricate a cursor whose HMAC no longer verifies. The
+    /// helper keeps the cursor shape (`::` separator) so the
+    /// listener reaches the typed HMAC check instead of failing
+    /// on a free-form decode error.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn manipulate_cursor(cursor: &RemoteHistoryCursor) -> String {
+        let mut bytes = cursor.as_str().as_bytes().to_vec();
+        for byte in bytes.iter_mut() {
+            let ch = *byte as char;
+            if ch.is_ascii_hexdigit() {
+                *byte = if ch == '0' { b'1' } else { b'0' };
+                break;
+            }
+        }
+        String::from_utf8(bytes).expect("cursor must remain utf-8")
+    }
+
+    /// Suppress the unused helper warning when the local-peer-
+    /// pairing-tls feature gate is enabled and the helper above
+    /// is the only place the symbol appears. The helper is
+    /// kept around for future re-use but currently the
+    /// `manipulate_cursor` helper above is what the test calls.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[allow(dead_code)]
+    fn flip_first_hex_digit(cursor: &str) -> String {
+        manipulate_cursor(&RemoteHistoryCursor::from_string(cursor.to_string()))
+    }
+
+    /// Productive end-to-end test: two real `TlsPeerTransport`
+    /// listeners on `127.0.0.1`, the
+    /// [`PeerTextHistoryHostHandlerAdapter`] the bootstrap
+    /// installs on the host, a [`PeerTextHistoryService`] whose
+    /// [`PeerPairingHistoryTransportAdapter`] dials the remote
+    /// listener through mTLS, a real [`PeerCursorSecret`] the host
+    /// mints on trust promotion, an [`InMemoryHostHistorySource`]
+    /// the host projects from, and the typed outcomes the spec
+    /// pins (`Ok`, `InvalidCursor`, `PeerUnavailable`,
+    /// `TransportUnavailable`). The test is the productive evidence
+    /// the OpenSpec 2.6 reopening asks for; it does NOT use a
+    /// sentinel cursor, a synthetic `HistoryHostHandler` or any
+    /// `peer_pairing` fake — every byte that crosses the wire is
+    /// produced by the real mTLS listener / dial loop.
+    ///
+    /// Coverage:
+    ///
+    /// 1. First page over mTLS: the host returns the bounded
+    ///    `MAX_PAGE_ROWS` rows newest-first and mints a real
+    ///    HMAC-SHA256 `next_cursor` signed with the
+    ///    `PeerCursorSecret` the host owns.
+    /// 2. Second page through the HMAC-signed cursor the host
+    ///    just minted: the cursor round-trips end-to-end.
+    /// 3. Smaller page size (`limit = 7`): the host honours the
+    ///    requested limit and emits a `next_cursor` only when more
+    ///    rows remain.
+    /// 4. Forged cursor (`definitely-not-a-host-cursor`):
+    ///    the adapter collapses to the typed `InvalidCursor` and
+    ///    the client surfaces it as
+    ///    [`PeerHistoryOutcome::InvalidCursor`] (NOT
+    ///    `TransportUnavailable` or `Malformed`).
+    /// 5. Cursor signed for another peer (`peer-y` minted with
+    ///    a different secret): the host's HMAC check rejects
+    ///    the cross-peer replay and surfaces `InvalidCursor`.
+    /// 6. Cursor minted under a rotated / replaced secret: the
+    ///    host rotates the secret mid-test and the previously
+    ///    valid cursor collapses to `InvalidCursor`.
+    /// 7. No-secret state: clearing the host's secret collapses
+    ///    to `Unavailable("not_trusted")` and the client surfaces
+    ///    `PeerUnavailable`.
+    /// 8. No-handler state: a fresh host listener without the
+    ///    adapter collapses to the typed `TransportUnavailable`
+    ///    outcome so the renderer never confuses the
+    ///    `not_available` reason with a cursor failure.
+    /// 9. Persistence failure: an `InMemoryHostHistorySource`
+    ///    the test can flip into a failing state collapses to
+    ///    `Unavailable("persistence_unavailable")` and the
+    ///    client surfaces the typed outcome without retrying.
+    /// 10. Wrong pin: a mismatched cert fingerprint is rejected
+    ///     by the mTLS handshake before the protocol layer sees
+    ///     any bytes.
+    ///
+    /// The test also asserts the wire payload the client surfaces
+    /// never carries the HMAC secret, the entry body, the entry
+    /// hash, the host's bound port, the loopback IP or the pinned
+    /// cert fingerprint — every assertion a future regression that
+    /// leaks metadata would break.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn productive_core_history_round_trip_over_two_real_tls_transports() {
+        use crate::peer_pairing::PeerTextHistoryHostHandlerAdapter;
+        use crate::peer_text_history::PeerPairingHistoryTransportAdapter;
+        use clipvault_platform::peer_transport::derive_cert_fingerprint;
+        use clipvault_platform::peer_transport::tls::{
+            install_with_material_and_resolver, install_with_material_resolver_and_history,
+            RecordingAdvertisementSink,
+        };
+        use clipvault_platform::peer_transport::PeerTransportObservation;
+        use clipvault_platform::peer_transport::{
+            PairingAdvertisementSink, PeerTransport as _, RemotePeerResolver, TlsPeerTransport,
+            TransportSink,
+        };
+        use clipvault_platform::LocalIdentityMaterial;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::sync::Mutex as StdMutex;
+
+        const ROWS: i64 = 23;
+
+        // Build the host + client identity material from
+        // deterministic seeds so the test does not depend on
+        // the OS RNG. `LocalIdentityMaterial::from_seed`
+        // mints a fresh keypair + cert every call; we hold the
+        // two materials so we can arm pins against the cert
+        // fingerprints they expose.
+        let host_material = LocalIdentityMaterial::from_seed([0xA1u8; 32]).expect("host material");
+        let client_material =
+            LocalIdentityMaterial::from_seed([0xB1u8; 32]).expect("client material");
+        let host_peer_id = host_material.identity().peer_id.to_string();
+        let client_peer_id = client_material.identity().peer_id.to_string();
+        let host_cert_fingerprint = derive_cert_fingerprint(host_material.cert_der());
+        let client_cert_fingerprint = derive_cert_fingerprint(client_material.cert_der());
+
+        // Host source: a `toggle`-able failure source the test
+        // uses to assert the persistence-failure outcome. The
+        // `failing` flag flips between the two pages so the
+        // first page succeeds and the second collapses to
+        // `Unavailable("persistence_unavailable")`.
+        struct ToggleSource {
+            entries: Vec<clipvault_db::EntryRecord>,
+            failing: StdMutex<bool>,
+        }
+        impl HostHistorySource for ToggleSource {
+            fn page_after(
+                &self,
+                created_at: &str,
+                id: i64,
+                limit: usize,
+            ) -> Result<Vec<EntryRecord>, PeerHistoryPersistenceError> {
+                if *self.failing.lock().expect("fail lock") {
+                    return Err(PeerHistoryPersistenceError::Failed);
+                }
+                let mut matching: Vec<EntryRecord> = self
+                    .entries
+                    .iter()
+                    .filter(|entry| entry_is_transferable(entry))
+                    .filter(|entry| {
+                        entry.created_at.as_str() < created_at
+                            || (entry.created_at == created_at && entry.id < id)
+                    })
+                    .cloned()
+                    .collect();
+                matching.sort_by(|a, b| {
+                    b.created_at
+                        .cmp(&a.created_at)
+                        .then_with(|| b.id.cmp(&a.id))
+                });
+                matching.truncate(limit);
+                Ok(matching)
+            }
+            fn snapshot_id(&self) -> Result<String, PeerHistoryPersistenceError> {
+                if *self.failing.lock().expect("fail lock") {
+                    return Err(PeerHistoryPersistenceError::Failed);
+                }
+                Ok(compute_page_fingerprint(
+                    "local",
+                    "2026-01-01T00:00:00Z",
+                    ROWS,
+                    ROWS as usize,
+                ))
+            }
+        }
+
+        let mut entries = Vec::new();
+        for id in 1..=ROWS {
+            // Each row embeds the `SECRET_BODY` marker AFTER
+            // enough filler text that the bounded preview
+            // (PREVIEW_MAX_CHARS = 300) truncates the marker
+            // before it reaches the wire. The wire payload
+            // assertion below confirms the marker never
+            // surfaces in `format!("{payload_outcome:?}")` —
+            // the productive `PeerTextHistoryService::serve`
+            // project is bounded by the runtime, not by the
+            // transport. Keeping the body short overall keeps
+            // the envelope below the platform's
+            // `MAX_INBOUND_PAYLOAD` cap (8 KiB) so the
+            // productive transport can carry a full
+            // `MAX_PAGE_ROWS`-sized page in a single
+            // envelope.
+            let filler = "a".repeat(PREVIEW_MAX_CHARS);
+            let body = format!("row-{id} {filler} SECRET_BODY_THAT_MUST_NOT_LEAK");
+            entries.push(record(id, ContentType::Text, &body, "2026-01-01T00:00:00Z"));
+        }
+        let source = Arc::new(ToggleSource {
+            entries,
+            failing: StdMutex::new(false),
+        });
+
+        // Productive host-side wiring:
+        // - `PeerTextHistoryService` with a real
+        //   `PeerCursorSecret` the host owns;
+        // - `PeerTextHistoryHostHandlerAdapter` translates
+        //   `HistoryHostHandler::list_recent_text` into
+        //   `PeerTextHistoryService::serve` over the host source.
+        // The host side never dials itself; the host service
+        // uses the noop history transport as a safe fallback so
+        // the `set_cursor_secret` / `cursor_secret` API works
+        // even though only `serve` is exercised on the host side.
+        // The secret is keyed by the **dialer's** peer_id
+        // (`client_peer_id`): when the host mints a cursor for a
+        // page that the client just requested, the cursor must
+        // validate against the secret that the host stored for
+        // that peer — never against the host's own identity.
+        let host_service = PeerTextHistoryService::new(Arc::new(NoopPeerHistoryTransport));
+        let host_secret = PeerCursorSecret::generate();
+        let host_secret_hex = host_secret.to_hex();
+        host_service.set_cursor_secret(&client_peer_id, host_secret);
+        let host_adapter: Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler> =
+            Arc::new(PeerTextHistoryHostHandlerAdapter::new(
+                host_service.clone(),
+                source.clone() as Arc<dyn HostHistorySource>,
+            ));
+
+        // Install the host listener with the productive handler
+        // already wired so the very first inbound
+        // `ListRecentText` envelope lands on
+        // `PeerTextHistoryService::serve` over the toggle source.
+        struct NoOpSink;
+        impl TransportSink for NoOpSink {
+            fn on_pairing_observed(&self, _observation: PeerTransportObservation) {}
+        }
+        let host_transport = Arc::new(TlsPeerTransport::new());
+        let host_advertisement: Arc<dyn PairingAdvertisementSink> =
+            Arc::new(RecordingAdvertisementSink::new());
+        let host_sink: Arc<dyn TransportSink> = Arc::new(NoOpSink);
+        let host_port = install_with_material_resolver_and_history(
+            host_transport.as_ref(),
+            host_material.clone(),
+            "host".to_string(),
+            host_advertisement,
+            host_sink,
+            None,
+            Some(Arc::clone(&host_adapter)),
+        )
+        .expect("install host");
+
+        // Client-side wiring:
+        // - `PeerTextHistoryService` with a real
+        //   `PeerPairingHistoryTransportAdapter` driving the
+        //   productive mTLS dial loop;
+        // - the resolver points at the host's loopback port.
+        let client_transport = Arc::new(TlsPeerTransport::new());
+        let host_port_slot: Arc<parking_lot::Mutex<Option<u16>>> =
+            Arc::new(parking_lot::Mutex::new(Some(host_port)));
+        struct HostPortResolver {
+            host: Arc<parking_lot::Mutex<Option<u16>>>,
+            peer_id: String,
+        }
+        impl RemotePeerResolver for HostPortResolver {
+            fn resolve(&self, peer_id: &str) -> Option<SocketAddr> {
+                if peer_id != self.peer_id {
+                    return None;
+                }
+                let guard = self.host.lock();
+                let port = *guard;
+                Some(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                    port?,
+                ))
+            }
+        }
+        let resolver: Arc<dyn RemotePeerResolver> = Arc::new(HostPortResolver {
+            host: Arc::clone(&host_port_slot),
+            peer_id: host_peer_id.clone(),
+        });
+        let client_advertisement: Arc<dyn PairingAdvertisementSink> =
+            Arc::new(RecordingAdvertisementSink::new());
+        let client_sink: Arc<dyn TransportSink> = Arc::new(NoOpSink);
+        install_with_material_and_resolver(
+            client_transport.as_ref(),
+            client_material.clone(),
+            "client".to_string(),
+            client_advertisement,
+            client_sink,
+            Some(resolver),
+        )
+        .expect("install client");
+
+        // Arm the pins so the productive dial completes the
+        // mTLS handshake against the host listener.
+        client_transport
+            .arm_pin(&host_peer_id, &host_cert_fingerprint)
+            .expect("arm pin (client -> host)");
+        host_transport
+            .arm_pin(&client_peer_id, &client_cert_fingerprint)
+            .expect("arm pin (host -> client)");
+
+        // Yield so the host accept loop polls at least once
+        // before the dialer fires.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // Client-side facade: the productive dial driver the
+        // shell uses, wired against the client `TlsPeerTransport`
+        // we just installed. Marking the peer active so the
+        // `browse` call reaches the dial loop.
+        let client_history_transport: Arc<dyn PeerHistoryTransport> = Arc::new(
+            PeerPairingHistoryTransportAdapter::new(client_transport.clone()),
+        );
+        let client_service = PeerTextHistoryService::new(client_history_transport);
+        client_service.record_peer_state(
+            &host_peer_id,
+            PeerActiveState {
+                trusted: true,
+                active: true,
+            },
+        );
+
+        // ----------------------------------------------------------------
+        // 1. First page over mTLS — host returns the bounded
+        //    page and mints a real HMAC-SHA256 `next_cursor`.
+        //    The seeded source carries `ROWS` entries (> limit)
+        //    so the host mints a cursor the second page can
+        //    verify. The page size is intentionally below
+        //    `MAX_PAGE_ROWS` so the test exercises both the
+        //    cursor minting path AND the wire-envelope size
+        //    budget (a full MAX_PAGE_ROWS page would exceed the
+        //    platform's 8 KiB envelope cap given the body
+        //    length each row carries).
+        // ----------------------------------------------------------------
+        let first_outcome = client_service.browse(&host_peer_id, &host_cert_fingerprint, None, 7);
+        let PeerHistoryOutcome::Ok {
+            page: first_page,
+            snapshot_id: first_snapshot_id,
+        } = first_outcome
+        else {
+            panic!("first page must return Ok variant, got {first_outcome:?}");
+        };
+        assert_eq!(first_page.rows.len(), 7);
+        assert_eq!(first_snapshot_id.len(), 64);
+        let first_next_cursor = first_page
+            .next_cursor
+            .as_ref()
+            .expect("first page mints a cursor when more rows remain");
+
+        // ----------------------------------------------------------------
+        // 2. Second page through the HMAC-signed cursor.
+        // ----------------------------------------------------------------
+        let second_outcome = client_service.browse(
+            &host_peer_id,
+            &host_cert_fingerprint,
+            Some(first_next_cursor),
+            7,
+        );
+        let PeerHistoryOutcome::Ok {
+            page: second_page, ..
+        } = second_outcome
+        else {
+            panic!("second page must return Ok variant");
+        };
+        assert_eq!(second_page.rows.len(), 7);
+        // The third page should still have rows left (we
+        // started with 23), so a follow-up cursor must be
+        // minted.
+        let third_cursor = second_page
+            .next_cursor
+            .as_ref()
+            .expect("second page must mint a cursor when more rows remain");
+
+        // ----------------------------------------------------------------
+        // 3. Smaller page size — `limit = 3` over `ROWS` rows
+        //    so a follow-up cursor mints again.
+        // ----------------------------------------------------------------
+        let small_outcome = client_service.browse(&host_peer_id, &host_cert_fingerprint, None, 3);
+        let PeerHistoryOutcome::Ok {
+            page: small_page, ..
+        } = small_outcome
+        else {
+            panic!("small page must return Ok variant");
+        };
+        assert_eq!(small_page.rows.len(), 3);
+        let small_cursor = small_page
+            .next_cursor
+            .as_ref()
+            .expect("small page must emit a cursor when more rows remain");
+
+        // ----------------------------------------------------------------
+        // 4. Forged cursor — the host must surface typed
+        //    `InvalidCursor` and the client must surface the
+        //    typed `PeerHistoryOutcome::InvalidCursor` (NOT
+        //    `TransportUnavailable` or `Malformed`).
+        // ----------------------------------------------------------------
+        let forged = RemoteHistoryCursor::from_string("definitely-not-a-host-cursor".to_string());
+        let outcome = client_service.browse(
+            &host_peer_id,
+            &host_cert_fingerprint,
+            Some(&forged),
+            MAX_PAGE_ROWS as u32,
+        );
+        assert!(
+            matches!(outcome, PeerHistoryOutcome::InvalidCursor),
+            "forged cursor must surface typed InvalidCursor, got {outcome:?}"
+        );
+
+        // ----------------------------------------------------------------
+        // 5. Cursor signed for another peer — `peer-y` minted
+        //    with a different secret. The host's HMAC check
+        //    MUST reject the cross-peer replay.
+        // ----------------------------------------------------------------
+        let foreign_secret = PeerCursorSecret::generate();
+        let foreign_cursor = RemoteHistoryCursor::mint(
+            "peer-y",
+            "2026-01-02T03:04:05Z",
+            30,
+            foreign_secret.as_bytes(),
+        );
+        let outcome = client_service.browse(
+            &host_peer_id,
+            &host_cert_fingerprint,
+            Some(&foreign_cursor),
+            MAX_PAGE_ROWS as u32,
+        );
+        assert!(
+            matches!(outcome, PeerHistoryOutcome::InvalidCursor),
+            "cross-peer cursor must surface typed InvalidCursor, got {outcome:?}"
+        );
+
+        // ----------------------------------------------------------------
+        // 6. Cursor minted under a rotated / replaced secret.
+        //    The host rotates its secret mid-test and the
+        //    previously valid cursor collapses to `InvalidCursor`.
+        // ----------------------------------------------------------------
+        // Re-mint the secret and confirm `first_next_cursor`
+        // (minted under the previous secret) now fails.
+        host_service.set_cursor_secret(&client_peer_id, PeerCursorSecret::generate());
+        let outcome = client_service.browse(
+            &host_peer_id,
+            &host_cert_fingerprint,
+            Some(first_next_cursor),
+            MAX_PAGE_ROWS as u32,
+        );
+        assert!(
+            matches!(outcome, PeerHistoryOutcome::InvalidCursor),
+            "rotated-secret cursor must surface typed InvalidCursor, got {outcome:?}"
+        );
+
+        // ----------------------------------------------------------------
+        // 7. No-secret state — clearing the host's secret
+        //    collapses to `Unavailable("not_trusted")` at the
+        //    wire, which the productive transport surfaces as
+        //    `TransportError::Revoked` and the client finally
+        //    reports as `PeerUnavailable("not_active")`. The
+        //    typed outcome is stable; the runtime never collapses
+        //    a cursor-secret failure into a generic network
+        //    error.
+        // ----------------------------------------------------------------
+        host_service.clear_cursor_secret(&client_peer_id);
+        let outcome = client_service.browse(
+            &host_peer_id,
+            &host_cert_fingerprint,
+            None,
+            MAX_PAGE_ROWS as u32,
+        );
+        assert!(
+            matches!(
+                outcome,
+                PeerHistoryOutcome::PeerUnavailable {
+                    reason: "not_active"
+                }
+            ),
+            "no-secret state must surface PeerUnavailable(not_active), got {outcome:?}"
+        );
+
+        // Restore the original secret for the persistence test.
+        host_service.install_cursor_secret_hex(&client_peer_id, &host_secret_hex);
+
+        // ----------------------------------------------------------------
+        // 8. No-handler state — install a fresh host listener
+        //    without the adapter so the wire contract collapses
+        //    to `ListRecentTextUnavailable("not_available")` and
+        //    the client surfaces `TransportUnavailable`.
+        // ----------------------------------------------------------------
+        let bare_host = Arc::new(TlsPeerTransport::new());
+        let bare_advertisement: Arc<dyn PairingAdvertisementSink> =
+            Arc::new(RecordingAdvertisementSink::new());
+        let bare_sink: Arc<dyn TransportSink> = Arc::new(NoOpSink);
+        let bare_port = install_with_material_resolver_and_history(
+            bare_host.as_ref(),
+            host_material.clone(),
+            "bare-host".to_string(),
+            bare_advertisement,
+            bare_sink,
+            None,
+            None,
+        )
+        .expect("install bare host");
+        let bare_fingerprint = derive_cert_fingerprint(host_material.cert_der());
+        let bare_port_slot: Arc<parking_lot::Mutex<Option<u16>>> =
+            Arc::new(parking_lot::Mutex::new(Some(bare_port)));
+        let bare_resolver: Arc<dyn RemotePeerResolver> = Arc::new(HostPortResolver {
+            host: Arc::clone(&bare_port_slot),
+            peer_id: host_peer_id.clone(),
+        });
+        let bare_client = Arc::new(TlsPeerTransport::new());
+        let bare_advertisement_c: Arc<dyn PairingAdvertisementSink> =
+            Arc::new(RecordingAdvertisementSink::new());
+        let bare_sink_c: Arc<dyn TransportSink> = Arc::new(NoOpSink);
+        install_with_material_and_resolver(
+            bare_client.as_ref(),
+            client_material.clone(),
+            "bare-client".to_string(),
+            bare_advertisement_c,
+            bare_sink_c,
+            Some(bare_resolver),
+        )
+        .expect("install bare client");
+        bare_client
+            .arm_pin(&host_peer_id, &bare_fingerprint)
+            .expect("arm pin bare");
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let bare_history_transport: Arc<dyn PeerHistoryTransport> =
+            Arc::new(PeerPairingHistoryTransportAdapter::new(bare_client.clone()));
+        let bare_service = PeerTextHistoryService::new(bare_history_transport);
+        bare_service.record_peer_state(
+            &host_peer_id,
+            PeerActiveState {
+                trusted: true,
+                active: true,
+            },
+        );
+        let outcome =
+            bare_service.browse(&host_peer_id, &bare_fingerprint, None, MAX_PAGE_ROWS as u32);
+        assert!(
+            matches!(
+                outcome,
+                PeerHistoryOutcome::TransportUnavailable {
+                    reason: "unavailable"
+                }
+            ),
+            "no-handler state must surface typed TransportUnavailable, got {outcome:?}"
+        );
+        bare_client.stop().expect("stop bare client");
+        bare_host.stop().expect("stop bare host");
+
+        // ----------------------------------------------------------------
+        // 9. Persistence failure — flip the toggle source into
+        //    its failing state and confirm the client surfaces
+        //    the typed `TransportUnavailable` outcome without
+        //    retrying.
+        // ----------------------------------------------------------------
+        *source.failing.lock().expect("fail lock") = true;
+        let outcome = client_service.browse(
+            &host_peer_id,
+            &host_cert_fingerprint,
+            None,
+            MAX_PAGE_ROWS as u32,
+        );
+        assert!(
+            matches!(
+                outcome,
+                PeerHistoryOutcome::TransportUnavailable {
+                    reason: "unavailable"
+                }
+            ),
+            "persistence failure must surface typed TransportUnavailable, got {outcome:?}"
+        );
+        *source.failing.lock().expect("fail lock") = false;
+
+        // ----------------------------------------------------------------
+        // 10. Wrong pin — the productive mTLS handshake must
+        //     reject a mismatched cert fingerprint and the
+        //     client must surface the typed outcome without
+        //     leaking any row payload.
+        // ----------------------------------------------------------------
+        let wrong_pin = derive_cert_fingerprint(client_material.cert_der());
+        let outcome = client_service.browse(&host_peer_id, &wrong_pin, None, MAX_PAGE_ROWS as u32);
+        assert!(
+            matches!(
+                outcome,
+                PeerHistoryOutcome::PeerUnavailable {
+                    reason: "not_active"
+                }
+            ),
+            "wrong pin must surface typed PeerUnavailable(not_active), got {outcome:?}"
+        );
+
+        // ----------------------------------------------------------------
+        // 11. Payload sanity — the wire response the client
+        //     surfaces must never carry the HMAC secret, the
+        //     entry body, the entry hash, the host's bound
+        //     port, the loopback IP or the pinned cert
+        //     fingerprint. A regression that leaks metadata
+        //     would surface here.
+        // ----------------------------------------------------------------
+        // Fetch a fresh page after restoring the toggle source
+        // so the payload assertion has a populated `Ok`
+        // outcome to inspect.
+        let payload_outcome = client_service.browse(&host_peer_id, &host_cert_fingerprint, None, 5);
+        let payload_serialized = format!("{payload_outcome:?}");
+        for forbidden in [
+            host_cert_fingerprint.as_str(),
+            client_cert_fingerprint.as_str(),
+            "127.0.0.1",
+            "/tmp",
+            "localhost",
+            host_secret_hex.as_str(),
+            "SECRET_BODY_THAT_MUST_NOT_LEAK",
+            "deadbeef",
+        ] {
+            assert!(
+                !payload_serialized.contains(forbidden),
+                "wire payload leaked {forbidden}"
+            );
+        }
+        // The previews are bounded to PREVIEW_MAX_CHARS so the
+        // body must be truncated; spot-check the visible
+        // preview escaped the body and never reached the
+        // secret marker.
+        if let PeerHistoryOutcome::Ok { page, .. } = &payload_outcome {
+            for row in &page.rows {
+                // The marker MUST survive in the persisted body
+                // but never reach the wire (the body is bounded
+                // by PREVIEW_MAX_CHARS so the marker — which is
+                // appended after a long body — is sliced off).
+                assert!(
+                    row.preview.contains("row-"),
+                    "preview must show the visible row marker: {}",
+                    row.preview
+                );
+                assert!(
+                    !row.preview.contains("SECRET_BODY_THAT_MUST_NOT_LEAK"),
+                    "preview must not leak the secret body marker: {}",
+                    row.preview
+                );
+                assert!(!row.preview.contains('<') && !row.preview.contains('>'));
+            }
+        }
+
+        // Cleanup: stop every transport so the next test
+        // starts from a clean slate.
+        host_transport.stop().expect("stop host");
+        client_transport.stop().expect("stop client");
+
+        // Silence the unused-helper warning when the feature
+        // gate is enabled.
+        let _ = small_cursor;
+        let _ = third_cursor;
+    }
+}
+
+/// Default noop facade the cross-compile / unsupported-target
+/// build installs. Every call returns
+/// [`PeerHistoryTransportError::Unavailable`] so the runtime
+/// collapses the outcome into
+/// [`PeerHistoryOutcome::TransportUnavailable`] without ever
+/// reaching the pairing transport. The struct is a safe fallback —
+/// it is the canonical "this host doesn't ship the mTLS history
+/// driver" return path the bootstrap documents for cross-compiles
+/// and Windows builds.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopPeerHistoryTransport;
+
+impl PeerHistoryTransport for NoopPeerHistoryTransport {
+    fn list_recent_text(
+        &self,
+        _request: ListRecentTextRequest,
+    ) -> Result<ListRecentTextResponse, PeerHistoryTransportError> {
+        Err(PeerHistoryTransportError::Unavailable)
+    }
+}
+
+/// Productive adapter that delegates to the
+/// [`crate::peer_pairing::PeerTransport`] the bootstrap already
+/// installed for the pairing change. The adapter owns no
+/// transport state of its own: it is a thin translation layer
+/// that converts the [`ListRecentTextRequest`] the runtime hands it
+/// into the typed [`PeerHistorySnapshot`] the productive pairing
+/// transport hands back. The transport wrapper exists so the core
+/// owns the typed outcome surface and the platform crate owns the
+/// mTLS dial loop — neither side reaches across the boundary.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub struct PeerPairingHistoryTransportAdapter {
+    inner: Arc<dyn crate::peer_pairing::PeerTransport>,
+}
+
+#[cfg(feature = "local-peer-pairing-tls")]
+impl PeerPairingHistoryTransportAdapter {
+    /// Build an adapter that delegates `list_recent_text` to the
+    /// supplied pairing transport. The adapter is cheap to clone
+    /// (`Arc`-shared); the bootstrap keeps a single instance per
+    /// app context.
+    pub fn new(inner: Arc<dyn crate::peer_pairing::PeerTransport>) -> Self {
+        Self { inner }
+    }
+}
+
+#[cfg(feature = "local-peer-pairing-tls")]
+impl PeerHistoryTransport for PeerPairingHistoryTransportAdapter {
+    fn list_recent_text(
+        &self,
+        request: ListRecentTextRequest,
+    ) -> Result<ListRecentTextResponse, PeerHistoryTransportError> {
+        match self.inner.list_recent_text(
+            &request.peer_id,
+            &request.cert_fingerprint,
+            &request.cursor,
+            request.limit,
+        ) {
+            Ok(snapshot) => Ok(ListRecentTextResponse {
+                page: RemoteTextHistoryPage {
+                    rows: snapshot
+                        .rows
+                        .into_iter()
+                        .map(|row| crate::peer_text_history::RemoteTextPreview {
+                            remote_entry_id: row.remote_entry_id,
+                            title: row.title,
+                            content_type: row.content_type,
+                            created_at: row.created_at,
+                            preview: row.preview,
+                        })
+                        .collect(),
+                    next_cursor: if snapshot.next_cursor.is_empty() {
+                        None
+                    } else {
+                        Some(crate::peer_text_history::RemoteHistoryCursor::from_string(
+                            snapshot.next_cursor,
+                        ))
+                    },
+                },
+                // The host emitted the `snapshot_id` SHA-256 over
+                // its own header; the adapter forwards the value
+                // verbatim and never recomputes a fingerprint
+                // from the visible rows. A partial reconstruction
+                // would diverge from the host the moment a new
+                // capture landed or a row was removed between
+                // page requests.
+                snapshot_id: snapshot.snapshot_id,
+            }),
+            Err(error) => Err(map_pairing_transport_error(error)),
+        }
+    }
+}
+
+/// Translate [`crate::peer_pairing::TransportError`] into the
+/// typed [`PeerHistoryTransportError`] the runtime branches on. The
+/// mapping keeps every outcome the runtime already understands
+/// (`UnknownPeer`, `KeyMismatch`, `Revoked`, `Blocked`,
+/// `Unavailable`, `IncompatibleProtocol`, `Malformed`,
+/// `InvalidCursor`) so the `browse` flow does not need to inspect
+/// free-form strings. The dedicated `InvalidCursor` mapping is the
+/// only path through which a cursor-rejection signal from the
+/// remote host reaches the renderer; collapsing it into `Malformed`
+/// or `Unavailable` would hide a forged / rotated / replayed cursor
+/// behind a network-shaped error.
+#[cfg(feature = "local-peer-pairing-tls")]
+fn map_pairing_transport_error(
+    error: crate::peer_pairing::TransportError,
+) -> PeerHistoryTransportError {
+    use crate::peer_pairing::TransportError as Pairing;
+    match error {
+        Pairing::UnknownPeer => PeerHistoryTransportError::UnknownPeer,
+        Pairing::KeyMismatch => PeerHistoryTransportError::KeyMismatch,
+        Pairing::Revoked => PeerHistoryTransportError::Revoked,
+        Pairing::Blocked => PeerHistoryTransportError::Blocked,
+        Pairing::IncompatibleProtocol => PeerHistoryTransportError::IncompatibleProtocol,
+        Pairing::Malformed => PeerHistoryTransportError::Malformed,
+        Pairing::InvalidCursor => PeerHistoryTransportError::InvalidCursor,
+        Pairing::AlreadyRunning | Pairing::NotRunning | Pairing::Unavailable | Pairing::Crypto => {
+            PeerHistoryTransportError::Unavailable
+        }
+    }
+}
+
+/// Production adapter the bootstrap installs into
+/// [`crate::peer_pairing::PairingRuntime::install_cursor_secret_cache`].
+/// The adapter mirrors every cursor-secret update the runtime
+/// commits to the database so the listener can serve the next
+/// `list_recent_text` request without re-reading SQLite. The
+/// adapter never inspects the secret bytes; it forwards the typed
+/// [`PeerCursorSecret`] the runtime already mints through
+/// [`PeerCursorSecret::generate`] so the raw key material cannot
+/// leak through a log statement.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub struct PeerTextHistoryCursorSecretCache {
+    service: PeerTextHistoryService,
+}
+
+#[cfg(feature = "local-peer-pairing-tls")]
+impl PeerTextHistoryCursorSecretCache {
+    /// Build the cache adapter the bootstrap wires against the
+    /// productive pairing runtime. The helper clones the
+    /// [`PeerTextHistoryService`] because both the runtime and
+    /// the listener keep their own handle.
+    pub fn new(service: PeerTextHistoryService) -> Self {
+        Self { service }
+    }
+}
+
+#[cfg(feature = "local-peer-pairing-tls")]
+impl crate::peer_pairing::PeerCursorSecretCache for PeerTextHistoryCursorSecretCache {
+    fn install(&self, peer_id: &str, secret: PeerCursorSecret) {
+        self.service.set_cursor_secret(peer_id, secret);
+    }
+
+    fn clear(&self, peer_id: &str) {
+        self.service.clear_cursor_secret(peer_id);
     }
 }

@@ -453,11 +453,12 @@ export const peerPairingHealthCommand: ClipvaultCommandArg<
  */
 export const peerHistoryBrowseCommand: ClipvaultCommandArg<
   PeerHistoryBrowseResponse,
-  { peer_id: string; cursor?: string }
+  { peer_id: string; cursor?: string; limit?: number }
 > = (args) =>
   invoke<PeerHistoryBrowseResponse>("clipvault_peer_history_browse", {
     peerId: args.peer_id,
     cursor: args.cursor ?? null,
+    limit: args.limit ?? null,
   });
 
 /**

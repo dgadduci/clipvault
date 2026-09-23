@@ -85,6 +85,13 @@ flate2 = { workspace = true }
 # persists, logs or re-exports the secret key bytes.
 ed25519-dalek = { workspace = true }
 rand_core = { workspace = true }
+# HMAC-SHA256 + base64url encoding the `peer-text-history-browser`
+# change uses to mint and verify the opaque cursor the host returns
+# with every metadata-only `list_recent_text` page. Both crates are
+# small, mature, pure-Rust and limited to a single use site so the
+# new dependency surface stays proportional to the change.
+hmac = "0.12"
+base64 = "0.22"
 
 [dev-dependencies]
 rusqlite = { workspace = true }

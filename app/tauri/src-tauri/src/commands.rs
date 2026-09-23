@@ -3368,18 +3368,21 @@ pub enum PeerHistoryBrowseResponse {
         snapshot_id: String,
     },
     /// The cursor the renderer submitted was not minted by this
-    /// host. The runtime never retries; the renderer surfaces a
-    /// typed reason and asks the user to restart the browse.
+    /// host (or the per-peer secret rotated under it). The
+    /// runtime never retries; the renderer surfaces a typed
+    /// reason and asks the user to restart the browse.
     InvalidCursor,
     /// The peer is not currently eligible to serve a page
     /// (no known row, not trusted, or not active). The runtime
     /// never opened a network call; the renderer surfaces the
     /// stable reason copy.
     PeerUnavailable { reason: &'static str },
-    /// The underlying persistence layer rejected the page
-    /// request. The renderer surfaces a typed failure copy
-    /// without retrying blindly.
-    PersistenceUnavailable,
+    /// The productive mTLS transport rejected the page request
+    /// (`unavailable` / `unknown_peer` / `key_mismatch` /
+    /// `revoked` / `blocked` / `incompatible_protocol` /
+    /// `malformed`). The renderer surfaces the typed reason
+    /// copy without retrying blindly.
+    TransportUnavailable { reason: &'static str },
 }
 
 /// Metadata-only row the renderer renders. The struct mirrors
@@ -3426,35 +3429,54 @@ impl PeerHistoryBrowseResponse {
             clipvault_core::peer_text_history::PeerHistoryOutcome::PeerUnavailable { reason } => {
                 PeerHistoryBrowseResponse::PeerUnavailable { reason }
             }
-            clipvault_core::peer_text_history::PeerHistoryOutcome::PersistenceUnavailable => {
-                PeerHistoryBrowseResponse::PersistenceUnavailable
-            }
+            clipvault_core::peer_text_history::PeerHistoryOutcome::TransportUnavailable {
+                reason,
+            } => PeerHistoryBrowseResponse::TransportUnavailable { reason },
         }
     }
 }
 
 /// Browse the transferable text history of `peer_id`. The
 /// runtime consults the in-memory trust / active cache and
-/// refuses to project when the peer is not trusted, not
-/// present or unknown. The command never opens a network
-/// call: the trust / active check happens locally against
-/// the cache the shell populated on every snapshot / health
-/// probe, and the projection only reads from SQLite. The
+/// refuses to dial when the peer is not trusted, not
+/// present or unknown. Once the gate opens, the service
+/// reaches the remote listener through the productive
+/// [`PeerTransport::list_recent_text`] mTLS path the
+/// pairing change installed — the local SQLite layer is
+/// NEVER consulted as a source of remote previews. The
 /// command never mutates SQLite in response to a browsing
-/// call (the projection is read-only) and never emits a
-/// `history-updated` event.
+/// call and never emits a `history-updated` event.
+///
+/// The cert fingerprint the runtime ships to the transport
+/// comes from the cached `PairingRuntime` snapshot (the
+/// value the productive pairing handshake persisted at
+/// promotion time). The bridge NEVER accepts a fingerprint
+/// from the renderer: the UI cannot mint or rotate the pin.
 #[tauri::command]
 pub fn clipvault_peer_history_browse(
     state: State<'_, SharedState>,
     peer_id: String,
     cursor: Option<String>,
+    limit: Option<u32>,
 ) -> PeerHistoryBrowseResponse {
     let context = state.context();
     let service = context.peer_text_history();
     let cursor = cursor
         .filter(|value| !value.is_empty())
         .map(clipvault_core::peer_text_history::RemoteHistoryCursor::from_string);
-    let outcome = service.browse(&peer_id, cursor.as_ref());
+    let limit = limit
+        .unwrap_or(clipvault_core::peer_text_history::DEFAULT_PAGE_ROWS as u32)
+        .min(clipvault_core::peer_text_history::MAX_PAGE_ROWS as u32)
+        .max(1);
+    let cert_fingerprint = match context.peer_pairing().cert_fingerprint_for(&peer_id) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => {
+            return PeerHistoryBrowseResponse::PeerUnavailable {
+                reason: "not_trusted",
+            };
+        }
+    };
+    let outcome = service.browse(&peer_id, &cert_fingerprint, cursor.as_ref(), limit);
     PeerHistoryBrowseResponse::from_outcome(outcome)
 }
 

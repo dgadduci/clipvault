@@ -293,6 +293,54 @@ pub trait TransportSink: Send + Sync {
     fn on_pairing_session_started(&self, _metadata: InboundSessionMetadata) {}
 }
 
+/// Host-side handler the listener drives when an `ListRecentText`
+/// envelope lands after a successful mTLS handshake. The trait is
+/// feature-gated to the productive TLS path so cross-compiles and
+/// unsupported targets keep compiling. The transport invokes the
+/// handler exactly once per inbound envelope and forwards the typed
+/// response through the wire; the handler never touches a TLS
+/// stream, a socket or a session id.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub trait HistoryHostHandler: Send + Sync {
+    /// Project a metadata-only page of the local history. The
+    /// `peer_id` argument is the canonical `peer_id` the
+    /// transport derived from the cert's SPKI; the transport
+    /// already authenticated it against the pin the runtime
+    /// armed. `cursor` is the opaque cursor the client
+    /// submitted verbatim (empty string for the first page);
+    /// `limit` is the upper bound the client requested, capped
+    /// to [`HISTORY_MAX_PAGE_ROWS`]. Implementations NEVER
+    /// inspect row content beyond the metadata-only projection
+    /// and NEVER return a payload other than the bounded page.
+    fn list_recent_text(&self, peer_id: &str, cursor: &str, limit: u32) -> HistoryHostResponse;
+}
+
+/// Outcome the host-side handler returns to the listener. The
+/// transport forwards the variant through the wire envelope the
+/// spec pins: `ListRecentTextAck` for [`HistoryHostResponse::Ok`],
+/// `ListRecentTextInvalid` for [`HistoryHostResponse::InvalidCursor`]
+/// and `ListRecentTextUnavailable` for
+/// [`HistoryHostResponse::Unavailable`]. Every variant collapses
+/// to a stable reason string the renderer branches on.
+#[cfg(feature = "local-peer-pairing-tls")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistoryHostResponse {
+    Ok {
+        rows: Vec<wire::ListRecentTextRow>,
+        /// Opaque cursor the renderer must submit to fetch the
+        /// next page. Empty string when this page is the last one.
+        next_cursor: String,
+        /// Stable fingerprint the renderer compares across page
+        /// requests to detect a local capture that landed between
+        /// the two.
+        snapshot_id: String,
+    },
+    InvalidCursor,
+    Unavailable {
+        reason: &'static str,
+    },
+}
+
 /// Coordinated start / stop the [`PeerTransport`] layer delegates
 /// to in order to keep the mDNS advertisement in lockstep with
 /// the real ephemeral port the TLS listener reserved. The
@@ -396,6 +444,31 @@ pub trait PeerTransport: Send + Sync {
         self.start_with_material_and_display_name(material, sink, advertisement, display_name)
     }
 
+    /// Productive install path that also wires the resolver and
+    /// the host-side [`HistoryHostHandler`] the listener drives
+    /// when a `ListRecentText` envelope lands. The handler is
+    /// installed by the bootstrap after the productive pairing
+    /// material is loaded so the listener can project the local
+    /// metadata-only page through the same `HostHistorySource`
+    /// the core runtime owns. The default implementation forwards
+    /// to [`Self::start_with_material_and_resolver`] so a feature
+    /// pair that builds without the productive history path keeps
+    /// compiling — `ListRecentText` envelopes collapse to
+    /// `not_available` until the handler is installed.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn start_with_material_resolver_and_history(
+        &self,
+        material: LocalIdentityMaterial,
+        sink: Arc<dyn TransportSink>,
+        advertisement: Arc<dyn PairingAdvertisement>,
+        resolver: Option<Arc<dyn RemotePeerResolver>>,
+        display_name: &str,
+        history_handler: Option<Arc<dyn HistoryHostHandler>>,
+    ) -> Result<u16, TransportError> {
+        let _ = history_handler;
+        self.start_with_material_and_resolver(material, sink, advertisement, resolver, display_name)
+    }
+
     fn stop(&self) -> Result<(), TransportError>;
 
     fn is_running(&self) -> bool;
@@ -428,6 +501,20 @@ pub trait PeerTransport: Send + Sync {
     /// content RPCs in this change.
     #[cfg(feature = "local-peer-pairing-tls")]
     fn health_check(&self, peer_id: &str, cert_fingerprint: &str) -> Result<(), TransportError>;
+
+    /// Install (or replace) the host-side [`HistoryHostHandler`]
+    /// the listener drives when a `ListRecentText` envelope lands.
+    /// The bootstrap calls this after the productive pairing
+    /// material loader returns so the handler can rely on the same
+    /// SQLite handle the runtime already holds. Idempotent: a
+    /// second call replaces the previous handler so a future
+    /// refactor that re-wires the runtime cannot leak events to a
+    /// stale sink.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_history_handler(
+        &self,
+        handler: Arc<dyn HistoryHostHandler>,
+    ) -> Result<(), TransportError>;
 
     /// Open an outbound pairing session against the announced
     /// peer. The transport resolves the peer through the
@@ -632,6 +719,15 @@ pub enum TransportError {
     /// does not understand.
     #[error("peer transport wire protocol is incompatible")]
     IncompatibleProtocol,
+    /// The remote peer refused the page request because the
+    /// caller submitted an opaque cursor the host did not mint
+    /// (forged payload, replay against another peer, signed under
+    /// a rotated HMAC secret, …). The runtime collapses this
+    /// into the typed `invalid_cursor` outcome the spec pins; a
+    /// generic `Malformed` would have hidden the reason behind a
+    /// network-shaped error.
+    #[error("peer transport rejected an invalid history cursor")]
+    InvalidCursor,
 }
 
 /// Noop transport the platform crate installs when the
@@ -727,6 +823,17 @@ impl PeerTransport for NoopPeerTransport {
         // health check collapses to the typed `Unavailable`
         // outcome the runtime already surfaces for the
         // discovery-only contract.
+        Err(TransportError::Unavailable)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_history_handler(
+        &self,
+        _handler: Arc<dyn HistoryHostHandler>,
+    ) -> Result<(), TransportError> {
+        // The noop transport never opens a session, so a
+        // history-handler install collapses to the typed
+        // `Unavailable` outcome the runtime already surfaces.
         Err(TransportError::Unavailable)
     }
 
@@ -906,6 +1013,16 @@ pub(crate) struct TransportState {
             >,
         >,
     >,
+    /// Host-side history handler the listener drives when a
+    /// `ListRecentText` envelope lands. The trait is the seam
+    /// between the mTLS listener and the core runtime; the
+    /// transport never inspects row content beyond the
+    /// metadata-only projection. `None` on hosts that do not
+    /// ship the `peer-text-history-browser` change yet —
+    /// `ListRecentText` envelopes collapse to
+    /// `ListRecentTextUnavailable { reason: not_available }`
+    /// so the wire contract stays stable.
+    pub history_handler: Option<Arc<dyn HistoryHostHandler>>,
 }
 
 #[cfg(feature = "local-peer-pairing-tls")]
@@ -928,6 +1045,7 @@ impl Default for TransportState {
             next_session_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             session_sink: None,
             inbound_sessions: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            history_handler: None,
         }
     }
 }
@@ -1095,6 +1213,37 @@ impl PeerTransport for TlsPeerTransport {
     #[cfg(feature = "local-peer-pairing-tls")]
     fn health_check(&self, peer_id: &str, cert_fingerprint: &str) -> Result<(), TransportError> {
         super::peer_transport::tls::health_check(self, peer_id, cert_fingerprint)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_history_handler(
+        &self,
+        handler: Arc<dyn HistoryHostHandler>,
+    ) -> Result<(), TransportError> {
+        super::peer_transport::tls::install_history_handler(self, handler)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn start_with_material_resolver_and_history(
+        &self,
+        material: LocalIdentityMaterial,
+        sink: Arc<dyn TransportSink>,
+        advertisement: Arc<dyn PairingAdvertisement>,
+        resolver: Option<Arc<dyn RemotePeerResolver>>,
+        display_name: &str,
+        history_handler: Option<Arc<dyn HistoryHostHandler>>,
+    ) -> Result<u16, TransportError> {
+        let adapter: Arc<dyn PairingAdvertisementSink> =
+            Arc::new(AdvertisementSinkAdapter::new(advertisement));
+        super::peer_transport::tls::install_with_material_resolver_and_history(
+            self,
+            material,
+            display_name.to_string(),
+            adapter,
+            sink,
+            resolver,
+            history_handler,
+        )
     }
 
     #[cfg(feature = "local-peer-pairing-tls")]

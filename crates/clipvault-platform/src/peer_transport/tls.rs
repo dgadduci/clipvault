@@ -55,7 +55,7 @@ use super::wire::{compute_sas, PairingMessage};
 #[cfg(feature = "local-peer-pairing-tls")]
 use super::{
     derive_cert_fingerprint, PairingAdvertisementSink, PeerTransportObservation, TransportError,
-    TransportSink, PAIRING_MAX_IN_FLIGHT_SESSIONS, PAIRING_WIRE_VERSION,
+    TransportSink, HISTORY_WIRE_VERSION, PAIRING_MAX_IN_FLIGHT_SESSIONS, PAIRING_WIRE_VERSION,
 };
 
 /// Bind address the production listener uses. The production
@@ -601,6 +601,34 @@ pub fn install_with_material_and_resolver(
     sink: Arc<dyn TransportSink>,
     resolver: Option<Arc<dyn super::RemotePeerResolver>>,
 ) -> Result<u16, TransportError> {
+    install_with_material_resolver_and_history(
+        transport,
+        material,
+        display_name,
+        advertisement,
+        sink,
+        resolver,
+        None,
+    )
+}
+
+/// Variant of [`install_with_material_and_resolver`] the bootstrap
+/// uses when the `peer-text-history-browser` change is enabled.
+/// The handler is the host-side projection the listener drives
+/// when an authenticated peer asks for `list_recent_text`; it is
+/// installed before the listener binds so a `ListRecentText`
+/// envelope that lands on the very first inbound connection can
+/// already be served without falling back to `not_available`.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub fn install_with_material_resolver_and_history(
+    transport: &super::TlsPeerTransport,
+    material: LocalIdentityMaterial,
+    display_name: String,
+    advertisement: Arc<dyn PairingAdvertisementSink>,
+    sink: Arc<dyn TransportSink>,
+    resolver: Option<Arc<dyn super::RemotePeerResolver>>,
+    history_handler: Option<Arc<dyn super::HistoryHostHandler>>,
+) -> Result<u16, TransportError> {
     if transport
         .running
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -681,6 +709,7 @@ pub fn install_with_material_and_resolver(
             let state = transport.state.lock().expect("state lock");
             Arc::clone(&state.next_session_id)
         };
+        let history_handler_for_task = history_handler.as_ref().map(Arc::clone);
         let accept_handle = runtime.spawn(async move {
             run_accept_loop(
                 listener,
@@ -696,6 +725,7 @@ pub fn install_with_material_and_resolver(
                 handshake_pins_lookup,
                 inbound_sessions_for_task,
                 next_session_id_for_task,
+                history_handler_for_task,
             )
             .await;
         });
@@ -712,6 +742,7 @@ pub fn install_with_material_and_resolver(
         state.local_display_name = display_name;
         state.resolver = resolver;
         state.session_sink = Some(sink);
+        state.history_handler = history_handler;
         // The handshake pin lookup is the single source of
         // truth shared between the verifier, the inbound health
         // handler and `arm_pin` / `disarm_pin`. The install path
@@ -1155,6 +1186,14 @@ async fn run_accept_loop(
     // handler pointed at the same map.
     inbound_sessions: InboundSessionsMap,
     next_session_id: Arc<std::sync::atomic::AtomicU64>,
+    // Host-side history handler the listener drives when an
+    // authenticated peer asks for `list_recent_text`. The handler
+    // is read once at install time; the runtime can replace it
+    // later through `install_history_handler` and the next
+    // inbound connection will see the new value (the spawned
+    // task copies the `Option<Arc<_>>` per iteration so the
+    // hot-swap actually reaches the listener).
+    history_handler: Option<Arc<dyn super::HistoryHostHandler>>,
 ) {
     loop {
         if cancel.load(Ordering::Acquire) {
@@ -1185,6 +1224,7 @@ async fn run_accept_loop(
         let handshake_pins_for_session = handshake_pins.clone();
         let inbound_sessions_for_session = Arc::clone(&inbound_sessions);
         let next_session_id_for_session = Arc::clone(&next_session_id);
+        let history_handler_for_session = history_handler.as_ref().map(Arc::clone);
         tokio::spawn(async move {
             let outcome = handle_connection(
                 stream,
@@ -1201,6 +1241,7 @@ async fn run_accept_loop(
                 handshake_pins_for_session,
                 inbound_sessions_for_session,
                 next_session_id_for_session,
+                history_handler_for_session,
             )
             .await;
             if !matches!(outcome, ConnectionOutcome::Completed) {
@@ -1248,6 +1289,7 @@ async fn handle_connection(
     handshake_pins: Arc<HandshakePinLookup>,
     inbound_sessions: InboundSessionsMap,
     next_session_id: Arc<std::sync::atomic::AtomicU64>,
+    history_handler: Option<Arc<dyn super::HistoryHostHandler>>,
 ) -> ConnectionOutcome {
     let _ = peer_addr;
     let tls_stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
@@ -1277,6 +1319,7 @@ async fn handle_connection(
             handshake_pins,
             inbound_sessions,
             next_session_id,
+            history_handler,
         ),
     )
     .await;
@@ -1334,15 +1377,22 @@ async fn run_pairing_session<IO>(
     handshake_pins: Arc<HandshakePinLookup>,
     inbound_sessions: InboundSessionsMap,
     next_session_id: Arc<std::sync::atomic::AtomicU64>,
+    history_handler: Option<Arc<dyn super::HistoryHostHandler>>,
 ) -> Result<(), String>
 where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     // 0. Read the FIRST envelope to dispatch between pairing
     //    and health. The productive pairing transport refuses
-    //    every other route (history / fetch / import) — those
-    //    routes surface as `UnknownRoute` because the listener
-    //    simply closes the connection without writing a reply.
+    //    every other route (fetch / import) — those routes
+    //    surface as `UnknownRoute` because the listener simply
+    //    closes the connection without writing a reply. The
+    //    `ListRecentText` envelope is gated to the
+    //    `peer-text-history-browser` change: it shares the auth +
+    //    pin path the health handler uses and is only served when
+    //    the host handler the bootstrap installed returned a
+    //    page. `None` collapses to `ListRecentTextUnavailable`
+    //    with `reason = not_available`.
     let first_message = read_envelope(&mut stream).await?;
     match first_message {
         PairingMessage::Health { version, peer_id } => {
@@ -1356,14 +1406,33 @@ where
             )
             .await;
         }
+        PairingMessage::ListRecentText {
+            version,
+            peer_id,
+            cursor,
+            limit,
+        } => {
+            return handle_list_recent_text_session(
+                &mut stream,
+                version,
+                peer_id,
+                cursor,
+                limit,
+                &local_peer_id,
+                &peer_cert_slot,
+                handshake_pins,
+                history_handler,
+            )
+            .await;
+        }
         PairingMessage::Hello { .. } => {
             // Fall through into the pairing path. The Hello
             // envelope is consumed below.
         }
         other => {
-            // The listener refuses every other route: history,
-            // fetch, import — the productive pairing transport
-            // never opens those endpoints.
+            // The listener refuses every other route: fetch,
+            // import — the productive pairing transport never
+            // opens those endpoints.
             let _ = other;
             return Err("unknown route".to_string());
         }
@@ -1662,6 +1731,97 @@ where
         peer_id: local_peer_id.to_string(),
         protocol_major: LOCAL_PAIRING_PROTOCOL_MAJOR,
         present: true,
+    };
+    write_envelope(stream, &reply).await?;
+    Ok(())
+}
+
+/// Handle a `ListRecentText` envelope the listener accepted. The
+/// handler mirrors the auth path the health probe uses: the remote
+/// cert's SPKI must derive the declared `peer_id` and the runtime
+/// must have armed the matching pin before any byte crosses the
+/// application layer. The host-side page is delegated to the
+/// [`HistoryHostHandler`] the bootstrap installed; a `None` handler
+/// collapses to [`PairingMessage::ListRecentTextUnavailable`] with
+/// `reason = not_available` so a future host that has not enabled
+/// the change still speaks the wire contract.
+#[cfg(feature = "local-peer-pairing-tls")]
+async fn handle_list_recent_text_session<IO>(
+    stream: &mut TlsStream<IO>,
+    version: u32,
+    peer_id: String,
+    cursor: String,
+    limit: u32,
+    local_peer_id: &str,
+    peer_cert_slot: &Arc<PeerCertSlot>,
+    handshake_pins: Arc<HandshakePinLookup>,
+    history_handler: Option<Arc<dyn super::HistoryHostHandler>>,
+) -> Result<(), String>
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if version != HISTORY_WIRE_VERSION {
+        return Err("incompatible wire version".to_string());
+    }
+    let remote_cert_der = peer_cert_slot
+        .take()
+        .ok_or_else(|| "remote peer cert not delivered".to_string())?;
+    let remote_public_key = extract_ed25519_public_key_from_cert(&remote_cert_der)
+        .ok_or_else(|| "remote peer cert does not embed an Ed25519 SPKI".to_string())?;
+    let remote_peer_id = super::peer_id_from_public_key(&{
+        let mut key = [0u8; 32];
+        if remote_public_key.len() != 32 {
+            return Err("remote public key has invalid length".to_string());
+        }
+        key.copy_from_slice(&remote_public_key);
+        key
+    });
+    if peer_id != remote_peer_id {
+        return Err("list_recent_text peer_id does not match SPKI".to_string());
+    }
+    let presented = derive_cert_fingerprint(&remote_cert_der);
+    let pin = handshake_pins.lookup(&remote_peer_id);
+    match pin {
+        Some(expected) if expected == presented => {}
+        Some(_) => return Err("key mismatch".to_string()),
+        None => return Err("unknown peer".to_string()),
+    }
+
+    // `history_handler` is `None` only on hosts that did not ship
+    // the `peer-text-history-browser` change yet; the reply is
+    // `ListRecentTextUnavailable { reason: not_available }` so the
+    // wire contract stays stable across builds.
+    let reply = match history_handler {
+        Some(handler) => match handler.list_recent_text(&remote_peer_id, &cursor, limit) {
+            super::HistoryHostResponse::Ok {
+                rows,
+                next_cursor,
+                snapshot_id,
+            } => PairingMessage::ListRecentTextAck {
+                version: HISTORY_WIRE_VERSION,
+                peer_id: local_peer_id.to_string(),
+                rows,
+                next_cursor,
+                snapshot_id,
+            },
+            super::HistoryHostResponse::InvalidCursor => PairingMessage::ListRecentTextInvalid {
+                version: HISTORY_WIRE_VERSION,
+                peer_id: local_peer_id.to_string(),
+                reason: "invalid_cursor".to_string(),
+            },
+            super::HistoryHostResponse::Unavailable { reason } => {
+                PairingMessage::ListRecentTextUnavailable {
+                    version: HISTORY_WIRE_VERSION,
+                    peer_id: local_peer_id.to_string(),
+                    reason: reason.to_string(),
+                }
+            }
+        },
+        None => PairingMessage::ListRecentTextUnavailable {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: local_peer_id.to_string(),
+            reason: "not_available".to_string(),
+        },
     };
     write_envelope(stream, &reply).await?;
     Ok(())
@@ -2033,6 +2193,26 @@ pub fn health_check(
     Ok(())
 }
 
+/// Install (or replace) the host-side [`super::HistoryHostHandler`]
+/// the listener drives when a `ListRecentText` envelope lands. The
+/// runtime calls this after the productive pairing material loader
+/// returns so the handler can rely on the same SQLite handle the
+/// runtime already holds. Idempotent: a second call replaces the
+/// previous handler. The transport is NOT required to be running
+/// before the call; a fresh install or a future `start` simply
+/// observes the new handler. Returns the typed `Unavailable`
+/// outcome when the productive TLS path is not linked in (the
+/// default noop transport cannot install a real handler).
+#[cfg(feature = "local-peer-pairing-tls")]
+pub fn install_history_handler(
+    transport: &super::TlsPeerTransport,
+    handler: Arc<dyn super::HistoryHostHandler>,
+) -> Result<(), super::TransportError> {
+    let mut state = transport.state.lock().expect("state lock");
+    state.history_handler = Some(handler);
+    Ok(())
+}
+
 /// Metadata-only `list_recent_text` dial driver the
 /// `peer-text-history-browser` change exposes through the
 /// productive transport. The transport dials the remote
@@ -2052,14 +2232,66 @@ pub fn health_check(
 /// only needs to forward.
 #[cfg(feature = "local-peer-pairing-tls")]
 pub fn list_recent_text(
-    _transport: &super::TlsPeerTransport,
+    transport: &super::TlsPeerTransport,
     peer_id: &str,
     cert_fingerprint: &str,
     cursor: &str,
     limit: u32,
 ) -> Result<super::PeerHistorySnapshot, super::TransportError> {
-    let _ = (peer_id, cert_fingerprint, cursor, limit);
-    Err(super::TransportError::Unavailable)
+    use super::PeerTransport;
+    // Pre-flight: the productive pin map must accept the
+    // runtime-supplied fingerprint. UnknownPeer / KeyMismatch
+    // collapse into the typed variants the runtime already
+    // branches on without going through a network round-trip.
+    health_check(transport, peer_id, cert_fingerprint)?;
+
+    if !transport.is_running() {
+        return Err(super::TransportError::Unavailable);
+    }
+    let (material, resolver, runtime, pins) = {
+        let state = transport.state.lock().expect("state lock");
+        let material = state
+            .local_material
+            .clone()
+            .ok_or(super::TransportError::Crypto)?;
+        let resolver = state.resolver.clone();
+        let runtime_handle_opt = state.runtime.clone();
+        let pins = Arc::clone(&state.handshake_pins);
+        drop(state);
+        let runtime_handle = runtime_handle_opt.ok_or(super::TransportError::Unavailable)?;
+        (material, resolver, runtime_handle, pins)
+    };
+
+    let addr = match resolver.as_ref() {
+        Some(resolver) => resolver
+            .resolve(peer_id)
+            .ok_or(super::TransportError::UnknownPeer)?,
+        None => return Err(super::TransportError::Unavailable),
+    };
+
+    let connector = build_dial_connector(&material, Arc::clone(&pins));
+    let material_for_dial = material.clone();
+    let cursor_for_dial = cursor.to_string();
+    let result = runtime.block_on(async move {
+        dial_list_recent_text_async(
+            connector,
+            addr,
+            material_for_dial,
+            peer_id,
+            &cursor_for_dial,
+            limit,
+        )
+        .await
+    });
+    match result {
+        Ok(snapshot) => {
+            if snapshot.peer_id != peer_id {
+                return Err(super::TransportError::UnknownPeer);
+            }
+            Ok(snapshot)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Synchronous helper used by the outbound flow to dial the
@@ -3148,6 +3380,97 @@ async fn dial_health_async(
     })
 }
 
+/// Productive `list_recent_text` dial driver. The function dials the
+/// remote listener over mTLS through the resolver the bootstrap
+/// installed, exchanges the bounded `ListRecentText` envelope and
+/// returns either the [`super::PeerHistorySnapshot`] the host minted
+/// or one of the typed [`super::TransportError`] variants. Every
+/// failure collapses to a stable reason the runtime already branches
+/// on; the transport never inspects the row payload beyond the
+/// type check. The handler is feature-gated so cross-compiles and
+/// unsupported targets keep compiling.
+#[cfg(feature = "local-peer-pairing-tls")]
+async fn dial_list_recent_text_async(
+    connector: tokio_rustls::TlsConnector,
+    remote_addr: SocketAddr,
+    material: LocalIdentityMaterial,
+    peer_id: &str,
+    cursor: &str,
+    limit: u32,
+) -> Result<super::PeerHistorySnapshot, super::TransportError> {
+    use rustls::pki_types::ServerName;
+    let stream = tokio::net::TcpStream::connect(remote_addr)
+        .await
+        .map_err(|_| super::TransportError::Unavailable)?;
+    let server_name = ServerName::try_from("clipvault.local")
+        .map_err(|_| super::TransportError::Unavailable)?
+        .to_owned();
+    let mut tls_stream: TlsStream<tokio::net::TcpStream> = TlsStream::Client(
+        connector
+            .connect(server_name, stream)
+            .await
+            .map_err(|_| super::TransportError::KeyMismatch)?,
+    );
+    let request = PairingMessage::ListRecentText {
+        version: HISTORY_WIRE_VERSION,
+        peer_id: material.identity().peer_id.to_string(),
+        cursor: cursor.to_string(),
+        limit,
+    };
+    write_envelope(&mut tls_stream, &request)
+        .await
+        .map_err(|_| super::TransportError::Unavailable)?;
+    let reply = read_envelope(&mut tls_stream)
+        .await
+        .map_err(|_| super::TransportError::Unavailable)?;
+    match reply {
+        PairingMessage::ListRecentTextAck {
+            version: _,
+            peer_id: ack_peer_id,
+            rows,
+            next_cursor,
+            snapshot_id,
+        } => {
+            if ack_peer_id != peer_id {
+                return Err(super::TransportError::UnknownPeer);
+            }
+            Ok(super::PeerHistorySnapshot {
+                peer_id: ack_peer_id,
+                rows,
+                next_cursor,
+                snapshot_id,
+            })
+        }
+        PairingMessage::ListRecentTextInvalid { .. } => {
+            // The host refused the cursor the client submitted:
+            // a forged payload, a cursor minted under a rotated
+            // HMAC secret, a cursor replayed against another
+            // peer, … — every case collapses to the typed
+            // [`super::TransportError::InvalidCursor`] variant so
+            // the runtime can branch on `invalid_cursor`
+            // end-to-end. Converting it to a generic `Malformed`
+            // would have hidden the cursor-specific reason behind
+            // a network-shaped error and forced the renderer to
+            // inspect free-form strings to distinguish a real
+            // wire payload from a paginated-history rejection.
+            Err(super::TransportError::InvalidCursor)
+        }
+        PairingMessage::ListRecentTextUnavailable { reason, .. } => {
+            // Translate the host's stable snake_case reason onto
+            // a typed `TransportError` variant the runtime
+            // already branches on. Unknown reasons collapse to
+            // `Unavailable` so a forward-compatible host cannot
+            // crash an older client.
+            match reason.as_str() {
+                "not_trusted" | "not_active" => Err(super::TransportError::Revoked),
+                "pin_invalid" => Err(super::TransportError::KeyMismatch),
+                _ => Err(super::TransportError::Unavailable),
+            }
+        }
+        _ => Err(super::TransportError::IncompatibleProtocol),
+    }
+}
+
 // Silence the unused-import lint when the test surface isn't
 // pulled in but keeps the symbols available for downstream
 // crates that consume them through re-exports.
@@ -3998,6 +4321,416 @@ mod tests {
             !transport.is_running(),
             "toggle OFF must leave transport stopped"
         );
+    }
+
+    /// Productive TLS routing for `peer-text-history-browser`:
+    /// the test wires a synthetic [`super::super::HistoryHostHandler`]
+    /// that returns the rows a host projection would mint plus the
+    /// `valid:<offset>` cursor it understands. The dial loop,
+    /// the mTLS handshake and the pin lookup run against two real
+    /// `TlsPeerTransport` listeners; the test pins the
+    /// `ListRecentText` envelope routing only.
+    ///
+    /// The test does NOT exercise the productive cursor path:
+    /// the host returns an unsanitised, sentinel-shaped cursor
+    /// (`valid:<offset>`) that the host itself mints without
+    /// consulting any HMAC. It therefore cannot stand as evidence
+    /// of HMAC signing, secret rotation or persistence failure
+    /// handling. The integration test that does is
+    /// `productive_core_history_round_trip_over_two_real_tls_transports`
+    /// in `clipvault-core/src/peer_text_history.rs` (and its
+    /// sibling `productive_core_history_round_trip_*` tests); that
+    /// test wires the productive
+    /// [`crate::peer_pairing::PeerTextHistoryHostHandlerAdapter`]
+    /// over two real `TlsPeerTransport` instances, drives
+    /// [`crate::peer_text_history::PeerTextHistoryService::serve`]
+    /// with the per-peer HMAC secret, and verifies every
+    /// typed outcome the spec pins.
+    ///
+    /// Coverage the test keeps:
+    ///
+    /// - host `TlsPeerTransport` (port A) installs with a
+    ///   [`super::super::HistoryHostHandler`] backed by the
+    ///   synthetic sentinel handler so `ListRecentText` envelopes
+    ///   the listener already accepts can be served with real
+    ///   rows;
+    /// - client `TlsPeerTransport` (port B) installs with a
+    ///   [`super::super::RemotePeerResolver`] that always returns
+    ///   A's bound port and arms the pin for A's pinned cert
+    ///   fingerprint;
+    /// - client B invokes [`super::list_recent_text`] over the
+    ///   real mTLS dial loop to:
+    ///   1. fetch the first page,
+    ///   2. fetch the second page with the sentinel cursor,
+    ///   3. honour a smaller page size (`limit = 3`),
+    ///   4. reject a forged sentinel cursor at the host layer,
+    ///   5. reject a wrong cert fingerprint through mTLS pinning,
+    ///   6. observe [`super::super::TransportError::Unavailable`]
+    ///      when no handler is installed because the listener
+    ///      collapses `ListRecentText` to `not_available`.
+    ///
+    /// No multicast, manual IP, or LAN is involved: both
+    /// listeners bind on `127.0.0.1` and the resolver points the
+    /// dial at that loopback address. The fixture avoids
+    /// `unwrap_or_else` so a regression that bricks the productive
+    /// path surfaces here, not in the distroless smoke test.
+    #[test]
+    fn tls_routing_for_history_envelope_round_trip() {
+        use super::super::{
+            HistoryHostHandler, HistoryHostResponse, PeerHistorySnapshot, PeerTransport as _,
+            TlsPeerTransport,
+        };
+        use std::sync::Mutex as StdMutex;
+
+        // Constant the host's seeded row count and the
+        // productive [`super::super::HISTORY_MAX_PAGE_ROWS`]
+        // share: 53 rows give the first page a chance to fill
+        // the cap with three trailing rows so `next_cursor`
+        // always round-trips. The test never depends on the
+        // exact value beyond "enough to span the cap".
+        const MAX_TEST_ROWS: usize = 53;
+
+        let host_material = deterministic_material(0xA9);
+        let client_material = deterministic_material(0xB9);
+        let host_peer_id = host_material.identity().peer_id.to_string();
+        let client_peer_id = client_material.identity().peer_id.to_string();
+        let host_cert_fingerprint = derive_cert_fingerprint(host_material.cert_der());
+        let client_cert_fingerprint = derive_cert_fingerprint(client_material.cert_der());
+
+        // The host-side handler the bootstrap installs before
+        // the listener accepts the first session. The handler
+        // projects the host's local transferable text rows
+        // against a typed in-memory source so the test stays
+        // deterministic and never depends on SQLite.
+        let host_handler: Arc<dyn HistoryHostHandler> = {
+            struct FixedHostSource {
+                rows: Vec<super::super::wire::ListRecentTextRow>,
+                snapshot_id: String,
+            }
+            struct FixedHandler(StdMutex<FixedHostSource>);
+            impl HistoryHostHandler for FixedHandler {
+                fn list_recent_text(
+                    &self,
+                    _peer_id: &str,
+                    cursor: &str,
+                    limit: u32,
+                ) -> HistoryHostResponse {
+                    let state = self.0.lock().expect("host state lock");
+                    // Replace the cursor with a value the host
+                    // treats as a host-minted sentinel. Forged
+                    // cursors collapse to typed `InvalidCursor`;
+                    // an empty cursor is the first page.
+                    let offset: usize = if cursor.is_empty() {
+                        0
+                    } else if let Some(rest) = cursor.strip_prefix("valid:") {
+                        rest.parse().unwrap_or(usize::MAX)
+                    } else {
+                        return HistoryHostResponse::InvalidCursor;
+                    };
+                    if offset >= state.rows.len() {
+                        return HistoryHostResponse::Ok {
+                            rows: Vec::new(),
+                            next_cursor: String::new(),
+                            snapshot_id: state.snapshot_id.clone(),
+                        };
+                    }
+                    let take = limit.min((state.rows.len() - offset) as u32) as usize;
+                    let rows: Vec<super::super::wire::ListRecentTextRow> =
+                        state.rows.iter().skip(offset).take(take).cloned().collect();
+                    let next_offset = offset + rows.len();
+                    let next_cursor = if next_offset < state.rows.len() {
+                        format!("valid:{next_offset}")
+                    } else {
+                        String::new()
+                    };
+                    HistoryHostResponse::Ok {
+                        rows,
+                        next_cursor,
+                        snapshot_id: state.snapshot_id.clone(),
+                    }
+                }
+            }
+            let mut rows = Vec::new();
+            // Seed the host with enough rows to span the cap so
+            // the first page emits a `next_cursor`; this lets
+            // the integration test verify the pagination
+            // contract end-to-end.
+            for id in 1..=MAX_TEST_ROWS {
+                rows.push(super::super::wire::ListRecentTextRow {
+                    remote_entry_id: format!("entry-{id}"),
+                    title: None,
+                    content_type: "text".to_string(),
+                    created_at: format!("2026-01-01T00:00:0{id}Z"),
+                    preview: format!("row-{id} preview"),
+                });
+            }
+            Arc::new(FixedHandler(StdMutex::new(FixedHostSource {
+                rows,
+                snapshot_id: "abcdef".repeat(10) + "abcd",
+            })))
+        };
+
+        // Host listener: install with the host-side handler so
+        // the first inbound `ListRecentText` envelope lands on a
+        // productive handler instead of `not_available`.
+        let host_transport = TlsPeerTransport::new();
+        let host_advertisement: Arc<dyn PairingAdvertisementSink> =
+            Arc::new(RecordingAdvertisementSink::new());
+        struct NoOpSink;
+        impl TransportSink for NoOpSink {
+            fn on_pairing_observed(&self, _observation: PeerTransportObservation) {}
+        }
+        let host_sink: Arc<dyn TransportSink> = Arc::new(NoOpSink);
+        let host_port = install_with_material_resolver_and_history(
+            &host_transport,
+            host_material.clone(),
+            "host".to_string(),
+            host_advertisement,
+            host_sink,
+            None,
+            Some(Arc::clone(&host_handler)),
+        )
+        .expect("install host");
+
+        // Client listener: install with a resolver that maps
+        // the host peer_id to the host's bound port so the
+        // productive dial driver can hit the listener on the
+        // loopback interface.
+        let client_transport = TlsPeerTransport::new();
+        struct HostPortResolver {
+            host: Arc<parking_lot::Mutex<Option<u16>>>,
+            peer_id: String,
+        }
+        impl super::super::RemotePeerResolver for HostPortResolver {
+            fn resolve(&self, peer_id: &str) -> Option<SocketAddr> {
+                if peer_id != self.peer_id {
+                    return None;
+                }
+                let guard = self.host.lock();
+                let port_opt: Option<u16> = *guard;
+                let port = port_opt?;
+                Some(SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+                    port,
+                ))
+            }
+        }
+        let host_port_slot: Arc<parking_lot::Mutex<Option<u16>>> =
+            Arc::new(parking_lot::Mutex::new(Some(host_port)));
+        let resolver: Arc<dyn super::super::RemotePeerResolver> = Arc::new(HostPortResolver {
+            host: Arc::clone(&host_port_slot),
+            peer_id: host_peer_id.clone(),
+        });
+        let client_advertisement: Arc<dyn PairingAdvertisementSink> =
+            Arc::new(RecordingAdvertisementSink::new());
+        let client_sink: Arc<dyn TransportSink> = Arc::new(NoOpSink);
+        install_with_material_and_resolver(
+            &client_transport,
+            client_material.clone(),
+            "client".to_string(),
+            client_advertisement,
+            client_sink,
+            Some(resolver),
+        )
+        .expect("install client");
+
+        // Arm the pins on BOTH transports. The production pairing
+        // flow persists the two fingerprints after reciprocal
+        // approval so each side can validate the other's cert;
+        // we mirror that here so the dialer's TLS handshake is
+        // accepted by the listener's pin lookup and vice versa.
+        client_transport
+            .arm_pin(&host_peer_id, &host_cert_fingerprint)
+            .expect("arm pin (client -> host)");
+        host_transport
+            .arm_pin(&client_peer_id, &client_cert_fingerprint)
+            .expect("arm pin (host -> client)");
+
+        // Yield so the host accept loop polls at least once
+        // before the dialer fires its first request.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // 1. First page over mTLS. The host seeds `MAX_TEST_ROWS` rows
+        //    so the page fills the cap and emits a `next_cursor`
+        //    pointing at the next chunk.
+        let first = super::list_recent_text(
+            &client_transport,
+            &host_peer_id,
+            &host_cert_fingerprint,
+            "",
+            super::super::HISTORY_MAX_PAGE_ROWS as u32,
+        )
+        .expect("first page dials");
+        assert_eq!(first.peer_id, host_peer_id);
+        assert_eq!(first.rows.len(), super::super::HISTORY_MAX_PAGE_ROWS);
+        assert_eq!(
+            first.next_cursor,
+            format!("valid:{}", super::super::HISTORY_MAX_PAGE_ROWS)
+        );
+        assert_eq!(first.snapshot_id.len(), 64);
+
+        // 2. Second page after the signed `next_cursor` succeeds
+        //    with the trailing rows and no further cursor.
+        let second = super::list_recent_text(
+            &client_transport,
+            &host_peer_id,
+            &host_cert_fingerprint,
+            &first.next_cursor,
+            super::super::HISTORY_MAX_PAGE_ROWS as u32,
+        )
+        .expect("second page dials");
+        assert_eq!(
+            second.rows.len(),
+            MAX_TEST_ROWS - super::super::HISTORY_MAX_PAGE_ROWS
+        );
+        assert!(second.next_cursor.is_empty());
+
+        // 3. The host honours a smaller page size: an `Ok`
+        //    returns at most `limit` rows and emits a
+        //    `next_cursor` only when more rows remain.
+        let small = super::list_recent_text(
+            &client_transport,
+            &host_peer_id,
+            &host_cert_fingerprint,
+            "",
+            3,
+        )
+        .expect("small page dials");
+        assert_eq!(small.rows.len(), 3);
+        assert_eq!(small.next_cursor, "valid:3");
+
+        // 4. Forged cursor → typed [`TransportError::InvalidCursor`]
+        //    preserved end-to-end (no transport collapse to
+        //    `Malformed` / `Unavailable`).
+        let err = super::list_recent_text(
+            &client_transport,
+            &host_peer_id,
+            &host_cert_fingerprint,
+            "definitely-not-a-host-cursor",
+            super::super::HISTORY_MAX_PAGE_ROWS as u32,
+        )
+        .expect_err("forged cursor must surface InvalidCursor");
+        assert!(
+            matches!(err, super::super::TransportError::InvalidCursor),
+            "forged cursor must reach the typed InvalidCursor variant, got {err:?}",
+        );
+
+        // 5. Wrong cert fingerprint → mTLS pinning must reject
+        //    the connection at the handshake layer so the runtime
+        //    branch on `KeyMismatch`.
+        let wrong_pin = derive_cert_fingerprint(client_material.cert_der());
+        let err = super::list_recent_text(
+            &client_transport,
+            &host_peer_id,
+            &wrong_pin,
+            "",
+            super::super::HISTORY_MAX_PAGE_ROWS as u32,
+        )
+        .expect_err("wrong pin must surface KeyMismatch");
+        assert!(matches!(err, super::super::TransportError::KeyMismatch));
+
+        // Disarm the pin and confirm a follow-up dial surfaces
+        // `UnknownPeer` (the runtime never re-arms the pin for
+        // a trusted row that left the trusted state).
+        client_transport
+            .disarm_pin(&host_peer_id)
+            .expect("disarm pin");
+        let err = super::list_recent_text(
+            &client_transport,
+            &host_peer_id,
+            &host_cert_fingerprint,
+            "",
+            super::super::HISTORY_MAX_PAGE_ROWS as u32,
+        )
+        .expect_err("missing pin must surface UnknownPeer");
+        assert!(matches!(err, super::super::TransportError::UnknownPeer));
+
+        // 6. No-handler path: install a fresh host listener
+        //    without wiring a handler so `ListRecentText` on
+        //    the wire collapses to `ListRecentTextUnavailable`,
+        //    which the dial maps to
+        //    [`TransportError::Unavailable`].
+        let bare_host = TlsPeerTransport::new();
+        let bare_advertisement: Arc<dyn PairingAdvertisementSink> =
+            Arc::new(RecordingAdvertisementSink::new());
+        let bare_sink: Arc<dyn TransportSink> = Arc::new(NoOpSink);
+        let bare_port = install_with_material_resolver_and_history(
+            &bare_host,
+            host_material.clone(),
+            "bare-host".to_string(),
+            bare_advertisement,
+            bare_sink,
+            None,
+            None,
+        )
+        .expect("install bare host");
+        let bare_fingerprint = derive_cert_fingerprint(host_material.cert_der());
+        let bare_port_slot: Arc<parking_lot::Mutex<Option<u16>>> =
+            Arc::new(parking_lot::Mutex::new(Some(bare_port)));
+        let bare_resolver: Arc<dyn super::super::RemotePeerResolver> = Arc::new(HostPortResolver {
+            host: Arc::clone(&bare_port_slot),
+            peer_id: host_peer_id.clone(),
+        });
+        // Dial the bare host directly so this assertion survives
+        // the previous arm_pin / disarm_pin mutations.
+        let bare_client = TlsPeerTransport::new();
+        let bare_advertisement_c: Arc<dyn PairingAdvertisementSink> =
+            Arc::new(RecordingAdvertisementSink::new());
+        let bare_sink_c: Arc<dyn TransportSink> = Arc::new(NoOpSink);
+        install_with_material_and_resolver(
+            &bare_client,
+            client_material.clone(),
+            "bare-client".to_string(),
+            bare_advertisement_c,
+            bare_sink_c,
+            Some(bare_resolver),
+        )
+        .expect("install bare client");
+        bare_client
+            .arm_pin(&host_peer_id, &bare_fingerprint)
+            .expect("arm pin bare");
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let err = super::list_recent_text(
+            &bare_client,
+            &host_peer_id,
+            &bare_fingerprint,
+            "",
+            super::super::HISTORY_MAX_PAGE_ROWS as u32,
+        )
+        .expect_err("no handler must surface typed unavailability");
+        assert!(matches!(err, super::super::TransportError::Unavailable));
+
+        // Sanity pin: the productive transport never leaks the
+        // per-peer pinned fingerprint, the raw cert bytes, the
+        // host's bound port or the resolver closure through the
+        // snapshot it returns. The renderer only sees the
+        // bounded metadata rows the host emitted.
+        let snapshot: PeerHistorySnapshot = PeerHistorySnapshot {
+            peer_id: host_peer_id.clone(),
+            rows: small.rows.clone(),
+            next_cursor: small.next_cursor.clone(),
+            snapshot_id: small.snapshot_id.clone(),
+        };
+        let payload = format!("{snapshot:?}");
+        for forbidden in [
+            host_cert_fingerprint.as_str(),
+            bare_fingerprint.as_str(),
+            "127.0.0.1",
+            "/tmp",
+            "localhost",
+        ] {
+            assert!(
+                !payload.contains(forbidden),
+                "snapshot leaked {forbidden} into the wire payload",
+            );
+        }
+
+        // Cleanup: stop every transport and free the resolver
+        // ports.
+        host_transport.stop().expect("stop host");
+        client_transport.stop().expect("stop client");
+        bare_host.stop().expect("stop bare host");
+        bare_client.stop().expect("stop bare client");
     }
 
     /// Pinning survives a "restart": after the productive

@@ -459,6 +459,12 @@ impl<'a> EntryRepository<'a> {
     /// the cursor projection lives in `clipvault-core` because the
     /// preview escaping, the cursor encoding and the wire shaping
     /// are the core's responsibility, not the SQL layer's.
+    ///
+    /// The wire is plain text only — [`ContentType::Html`] rows are
+    /// excluded at the SQL boundary even though the local search
+    /// keeps them under the `is_textual()` predicate. The
+    /// `peer-text-history-browser` change pins the exclusion so a
+    /// peer never sees an HTML row in the metadata-only projection.
     pub fn text_entries_after(
         &self,
         created_at: &str,
@@ -468,6 +474,7 @@ impl<'a> EntryRepository<'a> {
         let limit = limit as i64;
         let placeholders = TEXTUAL_CONTENT_TYPES
             .iter()
+            .filter(|c| **c != ContentType::Html)
             .map(|c| format!("'{}'", c.as_str()))
             .collect::<Vec<_>>()
             .join(",");
@@ -497,12 +504,15 @@ impl<'a> EntryRepository<'a> {
 
     /// Stable `(created_at, id)` pair the cursor projection uses as
     /// the snapshot fingerprint. `None` when no transferable text
-    /// row exists yet.
+    /// row exists yet. The projection excludes [`ContentType::Html`]
+    /// rows so the snapshot the host returns matches the wire-only
+    /// plain-text rule the `peer-text-history-browser` change pins.
     pub fn latest_transferable_text_snapshot(
         &self,
     ) -> Result<Option<(String, i64)>, EntryRepositoryError> {
         let placeholders = TEXTUAL_CONTENT_TYPES
             .iter()
+            .filter(|c| **c != ContentType::Html)
             .map(|c| format!("'{}'", c.as_str()))
             .collect::<Vec<_>>()
             .join(",");
@@ -527,6 +537,35 @@ impl<'a> EntryRepository<'a> {
         } else {
             Ok(None)
         }
+    }
+
+    /// Total number of transferable text rows currently stored.
+    /// The `peer-text-history-browser` change folds the value into
+    /// the snapshot fingerprint so a local capture that landed
+    /// between page requests always bumps the fingerprint the
+    /// client compares against. Like [`Self::latest_transferable_text_snapshot`]
+    /// the helper excludes [`ContentType::Html`] rows so the count
+    /// matches the metadata-only surface the host exposes.
+    pub fn transferable_text_count(&self) -> Result<i64, EntryRepositoryError> {
+        let placeholders = TEXTUAL_CONTENT_TYPES
+            .iter()
+            .filter(|c| **c != ContentType::Html)
+            .map(|c| format!("'{}'", c.as_str()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT COUNT(*) FROM clipboard_entries
+             WHERE content_type IN ({placeholders})
+               AND asset_ref IS NULL
+               AND mime_type IS NULL
+               AND payload_width IS NULL
+               AND payload_height IS NULL
+               AND rich_text_hash IS NULL
+               AND (rich_html_ref IS NULL AND rich_rtf_ref IS NULL)"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let count: i64 = stmt.query_row(params![], |row| row.get(0))?;
+        Ok(count)
     }
 
     /// Every text entry currently stored. Used by the in-memory search

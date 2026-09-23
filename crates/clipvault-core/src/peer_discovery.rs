@@ -1110,6 +1110,7 @@ mod tests {
                             tls_cert_fingerprint: existing.tls_cert_fingerprint.clone(),
                             paired_at: existing.paired_at.clone(),
                             paired_protocol_major: existing.paired_protocol_major,
+                            cursor_secret: existing.cursor_secret.clone(),
                         };
                         guard.push(refreshed.clone());
                         UpsertObservationOutcome::Stored(refreshed)
@@ -1136,6 +1137,7 @@ mod tests {
                         tls_cert_fingerprint: String::new(),
                         paired_at: String::new(),
                         paired_protocol_major: 0,
+                        cursor_secret: String::new(),
                     };
                     guard.push(row.clone());
                     UpsertObservationOutcome::Stored(row)
@@ -1506,6 +1508,7 @@ mod tests {
                 tls_cert_fingerprint: String::new(),
                 paired_at: String::new(),
                 paired_protocol_major: 0,
+                cursor_secret: String::new(),
             },
         );
         runtime.start().expect("start");

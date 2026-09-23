@@ -644,7 +644,7 @@ export type PeerPairingHealthFailureReason =
  * page the `peer-text-history-browser` change ships. The
  * discriminated union keeps the wire contract stable: the
  * renderer branches on `kind` (`ok` / `invalid_cursor` /
- * `peer_unavailable` / `persistence_unavailable`) without
+ * `peer_unavailable` / `transport_unavailable`) without
  * inspecting free-form strings or content bytes.
  */
 export type PeerHistoryBrowseResponse =
@@ -673,7 +673,25 @@ export type PeerHistoryBrowseResponse =
        */
       reason: "no_known_peer" | "not_trusted" | "not_active";
     }
-  | { kind: "persistence_unavailable" };
+  | {
+      kind: "transport_unavailable";
+      /**
+       * Stable reason the productive mTLS transport surfaces
+       * when the page request is rejected
+       * (`unavailable` / `unknown_peer` / `key_mismatch` /
+       * `revoked` / `blocked` / `incompatible_protocol` /
+       * `malformed`). The renderer keeps the previous page and
+       * surfaces a typed error copy without retrying blindly.
+       */
+      reason:
+        | "unavailable"
+        | "unknown_peer"
+        | "key_mismatch"
+        | "revoked"
+        | "blocked"
+        | "incompatible_protocol"
+        | "malformed";
+    };
 
 /**
  * Metadata-only row the renderer renders when the user opens a
