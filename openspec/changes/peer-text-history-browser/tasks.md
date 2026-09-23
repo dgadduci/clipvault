@@ -74,6 +74,9 @@
   > toggle (no por el helper de test que recibe manualmente el
   > handler) y verifica que un `ListRecentText` autenticado llega al
   > handler sin devolver `not_available`.
+  > Reapertura: el ACK de historial recibe un presupuesto autenticado propio
+  > (sin relajar el frame de pairing) y el certificado cliente se toma de la
+  > conexión TLS concreta antes de autorizar la sesión.
   >
   > Reapertura: los pins mTLS de `TlsPeerTransport` son volátiles. El
   > bootstrap restaura antes del listener cada fingerprint canónico

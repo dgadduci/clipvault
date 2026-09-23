@@ -30,6 +30,11 @@ local. No se reutiliza la SQLite del solicitante como fuente de los previews.
   orden newest-first y un límite de 50 filas. Un cursor no emitido por el
   host, manipulado o que excede el window del secreto actual retorna
   `invalid_cursor`.
+- Mantener el frame de pairing pequeño, pero permitir que una respuesta
+  `list_recent_text` autenticada use un presupuesto propio, acotado y
+  suficiente para las 50 previews máximas. La evidencia del certificado
+  cliente se toma de la conexión TLS concreta antes de entregarla al handler
+  de sesión.
 - Mostrar los pares vinculados debajo de las colecciones en el desktop, con
   estado Activo/No disponible, punto verde sólo cuando el par es
   `trusted && is_present`, gris para trusted no disponible, y actualización

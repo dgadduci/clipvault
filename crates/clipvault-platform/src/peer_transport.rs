@@ -115,6 +115,14 @@ pub const HISTORY_WIRE_VERSION: u32 = 1;
 /// streaming more rows than the contract allows.
 pub const HISTORY_MAX_PAGE_ROWS: usize = 50;
 
+/// Maximum serialized size of one authenticated `ListRecentTextAck`.
+///
+/// A page is still bounded to [`HISTORY_MAX_PAGE_ROWS`] rows and each preview
+/// is bounded by the core, but JSON plus UTF-8 can legitimately exceed the
+/// small pairing frame. This limit applies only after the listener has
+/// authenticated the history request; pairing handshakes keep their own cap.
+pub const HISTORY_MAX_RESPONSE_BYTES: usize = 128 * 1024;
+
 /// Maximum length of an incoming pairing wire envelope. The pairing
 /// surface only ever exchanges nonces, fingerprints, SAS confirmations
 /// and signed approvals — the cap is generous and stays well below

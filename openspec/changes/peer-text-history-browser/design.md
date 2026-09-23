@@ -197,6 +197,23 @@ trust, cursor o protocolo. Si tras la ventana no existe endpoint, el outcome
 es `transport_unavailable: unavailable`, nunca `not_trusted`; `UnknownPeer`
 queda reservado para un pin/identidad desconocidos.
 
+### Presupuesto del frame de historial y certificado de la sesión
+
+Los envelopes de pairing (nonces, SAS y aprobaciones) conservan su límite
+pequeño. `ListRecentTextAck` usa en cambio un máximo explícito de 128 KiB:
+siguen existiendo los límites de 50 filas, dos líneas y 300 caracteres Unicode
+por preview, pero la serialización JSON de una página legítima no puede quedar
+accidentalmente por debajo del límite de pairing. El listener aún acepta sólo
+requests pequeños; el presupuesto ampliado se aplica únicamente al ACK de
+historial autenticado y el cliente lo valida antes de reservar memoria.
+
+Tras completar mTLS, el listener toma el certificado cliente de `TlsStream`
+para esa conexión y lo publica en el contexto de su propia sesión antes de
+autorizar Health o `ListRecentText`. No depende sólo del callback del verifier,
+que puede no volver a publicar el certificado en una conexión reanudada. La
+validación SPKI, `peer_id` y pin permanece idéntica; no se transportan
+certificados al core ni al renderer.
+
 ## Snapshot id
 
 El `snapshot_id` deja de ser `created_at|id`. Pasa a ser un fingerprint

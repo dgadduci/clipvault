@@ -55,7 +55,8 @@ use super::wire::{compute_sas, PairingMessage};
 #[cfg(feature = "local-peer-pairing-tls")]
 use super::{
     derive_cert_fingerprint, PairingAdvertisementSink, PeerTransportObservation, TransportError,
-    TransportSink, HISTORY_WIRE_VERSION, PAIRING_MAX_IN_FLIGHT_SESSIONS, PAIRING_WIRE_VERSION,
+    TransportSink, HISTORY_MAX_RESPONSE_BYTES, HISTORY_WIRE_VERSION,
+    PAIRING_MAX_IN_FLIGHT_SESSIONS, PAIRING_WIRE_VERSION,
 };
 
 /// Bind address the production listener uses. The production
@@ -101,11 +102,9 @@ pub const LOCAL_DISCOVERY_ONLY_CAPABILITY: &str = "discovery_only";
 /// the discovery value when the wire contract changes.
 pub const LOCAL_DISCOVERY_ONLY_PROTOCOL_MAJOR: i64 = 1;
 
-/// Maximum length of an inbound mTLS payload. The pairing surface
-/// only exchanges nonces, fingerprints, SAS confirmations and
-/// signed approvals — the cap is generous and stays well below
-/// the MTU so the listener can short-circuit obviously malicious
-/// payloads before they reach the application state machine.
+/// Maximum length of an inbound pairing request. History replies use
+/// [`HISTORY_MAX_RESPONSE_BYTES`] after the request has authenticated;
+/// pairing itself retains this smaller allocation bound.
 pub const MAX_INBOUND_PAYLOAD: usize = 8 * 1024;
 
 /// Per-attempt cap the accept loop waits for a TLS handshake to
@@ -1338,6 +1337,22 @@ async fn handle_connection(
     };
     eprintln!("pairing TLS handshake completed; running session for {peer_addr}");
 
+    // Keep the certificate bound to this accepted TLS connection available to
+    // the protocol handler. The verifier normally publishes the same DER into
+    // `peer_cert_slot`, but a resumed handshake is not required to invoke that
+    // callback again. `CommonState` is the authoritative connection-local
+    // source, so re-publishing it here prevents a later Health or history
+    // request from observing an empty slot.
+    if let Some(cert_der) = tls_stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .map(|certificate| certificate.to_vec())
+    {
+        peer_cert_slot.publish(cert_der);
+    }
+
     let outcome = tokio::time::timeout(
         CONNECTION_TIMEOUT,
         run_pairing_session(
@@ -1860,10 +1875,21 @@ where
     Ok(())
 }
 
-/// Read a single length-prefixed envelope from the stream. The
-/// function caps the payload at [`MAX_INBOUND_PAYLOAD`] so an
-/// oversized frame cannot exhaust the buffer.
+/// Read a single length-prefixed envelope using the pairing request budget.
 async fn read_envelope<IO>(stream: &mut TlsStream<IO>) -> Result<PairingMessage, String>
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    read_envelope_with_limit(stream, MAX_INBOUND_PAYLOAD).await
+}
+
+/// Read a single length-prefixed envelope with an explicit allocation budget.
+/// Only the authenticated history client calls this with the larger history
+/// response limit; every listener-side request stays at the pairing cap.
+async fn read_envelope_with_limit<IO>(
+    stream: &mut TlsStream<IO>,
+    max_payload: usize,
+) -> Result<PairingMessage, String>
 where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -1872,7 +1898,7 @@ where
         return Err(format!("read length: {error}"));
     }
     let len = u32::from_le_bytes(len_bytes) as usize;
-    if len == 0 || len > MAX_INBOUND_PAYLOAD {
+    if len == 0 || len > max_payload {
         return Err(format!("invalid envelope length: {len}"));
     }
     let mut payload = vec![0u8; len];
@@ -1883,6 +1909,13 @@ where
         .map_err(|error| format!("decode envelope: {error}"))
 }
 
+fn envelope_payload_limit(message: &PairingMessage) -> usize {
+    match message {
+        PairingMessage::ListRecentTextAck { .. } => HISTORY_MAX_RESPONSE_BYTES,
+        _ => MAX_INBOUND_PAYLOAD,
+    }
+}
+
 async fn write_envelope<IO>(
     stream: &mut TlsStream<IO>,
     message: &PairingMessage,
@@ -1891,7 +1924,7 @@ where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let payload = serde_json::to_vec(message).map_err(|error| format!("encode: {error}"))?;
-    if payload.len() > MAX_INBOUND_PAYLOAD {
+    if payload.len() > envelope_payload_limit(message) {
         return Err(format!("payload too large: {} bytes", payload.len()));
     }
     let len = (payload.len() as u32).to_le_bytes();
@@ -3469,7 +3502,7 @@ async fn dial_list_recent_text_async(
     write_envelope(&mut tls_stream, &request)
         .await
         .map_err(|_| super::TransportError::Unavailable)?;
-    let reply = read_envelope(&mut tls_stream)
+    let reply = read_envelope_with_limit(&mut tls_stream, HISTORY_MAX_RESPONSE_BYTES)
         .await
         .map_err(|_| super::TransportError::Unavailable)?;
     match reply {
@@ -4559,7 +4592,10 @@ mod tests {
                     title: None,
                     content_type: "text".to_string(),
                     created_at: format!("2026-01-01T00:00:0{id}Z"),
-                    preview: format!("row-{id} preview"),
+                    // A legal full-size preview makes the first 50-row ACK
+                    // exceed the pairing frame. The history-specific limit
+                    // must carry it end-to-end without weakening pairing.
+                    preview: format!("row-{id} {}", "x".repeat(300)),
                 });
             }
             Arc::new(FixedHandler(StdMutex::new(FixedHostSource {

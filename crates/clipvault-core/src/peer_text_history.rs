@@ -2373,7 +2373,7 @@ mod tests {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         use std::sync::Mutex as StdMutex;
 
-        const ROWS: i64 = 23;
+        const ROWS: i64 = MAX_PAGE_ROWS as i64 + 3;
 
         // Build the host + client identity material from
         // deterministic seeds so the test does not depend on
@@ -2588,14 +2588,16 @@ mod tests {
         //    page and mints a real HMAC-SHA256 `next_cursor`.
         //    The seeded source carries `ROWS` entries (> limit)
         //    so the host mints a cursor the second page can
-        //    verify. The page size is intentionally below
-        //    `MAX_PAGE_ROWS` so the test exercises both the
-        //    cursor minting path AND the wire-envelope size
-        //    budget (a full MAX_PAGE_ROWS page would exceed the
-        //    platform's 8 KiB envelope cap given the body
-        //    length each row carries).
+        //    verify. Requesting `MAX_PAGE_ROWS` makes the serialized ACK
+        //    larger than the pairing frame, so this is also the productive
+        //    regression for the history-specific response budget.
         // ----------------------------------------------------------------
-        let first_outcome = client_service.browse(&host_peer_id, &host_cert_fingerprint, None, 7);
+        let first_outcome = client_service.browse(
+            &host_peer_id,
+            &host_cert_fingerprint,
+            None,
+            MAX_PAGE_ROWS as u32,
+        );
         let PeerHistoryOutcome::Ok {
             page: first_page,
             snapshot_id: first_snapshot_id,
@@ -2603,7 +2605,7 @@ mod tests {
         else {
             panic!("first page must return Ok variant, got {first_outcome:?}");
         };
-        assert_eq!(first_page.rows.len(), 7);
+        assert_eq!(first_page.rows.len(), MAX_PAGE_ROWS);
         assert_eq!(first_snapshot_id.len(), 64);
         let first_next_cursor = first_page
             .next_cursor
@@ -2617,7 +2619,7 @@ mod tests {
             &host_peer_id,
             &host_cert_fingerprint,
             Some(first_next_cursor),
-            7,
+            MAX_PAGE_ROWS as u32,
         );
         let PeerHistoryOutcome::Ok {
             page: second_page, ..
@@ -2625,14 +2627,8 @@ mod tests {
         else {
             panic!("second page must return Ok variant");
         };
-        assert_eq!(second_page.rows.len(), 7);
-        // The third page should still have rows left (we
-        // started with 23), so a follow-up cursor must be
-        // minted.
-        let third_cursor = second_page
-            .next_cursor
-            .as_ref()
-            .expect("second page must mint a cursor when more rows remain");
+        assert_eq!(second_page.rows.len(), 3);
+        assert!(second_page.next_cursor.is_none());
 
         // ----------------------------------------------------------------
         // 3. Smaller page size — `limit = 3` over `ROWS` rows
@@ -2917,7 +2913,6 @@ mod tests {
         // Silence the unused-helper warning when the feature
         // gate is enabled.
         let _ = small_cursor;
-        let _ = third_cursor;
     }
 }
 
