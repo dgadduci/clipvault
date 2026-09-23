@@ -672,17 +672,17 @@ impl MdnsPeerDiscoveryAdapter {
             MdnsAdapterError::ServiceInfo
         })?
         .enable_addr_auto();
-        // Only unregister the previous record when the
-        // `fullname` actually changed; flipping the TXT record
-        // for the same instance keeps the daemon's state
-        // machine clean.
-        if handle.fullname != new_fullname {
-            match handle.daemon.unregister(&handle.fullname) {
-                Ok(receiver) => {
-                    let _ = receiver.recv_timeout(UNREGISTER_WAIT);
-                }
-                Err(_) => warn!("mdns-sd unregister during reconfigure failed; continuing"),
+        // An initial discovery-only record uses port 0. Replacing
+        // it in-place with the same fullname is not consistently
+        // re-resolved by every DNS-SD browser, leaving a peer
+        // marked present but with an obsolete `IP:0` route. Always
+        // withdraw first so the following registration publishes a
+        // fresh SRV record with the real pairing listener port.
+        match handle.daemon.unregister(&handle.fullname) {
+            Ok(receiver) => {
+                let _ = receiver.recv_timeout(UNREGISTER_WAIT);
             }
+            Err(_) => warn!("mdns-sd unregister during reconfigure failed; continuing"),
         }
         handle.daemon.register(service_info).map_err(|error| {
             warn!(error = %error, "failed to register mdns-sd service");
@@ -880,11 +880,15 @@ pub(super) fn process_event(
                     .lock()
                     .expect("peer registry")
                     .insert(fullname.clone(), peer_id.clone());
+                let mut addresses = peer_addresses.lock().expect("peer addresses");
                 if let Some(address) = address {
-                    peer_addresses
-                        .lock()
-                        .expect("peer addresses")
-                        .insert(peer_id, address);
+                    addresses.insert(peer_id, address);
+                } else {
+                    // A discovery-only announcement (port 0) is
+                    // sufficient for presence but never for a TCP
+                    // dial. Drop any earlier endpoint so a restart
+                    // cannot retain a stale pairing port.
+                    addresses.remove(&peer_id);
                 }
                 // A fresh resolution refreshes the liveness
                 // anchor and clears any in-flight verify guard
@@ -1042,6 +1046,9 @@ fn run_liveness_scheduler(
 /// pairing listener accepts only IPv4. Discovery still consumes A and AAAA for
 /// presence; only the private pairing route must match the listener family.
 fn pairing_socket_addr(info: &mdns_sd::ServiceInfo) -> Option<SocketAddr> {
+    if info.get_port() == DISCOVERY_ONLY_PORT {
+        return None;
+    }
     info.get_addresses().iter().find_map(|ip| match ip {
         IpAddr::V4(ipv4) => Some(SocketAddr::new(IpAddr::V4(*ipv4), info.get_port())),
         IpAddr::V6(_) => None,
@@ -1448,6 +1455,49 @@ mod tests {
             .expect_err("port=0 must be rejected before any mdns-sd call");
         assert!(matches!(err, AdapterError::MalformedAdvertisement));
         assert!(!adapter.is_running());
+    }
+
+    #[test]
+    fn discovery_only_resolution_never_keeps_a_port_zero_endpoint() {
+        let registry: Arc<StdMutex<HashMap<String, String>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
+        let addresses: Arc<StdMutex<HashMap<String, SocketAddr>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
+        let liveness: Arc<StdMutex<LivenessState>> =
+            Arc::new(StdMutex::new(LivenessState::default()));
+        let sink: Arc<dyn DiscoverySink> = Arc::new(CapturingSink::default());
+        let peer_id = "0123456789abcdef0123456789abcdef";
+        addresses.lock().expect("addresses").insert(
+            peer_id.to_string(),
+            SocketAddr::new("192.0.2.7".parse().expect("ipv4"), 65000),
+        );
+        let mut properties = std::collections::HashMap::new();
+        properties.insert("peer_id".to_string(), peer_id.to_string());
+        properties.insert("fp".to_string(), "aaaaaaaaaaaaaaaa".to_string());
+        properties.insert("name".to_string(), "Studio".to_string());
+        properties.insert("pmajor".to_string(), "1".to_string());
+        properties.insert("cap".to_string(), "discovery_only".to_string());
+        let info = mdns_sd::ServiceInfo::new(
+            SERVICE_TYPE,
+            "Studio-A",
+            "host.local.",
+            "192.0.2.7",
+            DISCOVERY_ONLY_PORT,
+            properties,
+        )
+        .expect("service info");
+
+        process_event(
+            &mdns_sd::ServiceEvent::ServiceResolved(info),
+            &sink,
+            &registry,
+            &addresses,
+            &liveness,
+        );
+        assert!(
+            addresses.lock().expect("addresses").get(peer_id).is_none(),
+            "a discovery-only record must remove a stale pairing endpoint instead of preserving IP:0"
+        );
     }
 
     /// Loopback test: spin up two real daemons on the same host

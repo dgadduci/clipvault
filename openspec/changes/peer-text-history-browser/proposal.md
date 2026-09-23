@@ -23,7 +23,9 @@ local. No se reutiliza la SQLite del solicitante como fuente de los previews.
 - Añadir el endpoint autenticado list_recent_text al transporte mTLS
   productivo. El dial, la autorización y la proyección remota se implementan
   en este mismo cambio.
-- Proyectar sólo texto elegible, tipo, fecha, título opcional y preview escapado.
+- Proyectar sólo el preview plano elegible, tipo, fecha y título opcional. Las
+  entradas textuales que además tengan una representación rich conservan su
+  preview plano; nunca se envían sus referencias ni bytes rich.
 - Usar cursor firmado por el host (HMAC-SHA256 con secreto por peer),
   orden newest-first y un límite de 50 filas. Un cursor no emitido por el
   host, manipulado o que excede el window del secreto actual retorna
@@ -41,8 +43,8 @@ local. No se reutiliza la SQLite del solicitante como fuente de los previews.
 ## Fuera de alcance
 
 - fetch de texto completo, Importar, colecciones de pares, provenance,
-  deduplicación, búsqueda remota, imágenes/rich text, copy/paste o edición
-  remota.
+  deduplicación, búsqueda remota, imágenes, bytes/referencias rich,
+  copy/paste o edición remota.
 
 ## Criterio de aceptación
 

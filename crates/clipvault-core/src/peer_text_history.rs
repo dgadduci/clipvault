@@ -37,14 +37,14 @@
 //!
 //! [`entry_is_transferable`] is the single predicate the host
 //! projection and the unit tests share. A row is transferable when
-//! its [`clipvault_db::ContentType`] is textual and carries no
-//! image asset, no rich-text metadata and no payload dimensions.
+//! its [`clipvault_db::ContentType`] is textual and carries no image
+//! asset, MIME payload or dimensions. Rich-text metadata is never
+//! transported, but a textual row that also has a rich representation
+//! remains eligible through its normalized plain-text preview.
 //! [`ContentType::Html`] is excluded explicitly: the wire is plain
-//! text only and the local HTML preview escapes information the
-//! remote card never delivers to the wire. Image rows and rich-text
-//! rows are filtered out before the projection runs so a peer never
-//! sees a disabled row; the spec scenario "Image or rich-text row
-//! exists" pins that contract.
+//! text only and the local HTML preview escapes information the remote
+//! card never delivers to the wire. Image and HTML rows are filtered
+//! out before the projection runs so a peer never sees a disabled row.
 //!
 //! ## Ordering, cursor and limits
 //!
@@ -372,16 +372,15 @@ pub struct RemoteTextHistoryPage {
 
 /// Predicate the runtime and the unit tests share. The predicate
 /// returns `true` when the entry is textual, carries no
-/// non-transferable metadata (image asset, image MIME/size, rich-text
-/// metadata) and is not [`ContentType::Html`]. The HTML exclusion
+/// non-transferable payload metadata (image asset, image MIME/size)
+/// and is not [`ContentType::Html`]. Rich metadata is never exposed,
+/// but does not discard the normalized plain text the preview uses.
+/// The HTML exclusion
 /// matches the design
 /// (`peer-text-history-browser/design.md` §"Dependencia y contrato")
 /// — the wire is plain text and the local HTML preview would lose
 /// information the remote card never exposes.
 ///
-/// A row that has rich-text metadata is non-transferable even when
-/// the textual content is otherwise valid, because the design caps
-/// the wire to plain text only.
 pub fn entry_is_transferable(entry: &EntryRecord) -> bool {
     if !entry.content_type.is_textual() {
         return false;
@@ -395,9 +394,6 @@ pub fn entry_is_transferable(entry: &EntryRecord) -> bool {
         return false;
     }
     if entry.is_renderable_image() {
-        return false;
-    }
-    if entry.has_rich_text() {
         return false;
     }
     if entry.asset_ref.is_some() {
@@ -917,6 +913,8 @@ pub struct ListRecentTextResponse {
 pub enum PeerHistoryTransportError {
     #[error("peer history transport is unavailable")]
     Unavailable,
+    #[error("peer history transport has no resolved pairing endpoint")]
+    PeerUnresolved,
     #[error("peer history transport rejected an unknown peer")]
     UnknownPeer,
     #[error("peer history transport rejected a mismatched TLS identity")]
@@ -940,6 +938,7 @@ impl PeerHistoryTransportError {
     pub fn reason(&self) -> &'static str {
         match self {
             Self::Unavailable => "unavailable",
+            Self::PeerUnresolved => "unavailable",
             Self::UnknownPeer => "unknown_peer",
             Self::KeyMismatch => "key_mismatch",
             Self::Revoked => "revoked",
@@ -1129,7 +1128,8 @@ impl PeerTextHistoryService {
                     reason: "not_trusted",
                 },
                 PeerHistoryTransportError::InvalidCursor => PeerHistoryOutcome::InvalidCursor,
-                PeerHistoryTransportError::IncompatibleProtocol
+                PeerHistoryTransportError::PeerUnresolved
+                | PeerHistoryTransportError::IncompatibleProtocol
                 | PeerHistoryTransportError::Malformed
                 | PeerHistoryTransportError::Unavailable => {
                     PeerHistoryOutcome::TransportUnavailable {
@@ -1295,11 +1295,12 @@ mod tests {
     }
 
     #[test]
-    fn transferable_predicate_rejects_rich_text_rows() {
+    fn transferable_predicate_keeps_plain_preview_for_rich_text_rows() {
         let mut record = record(1, ContentType::Text, "hello", "2026-01-01T00:00:00Z");
         record.rich_text_hash = Some("a".repeat(64));
         record.rich_html_ref = Some("rich-text/a.html".to_string());
-        assert!(!entry_is_transferable(&record));
+        assert!(entry_is_transferable(&record));
+        assert_eq!(build_preview(&record.content), "hello");
     }
 
     #[test]
@@ -1815,6 +1816,12 @@ mod tests {
                     reason: "unavailable",
                 },
             ),
+            (
+                PeerHistoryTransportError::PeerUnresolved,
+                PeerHistoryOutcome::TransportUnavailable {
+                    reason: "unavailable",
+                },
+            ),
         ] {
             let transport = Arc::new(ScriptedPeerHistoryTransport::new(Err(error.clone())));
             let service = PeerTextHistoryService::new(transport);
@@ -1907,7 +1914,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_excludes_image_rich_text_and_html_rows() {
+    fn serve_excludes_image_and_html_but_keeps_rich_plain_preview() {
         let entries = vec![
             record(1, ContentType::Text, "transferable", "2026-01-01T00:00:00Z"),
             image_record(2),
@@ -1924,8 +1931,14 @@ mod tests {
         let HostHistoryResponse::Ok(page, _) = response else {
             panic!("expected Ok response");
         };
-        assert_eq!(page.rows.len(), 1);
-        assert_eq!(page.rows[0].preview, "transferable");
+        assert_eq!(page.rows.len(), 2);
+        let previews = page
+            .rows
+            .iter()
+            .map(|row| row.preview.as_str())
+            .collect::<Vec<_>>();
+        assert!(previews.contains(&"transferable"));
+        assert!(previews.contains(&"rich"));
     }
 
     #[test]
@@ -3019,6 +3032,7 @@ fn map_pairing_transport_error(
     use crate::peer_pairing::TransportError as Pairing;
     match error {
         Pairing::UnknownPeer => PeerHistoryTransportError::UnknownPeer,
+        Pairing::PeerUnresolved => PeerHistoryTransportError::PeerUnresolved,
         Pairing::KeyMismatch => PeerHistoryTransportError::KeyMismatch,
         Pairing::Revoked => PeerHistoryTransportError::Revoked,
         Pairing::Blocked => PeerHistoryTransportError::Blocked,

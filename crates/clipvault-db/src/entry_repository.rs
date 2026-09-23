@@ -445,8 +445,8 @@ impl<'a> EntryRepository<'a> {
     ///
     /// `peer-text-history-browser` projects a bounded preview of
     /// the local text history for a remote peer. The projection
-    /// filters on the textual taxonomy plus the image /
-    /// rich-text predicates the core layer enforces, sorts
+    /// filters on the textual taxonomy plus the image-payload
+    /// predicates the core layer enforces, sorts
     /// newest-first and breaks ties with `id DESC`. The cursor
     /// is the `(created_at, id)` pair of the last row the
     /// previous page returned; the query pages strictly after
@@ -486,9 +486,6 @@ impl<'a> EntryRepository<'a> {
                AND mime_type IS NULL
                AND payload_width IS NULL
                AND payload_height IS NULL
-               AND rich_text_hash IS NULL
-               AND rich_html_ref IS NULL
-               AND rich_rtf_ref IS NULL
                AND (created_at < ?1 OR (created_at = ?1 AND id < ?2))
              ORDER BY created_at DESC, id DESC
              LIMIT ?3"
@@ -523,8 +520,6 @@ impl<'a> EntryRepository<'a> {
                AND mime_type IS NULL
                AND payload_width IS NULL
                AND payload_height IS NULL
-               AND rich_text_hash IS NULL
-               AND (rich_html_ref IS NULL AND rich_rtf_ref IS NULL)
              ORDER BY created_at DESC, id DESC
              LIMIT 1"
         );
@@ -559,9 +554,7 @@ impl<'a> EntryRepository<'a> {
                AND asset_ref IS NULL
                AND mime_type IS NULL
                AND payload_width IS NULL
-               AND payload_height IS NULL
-               AND rich_text_hash IS NULL
-               AND (rich_html_ref IS NULL AND rich_rtf_ref IS NULL)"
+               AND payload_height IS NULL"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let count: i64 = stmt.query_row(params![], |row| row.get(0))?;
@@ -4695,7 +4688,7 @@ mod tests {
     }
 
     #[test]
-    fn text_entries_after_excludes_image_and_rich_text() {
+    fn text_entries_after_excludes_image_but_keeps_rich_plain_text() {
         let (_dir, mut db) = open_temp_db();
         let mut repo = EntryRepository::new(db.connection_mut());
         let when = datetime!(2026-01-02 03:04:05 UTC);
@@ -4716,7 +4709,7 @@ mod tests {
             .text_entries_after(&sentinel_ts, i64::MAX, 10)
             .expect("page");
         let contents: Vec<&str> = page.iter().map(|r| r.content.as_str()).collect();
-        assert_eq!(contents, vec!["text"]);
+        assert_eq!(contents, vec!["rich", "text"]);
     }
 
     #[test]
@@ -4730,18 +4723,26 @@ mod tests {
         }
         // Insert an image at the latest timestamp; it must NOT
         // be returned by the snapshot because the cursor
-        // projection only sees transferable text.
+        // projection only sees transferable text. A later text
+        // row with a rich sidecar remains eligible through its
+        // normalized plain-text preview.
         let image_when = datetime!(2026-01-02 03:10:00 UTC);
         repo.insert_or_touch(new_image_entry("img", 1, 1, image_when))
             .expect("image");
+        let rich_when = image_when + time::Duration::seconds(1);
+        repo.insert_or_touch(new_rich_entry(
+            "rich text",
+            "rich-hash",
+            Some("<b>rich text</b>"),
+            None,
+            rich_when,
+        ))
+        .expect("rich text");
         let repo = EntryRepository::new(db.connection_mut());
         let snapshot = repo.latest_transferable_text_snapshot().expect("snapshot");
         let (created_at, id) = snapshot.expect("non-empty");
-        // The newest textual row is "c" (the image comes later
-        // but is excluded by the predicate).
-        assert_eq!(id, 3);
-        // The "c" entry sits at +2 seconds from the base timestamp.
-        let expected_ts = format_timestamp(datetime!(2026-01-02 03:04:07 UTC));
+        assert_eq!(id, 5);
+        let expected_ts = format_timestamp(rich_when);
         assert_eq!(created_at, expected_ts);
     }
 

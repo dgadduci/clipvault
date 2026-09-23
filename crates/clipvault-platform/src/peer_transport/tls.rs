@@ -119,6 +119,16 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// is a misbehaving peer.
 pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A pairing record can be observed before its final SRV endpoint
+/// replaces the discovery-only `port = 0` announcement. Re-resolve
+/// a small, bounded number of times so an otherwise active peer is
+/// not failed solely because mDNS update delivery lagged the UI
+/// selection by a few hundred milliseconds.
+#[cfg(feature = "local-peer-pairing-tls")]
+const HISTORY_DIAL_ATTEMPTS: usize = 4;
+#[cfg(feature = "local-peer-pairing-tls")]
+const HISTORY_DIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
+
 /// Maximum lifetime of an inbound pairing session waiting for
 /// the local user to approve the SAS code. Mirrors the runtime
 /// hard cap so the listener never blocks forever on a stuck
@@ -2285,26 +2295,42 @@ pub fn list_recent_text(
         (material, resolver, runtime_handle, pins)
     };
 
-    let addr = match resolver.as_ref() {
-        Some(resolver) => resolver
-            .resolve(peer_id)
-            .ok_or(super::TransportError::UnknownPeer)?,
+    let resolver = match resolver {
+        Some(resolver) => resolver,
         None => return Err(super::TransportError::Unavailable),
     };
-
     let connector = build_dial_connector(&material, Arc::clone(&pins));
-    let material_for_dial = material.clone();
     let cursor_for_dial = cursor.to_string();
     let result = runtime.block_on(async move {
-        dial_list_recent_text_async(
-            connector,
-            addr,
-            material_for_dial,
-            peer_id,
-            &cursor_for_dial,
-            limit,
-        )
-        .await
+        let mut last_error = super::TransportError::PeerUnresolved;
+        for attempt in 0..HISTORY_DIAL_ATTEMPTS {
+            let Some(addr) = resolver.resolve(peer_id) else {
+                last_error = super::TransportError::PeerUnresolved;
+                if attempt + 1 < HISTORY_DIAL_ATTEMPTS {
+                    tokio::time::sleep(HISTORY_DIAL_RETRY_DELAY).await;
+                    continue;
+                }
+                break;
+            };
+            match dial_list_recent_text_async(
+                connector.clone(),
+                addr,
+                material.clone(),
+                peer_id,
+                &cursor_for_dial,
+                limit,
+            )
+            .await
+            {
+                Ok(snapshot) => return Ok(snapshot),
+                Err(super::TransportError::Unavailable) if attempt + 1 < HISTORY_DIAL_ATTEMPTS => {
+                    last_error = super::TransportError::Unavailable;
+                    tokio::time::sleep(HISTORY_DIAL_RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error)
     });
     match result {
         Ok(snapshot) => {
@@ -4343,6 +4369,55 @@ mod tests {
         assert!(
             !transport.is_running(),
             "toggle OFF must leave transport stopped"
+        );
+    }
+
+    #[test]
+    fn history_dial_retries_an_unresolved_endpoint_without_claiming_unknown_peer() {
+        use crate::peer_transport::{PeerTransport as _, RemotePeerResolver, TlsPeerTransport};
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        struct DelayedResolver {
+            calls: AtomicUsize,
+        }
+
+        impl RemotePeerResolver for DelayedResolver {
+            fn resolve(&self, _peer_id: &str) -> Option<SocketAddr> {
+                self.calls.fetch_add(1, AtomicOrdering::AcqRel);
+                None
+            }
+        }
+
+        let transport = TlsPeerTransport::new();
+        let material = deterministic_material(0xC2);
+        let peer_id = "trusted-peer";
+        let fingerprint = "a".repeat(64);
+        let resolver = Arc::new(DelayedResolver {
+            calls: AtomicUsize::new(0),
+        });
+        let advertisement: Arc<dyn PairingAdvertisementSink> =
+            Arc::new(RecordingAdvertisementSink::new());
+        let sink: Arc<dyn TransportSink> = Arc::new(NoopSink);
+        install_with_material_and_resolver(
+            &transport,
+            material,
+            "test".to_string(),
+            advertisement,
+            sink,
+            Some(resolver.clone()),
+        )
+        .expect("install listener");
+        transport.arm_pin(peer_id, &fingerprint).expect("arm pin");
+
+        let error = super::list_recent_text(&transport, peer_id, &fingerprint, "", 1)
+            .expect_err("an unresolved endpoint must fail after the bounded retry window");
+        transport.stop().expect("stop listener");
+
+        assert!(matches!(error, TransportError::PeerUnresolved));
+        assert_eq!(
+            resolver.calls.load(AtomicOrdering::Acquire),
+            HISTORY_DIAL_ATTEMPTS,
+            "the resolver must be consulted again throughout the bounded retry window"
         );
     }
 

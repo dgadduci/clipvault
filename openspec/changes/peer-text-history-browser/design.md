@@ -7,10 +7,13 @@ de mTLS y de verificar peer trusted + Activo. El host consulta su historial
 local usando una proyección de core, no SQL desde el runtime de red.
 
 Una entrada se lista si ContentType es textual, su `is_textual()` es `true`,
-no tiene asset_ref, mime_type, payload_width/height ni rich-text references.
-`Html` se excluye explícitamente del set transferible aunque sea textual: el
-preview escapado en HTML pierde información que la card local nunca entrega al
-remoto, así que el wire sólo admite texto plano.
+no tiene asset_ref, mime_type ni payload_width/height. Las referencias y
+metadatos rich (`rich_text_hash`, `rich_html_ref`, `rich_rtf_ref`) no se
+transportan, pero tampoco descartan el texto plano normalizado que la entrada
+ya conserva: el host construye únicamente el preview escapado y acotado desde
+ese texto plano. `Html` se excluye explícitamente del set transferible aunque
+sea textual: el preview escapado en HTML pierde información que la card local
+nunca entrega al remoto, así que el wire sólo admite texto plano.
 
 ## Camino mTLS productivo
 
@@ -177,6 +180,23 @@ servicio (`serve`) sigue devolviendo
 la traducción al lado del cliente permanece estable. La distinción
 queda cubierta por tests dedicados.
 
+### Endpoint mDNS de pairing tras arranque o reconfiguración
+
+La presencia y la ruta de dial son datos distintos: un `Observed` puede llegar
+para el anuncio inicial `discovery_only`, cuyo puerto es el centinela `0` y no
+representa un listener TLS. El adaptador nunca guarda ni resuelve un endpoint
+con puerto `0`; al pasar a `capability = pairing` retira el registro anterior y
+registra el SRV/TXT con el puerto TLS real, aun cuando el fullname no cambie.
+Así los browsers remotos reciben una resolución nueva y no conservan una ruta
+obsoleta.
+
+El dial de historial conserva un reintento corto y acotado al resolver o a un
+fallo de conexión transitorio: vuelve a consultar el `RemotePeerResolver` antes
+de cada intento y sólo reintenta `unavailable`. No reintenta un rechazo de pin,
+trust, cursor o protocolo. Si tras la ventana no existe endpoint, el outcome
+es `transport_unavailable: unavailable`, nunca `not_trusted`; `UnknownPeer`
+queda reservado para un pin/identidad desconocidos.
+
 ## Snapshot id
 
 El `snapshot_id` deja de ser `created_at|id`. Pasa a ser un fingerprint
@@ -298,8 +318,8 @@ para que ambas cards compartan la misma tipografía.
 
 Tests core cubren elegibilidad, orden, cursor firmado (firma válida,
 firma inválida, secreto rotado, timestamp manipulado), límites, preview
-escapado, exclusión de `Html`/image/rich-text, snapshot id no reversible y
-metadata permitida.
+escapado, inclusión del preview plano de una entrada textual rich, exclusión
+de `Html`/image, snapshot id no reversible y metadata permitida.
 
 Tests de transporte cubren trust, pin, invalid cursor y reemplazo del
 stub por la ruta mTLS productiva.

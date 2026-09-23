@@ -674,8 +674,9 @@ pub trait PairingAdvertisement: Send + Sync {
 pub trait RemotePeerResolver: Send + Sync {
     /// Return the most recent `SocketAddr` the resolver knows for
     /// the matching `peer_id`. `None` when the resolver has no
-    /// record of the peer (the runtime surfaces the
-    /// `UnknownPeer` outcome).
+    /// record of the peer (the history route surfaces the
+    /// typed `PeerUnresolved` outcome rather than treating that
+    /// temporary endpoint absence as a trust failure).
     fn resolve(&self, peer_id: &str) -> Option<std::net::SocketAddr>;
 }
 
@@ -702,6 +703,12 @@ pub enum TransportError {
     /// persisted after the reciprocal pairing.
     #[error("peer transport rejected an unknown peer or mismatched identity")]
     UnknownPeer,
+    /// Discovery still reports a peer as present, but has not yet
+    /// resolved a non-zero pairing endpoint for it. This is not a
+    /// trust or certificate failure and callers may retry it within
+    /// a bounded transient window.
+    #[error("peer transport has no resolved pairing endpoint")]
+    PeerUnresolved,
     /// The remote peer's TLS chain does not authenticate against
     /// the pinned certificate fingerprint the pairing handshake
     /// recorded.

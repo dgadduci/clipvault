@@ -676,6 +676,7 @@ fn map_transport_error_to_pairing_error(
     use clipvault_platform::peer_transport::TransportError;
     match error {
         TransportError::UnknownPeer => PairingError::UnknownOrKeyMismatch,
+        TransportError::PeerUnresolved => PairingError::TransportUnavailable,
         TransportError::KeyMismatch => PairingError::UnknownOrKeyMismatch,
         TransportError::Blocked => PairingError::Blocked,
         TransportError::Revoked => PairingError::Revoked,

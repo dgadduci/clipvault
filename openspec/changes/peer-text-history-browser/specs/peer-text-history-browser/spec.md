@@ -18,11 +18,18 @@ transferable set even when it is textual.
   text page ordered newest first with at most 50 rows, and each card carries a
   two-line preview no longer than 300 characters
 
-#### Scenario: Image, rich-text or HTML row exists
+#### Scenario: Image or HTML row exists
 
-- **WHEN** the host contains image, rich-text or HTML entries
+- **WHEN** the host contains image or HTML entries
 - **THEN** those entries are omitted from the remote page and no disabled row
   is rendered
+
+#### Scenario: Text entry also has a rich representation
+
+- **WHEN** the host contains a textual entry with rich-text metadata and a
+  normalized plain-text value
+- **THEN** the host includes only the bounded escaped preview built from that
+  plain-text value, and does not expose rich references or rich bytes
 
 #### Scenario: Forged or rotated cursor
 
@@ -45,6 +52,14 @@ transferable set even when it is textual.
 - **THEN** ClipVault restores that pin before accepting or dialing mTLS
   history sessions, and browsing the trusted active peer does not fail
   solely because the verifier map was recreated
+
+#### Scenario: Presence arrives before the pairing endpoint
+
+- **WHEN** a trusted peer is observed through its initial `discovery_only`
+  mDNS record or while its pairing record is being refreshed
+- **THEN** ClipVault does not dial port `0`, retries resolution/connections only
+  within a bounded transient window, and never reports the endpoint absence as
+  `not_trusted`
 
 ### Requirement: Linked peers are a reactive desktop source inside the sidebar
 

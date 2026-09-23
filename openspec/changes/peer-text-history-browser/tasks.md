@@ -28,7 +28,10 @@
 ## 2. Core y transporte
 
 - [x] 2.1 Definir RemoteTextPreview, cursor opaco y eligibility shared para
-  texto sin image/rich payload; validar tamaño/Unicode sin body completo.
+  texto plano sin payload de imagen; validar tamaño/Unicode sin body completo.
+  > Reapertura: una entrada textual con metadatos rich conserva texto plano
+  > normalizado y debe aportar sólo ese preview; HTML, imágenes, assets,
+  > dimensiones, MIME y referencias/bytes rich siguen fuera del wire.
 - [x] 2.2 Implementar proyección newest-first, tie-breaker, límite 50, preview
   escapado de dos líneas/300 caracteres e invalid_cursor inicial.
   > Reapertura: la corrección clampa el `limit` solicitado a `1..=50` y lo
@@ -78,6 +81,12 @@
   > no trusted, vacías o malformadas no se arman. Una regresión usa el
   > transporte TLS real para verificar que el pin restaurado pasa
   > `health_check` y que las otras filas siguen como `UnknownPeer`.
+  >
+  > Reapertura: un `Observed` de `discovery_only` no puede dejar una ruta
+  > `IP:0` en el resolver. Al publicar `pairing` se retira y registra el
+  > anuncio aun con el mismo fullname; el dial consulta de nuevo el resolver y
+  > reintenta sólo la ausencia/falla transitoria de endpoint dentro de una
+  > ventana acotada. La ausencia de endpoint no se mapea a `not_trusted`.
 - [x] 2.4 Reemplazar el cursor percent-encoded por HMAC-SHA256 sobre
   `(peer_id, created_at, id)` con secreto de 32 bytes por peer; rotar el
   secreto en `Revoked`; persistir el secreto ligado al peer; devolver
@@ -102,8 +111,8 @@
   sobre el header de la página transferible; excluir `Html` del set
   elegible (aunque sea textual) y cubrirlo con test.
 - [x] 2.6 Tests: orden, cursor firmado (válido, inválido, secreto rotado,
-  timestamp manipulado), boundaries, exclusiones (image / rich-text /
-  Html), escape, snapshot id no reversible, que DTOs / eventos /
+  timestamp manipulado), boundaries, exclusiones (image / Html), inclusión
+  de preview plano con sidecar rich, escape, snapshot id no reversible, que DTOs / eventos /
   diagnósticos no exponen contenido completo e integración real con dos
   runtimes TLS productivos (primera página, página con cursor firmado,
   rechazo por cursor manipulado / peer equivocado / secreto rotado /
@@ -129,6 +138,12 @@
   > nombre describa lo que acredita (routing TLS, no cursor firmado
   > productivo) y deja de citarse como evidencia de HMAC, rotación o
   > persistencia.
+  >
+  > Reapertura: cubrir que texto con metadatos rich conserva sólo su preview
+  > plano, que la SQL/proyección/snapshot comparten ese predicado, que el
+  > resolver mDNS nunca publica un puerto `0` y que un endpoint que aparece
+  > durante la ventana acotada se resuelve y dialea sin reclasificarlo como
+  > falta de trust.
 
 ## 3. Shell y UI
 
@@ -188,6 +203,10 @@
   > `Blocked` a `not_trusted`, y un `state.active == false` se mantiene
   > `not_active`. Se añaden tests específicos para la distinción
   > `not_active` vs `not_trusted`.
+  >
+  > Reapertura: la ausencia temporal de endpoint mDNS se conserva como
+  > indisponibilidad de transporte y no comparte la variante `UnknownPeer`
+  > que expresa pin/identidad desconocidos.
 - [x] 3.5 El cierre normal del shell (`⌘Q`, *tray Salir*, `Ctrl-C`)
   llama a `stop_network_subsystems` antes de la pasada de
   retention: primero `stop_pairing_transport()` y después
@@ -249,6 +268,10 @@
   > Reapertura: se revalida el preload de pins mTLS persistidos tras
   > reinicio, junto con el test focalizado de restauración y la
   > batería Rust relevante. La prueba humana 4.2 continúa pendiente.
+  >
+  > Reapertura: validar el predicado ampliado para previews planos rich y la
+  > corrección de endpoint/reintento mDNS, además de la batería Rust, frontend,
+  > OpenSpec strict y diff. La prueba humana 4.2 continúa pendiente.
 - [ ] 4.2 Prueba manual en Wayland, X11 y macOS: lista reactiva de
   pares, puntos activo/no disponible, reemplazo del panel principal,
   previews horizontales, páginas, falla de red, menú Importar
