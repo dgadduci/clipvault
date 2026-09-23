@@ -97,8 +97,15 @@ keyring = { version = "3.6", default-features = false, features = ["apple-native
 # constraint; broadcast/IP-manual scanning is explicitly out of
 # scope. Default features are disabled so the bundle links only the
 # `mio`/`socket2` runtime; the platform crate pulls `tracing` from
-# the workspace for the metadata-only log surface.
-mdns-sd = { version = "0.11", default-features = false }
+# the workspace for the metadata-only log surface. Bumped from
+# 0.11 → 0.13 by the `local-peer-presence-liveness` change so the
+# adapter can call `ServiceDaemon::verify` (introduced in
+# `keepsimple1/mdns-sd` PR #267, first released in 0.12.0) and
+# implement the bounded DNS-SD liveness confirmation the design
+# documents. 0.13 is the highest 0.12-compatible minor that still
+# keeps the same `ServiceInfo::new` signature and stays within the
+# workspace MSRV (the crate declares `rust-version = 1.71`).
+mdns-sd = { version = "0.13", default-features = false }
 # Asynchronous runtime the `local-peer-mutual-pairing` change uses
 # to drive the TLS listener + mTLS handshake + pairing session
 # state machine. Approved by OpenSpec: tokio is the canonical Rust

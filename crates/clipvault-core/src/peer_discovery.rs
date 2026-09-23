@@ -63,13 +63,21 @@ pub use clipvault_platform::peer_discovery::{
 };
 use clipvault_platform::peer_identity::{PeerFingerprint, PeerId};
 
-/// TTL after which a previously-observed peer is treated as
-/// `No disponible` even if the runtime never received a removal
-/// event. The value mirrors RFC 6762's recommended one-minute
-/// TTL (`last_discovered_at + TTL`) and is intentionally generous
-/// enough to absorb transient mDNS hiccups without flipping the UI
-/// between states on every browser iteration.
-pub const PRESENCE_TTL: Duration = Duration::from_secs(120);
+/// Cadence at which the platform adapter re-confirms an already
+/// resolved DNS-SD service instance. The constant is shared with
+/// the platform layer so the runtime and the adapter agree on the
+/// minimum interval a peer can be considered alive without a fresh
+/// [`DiscoveryEvent::Observed`] from the browser loop. The value
+/// (`local-peer-presence-liveness` change) sits at 60 s: long
+/// enough to absorb RFC 6762's recommended one-minute TTL without
+/// flipping the UI on every browser iteration, short enough that a
+/// verify timeout has a bounded blast radius. The platform
+/// adapter MUST NOT verify more frequently than this; the constant
+/// used to live at `PRESENCE_TTL = 120 s` but the design was
+/// retired because the core was incorrectly treating a peer as
+/// absent after that interval even when mDNS had not emitted a
+/// `ServiceRemoved`.
+pub const LIVENESS_CONFIRM_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Maximum length of the validated visible name the TXT record
 /// publishes. Mirrors `MAX_PEER_DISPLAY_NAME_LENGTH` from the
@@ -375,8 +383,12 @@ pub struct PeerSnapshotEntry {
     pub paired_at: Option<String>,
     pub first_seen_at: String,
     pub last_discovered_at: String,
-    /// `true` when the runtime observed the peer inside the
-    /// [`PRESENCE_TTL`] window. `false` otherwise.
+    /// `true` when the platform adapter has reported a
+    /// `ServiceResolved` for this `peer_id` and has not yet
+    /// received a `ServiceRemoved` (or a bounded DNS-SD
+    /// verify that flipped the cache to removed). `false`
+    /// otherwise. The flag no longer depends on a wall-clock
+    /// TTL — the platform adapter owns liveness.
     pub is_present: bool,
     /// Stable discriminator the UI branches on. Mirrors
     /// [`PeerPresence::as_str`] so the frontend can render the
@@ -415,13 +427,17 @@ impl PeerSnapshotEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerPresence {
-    /// The runtime received an observation inside the [`PRESENCE_TTL`]
-    /// window. The frontend MUST offer only "Vincular" — never
-    /// "Ver historial" until the pairing change lands.
+    /// The platform adapter reported a `ServiceResolved` for this
+    /// peer and the bounded DNS-SD liveness confirmation has not
+    /// yet pushed it back to the removed state. The frontend MUST
+    /// offer only "Vincular" — never "Ver historial" until the
+    /// pairing change lands.
     Detected,
-    /// Persisted historically but not visible right now. The UI
-    /// renders the peer but disables every action: there is no
-    /// reachable identity to verify.
+    /// Persisted historically but the adapter has not seen this
+    /// peer in the current browser session (or the bounded DNS-SD
+    /// verify confirmed it is gone). The UI renders the peer but
+    /// disables every action: there is no reachable identity to
+    /// verify.
     NotAvailable,
     /// Reserved for the future pairing change. Today the runtime
     /// never emits it; the variant exists so the wire contract
@@ -498,6 +514,19 @@ pub const RUNTIME_INACTIVE_REASON_DISABLED: &str = "disabled";
 /// peer. The runtime owns this table behind an `RwLock` so the
 /// `Equipos` snapshot can read it without serialising against the
 /// event pump.
+///
+/// Presence is now adapter-authoritative: the table simply
+/// records every `DiscoveryEvent::Observed` and clears the row
+/// when a matching `DiscoveryEvent::Removed` arrives. The previous
+/// `PRESENCE_TTL = 120 s` heuristic is gone — flipping a peer to
+/// `NotAvailable` because the core had not seen a fresh
+/// resolution in 120 s produced the false "No disponible" that
+/// the `local-peer-presence-liveness` change fixes (RFC 6762
+/// browsers can stay silent for a full TTL even when the
+/// responder is healthy). The platform adapter owns the
+/// liveness confirmation cadence (`LIVENESS_CONFIRM_INTERVAL` /
+/// `VERIFY_TIMEOUT`); the runtime only reflects what the adapter
+/// reports.
 #[derive(Debug, Clone, Default)]
 struct PresenceTable {
     inner: HashMap<String, Instant>,
@@ -512,29 +541,12 @@ impl PresenceTable {
         self.inner.remove(peer_id);
     }
 
-    fn is_present(&self, peer_id: &str, now: Instant) -> bool {
-        self.inner
-            .get(peer_id)
-            .map(|last| now.duration_since(*last) <= PRESENCE_TTL)
-            .unwrap_or(false)
+    fn is_present(&self, peer_id: &str, _now: Instant) -> bool {
+        self.inner.contains_key(peer_id)
     }
 
-    fn purge_expired(&mut self, now: Instant) -> Vec<String> {
-        let expired: Vec<String> = self
-            .inner
-            .iter()
-            .filter_map(|(peer_id, last)| {
-                if now.duration_since(*last) > PRESENCE_TTL {
-                    Some(peer_id.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for peer_id in &expired {
-            self.inner.remove(peer_id);
-        }
-        expired
+    fn clear(&mut self) {
+        self.inner.clear();
     }
 }
 
@@ -697,8 +709,12 @@ impl PeerDiscoveryRuntime {
 
     /// Stop the adapter. Idempotent: a second call after the
     /// adapter has already been stopped is a no-op. The runtime
-    /// keeps the in-memory presence table across stop / start so
-    /// a transient shutdown does not erase the known peers.
+    /// keeps the persisted `known_peers` rows across stop / start
+    /// so a transient shutdown does not erase the known peers,
+    /// but the in-memory presence table is cleared on every
+    /// `stop` so a fresh `start` re-derives presence from
+    /// authoritative mDNS events (the previous 120 s TTL
+    /// heuristic is gone — see [`PresenceTable`]).
     pub fn stop(&self) -> Result<(), AdapterError> {
         if !*self.running.read() {
             return Ok(());
@@ -719,6 +735,12 @@ impl PeerDiscoveryRuntime {
             }
         }
         self.events.lock().expect("events lock").clear();
+        // The platform adapter tears down its own liveness
+        // scheduler before `stop` returns so no callback can
+        // reinsert presence after this point; mirroring that on
+        // the core side keeps the snapshot in sync with the
+        // adapter's authoritative state.
+        self.presence.write().clear();
         Ok(())
     }
 
@@ -812,14 +834,6 @@ impl PeerDiscoveryRuntime {
             UpsertObservationOutcome::Stored(row) => ObservationOutcome::Stored(row),
             UpsertObservationOutcome::Conflict(row) => ObservationOutcome::Conflict(row),
         }
-    }
-
-    /// Reap entries whose presence TTL expired and return the
-    /// affected peer ids. The runtime relies on the shell to call
-    /// this on every snapshot so the `Equipos` view can render
-    /// `No disponible` without keeping a separate timer thread.
-    pub fn reap_expired(&self, now: Instant) -> Vec<String> {
-        self.presence.write().purge_expired(now)
     }
 
     /// Build a metadata-only snapshot the bridge surfaces. The
@@ -1539,7 +1553,17 @@ mod tests {
     }
 
     #[test]
-    fn presence_table_ttl_flips_peer_to_not_available() {
+    fn observed_peer_stays_present_past_three_former_presence_windows() {
+        // The previous design flipped a peer to `NotAvailable`
+        // after a fixed `PRESENCE_TTL = 120 s` wall-clock window
+        // because the core and the adapter were using different
+        // clocks to express "liveness". That produced the false
+        // "No disponible" the `local-peer-presence-liveness`
+        // change fixes. The new contract is adapter-authoritative:
+        // the presence table only flips when the adapter delivers
+        // a matching `DiscoveryEvent::Removed`, so the peer must
+        // remain `Detected` well past three of the former
+        // 120-second windows without any extra `Observed` event.
         let adapter = Arc::new(ScriptedAdapter::new());
         let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let runtime = runtime_with_storage(adapter, std::sync::Arc::clone(&storage));
@@ -1560,15 +1584,14 @@ mod tests {
         assert_eq!(snapshot.entries.len(), 1);
         assert_eq!(snapshot.entries[0].presence, PeerPresence::Detected);
 
-        // Reap expired entries after `PRESENCE_TTL + 1s` — the
-        // presence table drops the row and the snapshot flips to
-        // `NotAvailable`.
-        let later = now + PRESENCE_TTL + Duration::from_secs(1);
-        let purged = runtime.reap_expired(later);
-        assert_eq!(purged, vec!["0123456789abcdef0123456789abcdef".to_string()]);
+        // Three former 120-second windows (360 s + 1 s slack to
+        // make the wall-clock arithmetic obvious) — the runtime
+        // must still report `Detected` because no `Removed` has
+        // arrived. A `reap_expired`-style helper no longer exists.
+        let later = now + Duration::from_secs(360) + Duration::from_secs(1);
         let snapshot = runtime.snapshot(|| storage.lock().expect("storage").clone(), later);
         assert_eq!(snapshot.entries.len(), 1);
-        assert_eq!(snapshot.entries[0].presence, PeerPresence::NotAvailable);
+        assert_eq!(snapshot.entries[0].presence, PeerPresence::Detected);
     }
 
     /// The runtime must flip a previously-detected peer to

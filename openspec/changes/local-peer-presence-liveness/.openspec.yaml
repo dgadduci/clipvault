@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-22
+status: proposed
+summary: Mantener la presencia de pares mDNS mientras siguen visibles y confirmar bajas abruptas sin falsos vencimientos locales.
