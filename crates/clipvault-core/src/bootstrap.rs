@@ -1245,31 +1245,30 @@ impl AppBootstrap {
         // the only place the runtime stores the secret; the
         // listener signs and verifies cursors with the value the
         // bootstrap loaded so a restart never invalidates cursors
-        // the peer already holds. The preload is best-effort: a
-        // row that misses the column (the legacy pre-migration
-        // shape) is silently skipped and the next trust promotion
-        // will mint a fresh secret.
+        // the peer already holds. The preload is best-effort and
+        // also performs the `trusted` backfill the
+        // `peer-text-history-browser` change requires: rows that
+        // were `trusted` before the column landed carry an empty
+        // `cursor_secret`, and without an explicit mint the host
+        // would reject the first dial with the typed
+        // `not_trusted` reason. The bootstrap therefore mints a
+        // fresh CSPRNG secret for every `trusted` row whose column
+        // is empty or malformed, persists it through
+        // [`clipvault_db::KnownPeerRepository::set_cursor_secret`],
+        // and only then installs the value in the in-memory cache
+        // so a restart can never observe a secret that was lost
+        // on the next boot. Non-`trusted` rows are left untouched
+        // so the cache stays scoped to peers the runtime can sign
+        // cursors for. Failures are logged with a fixed phrase —
+        // no `peer_id`, secret, hostname, IP, port, certificate or
+        // content ever crosses the log boundary.
         {
             let mut db = database_handle.lock();
-            let conn = db.connection_mut();
-            let repo = clipvault_db::KnownPeerRepository::new(conn);
-            match repo.list() {
-                Ok(rows) => {
-                    for row in rows {
-                        if row.trust_state == clipvault_db::TrustState::Trusted
-                            && !row.cursor_secret.is_empty()
-                        {
-                            peer_text_history
-                                .install_cursor_secret_hex(&row.peer_id, &row.cursor_secret);
-                        }
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        ?error,
-                        "known_peers preload failed; cursor secrets will mint on next trust promotion"
-                    );
-                }
+            if let Err(error) = preload_cursor_secrets(&mut db, &peer_text_history) {
+                tracing::warn!(
+                    ?error,
+                    "known_peers preload failed; cursor secrets will mint on next trust promotion"
+                );
             }
         }
         // Build the metadata-only transferable-text browser. The
@@ -1473,6 +1472,74 @@ fn default_peer_discovery_adapter() -> impl clipvault_platform::PeerDiscoveryAda
     {
         clipvault_platform::NoopPeerDiscoveryAdapter::new()
     }
+}
+
+/// Pre-populate the [`crate::peer_text_history::PeerTextHistoryService`]
+/// cache with every persisted `known_peers.cursor_secret` row and
+/// backfill any `trusted` row whose column is empty or malformed.
+/// The helper is the single source of truth for the
+/// "trusted-but-no-secret" recovery path the bootstrap installs.
+/// Non-`trusted` rows are left untouched: the runtime only signs
+/// cursors for trusted peers, so a stale secret on an unverified
+/// row would only make future debugging noisier without any
+/// functional benefit. A malformed hex column is rotated rather
+/// than accepted so a corrupted row cannot downgrade the HMAC
+/// pipeline to a deterministic key. The function consumes the
+/// database handle so it can read the rows, mint a fresh secret
+/// and persist it through the same repository the runtime
+/// trusts. The initial row listing is the only failure that
+/// propagates to the bootstrap caller; a per-row write failure is
+/// logged locally with a fixed phrase (never the `peer_id`, the
+/// secret, hostname, IP, port, certificate, content or SQL
+/// detail), the affected row is skipped so the secret never
+/// reaches the in-memory cache, and the loop keeps processing
+/// the remaining rows so the bootstrap stays alive.
+pub(super) fn preload_cursor_secrets(
+    database: &mut clipvault_db::Database,
+    service: &crate::peer_text_history::PeerTextHistoryService,
+) -> Result<(), clipvault_db::KnownPeersError> {
+    let conn = database.connection_mut();
+    let repo = clipvault_db::KnownPeerRepository::new(conn);
+    let rows = repo.list()?;
+    for row in rows {
+        if row.trust_state != clipvault_db::TrustState::Trusted {
+            continue;
+        }
+        let hex_is_valid = row.cursor_secret.len() == 64
+            && row.cursor_secret.chars().all(|c| c.is_ascii_hexdigit());
+        if hex_is_valid {
+            // The persisted column already carries the canonical
+            // 32-byte secret. Install it verbatim; a follow-up
+            // `set_cursor_secret` would invalidate every cursor
+            // the peer already holds.
+            let _ = service.install_cursor_secret_hex(&row.peer_id, &row.cursor_secret);
+            continue;
+        }
+        // Backfill path: empty / short / non-hexadecimal column.
+        // Mint a fresh secret, persist it, and only after the
+        // write succeeds install it in the cache. If the write
+        // fails, this helper logs a fixed phrase — never the
+        // `peer_id`, the secret, hostname, IP, port, certificate,
+        // content or SQL detail — leaves the cache empty for the
+        // affected row, and continues with the remaining rows so
+        // the bootstrap keeps running. The peer ends up served as
+        // `not_trusted` until the next trust promotion re-mints
+        // a fresh secret.
+        let minted = crate::peer_text_history::PeerCursorSecret::generate();
+        let minted_hex = minted.to_hex();
+        let mut repo_mut = clipvault_db::KnownPeerRepository::new(conn);
+        match repo_mut.set_cursor_secret(&row.peer_id, &minted_hex) {
+            Ok(()) => {
+                let _ = service.install_cursor_secret_hex(&row.peer_id, &minted_hex);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "cursor secret backfill failed; the affected peer will be served as not_trusted until the next trust promotion"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Adapter the bootstrap installs as the
@@ -1694,5 +1761,211 @@ mod tests {
             active_app_backend_kind(&info_wayland, false),
             ActiveAppBackendKind::Unavailable
         );
+    }
+
+    /// Bootstrap backfill: three rows in a temp `known_peers`
+    /// (`trusted` with no secret, `trusted` with a valid secret,
+    /// `unverified` with no secret) drive the helper end-to-end.
+    /// The `trusted` row without a secret MUST come back with a
+    /// freshly minted secret persisted in SQLite AND installed
+    /// in the in-memory cache; the `trusted` row with a valid
+    /// secret MUST stay byte-for-byte identical; the non-`trusted`
+    /// row MUST remain empty (the runtime never signs cursors for
+    /// it). The seed data lives on a tempdir the test owns so the
+    /// workspace's `~/.clipvault` is never touched.
+    #[test]
+    fn preload_cursor_secrets_backfills_trusted_legacy_peers() {
+        use clipvault_db::{builtin_migrations, Database, TrustState};
+        use std::collections::HashMap;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut db = Database::open(dir.path().join("clipvault.db")).expect("open");
+        db.run_migrations(&builtin_migrations()).expect("migrate");
+
+        // Seed three rows.
+        let trusted_no_secret_id = "peer-trusted-no-secret";
+        let trusted_with_secret_id = "peer-trusted-with-secret";
+        let unverified_no_secret_id = "peer-unverified-no-secret";
+        let valid_secret_hex = "1".repeat(64);
+
+        {
+            let conn = db.connection_mut();
+            let mut repo = clipvault_db::KnownPeerRepository::new(conn);
+            for (peer_id, secret) in [
+                (trusted_no_secret_id, String::new()),
+                (trusted_with_secret_id, valid_secret_hex.clone()),
+                (unverified_no_secret_id, String::new()),
+            ] {
+                let outcome = repo
+                    .upsert_observation(&clipvault_db::PeerObservation {
+                        peer_id: peer_id.to_string(),
+                        public_key_fingerprint: "f".repeat(16),
+                        full_public_key_fingerprint: Some("f".repeat(64)),
+                        display_name: "Studio".to_string(),
+                        protocol_major: 1,
+                        capability: "pairing".to_string(),
+                        observed_at: time::OffsetDateTime::UNIX_EPOCH,
+                    })
+                    .expect("seed observation");
+                assert!(matches!(
+                    outcome,
+                    clipvault_db::UpsertObservationOutcome::Stored(_)
+                ));
+                if !secret.is_empty() {
+                    repo.set_cursor_secret(peer_id, &secret)
+                        .expect("seed secret");
+                }
+            }
+            // Promote the two we want to `Trusted`; the third
+            // stays `Unverified`.
+            let outcome = repo
+                .mark_trusted(
+                    trusted_no_secret_id,
+                    "fingerprint-aaaa",
+                    time::OffsetDateTime::UNIX_EPOCH,
+                    1,
+                )
+                .expect("mark_trusted a");
+            assert!(matches!(
+                outcome,
+                clipvault_db::TrustTransitionOutcome::Stored(_)
+            ));
+            let outcome = repo
+                .mark_trusted(
+                    trusted_with_secret_id,
+                    "fingerprint-bbbb",
+                    time::OffsetDateTime::UNIX_EPOCH,
+                    1,
+                )
+                .expect("mark_trusted b");
+            assert!(matches!(
+                outcome,
+                clipvault_db::TrustTransitionOutcome::Stored(_)
+            ));
+        }
+
+        let service = crate::peer_text_history::PeerTextHistoryService::new(Arc::new(
+            crate::peer_text_history::NoopPeerHistoryTransport,
+        ));
+        preload_cursor_secrets(&mut db, &service).expect("preload");
+
+        // Reload the rows so the test never inspects the in-memory
+        // cache directly: the contract the runtime consumes is the
+        // persisted column, and the cache mirrors it via
+        // `install_cursor_secret_hex` which the test already
+        // exercised end-to-end through the helper.
+        let conn = db.connection_mut();
+        let repo = clipvault_db::KnownPeerRepository::new(conn);
+        let rows: HashMap<String, clipvault_db::KnownPeer> = repo
+            .list()
+            .expect("list")
+            .into_iter()
+            .map(|row| (row.peer_id.clone(), row))
+            .collect();
+
+        let backfilled = &rows[trusted_no_secret_id];
+        assert_eq!(backfilled.trust_state, TrustState::Trusted);
+        assert_eq!(
+            backfilled.cursor_secret.len(),
+            64,
+            "trusted-no-secret row must end up with a 64-hex persisted secret"
+        );
+        assert!(
+            backfilled
+                .cursor_secret
+                .chars()
+                .all(|c| c.is_ascii_hexdigit()),
+            "backfilled secret must be a valid 64-hex string"
+        );
+
+        let preserved = &rows[trusted_with_secret_id];
+        assert_eq!(preserved.trust_state, TrustState::Trusted);
+        assert_eq!(
+            preserved.cursor_secret, valid_secret_hex,
+            "trusted-with-secret row must keep its persisted secret verbatim"
+        );
+
+        let left = &rows[unverified_no_secret_id];
+        assert_eq!(left.trust_state, TrustState::Unverified);
+        assert!(
+            left.cursor_secret.is_empty(),
+            "non-trusted row must stay empty so the runtime never leaks a secret outside its trust scope"
+        );
+
+        // The cache mirrors the persisted secrets: the backfilled
+        // and preserved rows both have a known secret, the
+        // unverified row does not.
+        let backfilled_secret = service
+            .cursor_secret_hex(trusted_no_secret_id)
+            .expect("backfilled cache hit");
+        assert_eq!(backfilled_secret, backfilled.cursor_secret);
+        let preserved_secret = service
+            .cursor_secret_hex(trusted_with_secret_id)
+            .expect("preserved cache hit");
+        assert_eq!(preserved_secret, valid_secret_hex);
+        assert!(
+            service.cursor_secret_hex(unverified_no_secret_id).is_none(),
+            "non-trusted peer must NOT be cached"
+        );
+    }
+
+    /// Bootstrap backfill against a row whose `cursor_secret`
+    /// column carries a malformed (non-hexadecimal) value: the
+    /// helper MUST treat the column as empty, mint a fresh
+    /// secret, persist it and only then install it in the cache.
+    /// The previous prototype would have kept the corrupted value
+    /// and the host would have failed to verify every cursor the
+    /// peer ever minted.
+    #[test]
+    fn preload_cursor_secrets_rotates_malformed_hex_for_trusted_legacy_peers() {
+        use clipvault_db::{builtin_migrations, Database, TrustState};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut db = Database::open(dir.path().join("clipvault.db")).expect("open");
+        db.run_migrations(&builtin_migrations()).expect("migrate");
+        let malformed_id = "peer-malformed";
+        {
+            let conn = db.connection_mut();
+            let mut repo = clipvault_db::KnownPeerRepository::new(conn);
+            repo.upsert_observation(&clipvault_db::PeerObservation {
+                peer_id: malformed_id.to_string(),
+                public_key_fingerprint: "f".repeat(16),
+                full_public_key_fingerprint: Some("f".repeat(64)),
+                display_name: "Studio".to_string(),
+                protocol_major: 1,
+                capability: "pairing".to_string(),
+                observed_at: time::OffsetDateTime::UNIX_EPOCH,
+            })
+            .expect("seed observation");
+            repo.mark_trusted(
+                malformed_id,
+                "fingerprint-cccc",
+                time::OffsetDateTime::UNIX_EPOCH,
+                1,
+            )
+            .expect("mark_trusted");
+            // Force a non-empty, non-hexadecimal value into the
+            // column so the helper sees the malformed branch.
+            let _ = conn.execute(
+                "UPDATE known_peers SET cursor_secret = ?1 WHERE peer_id = ?2",
+                rusqlite::params!["not-hex", malformed_id],
+            );
+        }
+        let service = crate::peer_text_history::PeerTextHistoryService::new(Arc::new(
+            crate::peer_text_history::NoopPeerHistoryTransport,
+        ));
+        preload_cursor_secrets(&mut db, &service).expect("preload");
+
+        let conn = db.connection_mut();
+        let repo = clipvault_db::KnownPeerRepository::new(conn);
+        let row = repo.get(malformed_id).expect("get").expect("present");
+        assert_eq!(row.trust_state, TrustState::Trusted);
+        assert_eq!(row.cursor_secret.len(), 64);
+        assert!(
+            row.cursor_secret.chars().all(|c| c.is_ascii_hexdigit()),
+            "malformed column must have been rotated into a valid hex"
+        );
+        let cached = service.cursor_secret_hex(malformed_id).expect("cache hit");
+        assert_eq!(cached, row.cursor_secret);
     }
 }

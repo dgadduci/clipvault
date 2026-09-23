@@ -63,6 +63,100 @@ El host:
    `ListRecentTextInvalid`. El wire nunca expone el secreto ni el hash
    crudo.
 
+### Backfill de secretos para pares `trusted` heredados
+
+La migración que añadió la columna `known_peers.cursor_secret` la
+inicializó como cadena vacía. Un par vinculado antes del despliegue de
+`peer-text-history-browser` puede seguir marcado `trusted` sin un
+secreto persistido: sin un backfill el host no podría firmar ni validar
+cursores para ese par y el dial remoto colapsaría a la razón
+tipada `not_trusted` incluso cuando el par está realmente activo.
+
+El bootstrap resuelve el caso durante `AppContext::bootstrap` /
+`bootstrap_at`:
+
+- Para cada fila de `known_peers` con `trust_state = Trusted`:
+  - Si `cursor_secret` es un hex válido de 64 caracteres, se instala en
+    `PeerTextHistoryService` con `install_cursor_secret_hex`.
+  - Si está vacío o tiene longitud / formato inválido, se genera un
+    nuevo `PeerCursorSecret` CSPRNG de 32 bytes, se persiste con
+    `KnownPeerRepository::set_cursor_secret` y, **sólo después de que
+    la escritura sea exitosa**, se instala en la caché en memoria del
+    servicio.
+- Filas con `trust_state != Trusted` no se tocan: el runtime sólo firma
+  cursores para pares `trusted`, así que un secreto huérfano en una
+  fila `unverified` / `revoked` / `blocked` seguiría siendo invisible y
+  ruidoso.
+- Un secreto con formato inválido se rota, no se acepta: dejar un valor
+  corrupto en la columna reventaría el HMAC en el primer cursor que el
+  par solicitara.
+- Un fallo de lectura o de escritura de la base de datos deja el
+  bootstrap vivo: el log lleva un mensaje fijo sin `peer_id`,
+  `cursor_secret`, hostname, IP, puerto, certificado ni contenido, y el
+  resto del proceso continúa.
+
+El comportamiento se cubre con un test representativo sobre una base
+temporal con tres filas (`trusted` sin secreto, `trusted` con secreto
+válido, `unverified` sin secreto) y tres asserts: persistencia +
+instalación, preservación y no-mutación.
+
+## Ciclo de vida del handler de historial
+
+`PeerTextHistoryHostHandlerAdapter` se instala durante `AppContext` para
+servir `list_recent_text` desde el primer envelope entrante, pero el
+toggle / startup del listener llama a
+`PairingRuntime::install_pairing_transport_with_resolver`, que delega en
+`start_with_material_and_resolver`. Esa ruta cae en
+`install_with_material_and_resolver`, que termina llamando a
+`install_with_material_resolver_and_history(..., None)`: el `None`
+sobreescribe `state.history_handler = None` y el listener queda mudo.
+
+La corrección pasa la dependencia explícitamente:
+
+- `PairingRuntime` conserva el `HistoryHostHandler` instalado en un slot
+  dedicado (`history_handler`) para que un reinicio del listener lo
+  reinyecte sin perder la productividad.
+- `install_history_handler_inner` registra el handler en ese slot y, si
+  el listener está corriendo, sigue llamándolo en el transporte
+  subyacente para mantener compatibilidad con tests y rutas heredadas.
+- `install_pairing_transport_with_resolver` ahora invoca
+  `start_with_material_resolver_and_history` pasando el handler
+  registrado (o `None` cuando aún no se instaló).
+
+El handler debe sobrevivir a: arranque normal con compartir activo,
+activar compartir, desactivar y volver a activar compartir, y reinicio
+del listener. El core ya no depende de que TLS "recuerde" implícitamente
+un handler anterior.
+
+Como defensa adicional, `install_with_material_and_resolver` y
+`install_with_material` preservan un handler existente cuando una ruta
+heredada recibe `None`, pero la corrección principal es que la ruta
+productiva ya no envía `None`.
+
+La plataforma se mantiene libre de SQLite y Tauri; el frontend se
+mantiene libre de lógica de negocio: el cambio vive en core + platform.
+
+### Outcomes tipados: `not_active` vs `not_trusted`
+
+El runtime debe distinguir con precisión por qué un par remoto rechaza
+una página:
+
+- `not_active` — el par local está apagado / sin presencia: el runtime
+  no abre la red y el cliente renderiza el estado "No disponible".
+- `not_trusted` — el host rechaza la página porque el par no es
+  `trusted` o porque el secreto HMAC no está instalado. El wire surface
+  es `PeerHistoryOutcome::PeerUnavailable { reason: "not_trusted" }`,
+  nunca `not_active`.
+
+La rama del cliente (`browse`) se ajusta para mapear
+`TransportError::Revoked` y `TransportError::Blocked` a la razón
+`not_trusted` (un par revocado o bloqueado no es `active`), mientras
+que un par con `state.active == false` mantiene `not_active`. El
+servicio (`serve`) sigue devolviendo
+`HostHistoryResponse::Unavailable("not_trusted")` cuando no hay secreto;
+la traducción al lado del cliente permanece estable. La distinción
+queda cubierta por tests dedicados.
+
 ## Snapshot id
 
 El `snapshot_id` deja de ser `created_at|id`. Pasa a ser un fingerprint

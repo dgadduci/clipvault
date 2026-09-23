@@ -592,6 +592,12 @@ pub fn install_with_material(
 /// `peer_id` to the `SocketAddr` the remote listener currently
 /// advertises through mDNS — the address never crosses the
 /// trust boundary.
+///
+/// The `resolver` is `None` for hosts / builds without the
+/// productive pairing flow; the legacy install entry point still
+/// works on those targets but `start_outbound` collapses to the
+/// documented [`TransportError::Unavailable`] until a real
+/// resolver is wired in.
 #[cfg(feature = "local-peer-pairing-tls")]
 pub fn install_with_material_and_resolver(
     transport: &super::TlsPeerTransport,
@@ -601,6 +607,23 @@ pub fn install_with_material_and_resolver(
     sink: Arc<dyn TransportSink>,
     resolver: Option<Arc<dyn super::RemotePeerResolver>>,
 ) -> Result<u16, TransportError> {
+    // Defence-in-depth: if a previous productive install wired a
+    // `HistoryHostHandler` (the bootstrap always does, before the
+    // first bind), preserve it across this bind. The productive
+    // pairing runtime now passes the handler explicitly through
+    // [`install_with_material_resolver_and_history`], but the
+    // legacy helper used by the toggle / startup flow previously
+    // dropped the handler to `None`. Keeping the value cached
+    // here means a regression that routes a bind through this
+    // helper (e.g. a test fixture or a future refactor) still
+    // serves the very first inbound `ListRecentText` envelope
+    // without falling back to `not_available`.
+    let preserved_handler = transport
+        .state
+        .lock()
+        .expect("state lock")
+        .history_handler
+        .clone();
     install_with_material_resolver_and_history(
         transport,
         material,
@@ -608,7 +631,7 @@ pub fn install_with_material_and_resolver(
         advertisement,
         sink,
         resolver,
-        None,
+        preserved_handler,
     )
 }
 

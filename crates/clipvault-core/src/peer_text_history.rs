@@ -1111,11 +1111,22 @@ impl PeerTextHistoryService {
                 PeerHistoryOutcome::Ok { page, snapshot_id }
             }
             Err(error) => match error {
-                PeerHistoryTransportError::UnknownPeer
-                | PeerHistoryTransportError::Revoked
+                // The transport rejected the caller for a reason
+                // tied to trust / secret state on the remote host.
+                // A `Revoked` / `Blocked` / `KeyMismatch` /
+                // `UnknownPeer` collapse into the typed
+                // `not_trusted` outcome so the renderer can show a
+                // trust-specific copy instead of mislabelling the
+                // peer as `not_active`. The `not_active` reason
+                // remains reserved for peers the local cache
+                // already knows are inactive (no presence flip
+                // required); the runtime never sends a network
+                // request for those.
+                PeerHistoryTransportError::Revoked
                 | PeerHistoryTransportError::Blocked
-                | PeerHistoryTransportError::KeyMismatch => PeerHistoryOutcome::PeerUnavailable {
-                    reason: "not_active",
+                | PeerHistoryTransportError::KeyMismatch
+                | PeerHistoryTransportError::UnknownPeer => PeerHistoryOutcome::PeerUnavailable {
+                    reason: "not_trusted",
                 },
                 PeerHistoryTransportError::InvalidCursor => PeerHistoryOutcome::InvalidCursor,
                 PeerHistoryTransportError::IncompatibleProtocol
@@ -1576,6 +1587,73 @@ mod tests {
         ));
     }
 
+    /// Pin the typed distinction the spec scenario "Revoked /
+    /// Blocked / not trusted / pin invalid / peer ausente"
+    /// imposes: a peer whose local cache says `active = false`
+    /// surfaces `not_active` (no network round-trip), while a
+    /// peer whose transport rejection was triggered by a trust
+    /// / secret condition (Revoked, Blocked, KeyMismatch,
+    /// UnknownPeer) surfaces `not_trusted`. The two outcomes
+    /// stay distinct so the renderer can render the matching
+    /// copy without conflating them.
+    #[test]
+    fn browse_distinguishes_not_active_from_not_trusted_outcomes() {
+        // Local cache says the peer is offline: no network call,
+        // `not_active` is returned verbatim. The local cache
+        // wins regardless of any transport signal.
+        let offline_service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        offline_service.record_peer_state(
+            "peer-offline",
+            PeerActiveState {
+                trusted: true,
+                active: false,
+            },
+        );
+        let outcome =
+            offline_service.browse("peer-offline", "fingerprint", None, MAX_PAGE_ROWS as u32);
+        assert!(
+            matches!(
+                outcome,
+                PeerHistoryOutcome::PeerUnavailable {
+                    reason: "not_active"
+                }
+            ),
+            "active=false peer must surface not_active, got {outcome:?}"
+        );
+
+        // Local cache says the peer is online AND trusted, but
+        // the transport rejected the page for a trust reason.
+        // The runtime must surface `not_trusted`, NOT
+        // `not_active` — the renderer needs the distinction to
+        // render the correct copy without retrying blindly.
+        for error in [
+            PeerHistoryTransportError::Revoked,
+            PeerHistoryTransportError::Blocked,
+            PeerHistoryTransportError::KeyMismatch,
+            PeerHistoryTransportError::UnknownPeer,
+        ] {
+            let transport = Arc::new(ScriptedPeerHistoryTransport::new(Err(error.clone())));
+            let service = PeerTextHistoryService::new(transport);
+            service.record_peer_state(
+                "peer-x",
+                PeerActiveState {
+                    trusted: true,
+                    active: true,
+                },
+            );
+            let outcome = service.browse("peer-x", "fingerprint", None, MAX_PAGE_ROWS as u32);
+            assert!(
+                matches!(
+                    outcome,
+                    PeerHistoryOutcome::PeerUnavailable {
+                        reason: "not_trusted"
+                    }
+                ),
+                "trust rejection {error:?} must surface not_trusted (got {outcome:?})"
+            );
+        }
+    }
+
     #[test]
     fn browse_returns_peer_unavailable_when_state_not_active() {
         let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
@@ -1687,28 +1765,32 @@ mod tests {
     #[test]
     fn browse_translates_transport_errors_into_outcomes() {
         for (error, expected_reason) in [
+            // Trust / secret rejections from the remote host collapse
+            // into the typed `not_trusted` reason so the renderer can
+            // distinguish "the host refuses the caller" from "the
+            // local cache says the peer is offline".
             (
                 PeerHistoryTransportError::UnknownPeer,
                 PeerHistoryOutcome::PeerUnavailable {
-                    reason: "not_active",
+                    reason: "not_trusted",
                 },
             ),
             (
                 PeerHistoryTransportError::Revoked,
                 PeerHistoryOutcome::PeerUnavailable {
-                    reason: "not_active",
+                    reason: "not_trusted",
                 },
             ),
             (
                 PeerHistoryTransportError::Blocked,
                 PeerHistoryOutcome::PeerUnavailable {
-                    reason: "not_active",
+                    reason: "not_trusted",
                 },
             ),
             (
                 PeerHistoryTransportError::KeyMismatch,
                 PeerHistoryOutcome::PeerUnavailable {
-                    reason: "not_active",
+                    reason: "not_trusted",
                 },
             ),
             (
@@ -2621,10 +2703,11 @@ mod tests {
         //    collapses to `Unavailable("not_trusted")` at the
         //    wire, which the productive transport surfaces as
         //    `TransportError::Revoked` and the client finally
-        //    reports as `PeerUnavailable("not_active")`. The
+        //    reports as `PeerUnavailable("not_trusted")`. The
         //    typed outcome is stable; the runtime never collapses
         //    a cursor-secret failure into a generic network
-        //    error.
+        //    error and the renderer can distinguish a missing
+        //    secret from a peer that simply lost presence.
         // ----------------------------------------------------------------
         host_service.clear_cursor_secret(&client_peer_id);
         let outcome = client_service.browse(
@@ -2637,10 +2720,10 @@ mod tests {
             matches!(
                 outcome,
                 PeerHistoryOutcome::PeerUnavailable {
-                    reason: "not_active"
+                    reason: "not_trusted"
                 }
             ),
-            "no-secret state must surface PeerUnavailable(not_active), got {outcome:?}"
+            "no-secret state must surface PeerUnavailable(not_trusted), got {outcome:?}"
         );
 
         // Restore the original secret for the persistence test.
@@ -2739,10 +2822,15 @@ mod tests {
         *source.failing.lock().expect("fail lock") = false;
 
         // ----------------------------------------------------------------
-        // 10. Wrong pin — the productive mTLS handshake must
+        // 10. Wrong pin — the productive dial driver MUST
         //     reject a mismatched cert fingerprint and the
         //     client must surface the typed outcome without
-        //     leaking any row payload.
+        //     leaking any row payload. A wrong pin collapses to
+        //     `TransportError::KeyMismatch` which the runtime
+        //     maps onto `PeerUnavailable { reason: "not_trusted" }`
+        //     — the renderer can therefore distinguish a TLS
+        //     trust failure from a peer that simply lost
+        //     presence.
         // ----------------------------------------------------------------
         let wrong_pin = derive_cert_fingerprint(client_material.cert_der());
         let outcome = client_service.browse(&host_peer_id, &wrong_pin, None, MAX_PAGE_ROWS as u32);
@@ -2750,10 +2838,10 @@ mod tests {
             matches!(
                 outcome,
                 PeerHistoryOutcome::PeerUnavailable {
-                    reason: "not_active"
+                    reason: "not_trusted"
                 }
             ),
-            "wrong pin must surface typed PeerUnavailable(not_active), got {outcome:?}"
+            "wrong pin must surface typed PeerUnavailable(not_trusted), got {outcome:?}"
         );
 
         // ----------------------------------------------------------------

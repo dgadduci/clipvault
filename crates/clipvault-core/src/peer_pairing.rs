@@ -538,6 +538,19 @@ struct PairingRuntimeInner {
     /// through this slot; tests can leave it empty to verify the
     /// persistence side of the contract in isolation.
     cursor_secret_cache: RwLock<Option<Arc<dyn PeerCursorSecretCache>>>,
+    /// Optional host-side [`clipvault_platform::peer_transport::HistoryHostHandler`]
+    /// the bootstrap installs so every inbound `ListRecentText`
+    /// envelope can be served from the very first connection.
+    /// The runtime caches the handler so a follow-up
+    /// `start_with_material_and_resolver` (the toggle flow) can
+    /// re-inject it via
+    /// [`clipvault_platform::peer_transport::PeerTransport::start_with_material_resolver_and_history`]
+    /// instead of letting the transport drop it to `None`. Tests
+    /// that wire a fake transport leave the slot empty to verify
+    /// the productive install path in isolation.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    history_handler:
+        RwLock<Option<Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>>>,
 }
 
 /// In-memory mirror of the persisted `known_peers.cursor_secret`
@@ -729,6 +742,8 @@ impl PairingRuntime {
             #[cfg(feature = "local-peer-pairing-tls")]
             inbound_sink: parking_lot::Mutex::new(None),
             cursor_secret_cache: RwLock::new(None),
+            #[cfg(feature = "local-peer-pairing-tls")]
+            history_handler: RwLock::new(None),
         };
         Self {
             inner: Arc::new(inner),
@@ -761,17 +776,34 @@ impl PairingRuntime {
     /// productive listener so a `ListRecentText` envelope that
     /// lands on the very first inbound connection can already be
     /// served without falling back to the documented
-    /// `not_available` reason. The transport is NOT required to
-    /// be running before the call: the productive install path
-    /// will pick up the handler when it boots, and a second call
-    /// replaces the previous one so a future re-wire cannot leak
-    /// events to a stale sink.
+    /// `not_available` reason. The handler is **cached in the
+    /// runtime** so a `stop` / `start` cycle on the transport
+    /// re-installs it instead of letting the listener come back
+    /// up with `history_handler = None`. The transport is NOT
+    /// required to be running before the call: the productive
+    /// install path picks the cached handler up the next time it
+    /// boots, and a second call replaces the previous one so a
+    /// future re-wire cannot leak events to a stale sink.
     #[cfg(feature = "local-peer-pairing-tls")]
     pub fn install_history_handler_inner(
         &self,
         handler: Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
     ) -> Result<(), clipvault_platform::peer_transport::TransportError> {
+        *self.inner.history_handler.write() = Some(Arc::clone(&handler));
         self.inner.transport.install_history_handler(handler)
+    }
+
+    /// Read-only accessor for the host-side history handler the
+    /// runtime cached on the last
+    /// [`Self::install_history_handler_inner`] call. The
+    /// platform-level test suite uses the accessor to assert the
+    /// handler survives a `stop` / `start` cycle without the
+    /// bootstrap having to re-call `install_history_handler_inner`.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub fn cached_history_handler(
+        &self,
+    ) -> Option<Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>> {
+        self.inner.history_handler.read().clone()
     }
 
     /// Cache the local identity the runtime uses to compute the
@@ -862,6 +894,18 @@ impl PairingRuntime {
     /// `SocketAddr` through mDNS — the resolver stays inside the
     /// platform layer so the runtime, SQLite, Tauri and the
     /// frontend never see an endpoint byte.
+    ///
+    /// The bootstrap installs the host-side `HistoryHostHandler`
+    /// *before* the first productive bind through
+    /// [`Self::install_history_handler_inner`]; this entry point
+    /// forwards the cached handler through
+    /// [`PeerTransport::start_with_material_resolver_and_history`]
+    /// so the freshly-bound listener serves the first inbound
+    /// `ListRecentText` envelope without falling back to the
+    /// documented `not_available` reason. A missing handler
+    /// collapses to `None` for the transport: the install path
+    /// stays backwards-compatible with tests and feature-gated
+    /// builds that never wire one.
     #[cfg(feature = "local-peer-pairing-tls")]
     pub fn install_pairing_transport_with_resolver(
         &self,
@@ -879,13 +923,15 @@ impl PairingRuntime {
             Err(_) => return Err(TransportOutcome::Unavailable),
         };
         let transport = self.inner.transport.clone();
+        let handler = self.inner.history_handler.read().clone();
         transport
-            .start_with_material_and_resolver(
+            .start_with_material_resolver_and_history(
                 material,
                 sink,
                 advertisement,
                 Some(resolver),
                 display_name,
+                handler,
             )
             .map_err(|_error| TransportOutcome::Unavailable)
     }
@@ -3380,6 +3426,567 @@ mod tests {
             persisted.cursor_secret.is_empty(),
             "unblock must clear the persisted secret",
         );
+    }
+
+    /// The productive toggle path must wire the host-side
+    /// `HistoryHostHandler` through every install. The previous
+    /// `install_pairing_transport_with_resolver` implementation
+    /// forwarded `None` to the productive transport, which the
+    /// TLS install path then persisted as `state.history_handler
+    /// = None`. The result: a freshly-bound listener answered
+    /// `ListRecentText` with the typed `not_available` reason
+    /// instead of the productive page. The fix caches the
+    /// handler in the runtime and re-passes it through
+    /// `start_with_material_resolver_and_history` on every
+    /// `install_pairing_transport_with_resolver` call.
+    ///
+    /// The test wires a recording transport that captures every
+    /// `start_with_material_resolver_and_history` call so the
+    /// assertion can pin the exact argument list the runtime
+    /// forwards: `Some(handler)` (never `None`), the supplied
+    /// resolver, and the validated display name. The test also
+    /// drives a `stop` / re-install cycle so the cached handler
+    /// survives across the listener restart that real toggles
+    /// trigger.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn install_pairing_transport_with_resolver_forwards_history_handler() {
+        use clipvault_platform::peer_transport::{HistoryHostResponse, RemotePeerResolver};
+        use std::net::SocketAddr;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Mutex as StdMutex;
+
+        /// Recording transport that captures every argument the
+        /// runtime forwards to `start_with_material_resolver_and_history`.
+        #[derive(Default)]
+        struct HistoryRecordingTransport {
+            calls: StdMutex<
+                Vec<Option<Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>>>,
+            >,
+            installed_handlers: StdMutex<
+                Vec<Option<Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>>>,
+            >,
+            bind_seq: AtomicUsize,
+        }
+
+        impl PeerTransport for HistoryRecordingTransport {
+            fn start(
+                &self,
+                _identity: &LocalPeerIdentity,
+                _sink: Arc<dyn TransportSink>,
+            ) -> Result<u16, TransportError> {
+                Err(TransportError::Unavailable)
+            }
+            fn start_with_material(
+                &self,
+                _material: clipvault_platform::LocalIdentityMaterial,
+                _sink: Arc<dyn TransportSink>,
+                _advertisement: Arc<dyn PairingAdvertisement>,
+            ) -> Result<u16, TransportError> {
+                Err(TransportError::Unavailable)
+            }
+            fn start_with_material_and_resolver(
+                &self,
+                _material: clipvault_platform::LocalIdentityMaterial,
+                _sink: Arc<dyn TransportSink>,
+                _advertisement: Arc<dyn PairingAdvertisement>,
+                _resolver: Option<Arc<dyn RemotePeerResolver>>,
+                _display_name: &str,
+            ) -> Result<u16, TransportError> {
+                Err(TransportError::Unavailable)
+            }
+            fn stop(&self) -> Result<(), TransportError> {
+                Ok(())
+            }
+            fn is_running(&self) -> bool {
+                false
+            }
+            fn arm_pin(
+                &self,
+                _peer_id: &str,
+                _cert_fingerprint: &str,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            fn disarm_pin(&self, _peer_id: &str) -> Result<(), TransportError> {
+                Ok(())
+            }
+            fn health_check(
+                &self,
+                _peer_id: &str,
+                _cert_fingerprint: &str,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            fn start_outbound(
+                &self,
+                _descriptor: clipvault_platform::peer_transport::OutboundSessionDescriptor,
+            ) -> Result<clipvault_platform::peer_transport::PairingOutbound, TransportError>
+            {
+                Err(TransportError::Unavailable)
+            }
+            fn approve_local(
+                &self,
+                _session_id: clipvault_platform::peer_transport::PairingSessionId,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            fn approve_inbound_session(
+                &self,
+                _session_id: clipvault_platform::peer_transport::PairingSessionId,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            fn cancel_session(
+                &self,
+                _session_id: clipvault_platform::peer_transport::PairingSessionId,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            fn disconnect_peer(&self, _peer_id: &str) -> Result<(), TransportError> {
+                Ok(())
+            }
+            fn health_probe(
+                &self,
+                _peer_id: &str,
+                _cert_fingerprint: &str,
+            ) -> Result<clipvault_platform::peer_transport::PeerHealthSnapshot, TransportError>
+            {
+                Ok(clipvault_platform::peer_transport::PeerHealthSnapshot {
+                    peer_id: _peer_id.to_string(),
+                    protocol_major: PAIRING_PROTOCOL_MAJOR,
+                    reached_at_unix_secs: 0,
+                })
+            }
+            fn install_history_handler(
+                &self,
+                handler: Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+            ) -> Result<(), TransportError> {
+                self.installed_handlers
+                    .lock()
+                    .expect("install lock")
+                    .push(Some(handler));
+                Ok(())
+            }
+            fn list_recent_text(
+                &self,
+                _peer_id: &str,
+                _cert_fingerprint: &str,
+                _cursor: &str,
+                _limit: u32,
+            ) -> Result<clipvault_platform::peer_transport::PeerHistorySnapshot, TransportError>
+            {
+                Err(TransportError::Unavailable)
+            }
+            fn start_with_material_resolver_and_history(
+                &self,
+                _material: clipvault_platform::LocalIdentityMaterial,
+                _sink: Arc<dyn TransportSink>,
+                _advertisement: Arc<dyn PairingAdvertisement>,
+                _resolver: Option<Arc<dyn RemotePeerResolver>>,
+                _display_name: &str,
+                history_handler: Option<
+                    Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+                >,
+            ) -> Result<u16, TransportError> {
+                self.calls.lock().expect("call lock").push(history_handler);
+                let port = self.bind_seq.fetch_add(1, AtomicOrdering::AcqRel) as u16 + 1;
+                Ok(port)
+            }
+        }
+
+        struct DisplayNameResolver;
+        impl RemotePeerResolver for DisplayNameResolver {
+            fn resolve(&self, _peer_id: &str) -> Option<SocketAddr> {
+                Some(SocketAddr::from(([127, 0, 0, 1], 0)))
+            }
+        }
+
+        struct DisplayNameSink;
+        impl TransportSink for DisplayNameSink {
+            fn on_pairing_observed(
+                &self,
+                _observation: clipvault_platform::peer_transport::PeerTransportObservation,
+            ) {
+            }
+        }
+        struct DisplayNameAdvertisement;
+        impl PairingAdvertisement for DisplayNameAdvertisement {
+            fn publish(&self, _bound_port: u16) -> Result<(), TransportError> {
+                Ok(())
+            }
+            fn withdraw(&self) -> Result<(), TransportError> {
+                Ok(())
+            }
+        }
+
+        struct TrackingHandler(StdMutex<usize>);
+        impl clipvault_platform::peer_transport::HistoryHostHandler for TrackingHandler {
+            fn list_recent_text(
+                &self,
+                _peer_id: &str,
+                _cursor: &str,
+                _limit: u32,
+            ) -> clipvault_platform::peer_transport::HistoryHostResponse {
+                *self.0.lock().expect("handler counter") += 1;
+                HistoryHostResponse::Unavailable { reason: "tracked" }
+            }
+        }
+
+        let transport = Arc::new(HistoryRecordingTransport::default());
+        let persistence = Arc::new(InMemoryPairingPersistence::new());
+        let runtime = PairingRuntime::new(transport.clone(), persistence);
+        seed_local_identity(&runtime);
+        let material =
+            clipvault_platform::LocalIdentityMaterial::from_seed([0x55u8; 32]).expect("material");
+        runtime.set_material_loader(Arc::new(FixedMaterialLoader(material)));
+
+        // Install the handler BEFORE installing the productive
+        // transport, mirroring the bootstrap path.
+        let handler: Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler> =
+            Arc::new(TrackingHandler(StdMutex::new(0)));
+        runtime
+            .install_history_handler_inner(Arc::clone(&handler))
+            .expect("install handler");
+        assert!(
+            runtime.cached_history_handler().is_some(),
+            "runtime must cache the handler so a future install re-uses it"
+        );
+
+        let resolver: Arc<dyn RemotePeerResolver> = Arc::new(DisplayNameResolver);
+        let sink: Arc<dyn TransportSink> = Arc::new(DisplayNameSink);
+        let advertisement: Arc<dyn PairingAdvertisement> = Arc::new(DisplayNameAdvertisement);
+        let port = runtime
+            .install_pairing_transport_with_resolver(
+                Arc::clone(&sink),
+                Arc::clone(&advertisement),
+                Arc::clone(&resolver),
+                "Studio Local",
+            )
+            .expect("first install");
+        assert!(port > 0, "install must bind a non-zero port");
+
+        // Drop the lock guards before the restart cycle. The
+        // fake transport also takes these mutexes inside
+        // `start_with_material_resolver_and_history` and
+        // `install_history_handler`; holding them across the
+        // second install would deadlock the test rather than
+        // exercise the runtime contract.
+        {
+            let calls = transport.calls.lock().expect("calls lock");
+            assert_eq!(
+                calls.len(),
+                1,
+                "toggle path must invoke start_with_material_resolver_and_history exactly once"
+            );
+            let handler_arg = calls[0]
+                .as_ref()
+                .expect("runtime must forward Some(handler), never None");
+            assert!(
+                Arc::ptr_eq(handler_arg, &handler),
+                "runtime must forward the exact handler the bootstrap installed"
+            );
+        }
+
+        // Restart cycle: stop and re-install; the cached handler
+        // MUST be re-forwarded to the productive install path so
+        // a freshly-bound listener keeps serving inbound
+        // `ListRecentText` envelopes.
+        runtime.stop_pairing_transport().expect("stop");
+        let port = runtime
+            .install_pairing_transport_with_resolver(
+                Arc::clone(&sink),
+                Arc::clone(&advertisement),
+                Arc::clone(&resolver),
+                "Studio Local",
+            )
+            .expect("second install");
+        assert!(port > 0);
+        {
+            let calls = transport.calls.lock().expect("calls lock");
+            assert_eq!(
+                calls.len(),
+                2,
+                "second install must call start_with_material_resolver_and_history again"
+            );
+            let handler_arg = calls[1]
+                .as_ref()
+                .expect("runtime must keep forwarding Some(handler) after stop/start");
+            assert!(
+                Arc::ptr_eq(handler_arg, &handler),
+                "runtime must forward the cached handler across the restart"
+            );
+        }
+
+        // Final sanity: the bootstrap-style `install_history_handler_inner`
+        // (called before the listener binds) MUST have recorded at least
+        // one entry too so a regression that bypasses the runtime cache
+        // surfaces here.
+        {
+            let installed = transport.installed_handlers.lock().expect("installed");
+            assert!(
+                !installed.is_empty(),
+                "install_history_handler must be called at least once before the first install"
+            );
+        }
+    }
+
+    /// Productive TLS test that drives the same
+    /// `PairingRuntime::install_pairing_transport_with_resolver`
+    /// path the shell toggles every time the user flips
+    /// `local_peer_sharing_enabled` on. Two real
+    /// `TlsPeerTransport` listeners bind on `127.0.0.1`; the
+    /// host side wires the productive
+    /// `PeerTextHistoryHostHandlerAdapter` BEFORE the install,
+    /// mirrors the bootstrap path, and a real client dials over
+    /// mTLS. A regression that the toggle path forwards `None`
+    /// for the host handler must surface here as
+    /// `transport_unavailable` — the test asserts the page
+    /// reaches the handler and the client receives a typed
+    /// `Ok` envelope.
+    ///
+    /// The test sits next to
+    /// `productive_core_history_round_trip_over_two_real_tls_transports`
+    /// (in `peer_text_history.rs`); both bind real TLS
+    /// listeners, but this one focuses narrowly on the toggle
+    /// path so a regression there cannot hide behind a
+    /// different test fixture.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn toggle_install_serves_authenticated_list_recent_text() {
+        let _e2e_guard = lock_two_real_listener_e2e();
+
+        use crate::peer_text_history::{
+            HostHistorySource, PeerActiveState, PeerCursorSecret,
+            PeerPairingHistoryTransportAdapter, PeerTextHistoryService,
+        };
+        use clipvault_platform::peer_transport::derive_cert_fingerprint;
+        use clipvault_platform::peer_transport::tls::{
+            install_with_material_and_resolver, RecordingAdvertisementSink,
+        };
+        use clipvault_platform::peer_transport::{
+            PairingAdvertisementSink, PeerTransport as _, TlsPeerTransport, TransportSink,
+        };
+        use clipvault_platform::LocalIdentityMaterial;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::sync::Mutex as StdMutex;
+
+        let host_material = LocalIdentityMaterial::from_seed([0x21u8; 32]).expect("host material");
+        let client_material =
+            LocalIdentityMaterial::from_seed([0x31u8; 32]).expect("client material");
+        let host_peer_id = host_material.identity().peer_id.to_string();
+        let client_peer_id = client_material.identity().peer_id.to_string();
+        let host_cert_fingerprint = derive_cert_fingerprint(host_material.cert_der());
+        let client_cert_fingerprint = derive_cert_fingerprint(client_material.cert_der());
+
+        // Host source with a single transferable row. The
+        // host mints an HMAC cursor the client can verify;
+        // the runtime forwards the bounded projection without
+        // inspecting any host-private content.
+        struct TinySource;
+        impl HostHistorySource for TinySource {
+            fn page_after(
+                &self,
+                _created_at: &str,
+                _id: i64,
+                _limit: usize,
+            ) -> Result<
+                Vec<clipvault_db::EntryRecord>,
+                crate::peer_text_history::PeerHistoryPersistenceError,
+            > {
+                Ok(Vec::new())
+            }
+            fn snapshot_id(
+                &self,
+            ) -> Result<String, crate::peer_text_history::PeerHistoryPersistenceError> {
+                Ok("a".repeat(64))
+            }
+        }
+        let source: Arc<dyn HostHistorySource> = Arc::new(TinySource);
+
+        // Host-side wiring: in-process service + adapter so
+        // the toggle path can install the handler the bootstrap
+        // would otherwise install ahead of time.
+        let host_service = PeerTextHistoryService::new(Arc::new(
+            crate::peer_text_history::NoopPeerHistoryTransport,
+        ));
+        let host_secret = PeerCursorSecret::generate();
+        // The host stores the secret keyed by the dialer's
+        // peer_id: the dial side emits its own identity as the
+        // wire `peer_id`, so the host receives `client_peer_id`
+        // and must look up the secret under that key.
+        host_service.set_cursor_secret(&client_peer_id, host_secret);
+        let handler: Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler> = Arc::new(
+            PeerTextHistoryHostHandlerAdapter::new(host_service.clone(), Arc::clone(&source)),
+        );
+
+        // Host PairingRuntime + listener. The bootstrap / toggle
+        // path installs the handler BEFORE calling the resolver
+        // path that drives the productive install.
+        struct NoOpSink;
+        impl TransportSink for NoOpSink {
+            fn on_pairing_observed(
+                &self,
+                _observation: clipvault_platform::peer_transport::PeerTransportObservation,
+            ) {
+            }
+        }
+        struct NoOpAdvertisement;
+        impl PairingAdvertisement for NoOpAdvertisement {
+            fn publish(&self, _bound_port: u16) -> Result<(), TransportError> {
+                Ok(())
+            }
+            fn withdraw(&self) -> Result<(), TransportError> {
+                Ok(())
+            }
+        }
+        let host_transport = Arc::new(TlsPeerTransport::new());
+        let host_runtime = PairingRuntime::new(
+            host_transport.clone(),
+            Arc::new(InMemoryPairingPersistence::new()),
+        );
+        host_runtime.set_material_loader(Arc::new(FixedMaterialLoader(host_material.clone())));
+        host_runtime.set_local_identity(Some(host_material.identity().clone()));
+        host_runtime
+            .install_history_handler_inner(Arc::clone(&handler))
+            .expect("install host handler");
+        assert!(
+            host_runtime.cached_history_handler().is_some(),
+            "runtime must cache the handler so the resolver path forwards it"
+        );
+
+        struct HostPortResolver {
+            port: Arc<StdMutex<Option<u16>>>,
+            peer_id: String,
+        }
+        impl clipvault_platform::peer_transport::RemotePeerResolver for HostPortResolver {
+            fn resolve(&self, peer_id: &str) -> Option<SocketAddr> {
+                if peer_id != self.peer_id {
+                    return None;
+                }
+                let port = *self.port.lock().expect("resolver lock");
+                Some(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                    port?,
+                ))
+            }
+        }
+        let host_port_slot: Arc<StdMutex<Option<u16>>> = Arc::new(StdMutex::new(None));
+        // The host resolver is only used for outbound pairing
+        // flows; the toggle install ignores its `peer_id`
+        // argument because the host never dials the peer it
+        // serves. The dial-driver side gets its own resolver
+        // that resolves `host_peer_id` to the host's bound
+        // port.
+        let host_resolver: Arc<dyn clipvault_platform::peer_transport::RemotePeerResolver> =
+            Arc::new(HostPortResolver {
+                port: Arc::clone(&host_port_slot),
+                peer_id: client_peer_id.clone(),
+            });
+        let host_sink: Arc<dyn TransportSink> = Arc::new(NoOpSink);
+        let host_advertisement: Arc<dyn PairingAdvertisement> = Arc::new(NoOpAdvertisement);
+        // Bind through the toggle path: this is the entry
+        // point that previously forwarded `None` to the
+        // productive transport. The fix now reuses the cached
+        // handler so the first inbound `ListRecentText`
+        // envelope can already be served.
+        let host_port = host_runtime
+            .install_pairing_transport_with_resolver(
+                Arc::clone(&host_sink),
+                Arc::clone(&host_advertisement),
+                Arc::clone(&host_resolver),
+                "Host",
+            )
+            .expect("install host through resolver");
+        assert!(host_port > 0);
+        *host_port_slot.lock().expect("resolver lock") = Some(host_port);
+
+        // Client-side resolver: resolves `host_peer_id` to the
+        // host's bound port so the productive dial driver
+        // hits the listener on the loopback interface.
+        let client_resolver: Arc<dyn clipvault_platform::peer_transport::RemotePeerResolver> =
+            Arc::new(HostPortResolver {
+                port: Arc::clone(&host_port_slot),
+                peer_id: host_peer_id.clone(),
+            });
+
+        // Client transport: install with a resolver pointing
+        // at the host's bound port so the productive dial
+        // driver hits the loopback listener. The test does NOT
+        // use `install_with_material_resolver_and_history` for
+        // the client side — the productive dial driver carries
+        // the bounded `ListRecentText` envelope and the host
+        // must answer through the toggle-installed handler.
+        let client_transport = Arc::new(TlsPeerTransport::new());
+        let client_advertisement: Arc<dyn PairingAdvertisementSink> =
+            Arc::new(RecordingAdvertisementSink::new());
+        let client_sink: Arc<dyn TransportSink> = Arc::new(NoOpSink);
+        install_with_material_and_resolver(
+            client_transport.as_ref(),
+            client_material.clone(),
+            "Client".to_string(),
+            client_advertisement,
+            client_sink,
+            Some(client_resolver),
+        )
+        .expect("install client");
+        client_transport
+            .arm_pin(&host_peer_id, &host_cert_fingerprint)
+            .expect("arm pin");
+        // The host must also accept the client's cert at the
+        // handshake layer; the previous prototype silently
+        // accepted an inbound mTLS session without pinning,
+        // letting the dial reach the handler. Pin both sides so
+        // the handshake validates and the host listener
+        // actually reaches `serve`.
+        host_transport
+            .arm_pin(&client_peer_id, &client_cert_fingerprint)
+            .expect("arm host pin");
+
+        // Yield so the host accept loop polls at least once
+        // before the dialer fires.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // Client-side facade: real dial loop against the host.
+        let client_history_transport: Arc<dyn crate::peer_text_history::PeerHistoryTransport> =
+            Arc::new(PeerPairingHistoryTransportAdapter::new(
+                client_transport.clone(),
+            ));
+        let client_service = PeerTextHistoryService::new(client_history_transport);
+        client_service.record_peer_state(
+            &host_peer_id,
+            PeerActiveState {
+                trusted: true,
+                active: true,
+            },
+        );
+
+        let outcome = client_service.browse(&host_peer_id, &host_cert_fingerprint, None, 7);
+        match outcome {
+            crate::peer_text_history::PeerHistoryOutcome::Ok {
+                page,
+                snapshot_id,
+            } => {
+                // TinySource returns an empty page; the
+                // important assertion is the OUTCOME itself,
+                // not the row count. The previous prototype
+                // collapsed this call to
+                // `transport_unavailable` (because
+                // `history_handler = None`); the fix must
+                // reach `Ok`.
+                assert!(
+                    page.rows.is_empty(),
+                    "tiny source serves an empty page when the toggle-installed handler is reached"
+                );
+                assert_eq!(snapshot_id.len(), 64);
+            }
+            other => panic!(
+                "toggle-path install must forward the handler so ListRecentText serves a page, got {other:?}"
+            ),
+        }
+
+        host_transport.stop().expect("stop host");
+        client_transport.stop().expect("stop client");
     }
 
     /// `approve_local` for a session registered by the listener

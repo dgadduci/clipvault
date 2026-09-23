@@ -54,6 +54,23 @@
   > la renderiza con su copy tipado. La corrección no convierte un
   > cursor manipulado, de otro peer o firmado antes de una rotación en
   > un error de red genérico.
+  >
+  > Reapertura: el handler de historial debe persistir dentro de
+  > `PairingRuntime` y atravesar cada reinicio del listener. La ruta
+  > productiva `install_pairing_transport_with_resolver` invoca
+  > `start_with_material_resolver_and_history` pasando el handler
+  > registrado en lugar de `None`; `install_history_handler_inner`
+  > registra el handler en el runtime para que un nuevo bind lo herede.
+  > Como defensa adicional, las rutas heredadas
+  > `install_with_material` / `install_with_material_and_resolver`
+  > preservan un handler existente si reciben `None`. Se añade un test
+  > `PairingRuntime` con transporte grabador (instalar handler, iniciar
+  > con resolver, afirmar `start_with_material_resolver_and_history`
+  > con `Some(handler)` y `stop`/`start` re-pasando el handler) y un
+  > test TLS productivo que arranca el listener por la ruta del
+  > toggle (no por el helper de test que recibe manualmente el
+  > handler) y verifica que un `ListRecentText` autenticado llega al
+  > handler sin devolver `not_available`.
 - [x] 2.4 Reemplazar el cursor percent-encoded por HMAC-SHA256 sobre
   `(peer_id, created_at, id)` con secreto de 32 bytes por peer; rotar el
   secreto en `Revoked`; persistir el secreto ligado al peer; devolver
@@ -62,6 +79,18 @@
   `set_cursor_secret()` con provisionamiento, persistencia, rotación y
   limpieza productiva; el cliente trata el cursor como opaco y sólo
   el host que posee su secreto privado lo valida.
+  > Reapertura: añadir un backfill seguro durante el bootstrap para
+  > pares `trusted` heredados que carecen de `cursor_secret`. El
+  > recorrido por `known_peers` valida la columna como hex de 64
+  > caracteres, persiste un secreto CSPRNG nuevo cuando está vacía o
+  > malformada, y sólo instala el valor en la caché del servicio
+  > después de persistirlo. Filas no `trusted` no se tocan. La
+  > corrección queda cubierta por un test representativo de bootstrap
+  > con DB temporal (trusted sin secreto → secreto persistido válido e
+  > instalado; trusted con secreto válido → preservado; no trusted sin
+  > secreto → permanece vacío). Los logs usan mensajes fijos sin
+  > `peer_id`, secreto, hostname, IP, puerto, certificado ni
+  > contenido.
 - [x] 2.5 Reemplazar `snapshot_id` por fingerprint SHA-256 no reversible
   sobre el header de la página transferible; excluir `Html` del set
   elegible (aunque sea textual) y cubrirlo con test.
@@ -144,6 +173,14 @@
   > `PeerHistoryBrowseResponse::InvalidCursor` permanece como
   > variante estable y conserva el `snapshot_id` que el host emitió
   > sin reconstruir un fingerprint remoto parcial.
+  >
+  > Reapertura: el motivo tipado se conserva de extremo a extremo —
+  > un peer local inactivo sigue devolviendo `not_active` y un host
+  > que rechaza por falta de trust o de secreto devuelve `not_trusted`
+  > (no `not_active`). El cliente (`browse`) traduce `Revoked` /
+  > `Blocked` a `not_trusted`, y un `state.active == false` se mantiene
+  > `not_active`. Se añaden tests específicos para la distinción
+  > `not_active` vs `not_trusted`.
 - [x] 3.5 El cierre normal del shell (`⌘Q`, *tray Salir*, `Ctrl-C`)
   llama a `stop_network_subsystems` antes de la pasada de
   retention: primero `stop_pairing_transport()` y después
@@ -191,6 +228,16 @@
   > cuerpo / hash / IP / puerto / fingerprint en el payload
   > serializado) aún no estaba cubierta por la verificación previa.
   > Se ejecuta y pasa antes de marcar 4.1 / 2.6 como completas.
+  >
+  > Reapertura: 4.1 vuelve a reabrirse para revalidar la batería
+  > completa porque las correcciones de backfill de secretos, de
+  > ciclo de vida del handler y de distinción tipada
+  > `not_active` / `not_trusted` introducen tests nuevos que no se
+  > habían ejecutado antes. La nueva revisión ejecuta los tests
+  > focales repetidos (≥3 veces para el test TLS productivo) y
+  > vuelve a pasar `cargo check --workspace`, `cargo fmt`,
+  > `git diff --check` y `npx openspec validate` antes de cerrar el
+  > cambio.
 - [ ] 4.2 Prueba manual en Wayland, X11 y macOS: lista reactiva de
   pares, puntos activo/no disponible, reemplazo del panel principal,
   previews horizontales, páginas, falla de red, menú Importar
