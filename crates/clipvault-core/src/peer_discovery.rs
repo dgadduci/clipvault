@@ -63,22 +63,6 @@ pub use clipvault_platform::peer_discovery::{
 };
 use clipvault_platform::peer_identity::{PeerFingerprint, PeerId};
 
-/// Cadence at which the platform adapter re-confirms an already
-/// resolved DNS-SD service instance. The constant is shared with
-/// the platform layer so the runtime and the adapter agree on the
-/// minimum interval a peer can be considered alive without a fresh
-/// [`DiscoveryEvent::Observed`] from the browser loop. The value
-/// (`local-peer-presence-liveness` change) sits at 60 s: long
-/// enough to absorb RFC 6762's recommended one-minute TTL without
-/// flipping the UI on every browser iteration, short enough that a
-/// verify timeout has a bounded blast radius. The platform
-/// adapter MUST NOT verify more frequently than this; the constant
-/// used to live at `PRESENCE_TTL = 120 s` but the design was
-/// retired because the core was incorrectly treating a peer as
-/// absent after that interval even when mDNS had not emitted a
-/// `ServiceRemoved`.
-pub const LIVENESS_CONFIRM_INTERVAL: Duration = Duration::from_secs(60);
-
 /// Maximum length of the validated visible name the TXT record
 /// publishes. Mirrors `MAX_PEER_DISPLAY_NAME_LENGTH` from the
 /// settings layer so the value cannot blow up the mDNS payload.
@@ -521,12 +505,9 @@ pub const RUNTIME_INACTIVE_REASON_DISABLED: &str = "disabled";
 /// `PRESENCE_TTL = 120 s` heuristic is gone — flipping a peer to
 /// `NotAvailable` because the core had not seen a fresh
 /// resolution in 120 s produced the false "No disponible" that
-/// the `local-peer-presence-liveness` change fixes (RFC 6762
-/// browsers can stay silent for a full TTL even when the
-/// responder is healthy). The platform adapter owns the
-/// liveness confirmation cadence (`LIVENESS_CONFIRM_INTERVAL` /
-/// `VERIFY_TIMEOUT`); the runtime only reflects what the adapter
-/// reports.
+/// the presence-stability change fixes (RFC 6762 browsers can
+/// stay silent for a full TTL even when the responder is healthy).
+/// The runtime reflects only the adapter's actual browser events.
 #[derive(Debug, Clone, Default)]
 struct PresenceTable {
     inner: HashMap<String, Instant>,

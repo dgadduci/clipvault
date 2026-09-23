@@ -108,217 +108,6 @@ struct AdapterState {
     /// the announced listener without exposing the address to
     /// the runtime layer. `None` when the adapter is stopped.
     peer_addresses: Option<Arc<Mutex<HashMap<String, std::net::SocketAddr>>>>,
-    /// Per-`fullname` liveness tracking the platform scheduler
-    /// reads to decide when to call
-    /// [`mdns_sd::ServiceDaemon::verify`]. The map is mutated by
-    /// the browse loop (Observed / Removed) and by the scheduler
-    /// thread (last-confirmed-at, in-flight guard). The browse
-    /// loop and the scheduler run on dedicated threads; the
-    /// `Mutex` keeps their access serialised.
-    liveness: Option<Arc<Mutex<LivenessState>>>,
-}
-
-/// Per-fullname state the platform scheduler uses to drive the
-/// bounded DNS-SD liveness confirmation. The struct is internal
-/// to the adapter and never touches the runtime, the core or
-/// SQLite. The scheduler is a pure function of this state and an
-/// injectable [`LivenessClock`], which keeps the deterministic
-/// regression tests independent of `ServiceDaemon` and
-/// multicast.
-///
-/// Each row tracks:
-///
-/// - `last_action_at`: the wall-clock instant of the most recent
-///   action the platform took on the fullname — either a
-///   successful [`mdns_sd::ServiceEvent::ServiceResolved`] or the
-///   moment a `verify` was issued. The scheduler waits
-///   [`LIVENESS_CONFIRM_INTERVAL`] after this instant before
-///   issuing the next `verify`.
-/// - `verify_deadline`: if `Some`, a `verify` is in flight and
-///   will time out at this instant. The scheduler releases the
-///   in-flight guard when the deadline passes even if
-///   `ServiceDaemon::verify` never produced a fresh
-///   `ServiceResolved` — the cadence cannot depend on the
-///   daemon emitting a redundant resolution event.
-///
-/// `ServiceRemoved` drops the row outright; the scheduler never
-/// schedules another `verify` for the fullname until a fresh
-/// `ServiceResolved` rebuilds it. `ServiceResolved` rebuilds the
-/// row from scratch: a fresh resolution supersedes any pending
-/// `verify` and resets the cadence to a full interval.
-#[derive(Default)]
-pub(super) struct LivenessState {
-    rows: HashMap<String, LivenessRow>,
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct LivenessRow {
-    last_action_at: std::time::Instant,
-    verify_deadline: Option<std::time::Instant>,
-}
-
-/// Monotonic clock the [`LivenessState`] state machine consults
-/// to decide when a `verify` is due and when its deadline
-/// expires. Production code wires [`SystemClock`]; tests inject
-/// a controllable clock so the regression suite does not have to
-/// create a real [`mdns_sd::ServiceDaemon`] or depend on
-/// multicast.
-pub(super) trait LivenessClock: Send + Sync {
-    fn now(&self) -> std::time::Instant;
-}
-
-/// Production clock that reads the monotonic `Instant` the
-/// scheduler previously consulted.
-pub(super) struct SystemClock;
-
-impl LivenessClock for SystemClock {
-    fn now(&self) -> std::time::Instant {
-        std::time::Instant::now()
-    }
-}
-
-/// Command the pure scheduler step asks the runtime to perform.
-/// The scheduler thread is the only consumer of `IssueVerify`;
-/// the runtime, core, SQLite and Tauri commands never see the
-/// value.
-///
-/// Each [`LivenessCommand::IssueVerify`] carries a
-/// [`VerifyToken`] the productive scheduler revalidates under
-/// lock immediately before calling
-/// [`mdns_sd::ServiceDaemon::verify`]. The token is the
-/// `verify_deadline` the row carried at snapshot time: a
-/// [`mdns_sd::ServiceEvent::ServiceRemoved`] that lands between
-/// `step` and the dispatch drops the row (no match), and a
-/// fresh [`mdns_sd::ServiceEvent::ServiceResolved`] resets the
-/// row's `verify_deadline` (different instant, no match). Either
-/// race must invalidate the snapshot command so the scheduler
-/// never queries a row that already left or that already
-/// refreshed its anchor.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum LivenessCommand {
-    IssueVerify {
-        fullname: String,
-        token: VerifyToken,
-    },
-}
-
-/// Opaque per-attempt identifier the state machine stamps on
-/// each [`LivenessCommand::IssueVerify`]. The constructor is
-/// `pub(super)` so only the state machine can mint fresh tokens;
-/// the scheduler compares the token against the current row's
-/// `verify_deadline` and discards the command on mismatch.
-///
-/// The wrapped `Instant` is the `verify_deadline` the row
-/// carried at snapshot time, which doubles as the natural
-/// attempt-unique value (each issuance advances `last_action_at`
-/// and therefore produces a different `verify_deadline`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct VerifyToken {
-    deadline: std::time::Instant,
-}
-
-/// Pure state-machine reaction to a fresh
-/// [`mdns_sd::ServiceEvent::ServiceResolved`]. Stamps
-/// `last_action_at` so the scheduler waits a full
-/// [`LIVENESS_CONFIRM_INTERVAL`] before issuing the next
-/// `verify`, and releases any in-flight slot the previous
-/// `ServiceResolved` set up. A healthy peer that the daemon
-/// re-resolves therefore does not get stuck: the deadline window
-/// is dropped so the cadence restarts cleanly even when the
-/// adapter never had a `verify` in flight.
-pub(super) fn on_service_resolved(
-    state: &mut LivenessState,
-    fullname: &str,
-    clock: &dyn LivenessClock,
-) {
-    let now = clock.now();
-    state.rows.insert(
-        fullname.to_string(),
-        LivenessRow {
-            last_action_at: now,
-            verify_deadline: None,
-        },
-    );
-}
-
-/// Pure state-machine reaction to a
-/// [`mdns_sd::ServiceEvent::ServiceRemoved`]. Drops the row so
-/// the scheduler never schedules another `verify` for the
-/// fullname, and clears any in-flight slot the previous
-/// `ServiceResolved` set up. A late callback that races the
-/// browse loop's removal cannot resurrect the peer: only a new
-/// `ServiceResolved` rebuilds the row, which is exactly the
-/// contract the runtime pins.
-pub(super) fn on_service_removed(state: &mut LivenessState, fullname: &str) {
-    state.rows.remove(fullname);
-}
-
-/// Inspect the in-flight guard for the given fullname. The
-/// scheduler thread uses it to short-circuit a `verify` whose
-/// `ServiceRemoved` raced between snapshot and dispatch. The
-/// helper is also the public surface the deterministic test
-/// suite uses to assert on the in-flight slot.
-#[cfg(test)]
-pub(super) fn is_in_flight(state: &LivenessState, fullname: &str) -> bool {
-    state
-        .rows
-        .get(fullname)
-        .and_then(|row| row.verify_deadline)
-        .is_some()
-}
-
-/// Run one scheduler tick. The function is a pure transformation
-/// of the [`LivenessState`]:
-///
-/// 1. If a row's `verify_deadline` has passed, the in-flight
-///    slot is released. The scheduler MUST NOT depend on a
-///    `ServiceResolved` to clear it — that was the regression
-///    the previous scheduler shipped and that this refactor
-///    fixes.
-/// 2. Otherwise, if `LIVENESS_CONFIRM_INTERVAL` has passed
-///    since `last_action_at`, a `verify` is issued and the row's
-///    `last_action_at` is moved forward so the next attempt is
-///    scheduled a full interval from now.
-///
-/// The function returns the set of [`LivenessCommand`]s the
-/// scheduler thread should dispatch to the `mdns-sd` daemon. The
-/// daemon's `verify` call is asynchronous — its `Result<()>`
-/// only confirms the command was enqueued — so the scheduler
-/// relies on the deadline to bound the in-flight slot rather
-/// than on the daemon's response. Every command carries a
-/// [`VerifyToken`] the productive scheduler revalidates under
-/// lock before dispatching, so a [`mdns_sd::ServiceEvent::ServiceRemoved`]
-/// or fresh [`mdns_sd::ServiceEvent::ServiceResolved`] that
-/// arrives between `step` and `daemon.verify` invalidates the
-/// snapshot.
-pub(super) fn step(
-    state: &mut LivenessState,
-    clock: &dyn LivenessClock,
-    confirm_interval: Duration,
-    verify_timeout: Duration,
-) -> Vec<LivenessCommand> {
-    let now = clock.now();
-    let mut commands = Vec::new();
-    for (fullname, row) in state.rows.iter_mut() {
-        match row.verify_deadline {
-            Some(deadline) if now >= deadline => {
-                row.verify_deadline = None;
-            }
-            None => {
-                if now.duration_since(row.last_action_at) >= confirm_interval {
-                    let deadline = now + verify_timeout;
-                    row.last_action_at = now;
-                    row.verify_deadline = Some(deadline);
-                    commands.push(LivenessCommand::IssueVerify {
-                        fullname: fullname.clone(),
-                        token: VerifyToken { deadline },
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-    commands
 }
 
 /// Owns the [`mdns_sd::ServiceDaemon`] plus the join handle of
@@ -331,12 +120,6 @@ struct MdnsHandle {
     fullname: String,
     thread: Option<JoinHandle<()>>,
     cancel: Arc<AtomicBool>,
-    /// Background liveness scheduler the
-    /// `local-peer-presence-liveness` change owns. The thread is
-    /// the only consumer of the bounded DNS-SD `verify` cadence
-    /// and joins before `unregister` / `shutdown` so a late
-    /// callback can never reanimate presence after stop.
-    liveness_thread: Option<JoinHandle<()>>,
     /// Idempotency guard so the ordered shutdown runs at most
     /// once even when both the explicit `stop` path and `Drop`
     /// fire (the explicit path takes the [`MdnsHandle`] out of
@@ -353,48 +136,19 @@ struct MdnsHandle {
 /// hung or the channel is wedged.
 const UNREGISTER_WAIT: Duration = Duration::from_millis(750);
 
-/// Minimum interval between two consecutive DNS-SD verifications
-/// for the same `service_fullname`. The value matches
-/// `clipvault_core::peer_discovery::LIVENESS_CONFIRM_INTERVAL`
-/// (the runtime mirrors it for documentation purposes; the
-/// platform layer is the only consumer). The cadence is short
-/// enough that the bounded verify has a tight blast radius (the
-/// timeout is only `VERIFY_TIMEOUT`), but long enough to absorb
-/// RFC 6762's recommended TTL without hammering the link.
-const LIVENESS_CONFIRM_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Per-verify timeout the adapter hands to
-/// `ServiceDaemon::verify`. The contract is a bounded DNS-SD
-/// query, not a TCP probe; 5 seconds is the upper bound the
-/// `local-peer-presence-liveness` change pins (the daemon's
-/// default `VERIFY_TIMEOUT_DEFAULT` is 10 s, which would mask
-/// the disappearance we actually want to surface).
-const LIVENESS_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Cadence at which the liveness scheduler wakes up to decide
-/// whether a fresh `verify` is due for some tracked fullname.
-/// 1 s is the smallest window that keeps the loop responsive
-/// (the 60 s minimum interval ensures we only fire ~once per
-/// peer per minute even when many peers are tracked).
-const LIVENESS_TICK: Duration = Duration::from_secs(1);
-
 impl MdnsHandle {
     /// Run the ordered shutdown exactly once.
     ///
     /// The order is critical and matches the design pinned in
     /// `local-peer-discovery/design.md` §"Descubrimiento, presencia
-    /// y compatibilidad" plus the `local-peer-presence-liveness`
-    /// change:
+    /// y compatibilidad":
     ///
-    /// 1. flip the cancel flag so the browse loop and the liveness
-    ///    scheduler wake up early;
-    /// 2. join the liveness scheduler so no fresh `verify` can be
-    ///    issued while we are tearing the daemon down;
-    /// 3. `unregister` the published `fullname` so remote browsers
+    /// 1. flip the cancel flag so the browse loop wakes up early;
+    /// 2. `unregister` the published `fullname` so remote browsers
     ///    receive `ServiceRemoved` and flip the peer to
     ///    `NotAvailable` without waiting for the TTL (~120 s);
-    /// 4. shut down the daemon (closes the receiver channel);
-    /// 5. join the browse thread.
+    /// 3. shut down the daemon (closes the receiver channel);
+    /// 4. join the browse thread.
     ///
     /// The function only logs fixed safe phrases on failure so the
     /// `fullname`, host name, IP, port and raw `mdns-sd` error
@@ -409,17 +163,7 @@ impl MdnsHandle {
 
         self.cancel.store(true, Ordering::Release);
 
-        // 1. Join the liveness scheduler first so no `verify`
-        //    command lands on the daemon after we start the
-        //    ordered goodbye path. A late verify could otherwise
-        //    race the daemon's own cache flush and resurrect a
-        //    `ServiceResolved` event after the browse receiver
-        //    has been closed.
-        if let Some(handle) = self.liveness_thread.take() {
-            let _ = handle.join();
-        }
-
-        // 2. Send the goodbye packet. `mdns-sd` documents
+        // 1. Send the goodbye packet. `mdns-sd` documents
         //    `unregister` as the graceful shutdown of a service
         //    and uses the returned `Receiver<UnregisterStatus>` to
         //    signal completion; on `Error::Msg` / `Error::Again`
@@ -434,7 +178,7 @@ impl MdnsHandle {
             Err(_) => warn!("mdns-sd unregister failed; continuing shutdown"),
         }
 
-        // 3. Tear down the daemon (closes the receiver so the loop
+        // 2. Tear down the daemon (closes the receiver so the loop
         //    exits). The daemon's own `Error` enum carries the
         //    socket path on `Error::Msg`, so we keep the existing
         //    fixed-phrase log to avoid leaking it.
@@ -442,7 +186,7 @@ impl MdnsHandle {
             warn!("mdns-sd daemon shutdown failed");
         }
 
-        // 4. Join the browse thread. The thread may have already
+        // 3. Join the browse thread. The thread may have already
         //    exited because the daemon receiver closed; ignore
         //    the join error in that case.
         if let Some(handle) = self.thread.take() {
@@ -539,17 +283,6 @@ impl MdnsPeerDiscoveryAdapter {
         let peer_addresses: Arc<Mutex<HashMap<String, std::net::SocketAddr>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let peer_addresses_for_thread = Arc::clone(&peer_addresses);
-        // Liveness scheduler state. The browse loop records
-        // every Observed / Removed into `last_confirmed_at` so
-        // the scheduler can decide when the next `verify` is
-        // due. The scheduler thread is the only consumer of
-        // `daemon.verify`; the runtime, the core and SQLite
-        // never see a verify call.
-        let liveness: Arc<Mutex<LivenessState>> = Arc::new(Mutex::new(LivenessState::default()));
-        let liveness_for_browse = Arc::clone(&liveness);
-        let liveness_for_scheduler = Arc::clone(&liveness);
-        let cancel_for_liveness = Arc::clone(&cancel);
-        let daemon_for_liveness = daemon.clone();
         // The browse loop runs on a dedicated thread; the
         // runtime passes the sink as an `Arc` so the closure
         // can move it into the thread without leaking the
@@ -563,31 +296,10 @@ impl MdnsPeerDiscoveryAdapter {
                     cancel_for_thread,
                     peer_registry_for_thread,
                     peer_addresses_for_thread,
-                    liveness_for_browse,
                 );
             })
             .map_err(|error| {
                 warn!(error = %error, "failed to spawn mdns-sd browse thread");
-                MdnsAdapterError::SpawnThread
-            })?;
-        let liveness_thread = thread::Builder::new()
-            .name("clipvault-peer-discovery-liveness".to_string())
-            .spawn(move || {
-                run_liveness_scheduler(
-                    daemon_for_liveness,
-                    cancel_for_liveness,
-                    liveness_for_scheduler,
-                );
-            })
-            .map_err(|error| {
-                warn!(error = %error, "failed to spawn mdns-sd liveness thread");
-                // Best-effort: tear down what we already started
-                // before surfacing the error so we do not leak
-                // a browse thread.
-                cancel.store(true, Ordering::Release);
-                if let Err(shutdown_error) = daemon.shutdown() {
-                    warn!(error = %shutdown_error, "mdns-sd daemon shutdown failed");
-                }
                 MdnsAdapterError::SpawnThread
             })?;
         *self.state.lock().expect("state lock") = AdapterState {
@@ -596,12 +308,10 @@ impl MdnsPeerDiscoveryAdapter {
                 fullname,
                 thread: Some(thread),
                 cancel,
-                liveness_thread: Some(liveness_thread),
                 shutdown_started: Cell::new(false),
             }),
             peer_registry: Some(peer_registry),
             peer_addresses: Some(peer_addresses),
-            liveness: Some(liveness),
         };
         debug!(port, "mdns-sd adapter registered and browse loop started");
         Ok(())
@@ -619,7 +329,6 @@ impl MdnsPeerDiscoveryAdapter {
         }
         state.peer_registry = None;
         state.peer_addresses = None;
-        state.liveness = None;
     }
 
     /// Update the published mDNS record on a running adapter
@@ -837,11 +546,10 @@ fn run_browse_loop(
     cancel: Arc<AtomicBool>,
     peer_registry: Arc<Mutex<HashMap<String, String>>>,
     peer_addresses: Arc<Mutex<HashMap<String, std::net::SocketAddr>>>,
-    liveness: Arc<Mutex<LivenessState>>,
 ) {
     while !cancel.load(Ordering::Acquire) {
         match receiver.recv_timeout(std::time::Duration::from_millis(500)) {
-            Ok(event) => process_event(&event, &sink, &peer_registry, &peer_addresses, &liveness),
+            Ok(event) => process_event(&event, &sink, &peer_registry, &peer_addresses),
             Err(error) => {
                 if is_disconnected(&error) {
                     break;
@@ -868,7 +576,6 @@ pub(super) fn process_event(
     sink: &Arc<dyn DiscoverySink>,
     peer_registry: &Arc<Mutex<HashMap<String, String>>>,
     peer_addresses: &Arc<Mutex<HashMap<String, std::net::SocketAddr>>>,
-    liveness: &Arc<Mutex<LivenessState>>,
 ) {
     match event {
         mdns_sd::ServiceEvent::ServiceResolved(info) => {
@@ -890,24 +597,6 @@ pub(super) fn process_event(
                     // cannot retain a stale pairing port.
                     addresses.remove(&peer_id);
                 }
-                // A fresh resolution refreshes the liveness
-                // anchor and clears any in-flight verify guard
-                // the previous scheduler tick set: the daemon
-                // already confirmed the peer is alive, so the
-                // bounded `verify` window is moot. The scheduler
-                // will wait another full
-                // [`LIVENESS_CONFIRM_INTERVAL`] before issuing
-                // the next `verify`. Note: this branch MUST NOT
-                // be the only path that releases the in-flight
-                // guard — `verify_deadline` expiration does the
-                // same job, so a healthy peer that only triggers
-                // cache refreshes (and never re-emits
-                // `ServiceResolved`) does not wedge the
-                // scheduler.
-                {
-                    let mut state = liveness.lock().expect("liveness");
-                    on_service_resolved(&mut state, &fullname, &SystemClock);
-                }
                 sink.push(DiscoveryEvent::Observed(record));
             }
         }
@@ -916,17 +605,6 @@ pub(super) fn process_event(
                 .lock()
                 .expect("peer registry")
                 .remove(fullname);
-            // Drop the liveness row outright. The browse loop
-            // sees the removal before the scheduler tick so a
-            // verify-in-flight that lands after the removal
-            // cannot resurrect presence: with no row in
-            // [`LivenessState`] the scheduler has nothing to
-            // verify. Only a new `ServiceResolved` rebuilds
-            // the row.
-            {
-                let mut state = liveness.lock().expect("liveness");
-                on_service_removed(&mut state, fullname);
-            }
             if let Some(peer_id) = peer_id.clone() {
                 peer_addresses
                     .lock()
@@ -942,98 +620,6 @@ pub(super) fn process_event(
             // runtime cares only about resolved and removed
             // events.
         }
-    }
-}
-
-/// Background liveness scheduler the
-/// `local-peer-presence-liveness` change owns. The thread wakes
-/// up every [`LIVENESS_TICK`] and dispatches the
-/// [`LivenessCommand`]s the pure [`step`] function returns.
-///
-/// The scheduler itself holds no decision logic — it only
-/// forwards the state-machine output to
-/// [`mdns_sd::ServiceDaemon::verify`]. The in-flight guard is
-/// owned by the state machine (`LivenessRow::verify_deadline`):
-/// the scheduler relies on the deadline to release the slot
-/// even when `verify` enqueues successfully but the daemon
-/// never emits a fresh `ServiceResolved`. `ServiceRemoved` has
-/// absolute precedence: the browse loop's call to
-/// [`on_service_removed`] drops the row before the scheduler
-/// can issue another verify.
-///
-/// Between the `step` snapshot and the `daemon.verify` call the
-/// browse loop can mutate the row — either drop it on
-/// `ServiceRemoved` or rebuild it on a fresh `ServiceResolved`.
-/// To honour the precedence contract the scheduler re-acquires
-/// the mutex for every command and confirms the row still
-/// carries the [`VerifyToken`] snapshotted with the command; a
-/// removed row or a different `verify_deadline` discards the
-/// command silently without issuing a stale query.
-///
-/// The scheduler's cancel flag is the same atomic the browse
-/// loop reads; flipping it from the `stop` path makes the loop
-/// exit on the next tick. `MdnsHandle::shutdown` joins the
-/// thread before `unregister`/`shutdown` so no callback can
-/// reanimate presence after the goodbye.
-fn run_liveness_scheduler(
-    daemon: mdns_sd::ServiceDaemon,
-    cancel: Arc<AtomicBool>,
-    liveness: Arc<Mutex<LivenessState>>,
-) {
-    while !cancel.load(Ordering::Acquire) {
-        // Snapshot the commands the pure state machine wants
-        // us to dispatch. The mutex is held only for the
-        // duration of the snapshot so a slow `daemon.verify`
-        // never blocks the browse loop.
-        let commands: Vec<LivenessCommand> = {
-            let mut state = liveness.lock().expect("liveness");
-            step(
-                &mut state,
-                &SystemClock,
-                LIVENESS_CONFIRM_INTERVAL,
-                LIVENESS_VERIFY_TIMEOUT,
-            )
-        };
-        for command in commands {
-            let LivenessCommand::IssueVerify { fullname, token } = command;
-            // Revalidate the token under the mutex. The row's
-            // `verify_deadline` MUST still equal the token we
-            // snapshotted — otherwise the browse loop mutated
-            // the row between `step` and now (a `ServiceRemoved`
-            // dropped it, a fresh `ServiceResolved` reset
-            // `last_action_at` and cleared `verify_deadline`).
-            // Discarding the stale snapshot honours the
-            // precedence contract: removed or superseded
-            // peers never receive a `verify` we already
-            // snapshotted.
-            let token_still_valid = {
-                let state = liveness.lock().expect("liveness");
-                state
-                    .rows
-                    .get(&fullname)
-                    .and_then(|row| row.verify_deadline)
-                    == Some(token.deadline)
-            };
-            if !token_still_valid {
-                continue;
-            }
-            if let Err(_error) = daemon.verify(fullname.clone(), LIVENESS_VERIFY_TIMEOUT) {
-                // A transient failure (queue full, daemon
-                // shutting down) must not surface as a
-                // removal. The state machine relies on the
-                // deadline to release the in-flight guard, but
-                // the next tick would re-issue the same
-                // command because `last_action_at` already
-                // advanced. Drop the row's anchor so the next
-                // tick retries the verify.
-                let mut state = liveness.lock().expect("liveness");
-                if let Some(row) = state.rows.get_mut(&fullname) {
-                    row.verify_deadline = None;
-                    row.last_action_at = std::time::Instant::now() - LIVENESS_CONFIRM_INTERVAL;
-                }
-            }
-        }
-        thread::park_timeout(LIVENESS_TICK);
     }
 }
 
@@ -1301,8 +887,6 @@ mod tests {
             Arc::new(StdMutex::new(HashMap::new()));
         let addresses: Arc<StdMutex<HashMap<String, SocketAddr>>> =
             Arc::new(StdMutex::new(HashMap::new()));
-        let liveness: Arc<StdMutex<LivenessState>> =
-            Arc::new(StdMutex::new(LivenessState::default()));
         let sink: Arc<dyn DiscoverySink> = Arc::new(CapturingSink::default());
 
         process_event(
@@ -1310,7 +894,6 @@ mod tests {
             &sink,
             &registry,
             &addresses,
-            &liveness,
         );
 
         assert_eq!(
@@ -1463,8 +1046,6 @@ mod tests {
             Arc::new(StdMutex::new(HashMap::new()));
         let addresses: Arc<StdMutex<HashMap<String, SocketAddr>>> =
             Arc::new(StdMutex::new(HashMap::new()));
-        let liveness: Arc<StdMutex<LivenessState>> =
-            Arc::new(StdMutex::new(LivenessState::default()));
         let sink: Arc<dyn DiscoverySink> = Arc::new(CapturingSink::default());
         let peer_id = "0123456789abcdef0123456789abcdef";
         addresses.lock().expect("addresses").insert(
@@ -1492,7 +1073,6 @@ mod tests {
             &sink,
             &registry,
             &addresses,
-            &liveness,
         );
         assert!(
             addresses.lock().expect("addresses").get(peer_id).is_none(),
@@ -1861,8 +1441,6 @@ mod tests {
             Arc::new(StdMutex::new(HashMap::new()));
         let addresses: Arc<StdMutex<HashMap<String, std::net::SocketAddr>>> =
             Arc::new(StdMutex::new(HashMap::new()));
-        let liveness: Arc<StdMutex<LivenessState>> =
-            Arc::new(StdMutex::new(LivenessState::default()));
         let sink = Arc::new(CapturingSink::default());
         let sink_dyn: Arc<dyn DiscoverySink> = sink.clone();
         let mut properties = std::collections::HashMap::new();
@@ -1879,9 +1457,9 @@ mod tests {
                 .expect("service info");
         let fullname = info.get_fullname().to_string();
         let resolved = mdns_sd::ServiceEvent::ServiceResolved(info);
-        process_event(&resolved, &sink_dyn, &registry, &addresses, &liveness);
+        process_event(&resolved, &sink_dyn, &registry, &addresses);
         let removed = mdns_sd::ServiceEvent::ServiceRemoved(SERVICE_TYPE.to_string(), fullname);
-        process_event(&removed, &sink_dyn, &registry, &addresses, &liveness);
+        process_event(&removed, &sink_dyn, &registry, &addresses);
         let events = sink.events.lock().expect("events").clone();
         assert_eq!(events.len(), 2);
         let observed = match &events[0] {
@@ -1912,8 +1490,6 @@ mod tests {
             Arc::new(StdMutex::new(HashMap::new()));
         let addresses: Arc<StdMutex<HashMap<String, std::net::SocketAddr>>> =
             Arc::new(StdMutex::new(HashMap::new()));
-        let liveness: Arc<StdMutex<LivenessState>> =
-            Arc::new(StdMutex::new(LivenessState::default()));
         let sink = Arc::new(CapturingSink::default());
         let sink_dyn: Arc<dyn DiscoverySink> = sink.clone();
         let mut properties_a = std::collections::HashMap::new();
@@ -1954,28 +1530,24 @@ mod tests {
             &sink_dyn,
             &registry,
             &addresses,
-            &liveness,
         );
         process_event(
             &mdns_sd::ServiceEvent::ServiceResolved(info_b),
             &sink_dyn,
             &registry,
             &addresses,
-            &liveness,
         );
         process_event(
             &mdns_sd::ServiceEvent::ServiceRemoved(SERVICE_TYPE.to_string(), fullname_a),
             &sink_dyn,
             &registry,
             &addresses,
-            &liveness,
         );
         process_event(
             &mdns_sd::ServiceEvent::ServiceRemoved(SERVICE_TYPE.to_string(), fullname_b),
             &sink_dyn,
             &registry,
             &addresses,
-            &liveness,
         );
         let events = sink.events.lock().expect("events").clone();
         assert_eq!(events.len(), 4);
@@ -2021,629 +1593,13 @@ mod tests {
             Arc::new(StdMutex::new(HashMap::new()));
         let addresses: Arc<StdMutex<HashMap<String, std::net::SocketAddr>>> =
             Arc::new(StdMutex::new(HashMap::new()));
-        let liveness: Arc<StdMutex<LivenessState>> =
-            Arc::new(StdMutex::new(LivenessState::default()));
         let sink = Arc::new(CapturingSink::default());
         let sink_dyn: Arc<dyn DiscoverySink> = sink.clone();
         let removed = mdns_sd::ServiceEvent::ServiceRemoved(
             SERVICE_TYPE.to_string(),
             "Unknown._clipvault._tcp.local.".to_string(),
         );
-        process_event(&removed, &sink_dyn, &registry, &addresses, &liveness);
+        process_event(&removed, &sink_dyn, &registry, &addresses);
         assert!(sink.events.lock().expect("events").is_empty());
-    }
-
-    // ----------------------------------------------------------------
-    // Liveness scheduler — `local-peer-presence-liveness` regressions.
-    //
-    // The tests below cover the contract the platform scheduler owns:
-    // a healthy peer stays `Detected` past three former 120-second
-    // windows (the previous bug); a `Removed` event flips the peer
-    // to absent immediately; the bounded DNS-SD `verify` runs only
-    // once per fullname, only after `LIVENESS_CONFIRM_INTERVAL`
-    // elapsed, and never after `stop` or `Removed`. Multicast is
-    // intentionally not required — the assertions drive the pure
-    // [`LivenessState`] state machine through a controllable
-    // [`TestClock`] so the suite stays deterministic on every
-    // sandbox / CI host.
-    // ----------------------------------------------------------------
-
-    /// Mock clock the deterministic scheduler tests use to drive
-    /// the [`LivenessState`] state machine without depending on
-    /// wall-clock time. The clock holds a single `Instant` the
-    /// test bumps between assertions.
-    struct TestClock {
-        now: StdMutex<std::time::Instant>,
-    }
-
-    impl TestClock {
-        fn at(instant: std::time::Instant) -> Self {
-            Self {
-                now: StdMutex::new(instant),
-            }
-        }
-        fn advance(&self, delta: Duration) {
-            let mut now = self.now.lock().expect("clock");
-            *now += delta;
-        }
-    }
-
-    impl LivenessClock for TestClock {
-        fn now(&self) -> std::time::Instant {
-            *self.now.lock().expect("clock")
-        }
-    }
-
-    const TEST_FULLNAME: &str = "ClipVault-0123456789abcdef0123456789abcdef._clipvault._tcp.local.";
-
-    fn seed_resolved(state: &mut LivenessState, clock: &TestClock) {
-        on_service_resolved(state, TEST_FULLNAME, clock);
-    }
-
-    /// `process_event(ServiceResolved)` records the resolution
-    /// timestamp through [`on_service_resolved`] so the
-    /// scheduler waits another full `LIVENESS_CONFIRM_INTERVAL`
-    /// before issuing the next `verify`. The contract is
-    /// "liveness sustained past three former 120-second
-    /// windows": the previous bug was that the runtime flipped
-    /// the peer to `NotAvailable` after a 120-second wall-clock
-    /// window even though mDNS had not emitted a
-    /// `ServiceRemoved`. This test pins the new invariant on the
-    /// pure state machine.
-    #[test]
-    fn on_resolved_seeds_liveness_row_at_clock_now() {
-        let clock = TestClock::at(std::time::Instant::now());
-        let mut state = LivenessState::default();
-        on_service_resolved(&mut state, TEST_FULLNAME, &clock);
-        let row = state
-            .rows
-            .get(TEST_FULLNAME)
-            .copied()
-            .expect("row must exist after ServiceResolved");
-        assert_eq!(
-            row.last_action_at,
-            clock.now(),
-            "anchor must be recorded at the moment of ServiceResolved"
-        );
-        assert!(
-            row.verify_deadline.is_none(),
-            "fresh resolution must not leave a verify in flight"
-        );
-    }
-
-    /// `process_event(ServiceRemoved)` MUST drop the row so the
-    /// scheduler never schedules a verify for the fullname. The
-    /// `Removed` already flipped the peer to absent at the
-    /// runtime level (the browse loop pushes the event); a
-    /// phantom verify would only resurrect the cache entry the
-    /// daemon just flushed.
-    #[test]
-    fn on_removed_drops_the_liveness_row() {
-        let clock = TestClock::at(std::time::Instant::now());
-        let mut state = LivenessState::default();
-        on_service_resolved(&mut state, TEST_FULLNAME, &clock);
-        assert!(state.rows.contains_key(TEST_FULLNAME));
-        on_service_removed(&mut state, TEST_FULLNAME);
-        assert!(
-            !state.rows.contains_key(TEST_FULLNAME),
-            "ServiceRemoved must drop the row so no future verify is scheduled"
-        );
-    }
-
-    /// `step` MUST return an [`LivenessCommand::IssueVerify`]
-    /// for any row whose `last_action_at` is older than
-    /// `LIVENESS_CONFIRM_INTERVAL` AND whose `verify_deadline`
-    /// is `None`. The cadence is 60 s (the runtime now documents
-    /// this constant in `LIVENESS_CONFIRM_INTERVAL`); a
-    /// regression that reduces the cadence would re-introduce
-    /// the high-rate verify storm this change explicitly
-    /// forbids.
-    #[test]
-    fn step_issues_verify_after_confirm_interval() {
-        let clock = TestClock::at(std::time::Instant::now());
-        let mut state = LivenessState::default();
-        seed_resolved(&mut state, &clock);
-        // No verify due yet (last_action_at == clock.now()).
-        assert!(
-            step(
-                &mut state,
-                &clock,
-                LIVENESS_CONFIRM_INTERVAL,
-                LIVENESS_VERIFY_TIMEOUT
-            )
-            .is_empty(),
-            "no verify must be issued before LIVENESS_CONFIRM_INTERVAL elapses"
-        );
-        // Advance just past the minimum interval.
-        clock.advance(LIVENESS_CONFIRM_INTERVAL + Duration::from_secs(1));
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert_eq!(
-            commands,
-            vec![LivenessCommand::IssueVerify {
-                fullname: TEST_FULLNAME.to_string(),
-                token: VerifyToken {
-                    deadline: clock.now() + LIVENESS_VERIFY_TIMEOUT,
-                },
-            }],
-            "verify must be issued exactly once per due fullname"
-        );
-        let row = state
-            .rows
-            .get(TEST_FULLNAME)
-            .copied()
-            .expect("row must remain after a verify is issued");
-        assert!(
-            is_in_flight(&state, TEST_FULLNAME),
-            "row must carry an in-flight guard once the verify is issued"
-        );
-        assert_eq!(
-            row.verify_deadline.expect("deadline"),
-            clock.now() + LIVENESS_VERIFY_TIMEOUT,
-            "deadline must be set to the moment of issue plus the verify timeout"
-        );
-    }
-
-    /// The scheduler MUST NOT issue more than one verify per
-    /// fullname at a time: even if `last_action_at` keeps
-    /// drifting, the `verify_deadline` slot is the single
-    /// source of truth for "do we already have a probe in
-    /// flight?". A regression that drops the in-flight
-    /// short-circuit would hammer the link once per tick per
-    /// peer — which the `local-peer-presence-liveness` design
-    /// explicitly forbids.
-    #[test]
-    fn step_keeps_only_one_in_flight_verify_per_fullname() {
-        let clock = TestClock::at(std::time::Instant::now());
-        let mut state = LivenessState::default();
-        seed_resolved(&mut state, &clock);
-        clock.advance(LIVENESS_CONFIRM_INTERVAL + Duration::from_secs(1));
-        // First tick issues the verify.
-        let first = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert_eq!(first.len(), 1);
-        // Subsequent ticks while the deadline is still in the
-        // future must NOT add a second verify.
-        clock.advance(Duration::from_secs(1));
-        let second = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert!(
-            second.is_empty(),
-            "scheduler must keep exactly one in-flight verify per fullname"
-        );
-    }
-
-    /// The headline regression the architecture review caught:
-    /// `ServiceDaemon::verify` is asynchronous and a healthy
-    /// record refresh may NOT emit another `ServiceResolved`.
-    /// The scheduler MUST therefore release the in-flight slot
-    /// when the `verify_deadline` expires and then schedule the
-    /// next attempt a full interval later — even when no
-    /// `ServiceResolved` arrives in between.
-    #[test]
-    fn deadline_releases_in_flight_and_rearms_next_attempt() {
-        let clock = TestClock::at(std::time::Instant::now());
-        let mut state = LivenessState::default();
-        seed_resolved(&mut state, &clock);
-        clock.advance(LIVENESS_CONFIRM_INTERVAL + Duration::from_secs(1));
-        // First verify.
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert_eq!(commands.len(), 1, "first verify must fire on time");
-        assert!(is_in_flight(&state, TEST_FULLNAME));
-        // Advance 1 second: deadline has not yet expired.
-        clock.advance(Duration::from_secs(1));
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert!(
-            commands.is_empty(),
-            "verify slot must stay in flight until the deadline expires"
-        );
-        assert!(
-            is_in_flight(&state, TEST_FULLNAME),
-            "verify slot must remain reserved before the deadline"
-        );
-        // Cross the deadline. No `ServiceResolved` arrives.
-        clock.advance(LIVENESS_VERIFY_TIMEOUT);
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert!(
-            commands.is_empty(),
-            "deadline expiry must release the in-flight slot without issuing a phantom verify"
-        );
-        assert!(
-            !is_in_flight(&state, TEST_FULLNAME),
-            "in-flight slot must be cleared once the deadline expires"
-        );
-        // Advance the remaining 59 s of the cadence — the
-        // scheduler must issue a second verify without any
-        // `ServiceResolved` arriving in between.
-        clock.advance(LIVENESS_CONFIRM_INTERVAL);
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert_eq!(
-            commands,
-            vec![LivenessCommand::IssueVerify {
-                fullname: TEST_FULLNAME.to_string(),
-                token: VerifyToken {
-                    deadline: clock.now() + LIVENESS_VERIFY_TIMEOUT,
-                },
-            }],
-            "scheduler must rearm the verify a full interval after the previous issue"
-        );
-    }
-
-    /// `ServiceRemoved` MUST take absolute precedence: even if
-    /// a `verify` is in flight, the row is dropped and the
-    /// scheduler never schedules another `verify` until a fresh
-    /// `ServiceResolved` rebuilds it. A late `ServiceRemoved`
-    /// from the daemon that lands AFTER the row was rebuilt is
-    /// a no-op for the state machine.
-    #[test]
-    fn removal_during_verify_drops_row_and_prevents_future_verifies() {
-        let clock = TestClock::at(std::time::Instant::now());
-        let mut state = LivenessState::default();
-        seed_resolved(&mut state, &clock);
-        clock.advance(LIVENESS_CONFIRM_INTERVAL + Duration::from_secs(1));
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert_eq!(commands.len(), 1);
-        assert!(is_in_flight(&state, TEST_FULLNAME));
-        // `ServiceRemoved` arrives while the verify is still in
-        // flight: the row must disappear and no further verify
-        // may be scheduled.
-        on_service_removed(&mut state, TEST_FULLNAME);
-        assert!(
-            !state.rows.contains_key(TEST_FULLNAME),
-            "ServiceRemoved must drop the row even with a verify in flight"
-        );
-        clock.advance(LIVENESS_VERIFY_TIMEOUT + LIVENESS_CONFIRM_INTERVAL);
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert!(
-            commands.is_empty(),
-            "scheduler must NOT reanimate a removed fullname on later ticks"
-        );
-        // A fresh `ServiceResolved` rebuilds the row and
-        // resumes the cadence — but only after a full
-        // interval has elapsed from the new anchor.
-        on_service_resolved(&mut state, TEST_FULLNAME, &clock);
-        assert!(state.rows.contains_key(TEST_FULLNAME));
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert!(
-            commands.is_empty(),
-            "fresh resolution must reset the cadence; no verify due yet"
-        );
-    }
-
-    /// `on_service_resolved` supersedes any pending verify: if
-    /// the daemon emits a fresh resolution while a verify is in
-    /// flight, the in-flight slot is cleared and the cadence
-    /// is reset to a full `LIVENESS_CONFIRM_INTERVAL` from the
-    /// new anchor. The scheduler must not double-confirm a peer
-    /// that just refreshed its record.
-    #[test]
-    fn on_resolved_clears_in_flight_and_rearms_cadence() {
-        let clock = TestClock::at(std::time::Instant::now());
-        let mut state = LivenessState::default();
-        seed_resolved(&mut state, &clock);
-        clock.advance(LIVENESS_CONFIRM_INTERVAL + Duration::from_secs(1));
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert_eq!(commands.len(), 1);
-        assert!(is_in_flight(&state, TEST_FULLNAME));
-        // Daemon emits a fresh `ServiceResolved` while the
-        // verify is still in flight.
-        on_service_resolved(&mut state, TEST_FULLNAME, &clock);
-        assert!(
-            !is_in_flight(&state, TEST_FULLNAME),
-            "fresh resolution must clear the in-flight slot"
-        );
-        // No verify is due until the full interval elapses
-        // from the new anchor.
-        clock.advance(LIVENESS_CONFIRM_INTERVAL / 2);
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert!(
-            commands.is_empty(),
-            "fresh resolution must reset the cadence to a full interval"
-        );
-        clock.advance(LIVENESS_CONFIRM_INTERVAL / 2 + Duration::from_secs(1));
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert_eq!(
-            commands.len(),
-            1,
-            "verify must fire a full interval after the new anchor"
-        );
-    }
-
-    /// `step` MUST not panic on an empty state and must not
-    /// issue commands when the row is gone. A regression that
-    /// retained the row through `ServiceRemoved` would issue a
-    /// phantom `verify` here.
-    #[test]
-    fn step_with_no_rows_returns_no_commands() {
-        let clock = TestClock::at(std::time::Instant::now());
-        let mut state = LivenessState::default();
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        assert!(commands.is_empty());
-    }
-
-    /// `step` MUST attach a [`VerifyToken`] to each
-    /// [`LivenessCommand::IssueVerify`] and the token MUST equal
-    /// the row's `verify_deadline`. The scheduler revalidates
-    /// the token under lock before calling
-    /// [`mdns_sd::ServiceDaemon::verify`] so a snapshot
-    /// invalidated by a later [`on_service_resolved`] /
-    /// [`on_service_removed`] never reaches the wire.
-    #[test]
-    fn issue_verify_command_carries_token_matching_row_deadline() {
-        let clock = TestClock::at(std::time::Instant::now());
-        let mut state = LivenessState::default();
-        seed_resolved(&mut state, &clock);
-        clock.advance(LIVENESS_CONFIRM_INTERVAL + Duration::from_secs(1));
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        let command = commands
-            .first()
-            .expect("step must emit one IssueVerify for a due row");
-        let LivenessCommand::IssueVerify { fullname, token } = command;
-        assert_eq!(fullname, TEST_FULLNAME);
-        let row = state
-            .rows
-            .get(TEST_FULLNAME)
-            .copied()
-            .expect("row must remain after step");
-        assert_eq!(
-            row.verify_deadline,
-            Some(token.deadline),
-            "token MUST equal the row's verify_deadline so the dispatch path can revalidate"
-        );
-    }
-
-    /// A `ServiceRemoved` that arrives between `step` and the
-    /// dispatch MUST invalidate the snapshotted command. The
-    /// scheduler revalidates the token under lock; with no row
-    /// left in [`LivenessState`] the lookup returns `None`, the
-    /// token does not match, and the verify is discarded.
-    #[test]
-    fn removed_between_step_and_dispatch_invalidates_command() {
-        let clock = TestClock::at(std::time::Instant::now());
-        let mut state = LivenessState::default();
-        seed_resolved(&mut state, &clock);
-        clock.advance(LIVENESS_CONFIRM_INTERVAL + Duration::from_secs(1));
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        let command = commands
-            .first()
-            .expect("step must emit one IssueVerify for a due row")
-            .clone();
-        // `ServiceRemoved` lands BEFORE the scheduler
-        // revalidates the token.
-        on_service_removed(&mut state, TEST_FULLNAME);
-        let LivenessCommand::IssueVerify { fullname, token } = &command;
-        let token_still_valid =
-            state.rows.get(fullname).and_then(|row| row.verify_deadline) == Some(token.deadline);
-        assert!(
-            !token_still_valid,
-            "removed row must invalidate the snapshotted command"
-        );
-    }
-
-    /// A fresh `ServiceResolved` that arrives between `step` and
-    /// the dispatch MUST invalidate the snapshotted command.
-    /// The browse loop's [`on_service_resolved`] clears the
-    /// `verify_deadline` (and advances `last_action_at`), so the
-    /// token's deadline no longer matches the row.
-    #[test]
-    fn resolved_between_step_and_dispatch_invalidates_command() {
-        let clock = TestClock::at(std::time::Instant::now());
-        let mut state = LivenessState::default();
-        seed_resolved(&mut state, &clock);
-        clock.advance(LIVENESS_CONFIRM_INTERVAL + Duration::from_secs(1));
-        let commands = step(
-            &mut state,
-            &clock,
-            LIVENESS_CONFIRM_INTERVAL,
-            LIVENESS_VERIFY_TIMEOUT,
-        );
-        let command = commands
-            .first()
-            .expect("step must emit one IssueVerify for a due row")
-            .clone();
-        let stale_deadline = match command {
-            LivenessCommand::IssueVerify { token, .. } => token.deadline,
-        };
-        // Advance the clock so the next `ServiceResolved`
-        // produces a clearly different `verify_deadline` even if
-        // the scheduler raced to dispatch immediately after.
-        clock.advance(Duration::from_secs(1));
-        on_service_resolved(&mut state, TEST_FULLNAME, &clock);
-        let token_still_valid = state
-            .rows
-            .get(TEST_FULLNAME)
-            .and_then(|row| row.verify_deadline)
-            == Some(stale_deadline);
-        assert!(
-            !token_still_valid,
-            "fresh resolution must invalidate the snapshotted command"
-        );
-    }
-
-    /// `cancel` MUST stop the scheduler thread without leaving a
-    /// late `verify` in flight. The test runs the production
-    /// `step` + token-revalidation dispatch loop on a dedicated
-    /// thread using the same [`TestClock`] the state machine
-    /// consumes, so the seeded row is REALLY due the moment the
-    /// scheduler wakes up. The dispatched log is the source of
-    /// truth: any further dispatch after cancel would surface as
-    /// a fresh entry, regardless of which clock advanced during
-    /// the test.
-    #[test]
-    fn cancel_prevents_further_verify_commands() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        // Shared clock so setup and the scheduler tick see the
-        // same instant. Production uses `SystemClock`; the
-        // deterministic test must not mix the two — the row's
-        // "due" status must be visible to the loop on the very
-        // first tick, not "soon" relative to wall-clock time.
-        let clock = Arc::new(TestClock::at(std::time::Instant::now()));
-        let liveness: Arc<StdMutex<LivenessState>> =
-            Arc::new(StdMutex::new(LivenessState::default()));
-        let dispatched: Arc<StdMutex<Vec<LivenessCommand>>> = Arc::new(StdMutex::new(Vec::new()));
-        // Pre-populate a row that is due RIGHT NOW so the loop
-        // must emit exactly one verify on its first tick if
-        // cancel does not short-circuit the dispatch.
-        {
-            let mut state = liveness.lock().expect("liveness");
-            seed_resolved(&mut state, clock.as_ref());
-            clock.advance(LIVENESS_CONFIRM_INTERVAL + Duration::from_secs(1));
-        }
-        let cancel_for_thread = Arc::clone(&cancel);
-        let liveness_for_thread = Arc::clone(&liveness);
-        let clock_for_thread = Arc::clone(&clock);
-        let dispatched_for_thread = Arc::clone(&dispatched);
-        let handle = thread::spawn(move || {
-            while !cancel_for_thread.load(Ordering::Acquire) {
-                let commands: Vec<LivenessCommand> = {
-                    let mut state = liveness_for_thread.lock().expect("liveness");
-                    step(
-                        &mut state,
-                        clock_for_thread.as_ref(),
-                        LIVENESS_CONFIRM_INTERVAL,
-                        LIVENESS_VERIFY_TIMEOUT,
-                    )
-                };
-                for command in commands {
-                    let LivenessCommand::IssueVerify { fullname, token } = command;
-                    // Mirror the productive revalidation: the
-                    // snapshot is only dispatched if the row
-                    // still carries the token.
-                    let token_still_valid = {
-                        let state = liveness_for_thread.lock().expect("liveness");
-                        state
-                            .rows
-                            .get(&fullname)
-                            .and_then(|row| row.verify_deadline)
-                            == Some(token.deadline)
-                    };
-                    if token_still_valid {
-                        dispatched_for_thread
-                            .lock()
-                            .expect("dispatched")
-                            .push(LivenessCommand::IssueVerify { fullname, token });
-                    }
-                }
-                thread::park_timeout(LIVENESS_TICK);
-            }
-        });
-        // Allow the scheduler a tick to consume the seeded
-        // anchor. The dispatched log MUST record exactly one
-        // verify for the seeded row before cancel arrives.
-        let wait_deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while std::time::Instant::now() < wait_deadline {
-            if !dispatched.lock().expect("dispatched").is_empty() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let log_before_cancel = dispatched.lock().expect("dispatched").clone();
-        assert_eq!(
-            log_before_cancel.len(),
-            1,
-            "scheduler must dispatch the seeded due row before cancel"
-        );
-        // Signal cancel; the thread must exit on the next
-        // cancel check (well under 2 s).
-        let join_start = std::time::Instant::now();
-        cancel.store(true, Ordering::Release);
-        let _ = handle.join();
-        assert!(
-            join_start.elapsed() < Duration::from_secs(2),
-            "scheduler must exit within a bounded window after cancel"
-        );
-        // The thread is gone: any further dispatch would have
-        // been impossible. The dispatched log remains pinned
-        // at exactly one entry — the seeded verify — so the
-        // "no callback late after stop" contract holds
-        // regardless of what wall-clock time elapsed.
-        let log_after_cancel = dispatched.lock().expect("dispatched").clone();
-        assert_eq!(
-            log_after_cancel.len(),
-            log_before_cancel.len(),
-            "cancel must prevent any further verify dispatch"
-        );
-        let state = liveness.lock().expect("liveness");
-        assert!(
-            state.rows.contains_key(TEST_FULLNAME),
-            "the seeded row must still be tracked after cancel"
-        );
     }
 }
