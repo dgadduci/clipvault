@@ -118,7 +118,9 @@ struct AdapterState {
 struct MdnsHandle {
     daemon: mdns_sd::ServiceDaemon,
     fullname: String,
+    announced_service: Arc<Mutex<AnnouncedService>>,
     thread: Option<JoinHandle<()>>,
+    announcement_thread: Option<JoinHandle<()>>,
     cancel: Arc<AtomicBool>,
     /// Idempotency guard so the ordered shutdown runs at most
     /// once even when both the explicit `stop` path and `Drop`
@@ -136,6 +138,32 @@ struct MdnsHandle {
 /// hung or the channel is wedged.
 const UNREGISTER_WAIT: Duration = Duration::from_millis(750);
 
+/// `mdns-sd` gives SRV and address records a 120-second host TTL. Reannounce
+/// well before that window so a temporary missed cache-refresh query cannot
+/// make two otherwise healthy peers expire each other simultaneously.
+const ANNOUNCEMENT_REFRESH_INTERVAL: Duration = Duration::from_secs(45);
+
+/// The local record the adapter most recently published. The refresh worker
+/// and `reconfigure` share this lock so a queued refresh cannot reannounce a
+/// discovery-only or stale-port record after the pairing listener changes it.
+struct AnnouncedService {
+    info: mdns_sd::ServiceInfo,
+}
+
+impl AnnouncedService {
+    fn new(info: mdns_sd::ServiceInfo) -> Self {
+        Self { info }
+    }
+
+    fn snapshot(&self) -> mdns_sd::ServiceInfo {
+        self.info.clone()
+    }
+
+    fn replace(&mut self, info: mdns_sd::ServiceInfo) {
+        self.info = info;
+    }
+}
+
 impl MdnsHandle {
     /// Run the ordered shutdown exactly once.
     ///
@@ -143,7 +171,7 @@ impl MdnsHandle {
     /// `local-peer-discovery/design.md` §"Descubrimiento, presencia
     /// y compatibilidad":
     ///
-    /// 1. flip the cancel flag so the browse loop wakes up early;
+    /// 1. flip the cancel flag and join the announcement worker;
     /// 2. `unregister` the published `fullname` so remote browsers
     ///    receive `ServiceRemoved` and flip the peer to
     ///    `NotAvailable` without waiting for the TTL (~120 s);
@@ -162,6 +190,10 @@ impl MdnsHandle {
         self.shutdown_started.set(true);
 
         self.cancel.store(true, Ordering::Release);
+        if let Some(handle) = self.announcement_thread.take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
 
         // 1. Send the goodbye packet. `mdns-sd` documents
         //    `unregister` as the graceful shutdown of a service
@@ -252,22 +284,9 @@ impl MdnsPeerDiscoveryAdapter {
             warn!(error = %error, "failed to start mdns-sd daemon");
             MdnsAdapterError::Register
         })?;
-        let (instance, hostname, fullname) = service_names(advertisement);
-        let properties = build_txt_properties(advertisement);
-        let service_info = mdns_sd::ServiceInfo::new(
-            SERVICE_TYPE,
-            &instance,
-            &hostname,
-            "",
-            port,
-            &properties[..],
-        )
-        .map_err(|error| {
-            warn!(error = %error, "failed to build mdns-sd service info");
-            MdnsAdapterError::ServiceInfo
-        })?
-        .enable_addr_auto();
-        daemon.register(service_info).map_err(|error| {
+        let service_info = build_service_info(advertisement, port)?;
+        let fullname = service_info.get_fullname().to_string();
+        daemon.register(service_info.clone()).map_err(|error| {
             warn!(error = %error, "failed to register mdns-sd service");
             MdnsAdapterError::Register
         })?;
@@ -283,6 +302,10 @@ impl MdnsPeerDiscoveryAdapter {
         let peer_addresses: Arc<Mutex<HashMap<String, std::net::SocketAddr>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let peer_addresses_for_thread = Arc::clone(&peer_addresses);
+        let announced_service = Arc::new(Mutex::new(AnnouncedService::new(service_info)));
+        let announced_service_for_thread = Arc::clone(&announced_service);
+        let daemon_for_announcement = daemon.clone();
+        let cancel_for_announcement = Arc::clone(&cancel);
         // The browse loop runs on a dedicated thread; the
         // runtime passes the sink as an `Arc` so the closure
         // can move it into the thread without leaking the
@@ -302,11 +325,28 @@ impl MdnsPeerDiscoveryAdapter {
                 warn!(error = %error, "failed to spawn mdns-sd browse thread");
                 MdnsAdapterError::SpawnThread
             })?;
+        let announcement_thread = thread::Builder::new()
+            .name("clipvault-peer-discovery-announcement".to_string())
+            .spawn(move || {
+                run_announcement_refresh(
+                    daemon_for_announcement,
+                    announced_service_for_thread,
+                    cancel_for_announcement,
+                );
+            })
+            .map_err(|error| {
+                warn!(error = %error, "failed to spawn mdns-sd announcement thread");
+                cancel.store(true, Ordering::Release);
+                let _ = daemon.shutdown();
+                MdnsAdapterError::SpawnThread
+            })?;
         *self.state.lock().expect("state lock") = AdapterState {
             daemon: Some(MdnsHandle {
                 daemon,
                 fullname,
+                announced_service,
                 thread: Some(thread),
+                announcement_thread: Some(announcement_thread),
                 cancel,
                 shutdown_started: Cell::new(false),
             }),
@@ -366,37 +406,29 @@ impl MdnsPeerDiscoveryAdapter {
         // one-way macOS/Linux discovery. `service_names` creates a
         // label-safe `clipvault-<peer_id>.local.` hostname so every
         // browser can resolve the SRV/TXT/A(AAA) record set.
-        let (instance, hostname, new_fullname) = service_names(advertisement);
-        let properties = build_txt_properties(advertisement);
-        let service_info = mdns_sd::ServiceInfo::new(
-            SERVICE_TYPE,
-            &instance,
-            &hostname,
-            "",
-            port,
-            &properties[..],
-        )
-        .map_err(|error| {
-            warn!(error = %error, "failed to build mdns-sd service info");
-            MdnsAdapterError::ServiceInfo
-        })?
-        .enable_addr_auto();
+        let service_info = build_service_info(advertisement, port)?;
+        let new_fullname = service_info.get_fullname().to_string();
         // An initial discovery-only record uses port 0. Replacing
         // it in-place with the same fullname is not consistently
         // re-resolved by every DNS-SD browser, leaving a peer
         // marked present but with an obsolete `IP:0` route. Always
         // withdraw first so the following registration publishes a
         // fresh SRV record with the real pairing listener port.
+        let mut announced_service = handle.announced_service.lock().expect("announced service");
         match handle.daemon.unregister(&handle.fullname) {
             Ok(receiver) => {
                 let _ = receiver.recv_timeout(UNREGISTER_WAIT);
             }
             Err(_) => warn!("mdns-sd unregister during reconfigure failed; continuing"),
         }
-        handle.daemon.register(service_info).map_err(|error| {
-            warn!(error = %error, "failed to register mdns-sd service");
-            MdnsAdapterError::Register
-        })?;
+        handle
+            .daemon
+            .register(service_info.clone())
+            .map_err(|error| {
+                warn!(error = %error, "failed to register mdns-sd service");
+                MdnsAdapterError::Register
+            })?;
+        announced_service.replace(service_info);
         handle.fullname = new_fullname;
         debug!(port, "mdns-sd adapter reconfigured");
         Ok(())
@@ -527,6 +559,58 @@ fn map_install_error(error: MdnsAdapterError) -> AdapterError {
         MdnsAdapterError::ServiceInfo => AdapterError::MalformedAdvertisement,
         MdnsAdapterError::Register | MdnsAdapterError::Browse | MdnsAdapterError::SpawnThread => {
             AdapterError::MulticastUnavailable
+        }
+    }
+}
+
+/// Build the exact service record the adapter registers and later reannounces.
+/// Keeping construction in one place ensures the periodic worker always
+/// republishes the same capability, port and privacy-bounded TXT metadata that
+/// the install or reconfigure path selected.
+fn build_service_info(
+    advertisement: &DiscoveryAdvertisement,
+    port: u16,
+) -> Result<mdns_sd::ServiceInfo, MdnsAdapterError> {
+    let (instance, hostname, _) = service_names(advertisement);
+    let properties = build_txt_properties(advertisement);
+    mdns_sd::ServiceInfo::new(
+        SERVICE_TYPE,
+        &instance,
+        &hostname,
+        "",
+        port,
+        &properties[..],
+    )
+    .map(|info| info.enable_addr_auto())
+    .map_err(|error| {
+        warn!(error = %error, "failed to build mdns-sd service info");
+        MdnsAdapterError::ServiceInfo
+    })
+}
+
+/// Reannounce the local service before its host-record TTL expires. This is
+/// intentionally publication-only: unlike `verify`, registration neither
+/// queries remote peers nor flushes their cached records when a packet is
+/// missed.
+fn run_announcement_refresh(
+    daemon: mdns_sd::ServiceDaemon,
+    announced_service: Arc<Mutex<AnnouncedService>>,
+    cancel: Arc<AtomicBool>,
+) {
+    while !cancel.load(Ordering::Acquire) {
+        thread::park_timeout(ANNOUNCEMENT_REFRESH_INTERVAL);
+        if cancel.load(Ordering::Acquire) {
+            break;
+        }
+        // Hold the state lock through enqueueing `register` so `reconfigure`
+        // cannot queue a new record and then be followed by this worker's
+        // stale snapshot. `ServiceDaemon` serialises commands in send order.
+        let refresh_result = {
+            let service = announced_service.lock().expect("announced service");
+            daemon.register(service.snapshot())
+        };
+        if refresh_result.is_err() {
+            warn!("mdns-sd announcement refresh failed; will retry");
         }
     }
 }
@@ -789,6 +873,32 @@ mod tests {
             1,
             "discovery_only",
         )
+    }
+
+    #[test]
+    fn announced_service_replaces_the_record_used_by_future_refreshes() {
+        let discovery = build_service_info(&ad(), DISCOVERY_ONLY_PORT).expect("discovery info");
+        let mut announced = AnnouncedService::new(discovery);
+        let pairing_fingerprint = "a".repeat(64);
+        let pairing = DiscoveryAdvertisement::new_pairing(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            &pairing_fingerprint,
+            "Studio",
+            1,
+        );
+        announced.replace(build_service_info(&pairing, 65000).expect("pairing info"));
+
+        let refreshed = announced.snapshot();
+        assert_eq!(refreshed.get_port(), 65000);
+        assert_eq!(
+            refreshed.get_property_val_str(TXT_CAPABILITY),
+            Some("pairing")
+        );
+        assert_eq!(
+            refreshed.get_property_val_str(TXT_PAIRING_FINGERPRINT),
+            Some(pairing_fingerprint.as_str())
+        );
     }
 
     #[test]
