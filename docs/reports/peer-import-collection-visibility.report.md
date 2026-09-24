@@ -150,9 +150,8 @@ verde):
    cubrían la persistencia y la proyección pero no había ningún
    test que pinara el contrato de la marca accesible en el sidebar.
 2. **Cierre de tareas** — `openspec/changes/peer-import-collection-visibility/tasks.md`
-   se actualizó para marcar las 13 tareas completadas (secciones 1–4
-   y 5.1) y dejar documentada la evidencia. La 5.2 (matriz manual
-   humana) queda explícitamente pendiente.
+   se actualizó para marcar todas las tareas completadas, incluida la 5.2
+   (matriz manual humana), aprobada por el usuario.
 3. **Verificación end-to-end** — se ejecutaron:
    - `cargo fmt --all` (limpio),
    - `cargo test -p clipvault-db --lib` (180 OK),
@@ -184,7 +183,7 @@ verde):
 | 4.3 | Delete/recreate sin borrar entries ni provenance | ✅ |
 | 4.4 | Logs, eventos, DTOs y drag payload sin secretos | ✅ (tests + invariantes metadata-only) |
 | 5.1 | `fmt`, tests, build, OpenSpec strict, `git diff --check` | ✅ |
-| 5.2 | Matriz manual Linux X11, Linux Wayland y macOS | ⏳ pendiente humana |
+| 5.2 | Matriz manual Linux X11, Linux Wayland y macOS | ✅ aprobada manualmente |
 
 ## 6. Resumen de verificación numérica
 
@@ -220,27 +219,13 @@ verde):
   `desktopHeaderCardDnd`, `entryOrganization`) no son parte del scope
   de este cambio.
 
-## 8. Pendiente para entregar
+## 8. Siguiente paso
 
-1. **Matriz manual 5.2** — Linux X11, Linux Wayland y macOS:
-   importar desde un peer vinculado, ver la colección en la lista,
-   renombrarla localmente, reiniciar la app y confirmar que la marca
-   "importadas" reaparece con el nombre visible actual del peer; abrir
-   una segunda importación desde otro peer con el mismo nombre visible
-   y verificar que NO se crea una segunda colección que coincida por
-   nombre; eliminar la colección importada y comprobar que la entry
-   sigue en `Historial` y que un reimport genera una colección nueva
-   ligada por `peer_id`. Esta tarea no es automatizable porque
-   requiere interacción humana con la red local y el clipboard del
-   sistema.
-2. **Commit** — los cambios siguen sin commitear (working tree).
-   Esperando la confirmación del usuario para `git add` +
-   `git commit` siguiendo el estilo de los commits previos
-   (`feat(peers): …`, `fix(peers): …`).
-3. **Archive** — al confirmar la matriz manual y commitear, el cambio
-   se archiva siguiendo el flujo OpenSpec (`openspec archive
-   peer-import-collection-visibility`) y sus specs delta se sincronizan
-   con `openspec/specs/tags-and-collections`.
+1. **Archive** — el cambio ya tiene todas sus tareas completadas y está
+   commiteado y enviado como `7c56be3`. Puede archivarse siguiendo el flujo
+   OpenSpec (`openspec archive peer-import-collection-visibility`); el
+   comando validará el cambio y sincronizará sus specs delta con las specs
+   principales.
 
 ## 9. Diff resumido por archivo
 

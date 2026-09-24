@@ -85,7 +85,7 @@
   - Los 13 fallos preexistentes en `bootstrap` y el fallo de
     `collectionColorsBridge` no están relacionados con este cambio
     (reproducidos sin los parches).
-- [ ] 5.2 Ejecutar la matriz manual Linux X11, Linux Wayland y macOS:
+- [x] 5.2 Ejecutar la matriz manual Linux X11, Linux Wayland y macOS:
   importar, ver la colección, renombrarla, reiniciar y confirmar origen,
-  múltiples peers y no mutación del clipboard/assets. Pendiente de
-  validación humana.
+  múltiples peers y no mutación del clipboard/assets. Aprobada mediante
+  validación manual humana.
