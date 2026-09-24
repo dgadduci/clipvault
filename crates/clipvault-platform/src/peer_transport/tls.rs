@@ -55,8 +55,9 @@ use super::wire::{compute_sas, PairingMessage};
 #[cfg(feature = "local-peer-pairing-tls")]
 use super::{
     derive_cert_fingerprint, PairingAdvertisementSink, PeerTransportObservation, TransportError,
-    TransportSink, HISTORY_MAX_RESPONSE_BYTES, HISTORY_WIRE_VERSION,
-    PAIRING_MAX_IN_FLIGHT_SESSIONS, PAIRING_WIRE_VERSION,
+    TransportSink, FETCH_TEXT_MAX_BODY_BYTES, FETCH_TEXT_MAX_RESPONSE_BYTES,
+    HISTORY_MAX_RESPONSE_BYTES, HISTORY_WIRE_VERSION, PAIRING_MAX_IN_FLIGHT_SESSIONS,
+    PAIRING_WIRE_VERSION,
 };
 
 /// Bind address the production listener uses. The production
@@ -626,13 +627,15 @@ pub fn install_with_material_and_resolver(
     // here means a regression that routes a bind through this
     // helper (e.g. a test fixture or a future refactor) still
     // serves the very first inbound `ListRecentText` envelope
-    // without falling back to `not_available`.
-    let preserved_handler = transport
-        .state
-        .lock()
-        .expect("state lock")
-        .history_handler
-        .clone();
+    // without falling back to `not_available`. The same
+    // forwarding pattern applies to the `peer-text-import`
+    // change: preserve any cached `FetchTextHostHandler` so the
+    // legacy helper still serves the first inbound `FetchText`
+    // envelope.
+    let state_guard = transport.state.lock().expect("state lock");
+    let preserved_handler = state_guard.history_handler.clone();
+    let preserved_fetch_handler = state_guard.fetch_handler.clone();
+    drop(state_guard);
     install_with_material_resolver_and_history(
         transport,
         material,
@@ -641,6 +644,7 @@ pub fn install_with_material_and_resolver(
         sink,
         resolver,
         preserved_handler,
+        preserved_fetch_handler,
     )
 }
 
@@ -660,6 +664,7 @@ pub fn install_with_material_resolver_and_history(
     sink: Arc<dyn TransportSink>,
     resolver: Option<Arc<dyn super::RemotePeerResolver>>,
     history_handler: Option<Arc<dyn super::HistoryHostHandler>>,
+    fetch_handler: Option<Arc<dyn super::FetchTextHostHandler>>,
 ) -> Result<u16, TransportError> {
     if transport
         .running
@@ -742,6 +747,7 @@ pub fn install_with_material_resolver_and_history(
             Arc::clone(&state.next_session_id)
         };
         let history_handler_for_task = history_handler.as_ref().map(Arc::clone);
+        let fetch_handler_for_task = fetch_handler.as_ref().map(Arc::clone);
         let accept_handle = runtime.spawn(async move {
             run_accept_loop(
                 listener,
@@ -758,6 +764,7 @@ pub fn install_with_material_resolver_and_history(
                 inbound_sessions_for_task,
                 next_session_id_for_task,
                 history_handler_for_task,
+                fetch_handler_for_task,
             )
             .await;
         });
@@ -775,6 +782,7 @@ pub fn install_with_material_resolver_and_history(
         state.resolver = resolver;
         state.session_sink = Some(sink);
         state.history_handler = history_handler;
+        state.fetch_handler = fetch_handler;
         // The handshake pin lookup is the single source of
         // truth shared between the verifier, the inbound health
         // handler and `arm_pin` / `disarm_pin`. The install path
@@ -1226,6 +1234,12 @@ async fn run_accept_loop(
     // task copies the `Option<Arc<_>>` per iteration so the
     // hot-swap actually reaches the listener).
     history_handler: Option<Arc<dyn super::HistoryHostHandler>>,
+    // Host-side fetch handler the listener drives when an
+    // authenticated peer asks for `fetch_text`. The handler is
+    // installed by the bootstrap through `install_fetch_handler`
+    // and follows the same hot-swap pattern as the history
+    // handler.
+    fetch_handler: Option<Arc<dyn super::FetchTextHostHandler>>,
 ) {
     loop {
         if cancel.load(Ordering::Acquire) {
@@ -1257,6 +1271,7 @@ async fn run_accept_loop(
         let inbound_sessions_for_session = Arc::clone(&inbound_sessions);
         let next_session_id_for_session = Arc::clone(&next_session_id);
         let history_handler_for_session = history_handler.as_ref().map(Arc::clone);
+        let fetch_handler_for_session = fetch_handler.as_ref().map(Arc::clone);
         tokio::spawn(async move {
             let outcome = handle_connection(
                 stream,
@@ -1274,6 +1289,7 @@ async fn run_accept_loop(
                 inbound_sessions_for_session,
                 next_session_id_for_session,
                 history_handler_for_session,
+                fetch_handler_for_session,
             )
             .await;
             if !matches!(outcome, ConnectionOutcome::Completed) {
@@ -1322,6 +1338,7 @@ async fn handle_connection(
     inbound_sessions: InboundSessionsMap,
     next_session_id: Arc<std::sync::atomic::AtomicU64>,
     history_handler: Option<Arc<dyn super::HistoryHostHandler>>,
+    fetch_handler: Option<Arc<dyn super::FetchTextHostHandler>>,
 ) -> ConnectionOutcome {
     let _ = peer_addr;
     let tls_stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
@@ -1368,6 +1385,7 @@ async fn handle_connection(
             inbound_sessions,
             next_session_id,
             history_handler,
+            fetch_handler,
         ),
     )
     .await;
@@ -1426,6 +1444,7 @@ async fn run_pairing_session<IO>(
     inbound_sessions: InboundSessionsMap,
     next_session_id: Arc<std::sync::atomic::AtomicU64>,
     history_handler: Option<Arc<dyn super::HistoryHostHandler>>,
+    fetch_handler: Option<Arc<dyn super::FetchTextHostHandler>>,
 ) -> Result<(), String>
 where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1440,7 +1459,9 @@ where
     //    pin path the health handler uses and is only served when
     //    the host handler the bootstrap installed returned a
     //    page. `None` collapses to `ListRecentTextUnavailable`
-    //    with `reason = not_available`.
+    //    with `reason = not_available`. The `FetchText` envelope
+    //    is gated to the `peer-text-import` change and follows
+    //    the same auth + pin path.
     let first_message = read_envelope(&mut stream).await?;
     match first_message {
         PairingMessage::Health { version, peer_id } => {
@@ -1470,6 +1491,23 @@ where
                 &peer_cert_slot,
                 handshake_pins,
                 history_handler,
+            )
+            .await;
+        }
+        PairingMessage::FetchText {
+            version,
+            peer_id,
+            remote_entry_id,
+        } => {
+            return handle_fetch_text_session(
+                &mut stream,
+                version,
+                peer_id,
+                remote_entry_id,
+                &local_peer_id,
+                &peer_cert_slot,
+                handshake_pins,
+                fetch_handler,
             )
             .await;
         }
@@ -1868,6 +1906,131 @@ where
         None => PairingMessage::ListRecentTextUnavailable {
             version: HISTORY_WIRE_VERSION,
             peer_id: local_peer_id.to_string(),
+            reason: "not_available".to_string(),
+        },
+    };
+    write_envelope(stream, &reply).await?;
+    Ok(())
+}
+
+/// Handle a `FetchText` envelope the listener accepted. The handler
+/// mirrors the auth path the health probe uses: the remote cert's
+/// SPKI must derive the declared `peer_id` and the runtime must
+/// have armed the matching pin before any byte crosses the
+/// application layer. The host-side body is delegated to the
+/// [`FetchTextHostHandler`] the bootstrap installed; a `None`
+/// handler collapses to [`PairingMessage::FetchTextUnavailable`]
+/// with `reason = not_available` so a future host that has not
+/// enabled the change still speaks the wire contract. The handler
+/// re-validates the [`FETCH_TEXT_MAX_BODY_BYTES`] cap on the body
+/// before writing the envelope so a drifted handler cannot
+/// accidentally stream more than the documented limit.
+#[cfg(feature = "local-peer-pairing-tls")]
+async fn handle_fetch_text_session<IO>(
+    stream: &mut TlsStream<IO>,
+    version: u32,
+    peer_id: String,
+    remote_entry_id: String,
+    local_peer_id: &str,
+    peer_cert_slot: &Arc<PeerCertSlot>,
+    handshake_pins: Arc<HandshakePinLookup>,
+    fetch_handler: Option<Arc<dyn super::FetchTextHostHandler>>,
+) -> Result<(), String>
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if version != HISTORY_WIRE_VERSION {
+        return Err("incompatible wire version".to_string());
+    }
+    let remote_cert_der = peer_cert_slot
+        .take()
+        .ok_or_else(|| "remote peer cert not delivered".to_string())?;
+    let remote_public_key = extract_ed25519_public_key_from_cert(&remote_cert_der)
+        .ok_or_else(|| "remote peer cert does not embed an Ed25519 SPKI".to_string())?;
+    let remote_peer_id = super::peer_id_from_public_key(&{
+        let mut key = [0u8; 32];
+        if remote_public_key.len() != 32 {
+            return Err("remote public key has invalid length".to_string());
+        }
+        key.copy_from_slice(&remote_public_key);
+        key
+    });
+    if peer_id != remote_peer_id {
+        return Err("fetch_text peer_id does not match SPKI".to_string());
+    }
+    let presented = derive_cert_fingerprint(&remote_cert_der);
+    let pin = handshake_pins.lookup(&remote_peer_id);
+    match pin {
+        Some(expected) if expected == presented => {}
+        Some(_) => return Err("key mismatch".to_string()),
+        None => return Err("unknown peer".to_string()),
+    }
+
+    // `fetch_handler` is `None` only on hosts that did not ship
+    // the `peer-text-import` change yet; the reply is
+    // `FetchTextUnavailable { reason: not_available }` so the
+    // wire contract stays stable across builds.
+    let reply = match fetch_handler {
+        Some(handler) => {
+            match handler.fetch_text(&remote_peer_id, &remote_entry_id) {
+                super::HostFetchResponse::Ok {
+                    title,
+                    content_type,
+                    body,
+                } => {
+                    if body.len() > FETCH_TEXT_MAX_BODY_BYTES {
+                        // Defence in depth: the handler contract
+                        // pins the cap, but the listener refuses
+                        // anything larger as a safety net.
+                        PairingMessage::FetchTextUnavailable {
+                            version: HISTORY_WIRE_VERSION,
+                            peer_id: local_peer_id.to_string(),
+                            remote_entry_id,
+                            reason: "body_too_large".to_string(),
+                        }
+                    } else {
+                        PairingMessage::FetchTextAck {
+                            version: HISTORY_WIRE_VERSION,
+                            peer_id: local_peer_id.to_string(),
+                            remote_entry_id,
+                            title,
+                            content_type,
+                            body,
+                        }
+                    }
+                }
+                super::HostFetchResponse::NotFound => PairingMessage::FetchTextUnavailable {
+                    version: HISTORY_WIRE_VERSION,
+                    peer_id: local_peer_id.to_string(),
+                    remote_entry_id,
+                    reason: "not_found".to_string(),
+                },
+                super::HostFetchResponse::NotTransferable => PairingMessage::FetchTextUnavailable {
+                    version: HISTORY_WIRE_VERSION,
+                    peer_id: local_peer_id.to_string(),
+                    remote_entry_id,
+                    reason: "not_transferable".to_string(),
+                },
+                super::HostFetchResponse::BodyTooLarge => PairingMessage::FetchTextUnavailable {
+                    version: HISTORY_WIRE_VERSION,
+                    peer_id: local_peer_id.to_string(),
+                    remote_entry_id,
+                    reason: "body_too_large".to_string(),
+                },
+                super::HostFetchResponse::PersistenceUnavailable => {
+                    PairingMessage::FetchTextUnavailable {
+                        version: HISTORY_WIRE_VERSION,
+                        peer_id: local_peer_id.to_string(),
+                        remote_entry_id,
+                        reason: "persistence_unavailable".to_string(),
+                    }
+                }
+            }
+        }
+        None => PairingMessage::FetchTextUnavailable {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: local_peer_id.to_string(),
+            remote_entry_id,
             reason: "not_available".to_string(),
         },
     };
@@ -2279,6 +2442,25 @@ pub fn install_history_handler(
     Ok(())
 }
 
+/// Install (or replace) the [`super::FetchTextHostHandler`] the
+/// listener drives when a `FetchText` envelope lands. The
+/// bootstrap installs the adapter once it has loaded the
+/// productive pairing material so the very first inbound
+/// `FetchText` envelope can already be served without falling
+/// back to the typed `not_available` reason. The helper is
+/// idempotent: a second call replaces the previous handler so a
+/// future refactor that re-wires the runtime cannot leak events
+/// to a stale sink.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub fn install_fetch_handler(
+    transport: &super::TlsPeerTransport,
+    handler: Arc<dyn super::FetchTextHostHandler>,
+) -> Result<(), super::TransportError> {
+    let mut state = transport.state.lock().expect("state lock");
+    state.fetch_handler = Some(handler);
+    Ok(())
+}
+
 /// Metadata-only `list_recent_text` dial driver the
 /// `peer-text-history-browser` change exposes through the
 /// productive transport. The transport dials the remote
@@ -2369,6 +2551,98 @@ pub fn list_recent_text(
         Ok(snapshot) => {
             if snapshot.peer_id != peer_id {
                 return Err(super::TransportError::UnknownPeer);
+            }
+            Ok(snapshot)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Authenticated `fetch_text` dial driver the `peer-text-import`
+/// change exposes through the productive transport. The transport
+/// dials the remote listener over mTLS, exchanges the bounded
+/// `FetchText` envelope and returns either the typed
+/// [`super::PeerFetchSnapshot`] the host emitted or one of the
+/// typed [`super::TransportError`] variants the runtime already
+/// branches on. The body the host returns is bounded by
+/// [`super::FETCH_TEXT_MAX_BODY_BYTES`]; the dial driver re-checks
+/// the limit locally before handing the snapshot back to the
+/// importer so a drifted host cannot accidentally bypass the
+/// documented cap.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub fn fetch_text(
+    transport: &super::TlsPeerTransport,
+    peer_id: &str,
+    cert_fingerprint: &str,
+    remote_entry_id: &str,
+) -> Result<super::PeerFetchSnapshot, super::TransportError> {
+    use super::PeerTransport;
+    // Pre-flight: the productive pin map must accept the
+    // runtime-supplied fingerprint. UnknownPeer / KeyMismatch
+    // collapse into the typed variants the runtime already
+    // branches on without going through a network round-trip.
+    health_check(transport, peer_id, cert_fingerprint)?;
+
+    if !transport.is_running() {
+        return Err(super::TransportError::Unavailable);
+    }
+    let (material, resolver, runtime, pins) = {
+        let state = transport.state.lock().expect("state lock");
+        let material = state
+            .local_material
+            .clone()
+            .ok_or(super::TransportError::Crypto)?;
+        let resolver = state.resolver.clone();
+        let runtime_handle_opt = state.runtime.clone();
+        let pins = Arc::clone(&state.handshake_pins);
+        drop(state);
+        let runtime_handle = runtime_handle_opt.ok_or(super::TransportError::Unavailable)?;
+        (material, resolver, runtime_handle, pins)
+    };
+
+    let resolver = match resolver {
+        Some(resolver) => resolver,
+        None => return Err(super::TransportError::Unavailable),
+    };
+    let connector = build_dial_connector(&material, Arc::clone(&pins));
+    let remote_for_dial = remote_entry_id.to_string();
+    let result = runtime.block_on(async move {
+        let mut last_error = super::TransportError::PeerUnresolved;
+        for attempt in 0..HISTORY_DIAL_ATTEMPTS {
+            let Some(addr) = resolver.resolve(peer_id) else {
+                last_error = super::TransportError::PeerUnresolved;
+                if attempt + 1 < HISTORY_DIAL_ATTEMPTS {
+                    tokio::time::sleep(HISTORY_DIAL_RETRY_DELAY).await;
+                    continue;
+                }
+                break;
+            };
+            match dial_fetch_text_async(
+                connector.clone(),
+                addr,
+                material.clone(),
+                peer_id,
+                &remote_for_dial,
+            )
+            .await
+            {
+                Ok(snapshot) => return Ok(snapshot),
+                Err(super::TransportError::Unavailable) if attempt + 1 < HISTORY_DIAL_ATTEMPTS => {
+                    last_error = super::TransportError::Unavailable;
+                    tokio::time::sleep(HISTORY_DIAL_RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error)
+    });
+    match result {
+        Ok(snapshot) => {
+            if snapshot.peer_id != peer_id {
+                return Err(super::TransportError::UnknownPeer);
+            }
+            if snapshot.body.len() > super::FETCH_TEXT_MAX_BODY_BYTES {
+                return Err(super::TransportError::BodyTooLarge);
             }
             Ok(snapshot)
         }
@@ -3546,6 +3820,93 @@ async fn dial_list_recent_text_async(
             match reason.as_str() {
                 "not_trusted" | "not_active" => Err(super::TransportError::Revoked),
                 "pin_invalid" => Err(super::TransportError::KeyMismatch),
+                _ => Err(super::TransportError::Unavailable),
+            }
+        }
+        _ => Err(super::TransportError::IncompatibleProtocol),
+    }
+}
+
+/// Productive `fetch_text` dial driver. The function dials the
+/// remote listener over mTLS through the resolver the bootstrap
+/// installed, exchanges the bounded `FetchText` envelope and
+/// returns either the [`super::PeerFetchSnapshot`] the host minted
+/// or one of the typed [`super::TransportError`] variants. The
+/// handler is feature-gated so cross-compiles and unsupported
+/// targets keep compiling.
+#[cfg(feature = "local-peer-pairing-tls")]
+async fn dial_fetch_text_async(
+    connector: tokio_rustls::TlsConnector,
+    remote_addr: SocketAddr,
+    material: LocalIdentityMaterial,
+    peer_id: &str,
+    remote_entry_id: &str,
+) -> Result<super::PeerFetchSnapshot, super::TransportError> {
+    use rustls::pki_types::ServerName;
+    let stream = tokio::net::TcpStream::connect(remote_addr)
+        .await
+        .map_err(|_| super::TransportError::Unavailable)?;
+    let server_name = ServerName::try_from("clipvault.local")
+        .map_err(|_| super::TransportError::Unavailable)?
+        .to_owned();
+    let mut tls_stream: TlsStream<tokio::net::TcpStream> = TlsStream::Client(
+        connector
+            .connect(server_name, stream)
+            .await
+            .map_err(|_| super::TransportError::KeyMismatch)?,
+    );
+    let request = PairingMessage::FetchText {
+        version: HISTORY_WIRE_VERSION,
+        peer_id: material.identity().peer_id.to_string(),
+        remote_entry_id: remote_entry_id.to_string(),
+    };
+    write_envelope(&mut tls_stream, &request)
+        .await
+        .map_err(|_| super::TransportError::Unavailable)?;
+    let reply = read_envelope_with_limit(&mut tls_stream, FETCH_TEXT_MAX_RESPONSE_BYTES)
+        .await
+        .map_err(|_| super::TransportError::Unavailable)?;
+    match reply {
+        PairingMessage::FetchTextAck {
+            version: _,
+            peer_id: ack_peer_id,
+            remote_entry_id: ack_remote_entry_id,
+            title,
+            content_type,
+            body,
+        } => {
+            if ack_peer_id != peer_id {
+                return Err(super::TransportError::UnknownPeer);
+            }
+            if ack_remote_entry_id != remote_entry_id {
+                return Err(super::TransportError::UnknownPeer);
+            }
+            if body.len() > FETCH_TEXT_MAX_BODY_BYTES {
+                return Err(super::TransportError::BodyTooLarge);
+            }
+            Ok(super::PeerFetchSnapshot {
+                peer_id: ack_peer_id,
+                remote_entry_id: ack_remote_entry_id,
+                title,
+                content_type,
+                body,
+            })
+        }
+        PairingMessage::FetchTextUnavailable { reason, .. } => {
+            // Translate the host's stable snake_case reason onto
+            // a typed `TransportError` variant the runtime
+            // already branches on. `not_found` /
+            // `not_transferable` collapse to a generic
+            // `Malformed` so the importer can branch on the
+            // fetch-specific outcome; other unknown reasons
+            // collapse to `Unavailable` so a forward-compatible
+            // host cannot crash an older client.
+            match reason.as_str() {
+                "not_found" | "not_transferable" => Err(super::TransportError::Malformed),
+                "not_trusted" | "not_active" => Err(super::TransportError::Revoked),
+                "pin_invalid" => Err(super::TransportError::KeyMismatch),
+                "persistence_unavailable" => Err(super::TransportError::Unavailable),
+                "body_too_large" => Err(super::TransportError::BodyTooLarge),
                 _ => Err(super::TransportError::Unavailable),
             }
         }

@@ -815,6 +815,99 @@ const MIGRATION_0016_KNOWN_PEERS_CURSOR_SECRET: Migration = Migration {
         ON known_peers (trust_state);",
 };
 
+/// `peer-text-import`: persist the per-peer collection binding the
+/// import flow uses so the imported entries stay grouped under the
+/// peer's user collection, and record the (peer_id, remote_entry_id,
+/// imported_content_hash) provenance rows that make the import
+/// idempotent across re-imports and snapshot edits. The migration is
+/// additive: both tables start empty, neither rewrites or deletes
+/// pre-existing rows, and the foreign keys only cascade on the
+/// collection row so a user who deletes the peer collection loses
+/// only the binding — the entries, their assets, tags, favourites
+/// and provenance rows all survive.
+///
+/// FK contract:
+///
+/// - `peer_collection_bindings.collection_id -> collections.id`:
+///   `ON DELETE CASCADE` removes the binding when the user
+///   intentionally deletes the peer collection. The cascade is
+///   intentionally restricted to this single row: the binding is
+///   the only thing that should disappear, never the imported
+///   entries or the remote provenance.
+/// - `peer_collection_bindings.peer_id -> known_peers.peer_id`:
+///   `ON DELETE CASCADE` removes the binding if the user later
+///   removes the peer entirely through a future pairing flow; the
+///   imported entries and the remote provenance remain because
+///   they reference the local entry ids (which still exist).
+/// - `remote_imports.local_entry_id -> clipboard_entries.id`:
+///   `ON DELETE CASCADE` removes the provenance row when the user
+///   removes the underlying local entry; the entry is the only
+///   artefact the provenance row references and the cascade keeps
+///   the table from accumulating orphans. The imported entry
+///   already deletes through the regular entry-removal path
+///   (which also sweeps its assets, tags, favourites, collections
+///   and rich-text refs), so the cascade stays scoped to the
+///   provenance row.
+/// - `remote_imports.peer_id -> known_peers.peer_id`: `ON DELETE
+///   CASCADE` keeps the table clean when a peer row disappears.
+///
+/// The composite primary key `(peer_id, remote_entry_id,
+/// imported_content_hash)` enforces the idempotence contract the
+/// design pins: re-importing the same peer/remote entry/content
+/// combination cannot create a second row. Editing the remote
+/// snapshot produces a fresh `(peer_id, remote_entry_id, hash)`
+/// triple that the importer can record as a new provenance row
+/// while the older one remains for the previous snapshot.
+///
+/// Indexes:
+///
+/// - `idx_peer_collection_bindings_collection_id`: lets the sidebar
+///   snapshot the binding for a given peer collection in O(1).
+/// - `idx_remote_imports_local_entry_id`: lets the entry removal
+///   path cascade cleanly and lets the history view surface every
+///   provenance row a given local entry participates in.
+/// - `idx_remote_imports_peer_remote`: keeps the lookup
+///   `(peer_id, remote_entry_id)` the importer needs to detect a
+///   prior import cheap, even when many peers are active.
+///
+/// The `down` step drops the new indexes and tables in a safe order
+/// (child first) and never touches any pre-existing row, so a
+/// rollback leaves the database in the pre-import shape without
+/// losing data.
+const MIGRATION_0017_PEER_IMPORT_BINDINGS: Migration = Migration {
+    version: 17,
+    description: "peer-text-import: persist peer_collection_bindings and remote_imports provenance",
+    up_sql: "CREATE TABLE IF NOT EXISTS peer_collection_bindings (
+        peer_id TEXT PRIMARY KEY,
+        collection_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (peer_id) REFERENCES known_peers(peer_id) ON DELETE CASCADE,
+        FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS remote_imports (
+        peer_id TEXT NOT NULL,
+        remote_entry_id TEXT NOT NULL,
+        imported_content_hash TEXT NOT NULL,
+        local_entry_id INTEGER NOT NULL,
+        imported_at TEXT NOT NULL,
+        PRIMARY KEY (peer_id, remote_entry_id, imported_content_hash),
+        FOREIGN KEY (peer_id) REFERENCES known_peers(peer_id) ON DELETE CASCADE,
+        FOREIGN KEY (local_entry_id) REFERENCES clipboard_entries(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_peer_collection_bindings_collection_id
+        ON peer_collection_bindings (collection_id);
+    CREATE INDEX IF NOT EXISTS idx_remote_imports_local_entry_id
+        ON remote_imports (local_entry_id);
+    CREATE INDEX IF NOT EXISTS idx_remote_imports_peer_remote
+        ON remote_imports (peer_id, remote_entry_id);",
+    down_sql: "DROP INDEX IF EXISTS idx_remote_imports_peer_remote;
+    DROP INDEX IF EXISTS idx_remote_imports_local_entry_id;
+    DROP INDEX IF EXISTS idx_peer_collection_bindings_collection_id;
+    DROP TABLE IF EXISTS remote_imports;
+    DROP TABLE IF EXISTS peer_collection_bindings;",
+};
+
 /// Returns the migrations shipped with ClipVault. Each new migration is
 /// appended to this slice to keep ordering deterministic.
 pub fn builtin_migrations() -> Vec<Migration> {
@@ -835,6 +928,7 @@ pub fn builtin_migrations() -> Vec<Migration> {
         MIGRATION_0014_KNOWN_PEERS_PAIRING,
         MIGRATION_0015_KNOWN_PEERS_PAIRING_FULL_FINGERPRINT,
         MIGRATION_0016_KNOWN_PEERS_CURSOR_SECRET,
+        MIGRATION_0017_PEER_IMPORT_BINDINGS,
     ]
 }
 
@@ -1191,6 +1285,155 @@ mod tests {
                 "{new_col} must be dropped on rollback, got {columns:?}",
             );
         }
+    }
+
+    #[test]
+    fn peer_import_bindings_migration_creates_required_tables_and_indexes() {
+        // The `peer-text-import` change persists the per-peer
+        // collection binding and the (peer_id, remote_entry_id,
+        // imported_content_hash) provenance rows. The migration
+        // MUST stay additive: it never rewrites or deletes
+        // pre-existing rows, never inspects clipboard content,
+        // and never persists an IP, port, fingerprint or cert
+        // byte. The FK contract pins the cascade semantics so a
+        // rollback can be reasoned about without guessing.
+        let up = MIGRATION_0017_PEER_IMPORT_BINDINGS.up_sql.to_uppercase();
+        assert!(
+            up.contains("CREATE TABLE IF NOT EXISTS PEER_COLLECTION_BINDINGS"),
+            "missing peer_collection_bindings table"
+        );
+        assert!(
+            up.contains("CREATE TABLE IF NOT EXISTS REMOTE_IMPORTS"),
+            "missing remote_imports table"
+        );
+        for column in [
+            "PEER_ID",
+            "COLLECTION_ID",
+            "REMOTE_ENTRY_ID",
+            "IMPORTED_CONTENT_HASH",
+            "LOCAL_ENTRY_ID",
+            "IMPORTED_AT",
+        ] {
+            assert!(
+                up.contains(column),
+                "peer import migration must persist column {column}"
+            );
+        }
+        assert!(
+            up.contains("PRIMARY KEY (PEER_ID, REMOTE_ENTRY_ID, IMPORTED_CONTENT_HASH)"),
+            "remote_imports must declare the composite idempotence primary key"
+        );
+        // Indexes the importer needs at runtime.
+        for index in [
+            "IDX_PEER_COLLECTION_BINDINGS_COLLECTION_ID",
+            "IDX_REMOTE_IMPORTS_LOCAL_ENTRY_ID",
+            "IDX_REMOTE_IMPORTS_PEER_REMOTE",
+        ] {
+            assert!(
+                up.contains(index),
+                "peer import migration must create index {index}"
+            );
+        }
+        // Endpoints and content MUST NOT land in either table —
+        // both tables are metadata-only by construction.
+        for forbidden in [
+            " BODY ",
+            "TEXT_PAYLOAD",
+            "IP_ADDRESS",
+            "IPV4",
+            " PORT ",
+            "TLS_CERT_FINGERPRINT",
+            "CERT_DER",
+            "PRIVATE_KEY",
+        ] {
+            assert!(
+                !up.contains(forbidden),
+                "peer import migration must not persist {forbidden}"
+            );
+        }
+        // Down must drop both tables in a safe order and remove
+        // every index so a rollback leaves no orphans behind.
+        let down = MIGRATION_0017_PEER_IMPORT_BINDINGS.down_sql.to_uppercase();
+        assert!(down.contains("DROP TABLE IF EXISTS REMOTE_IMPORTS"));
+        assert!(down.contains("DROP TABLE IF EXISTS PEER_COLLECTION_BINDINGS"));
+        for index in [
+            "IDX_REMOTE_IMPORTS_PEER_REMOTE",
+            "IDX_REMOTE_IMPORTS_LOCAL_ENTRY_ID",
+            "IDX_PEER_COLLECTION_BINDINGS_COLLECTION_ID",
+        ] {
+            assert!(down.contains(&format!("DROP INDEX IF EXISTS {index}")));
+        }
+    }
+
+    #[test]
+    fn peer_import_bindings_migration_rolls_back_cleanly() {
+        // Run the full migration set on a temp database, then
+        // rollback ONLY the `peer-text-import` migration. The
+        // pre-existing tables (collections, clipboard_entries,
+        // known_peers) must survive intact and the new tables must
+        // vanish.
+        use crate::rollback_migration;
+        use crate::Database;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("clipvault.db");
+        let mut db = Database::open(&path).expect("open");
+        let outcomes = db.run_migrations(&builtin_migrations()).expect("migrate");
+        let applied: Vec<i64> = outcomes
+            .iter()
+            .filter_map(|o| match o {
+                crate::MigrationOutcome::Applied { version, .. } => Some(*version),
+                crate::MigrationOutcome::AlreadyApplied { .. } => None,
+            })
+            .collect();
+        assert!(
+            applied.contains(&17),
+            "peer-text-import migration must apply on top of the cursor-secret base"
+        );
+
+        // Confirm the new tables exist and are queryable.
+        let _: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM peer_collection_bindings", [], |row| {
+                row.get(0)
+            })
+            .expect("peer_collection_bindings table is queryable");
+        let _: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM remote_imports", [], |row| row.get(0))
+            .expect("remote_imports table is queryable");
+
+        rollback_migration(&mut db, &MIGRATION_0017_PEER_IMPORT_BINDINGS).expect("rollback");
+        let err = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM peer_collection_bindings", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect_err("peer_collection_bindings must be gone after rollback");
+        assert!(err.to_string().contains("no such table"));
+        let err = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM remote_imports", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect_err("remote_imports must be gone after rollback");
+        assert!(err.to_string().contains("no such table"));
+
+        // Re-applying after the rollback restores the tables and
+        // indexes so a future contributor can iterate.
+        let outcomes = db
+            .run_migrations(&[MIGRATION_0017_PEER_IMPORT_BINDINGS])
+            .expect("re-apply");
+        assert!(matches!(
+            outcomes.first(),
+            Some(crate::MigrationOutcome::Applied { version: 17, .. })
+        ));
+        let _: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM peer_collection_bindings", [], |row| {
+                row.get(0)
+            })
+            .expect("peer_collection_bindings table is queryable again");
     }
 
     #[test]

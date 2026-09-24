@@ -2509,6 +2509,7 @@ mod tests {
             host_sink,
             None,
             Some(Arc::clone(&host_adapter)),
+            None,
         )
         .expect("install host");
 
@@ -2754,6 +2755,7 @@ mod tests {
             "bare-host".to_string(),
             bare_advertisement,
             bare_sink,
+            None,
             None,
             None,
         )
@@ -3034,9 +3036,11 @@ fn map_pairing_transport_error(
         Pairing::IncompatibleProtocol => PeerHistoryTransportError::IncompatibleProtocol,
         Pairing::Malformed => PeerHistoryTransportError::Malformed,
         Pairing::InvalidCursor => PeerHistoryTransportError::InvalidCursor,
-        Pairing::AlreadyRunning | Pairing::NotRunning | Pairing::Unavailable | Pairing::Crypto => {
-            PeerHistoryTransportError::Unavailable
-        }
+        Pairing::AlreadyRunning
+        | Pairing::NotRunning
+        | Pairing::Unavailable
+        | Pairing::Crypto
+        | Pairing::BodyTooLarge => PeerHistoryTransportError::Unavailable,
     }
 }
 

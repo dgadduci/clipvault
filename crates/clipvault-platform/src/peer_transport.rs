@@ -130,6 +130,23 @@ pub const HISTORY_MAX_RESPONSE_BYTES: usize = 128 * 1024;
 /// payloads before they reach the application state machine.
 pub const PAIRING_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
 
+/// Maximum serialized size of one authenticated `FetchTextAck`
+/// response. The contract pins a 1 MiB UTF-8 text body as the
+/// absolute cap the host honours; the JSON envelope plus the UTF-8
+/// overhead stays well below this 2 MiB ceiling so a regression
+/// that forgets to enforce the limit cannot accidentally stream
+/// more bytes than the runtime expects.
+pub const FETCH_TEXT_MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Hard cap the `peer-text-import` change pins on the imported text
+/// body. The runtime enforces the cap on both the listener (which
+/// refuses any body larger than the threshold) and the caller
+/// (which never trusts the listener's word alone). The 1 MiB value
+/// matches the design (`peer-text-import/design.md` §"Dependencia y
+/// fetch") and the spec (`peer-text-import/spec.md` §"Complete
+/// remote text is fetched only for explicit import").
+pub const FETCH_TEXT_MAX_BODY_BYTES: usize = 1024 * 1024;
+
 /// Maximum number of in-flight pairing sessions the listener keeps
 /// open concurrently. The transport surfaces a typed rejection when a
 /// remote peer tries to start a session above the cap so a single
@@ -349,6 +366,81 @@ pub enum HistoryHostResponse {
     },
 }
 
+/// Host-side handler the listener drives when a `FetchText`
+/// envelope lands after a successful mTLS handshake. The trait is
+/// feature-gated to the productive TLS path so cross-compiles and
+/// unsupported targets keep compiling. The transport invokes the
+/// handler exactly once per inbound envelope and forwards the typed
+/// response through the wire; the handler never touches a TLS
+/// stream, a socket or a session id.
+///
+/// Implementations are expected to enforce the
+/// [`FETCH_TEXT_MAX_BODY_BYTES`] cap on the body before returning
+/// the [`HostFetchResponse::Ok`] variant. Returning a larger body
+/// is a contract violation the transport must catch and reject
+/// with [`HostFetchResponse::BodyTooLarge`] so the caller cannot
+/// accidentally stream more than the contract allows.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub trait FetchTextHostHandler: Send + Sync {
+    /// Project the body of `remote_entry_id` for `peer_id`. The
+    /// `peer_id` argument is the canonical `peer_id` the
+    /// transport derived from the cert's SPKI; the transport
+    /// already authenticated it against the pin the runtime
+    /// armed. `remote_entry_id` is the opaque id the host
+    /// minted (the `entry-<id>` projection the
+    /// `peer-text-history-browser` change ships).
+    fn fetch_text(&self, peer_id: &str, remote_entry_id: &str) -> HostFetchResponse;
+}
+
+/// Outcome the host-side fetch handler returns to the listener.
+/// The transport forwards the variant through the wire envelope
+/// the spec pins: `FetchTextAck` for [`HostFetchResponse::Ok`],
+/// `FetchTextUnavailable` for every other variant. Every typed
+/// failure collapses into a stable reason string the importer
+/// branches on without inspecting free-form strings or content
+/// bytes.
+#[cfg(feature = "local-peer-pairing-tls")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostFetchResponse {
+    /// The host validated the body against the contract and the
+    /// handler returned a UTF-8 text smaller than the
+    /// [`FETCH_TEXT_MAX_BODY_BYTES`] cap. The transport forwards
+    /// the body verbatim; the importer re-validates the size and
+    /// the UTF-8 shape before any SQLite mutation.
+    Ok {
+        /// Validated, trimmed user-supplied title. `None` when
+        /// the entry has no custom title or the persisted value
+        /// fails validation.
+        title: Option<String>,
+        /// Canonical snake_case string the local SQLite layer
+        /// persists (e.g. `text`, `url`, `json`).
+        content_type: String,
+        /// Canonical UTF-8 body. The handler MUST keep the size
+        /// ≤ [`FETCH_TEXT_MAX_BODY_BYTES`]; the transport
+        /// refuses larger bodies with [`Self::BodyTooLarge`]
+        /// before they cross the wire.
+        body: String,
+    },
+    /// The entry disappeared between the listing and the fetch,
+    /// or it has been edited into a non-transferable shape. The
+    /// reason is a stable snake_case identifier the importer
+    /// branches on.
+    NotFound,
+    /// The entry exists but is no longer transferrable (an image
+    /// row, an `Html` row, a rich-only row whose plain preview
+    /// is gone, …). The importer collapses this into the typed
+    /// `not_transferable` outcome.
+    NotTransferable,
+    /// The entry exceeded the [`FETCH_TEXT_MAX_BODY_BYTES`] cap.
+    /// The transport surfaces this variant verbatim; the
+    /// importer rejects the body without persisting anything.
+    BodyTooLarge,
+    /// The persistence layer refused the lookup (SQLite error,
+    /// missing handle, …). The runtime collapses this into the
+    /// typed `persistence_unavailable` outcome.
+    PersistenceUnavailable,
+}
+
 /// Coordinated start / stop the [`PeerTransport`] layer delegates
 /// to in order to keep the mDNS advertisement in lockstep with
 /// the real ephemeral port the TLS listener reserved. The
@@ -472,8 +564,10 @@ pub trait PeerTransport: Send + Sync {
         resolver: Option<Arc<dyn RemotePeerResolver>>,
         display_name: &str,
         history_handler: Option<Arc<dyn HistoryHostHandler>>,
+        fetch_handler: Option<Arc<dyn FetchTextHostHandler>>,
     ) -> Result<u16, TransportError> {
         let _ = history_handler;
+        let _ = fetch_handler;
         self.start_with_material_and_resolver(material, sink, advertisement, resolver, display_name)
     }
 
@@ -625,6 +719,47 @@ pub trait PeerTransport: Send + Sync {
         let _ = (peer_id, cert_fingerprint, cursor, limit);
         Err(TransportError::Unavailable)
     }
+
+    /// Open an authenticated `fetch_text` request against the
+    /// pinned peer. The transport dials the remote listener over
+    /// mTLS, exchanges the bounded `fetch_text` envelope and
+    /// returns either the typed [`PeerFetchSnapshot`] the host
+    /// emitted or one of the typed [`TransportError`] variants
+    /// the runtime already branches on. The body the host returns
+    /// is bounded by [`FETCH_TEXT_MAX_BODY_BYTES`]; the transport
+    /// re-validates the limit before handing the payload back so
+    /// a drifted host cannot accidentally stream more than the
+    /// contract allows.
+    ///
+    /// The default implementation returns
+    /// [`TransportError::Unavailable`] so a transport that does
+    /// not yet wire the productive fetch envelope still compiles
+    /// — the shell surfaces the typed reason the runtime already
+    /// uses for the discovery-only contract.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn fetch_text(
+        &self,
+        peer_id: &str,
+        cert_fingerprint: &str,
+        remote_entry_id: &str,
+    ) -> Result<PeerFetchSnapshot, TransportError> {
+        let _ = (peer_id, cert_fingerprint, remote_entry_id);
+        Err(TransportError::Unavailable)
+    }
+
+    /// Install (or replace) the host-side [`FetchTextHostHandler`]
+    /// the listener drives when a `FetchText` envelope lands.
+    /// The bootstrap calls this after the productive pairing
+    /// material loader returns so the handler can rely on the
+    /// same SQLite handle the runtime already holds. Idempotent:
+    /// a second call replaces the previous handler so a future
+    /// refactor that re-wires the runtime cannot leak events to a
+    /// stale sink.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_fetch_handler(
+        &self,
+        handler: Arc<dyn FetchTextHostHandler>,
+    ) -> Result<(), TransportError>;
 }
 
 /// Metadata-only response the transport returns from
@@ -653,6 +788,25 @@ pub struct PeerHistorySnapshot {
     pub rows: Vec<wire::ListRecentTextRow>,
     pub next_cursor: String,
     pub snapshot_id: String,
+}
+
+/// Bounded response the transport returns from
+/// [`PeerTransport::fetch_text`]. The struct carries the
+/// validated body the host returned through the wire envelope:
+/// only the validated, trimmed `title`, the canonical
+/// `content_type` string the local SQLite layer persists, and
+/// the bounded UTF-8 body the host capped at
+/// [`FETCH_TEXT_MAX_BODY_BYTES`]. The transport re-validates
+/// the size locally before returning the snapshot so a
+/// malformed / drifted host cannot accidentally bypass the
+/// documented cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerFetchSnapshot {
+    pub peer_id: String,
+    pub remote_entry_id: String,
+    pub title: Option<String>,
+    pub content_type: String,
+    pub body: String,
 }
 
 /// Platform-neutral handle the platform layer exposes to the
@@ -743,6 +897,14 @@ pub enum TransportError {
     /// network-shaped error.
     #[error("peer transport rejected an invalid history cursor")]
     InvalidCursor,
+    /// The remote host returned a body that exceeded the
+    /// [`FETCH_TEXT_MAX_BODY_BYTES`] cap. The transport
+    /// enforces the limit locally so a drifted host cannot
+    /// stream more than the contract allows; the importer
+    /// collapses the rejection into the typed `body_too_large`
+    /// outcome without persisting anything.
+    #[error("peer transport rejected a fetch body that exceeded the 1 MiB UTF-8 limit")]
+    BodyTooLarge,
 }
 
 /// Noop transport the platform crate installs when the
@@ -849,6 +1011,31 @@ impl PeerTransport for NoopPeerTransport {
         // The noop transport never opens a session, so a
         // history-handler install collapses to the typed
         // `Unavailable` outcome the runtime already surfaces.
+        Err(TransportError::Unavailable)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_fetch_handler(
+        &self,
+        _handler: Arc<dyn FetchTextHostHandler>,
+    ) -> Result<(), TransportError> {
+        // The noop transport never opens a session, so a
+        // fetch-handler install collapses to the typed
+        // `Unavailable` outcome the runtime already surfaces.
+        Err(TransportError::Unavailable)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn fetch_text(
+        &self,
+        _peer_id: &str,
+        _cert_fingerprint: &str,
+        _remote_entry_id: &str,
+    ) -> Result<PeerFetchSnapshot, TransportError> {
+        // The noop transport never opens a real session, so a
+        // fetch request collapses to the typed `Unavailable`
+        // outcome the runtime already surfaces for the
+        // discovery-only contract.
         Err(TransportError::Unavailable)
     }
 
@@ -1038,6 +1225,15 @@ pub(crate) struct TransportState {
     /// `ListRecentTextUnavailable { reason: not_available }`
     /// so the wire contract stays stable.
     pub history_handler: Option<Arc<dyn HistoryHostHandler>>,
+    /// Host-side fetch handler the listener drives when a
+    /// `FetchText` envelope lands. The handler is installed by
+    /// the bootstrap through the productive
+    /// [`Self::install_fetch_handler`] API; a `None` collapses
+    /// `FetchText` envelopes to
+    /// `FetchTextUnavailable { reason: not_available }` so the
+    /// wire contract stays stable across builds that have not
+    /// shipped the `peer-text-import` change yet.
+    pub fetch_handler: Option<Arc<dyn FetchTextHostHandler>>,
 }
 
 #[cfg(feature = "local-peer-pairing-tls")]
@@ -1061,6 +1257,7 @@ impl Default for TransportState {
             session_sink: None,
             inbound_sessions: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             history_handler: None,
+            fetch_handler: None,
         }
     }
 }
@@ -1239,6 +1436,14 @@ impl PeerTransport for TlsPeerTransport {
     }
 
     #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_fetch_handler(
+        &self,
+        handler: Arc<dyn FetchTextHostHandler>,
+    ) -> Result<(), TransportError> {
+        super::peer_transport::tls::install_fetch_handler(self, handler)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
     fn start_with_material_resolver_and_history(
         &self,
         material: LocalIdentityMaterial,
@@ -1247,6 +1452,7 @@ impl PeerTransport for TlsPeerTransport {
         resolver: Option<Arc<dyn RemotePeerResolver>>,
         display_name: &str,
         history_handler: Option<Arc<dyn HistoryHostHandler>>,
+        fetch_handler: Option<Arc<dyn FetchTextHostHandler>>,
     ) -> Result<u16, TransportError> {
         let adapter: Arc<dyn PairingAdvertisementSink> =
             Arc::new(AdvertisementSinkAdapter::new(advertisement));
@@ -1258,6 +1464,7 @@ impl PeerTransport for TlsPeerTransport {
             sink,
             resolver,
             history_handler,
+            fetch_handler,
         )
     }
 
@@ -1307,6 +1514,16 @@ impl PeerTransport for TlsPeerTransport {
         limit: u32,
     ) -> Result<PeerHistorySnapshot, TransportError> {
         super::peer_transport::tls::list_recent_text(self, peer_id, cert_fingerprint, cursor, limit)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn fetch_text(
+        &self,
+        peer_id: &str,
+        cert_fingerprint: &str,
+        remote_entry_id: &str,
+    ) -> Result<PeerFetchSnapshot, TransportError> {
+        super::peer_transport::tls::fetch_text(self, peer_id, cert_fingerprint, remote_entry_id)
     }
 }
 
@@ -1481,6 +1698,68 @@ pub mod wire {
             peer_id: String,
             reason: String,
         },
+        /// Request the complete UTF-8 text of a remote entry.
+        /// The envelope is authenticated exactly like
+        /// [`PairingMessage::ListRecentText`] (the runtime
+        /// verifies the declared `peer_id` matches the SPKI the
+        /// cert pinned, then checks the cert fingerprint against
+        /// the persisted pin) and is gated to the
+        /// `peer-text-import` change: only an active trusted
+        /// peer can ask for the body of a transferrable text
+        /// entry, only after the user activates the `Importar`
+        /// action. The listener enforces the 1 MiB UTF-8 limit
+        /// before returning the body so a malicious / drifted
+        /// host cannot bypass the wire contract.
+        ///
+        /// The body never carries tags, collections, favorites,
+        /// source application metadata, content hash, asset
+        /// references or rich-text references. The transport
+        /// forwards the body verbatim to the importer, which
+        /// re-validates eligibility (size + UTF-8 + entry
+        /// existence) before any SQLite mutation.
+        FetchText {
+            version: u32,
+            peer_id: String,
+            remote_entry_id: String,
+        },
+        /// Successful reply the listener pushes back with the
+        /// bounded body the host validated against the import
+        /// contract. `title` is the validated, trimmed value the
+        /// host projects through the same
+        /// [`crate::peer_text_history::sanitize_remote_title`]
+        /// helper the metadata-only projection uses; `None`
+        /// means the entry has no custom title or the persisted
+        /// value fails validation.
+        ///
+        /// `content_type` is the canonical snake_case string
+        /// the local SQLite layer persists. The body is the
+        /// canonical UTF-8 text the listener capped at
+        /// [`FETCH_TEXT_MAX_BODY_BYTES`] bytes; the importer
+        /// re-validates the cap locally and refuses to insert
+        /// anything that exceeds the documented threshold.
+        FetchTextAck {
+            version: u32,
+            peer_id: String,
+            remote_entry_id: String,
+            title: Option<String>,
+            content_type: String,
+            body: String,
+        },
+        /// Typed rejection the listener pushes back when the
+        /// caller asked for a body that no longer exists, is no
+        /// longer transferrable, or the runtime cannot honour
+        /// the request for a documented reason (`not_trusted`,
+        /// `not_active`, `persistence_unavailable`, …). The
+        /// `reason` is a stable snake_case identifier the
+        /// importer can switch on; the transport never inspects
+        /// the payload beyond the type check and never echoes
+        /// the rejected body back.
+        FetchTextUnavailable {
+            version: u32,
+            peer_id: String,
+            remote_entry_id: String,
+            reason: String,
+        },
     }
 
     /// Metadata-only row the host returns in
@@ -1527,7 +1806,10 @@ pub mod wire {
                 | PairingMessage::ListRecentText { version, .. }
                 | PairingMessage::ListRecentTextAck { version, .. }
                 | PairingMessage::ListRecentTextInvalid { version, .. }
-                | PairingMessage::ListRecentTextUnavailable { version, .. } => *version,
+                | PairingMessage::ListRecentTextUnavailable { version, .. }
+                | PairingMessage::FetchText { version, .. }
+                | PairingMessage::FetchTextAck { version, .. }
+                | PairingMessage::FetchTextUnavailable { version, .. } => *version,
             }
         }
 
@@ -1541,7 +1823,10 @@ pub mod wire {
                 | PairingMessage::ListRecentText { peer_id, .. }
                 | PairingMessage::ListRecentTextAck { peer_id, .. }
                 | PairingMessage::ListRecentTextInvalid { peer_id, .. }
-                | PairingMessage::ListRecentTextUnavailable { peer_id, .. } => peer_id,
+                | PairingMessage::ListRecentTextUnavailable { peer_id, .. }
+                | PairingMessage::FetchText { peer_id, .. }
+                | PairingMessage::FetchTextAck { peer_id, .. }
+                | PairingMessage::FetchTextUnavailable { peer_id, .. } => peer_id,
             }
         }
 
@@ -1561,7 +1846,10 @@ pub mod wire {
                 | PairingMessage::ListRecentText { .. }
                 | PairingMessage::ListRecentTextAck { .. }
                 | PairingMessage::ListRecentTextInvalid { .. }
-                | PairingMessage::ListRecentTextUnavailable { .. } => "",
+                | PairingMessage::ListRecentTextUnavailable { .. }
+                | PairingMessage::FetchText { .. }
+                | PairingMessage::FetchTextAck { .. }
+                | PairingMessage::FetchTextUnavailable { .. } => "",
             }
         }
     }
@@ -1868,6 +2156,90 @@ mod tests {
             snapshot_id: String::new(),
         };
         assert_eq!(response.public_key_fingerprint(), "");
+    }
+
+    /// `PairingMessage::FetchText` round-trips through JSON so a
+    /// future refactor that drops the body field fails the test
+    /// before the build can ship. The envelope never carries the
+    /// body outside the `body` field; the runtime re-validates
+    /// the cap locally before the import commits.
+    #[test]
+    fn fetch_text_envelope_round_trips_through_json() {
+        let request = PairingMessage::FetchText {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-42".to_string(),
+        };
+        let serialised = serde_json::to_string(&request).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, request);
+        assert_eq!(parsed.public_key_fingerprint(), "");
+    }
+
+    /// `PairingMessage::FetchTextAck` round-trips the bounded body
+    /// the host returns. The envelope carries the validated title,
+    /// the canonical `content_type` and the UTF-8 body; the
+    /// runtime enforces the [`FETCH_TEXT_MAX_BODY_BYTES`] cap on
+    /// the receiving end so a drifted host cannot bypass the
+    /// documented limit.
+    #[test]
+    fn fetch_text_ack_envelope_round_trips_through_json() {
+        let ack = PairingMessage::FetchTextAck {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-42".to_string(),
+            title: Some("Hola · 漢字".to_string()),
+            content_type: "text".to_string(),
+            body: "hello".to_string(),
+        };
+        let serialised = serde_json::to_string(&ack).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, ack);
+    }
+
+    /// `PairingMessage::FetchTextUnavailable` rejection carries a
+    /// typed reason the importer maps onto the typed outcome
+    /// surface. The variants the wire contract pins
+    /// (`not_found`, `not_transferable`, `body_too_large`,
+    /// `not_trusted`, `not_active`, `persistence_unavailable`)
+    /// stay stable across rebuilds.
+    #[test]
+    fn fetch_text_unavailable_envelope_round_trips_through_json() {
+        let unavailable = PairingMessage::FetchTextUnavailable {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-42".to_string(),
+            reason: "not_found".to_string(),
+        };
+        let serialised = serde_json::to_string(&unavailable).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, unavailable);
+    }
+
+    /// `PairingMessage::FetchText` does NOT carry the public key
+    /// fingerprint — the envelope is metadata-only by
+    /// construction and the runtime never inspects the field.
+    /// Pinning the empty string here means a future contributor
+    /// who accidentally re-exposes the fingerprint fails the
+    /// test before the build can ship.
+    #[test]
+    fn fetch_text_does_not_expose_public_key_fingerprint() {
+        let request = PairingMessage::FetchText {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-42".to_string(),
+        };
+        assert_eq!(request.public_key_fingerprint(), "");
+
+        let ack = PairingMessage::FetchTextAck {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-42".to_string(),
+            title: None,
+            content_type: "text".to_string(),
+            body: "hello".to_string(),
+        };
+        assert_eq!(ack.public_key_fingerprint(), "");
     }
 
     /// Capture-only sink used by the noop tests so they can build

@@ -551,6 +551,18 @@ struct PairingRuntimeInner {
     #[cfg(feature = "local-peer-pairing-tls")]
     history_handler:
         RwLock<Option<Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>>>,
+    /// Optional host-side
+    /// [`clipvault_platform::peer_transport::FetchTextHostHandler`]
+    /// the bootstrap installs so every inbound `FetchText`
+    /// envelope can be served from the very first connection.
+    /// The runtime caches the handler the same way it caches the
+    /// history handler so the toggle flow can re-inject it on
+    /// every `start_with_material_and_resolver`. Tests that wire
+    /// a fake transport leave the slot empty to verify the
+    /// productive install path in isolation.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fetch_handler:
+        RwLock<Option<Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>>>,
 }
 
 /// In-memory mirror of the persisted `known_peers.cursor_secret`
@@ -693,7 +705,8 @@ fn map_transport_error_to_pairing_error(
         | TransportError::AlreadyRunning
         | TransportError::NotRunning
         | TransportError::Crypto
-        | TransportError::Malformed => PairingError::TransportUnavailable,
+        | TransportError::Malformed
+        | TransportError::BodyTooLarge => PairingError::TransportUnavailable,
     }
 }
 
@@ -745,6 +758,8 @@ impl PairingRuntime {
             cursor_secret_cache: RwLock::new(None),
             #[cfg(feature = "local-peer-pairing-tls")]
             history_handler: RwLock::new(None),
+            #[cfg(feature = "local-peer-pairing-tls")]
+            fetch_handler: RwLock::new(None),
         };
         Self {
             inner: Arc::new(inner),
@@ -805,6 +820,38 @@ impl PairingRuntime {
         &self,
     ) -> Option<Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>> {
         self.inner.history_handler.read().clone()
+    }
+
+    /// Forward the typed handler the listener drives when an
+    /// authenticated peer asks for `fetch_text`. The bootstrap
+    /// calls this before binding the very first productive
+    /// listener so a `FetchText` envelope that lands on the very
+    /// first inbound connection can already be served without
+    /// falling back to the documented `not_available` reason.
+    /// The function caches the handler so a follow-up
+    /// `start_with_material_and_resolver` (the toggle flow) can
+    /// re-inject it instead of letting the transport drop it to
+    /// `None`.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub fn install_fetch_handler_inner(
+        &self,
+        handler: Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
+    ) -> Result<(), clipvault_platform::peer_transport::TransportError> {
+        *self.inner.fetch_handler.write() = Some(Arc::clone(&handler));
+        self.inner.transport.install_fetch_handler(handler)
+    }
+
+    /// Read-only accessor for the host-side fetch handler the
+    /// runtime cached on the last
+    /// [`Self::install_fetch_handler_inner`] call. Tests use the
+    /// accessor to assert the handler survives a `stop` / `start`
+    /// cycle without the bootstrap having to re-call
+    /// `install_fetch_handler_inner`.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub fn cached_fetch_handler(
+        &self,
+    ) -> Option<Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>> {
+        self.inner.fetch_handler.read().clone()
     }
 
     /// Restore a certificate pin persisted by an earlier successful
@@ -933,6 +980,11 @@ impl PairingRuntime {
     /// collapses to `None` for the transport: the install path
     /// stays backwards-compatible with tests and feature-gated
     /// builds that never wire one.
+    ///
+    /// The same forwarding pattern applies to the
+    /// `peer-text-import` change: the cached fetch handler is
+    /// forwarded to the productive install path so the first
+    /// inbound `FetchText` envelope can already be served.
     #[cfg(feature = "local-peer-pairing-tls")]
     pub fn install_pairing_transport_with_resolver(
         &self,
@@ -950,7 +1002,8 @@ impl PairingRuntime {
             Err(_) => return Err(TransportOutcome::Unavailable),
         };
         let transport = self.inner.transport.clone();
-        let handler = self.inner.history_handler.read().clone();
+        let history_handler = self.inner.history_handler.read().clone();
+        let fetch_handler = self.inner.fetch_handler.read().clone();
         transport
             .start_with_material_resolver_and_history(
                 material,
@@ -958,7 +1011,8 @@ impl PairingRuntime {
                 advertisement,
                 Some(resolver),
                 display_name,
-                handler,
+                history_handler,
+                fetch_handler,
             )
             .map_err(|_error| TransportOutcome::Unavailable)
     }
@@ -1192,13 +1246,17 @@ impl PairingRuntime {
             | PairingMessage::ListRecentText { .. }
             | PairingMessage::ListRecentTextAck { .. }
             | PairingMessage::ListRecentTextInvalid { .. }
-            | PairingMessage::ListRecentTextUnavailable { .. } => {
-                // The metadata-only history / health probes never
-                // reach the runtime state machine. The productive
-                // transport handles them inside the listener loop
-                // and surfaces the typed outcome directly; the
-                // runtime only sees `observe_pairing` events for
-                // pairing / approval transitions.
+            | PairingMessage::ListRecentTextUnavailable { .. }
+            | PairingMessage::FetchText { .. }
+            | PairingMessage::FetchTextAck { .. }
+            | PairingMessage::FetchTextUnavailable { .. } => {
+                // The metadata-only history / health probes and the
+                // content fetch envelopes never reach the runtime
+                // state machine. The productive transport handles
+                // them inside the listener loop and surfaces the
+                // typed outcome directly; the runtime only sees
+                // `observe_pairing` events for pairing / approval
+                // transitions.
                 PairingOutcome::Failed(PairingError::IncompatibleProtocol)
             }
         }
@@ -3024,6 +3082,14 @@ mod tests {
         }
 
         #[cfg(feature = "local-peer-pairing-tls")]
+        fn install_fetch_handler(
+            &self,
+            _handler: Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
+        ) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
         fn list_recent_text(
             &self,
             _peer_id: &str,
@@ -3032,6 +3098,16 @@ mod tests {
             _limit: u32,
         ) -> Result<clipvault_platform::peer_transport::PeerHistorySnapshot, TransportError>
         {
+            Err(TransportError::Unavailable)
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn fetch_text(
+            &self,
+            _peer_id: &str,
+            _cert_fingerprint: &str,
+            _remote_entry_id: &str,
+        ) -> Result<clipvault_platform::peer_transport::PeerFetchSnapshot, TransportError> {
             Err(TransportError::Unavailable)
         }
 
@@ -3045,6 +3121,9 @@ mod tests {
             _display_name: &str,
             _history_handler: Option<
                 Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+            >,
+            _fetch_handler: Option<
+                Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
             >,
         ) -> Result<u16, TransportError> {
             Err(TransportError::Unavailable)
@@ -3242,6 +3321,13 @@ mod tests {
                 Ok(())
             }
             #[cfg(feature = "local-peer-pairing-tls")]
+            fn install_fetch_handler(
+                &self,
+                _handler: Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            #[cfg(feature = "local-peer-pairing-tls")]
             fn list_recent_text(
                 &self,
                 _peer_id: &str,
@@ -3262,6 +3348,9 @@ mod tests {
                 _display_name: &str,
                 _history_handler: Option<
                     Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+                >,
+                _fetch_handler: Option<
+                    Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
                 >,
             ) -> Result<u16, TransportError> {
                 Err(TransportError::Unavailable)
@@ -3595,6 +3684,17 @@ mod tests {
                     .push(Some(handler));
                 Ok(())
             }
+            fn install_fetch_handler(
+                &self,
+                handler: Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
+            ) -> Result<(), TransportError> {
+                self.installed_handlers
+                    .lock()
+                    .expect("install lock")
+                    .push(None);
+                let _ = handler;
+                Ok(())
+            }
             fn list_recent_text(
                 &self,
                 _peer_id: &str,
@@ -3602,6 +3702,15 @@ mod tests {
                 _cursor: &str,
                 _limit: u32,
             ) -> Result<clipvault_platform::peer_transport::PeerHistorySnapshot, TransportError>
+            {
+                Err(TransportError::Unavailable)
+            }
+            fn fetch_text(
+                &self,
+                _peer_id: &str,
+                _cert_fingerprint: &str,
+                _remote_entry_id: &str,
+            ) -> Result<clipvault_platform::peer_transport::PeerFetchSnapshot, TransportError>
             {
                 Err(TransportError::Unavailable)
             }
@@ -3614,6 +3723,9 @@ mod tests {
                 _display_name: &str,
                 history_handler: Option<
                     Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+                >,
+                _fetch_handler: Option<
+                    Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
                 >,
             ) -> Result<u16, TransportError> {
                 self.calls.lock().expect("call lock").push(history_handler);
@@ -4161,6 +4273,13 @@ mod tests {
                 Ok(())
             }
             #[cfg(feature = "local-peer-pairing-tls")]
+            fn install_fetch_handler(
+                &self,
+                _handler: Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            #[cfg(feature = "local-peer-pairing-tls")]
             fn list_recent_text(
                 &self,
                 _peer_id: &str,
@@ -4181,6 +4300,9 @@ mod tests {
                 _display_name: &str,
                 _history_handler: Option<
                     Arc<dyn clipvault_platform::peer_transport::HistoryHostHandler>,
+                >,
+                _fetch_handler: Option<
+                    Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
                 >,
             ) -> Result<u16, TransportError> {
                 Err(TransportError::Unavailable)

@@ -721,6 +721,76 @@ export interface PeerHistoryRow {
 }
 
 /**
+ * Discriminated union the `peer-text-import` change returns when
+ * the user activates `Importar` for a row of a trusted active
+ * peer. The bridge never carries the imported body: the
+ * frontend branches on `kind` to render the matching copy
+ * without inspecting free-form strings or content bytes. Every
+ * variant collapses to a stable identifier the UI maps to a
+ * localised message; the metadata-only fields (`entry_id`,
+ * `collection_id`, `deduplicated`) identify the local snapshot
+ * and its bound collection without leaking the imported text.
+ */
+export type PeerImportResponse =
+  | {
+      kind: "imported";
+      /** Local entry id the import produced (existing or freshly created). */
+      entry_id: number;
+      /** Peer-bound collection id the entry was added to. */
+      collection_id: number;
+      /**
+       * `true` when the import reused an existing local row
+       * (an identical canonical hash was already stored or the
+       * same `(peer, remote_entry, hash)` provenance was
+       * already recorded). `false` when the import produced a
+       * fresh local row.
+       */
+      deduplicated: boolean;
+    }
+  | {
+      kind: "peer_unavailable";
+      /**
+       * Stable reason the runtime maps to copy
+       * (`no_known_peer` / `not_trusted` / `not_active`).
+       */
+      reason: "no_known_peer" | "not_trusted" | "not_active";
+    }
+  | {
+      kind: "transport_unavailable";
+      /**
+       * Stable reason the productive mTLS transport surfaces
+       * when the import request is rejected
+       * (`unavailable` / `unknown_peer` / `key_mismatch` /
+       * `revoked` / `blocked` / `incompatible_protocol` /
+       * `malformed` / `not_transferable` / `body_too_large` /
+       * `persistence_unavailable`). The renderer keeps the
+       * previous page and surfaces a typed error copy without
+       * retrying blindly.
+       */
+      reason:
+        | "unavailable"
+        | "unknown_peer"
+        | "key_mismatch"
+        | "revoked"
+        | "blocked"
+        | "incompatible_protocol"
+        | "malformed"
+        | "not_transferable"
+        | "body_too_large"
+        | "persistence_unavailable";
+    }
+  | { kind: "body_too_large" }
+  | { kind: "invalid_utf8" }
+  | { kind: "not_transferable" }
+  | { kind: "empty_content" }
+  | { kind: "title_invalid" }
+  | {
+      kind: "persistence_error";
+      /** Stable reason the renderer surfaces without raw SQLite strings. */
+      reason: string;
+    };
+
+/**
  * Augmented metadata-only row the `Equipos` view renders when
  * the pairing change is enabled. The DTO extends the discovery
  * snapshot entry with the trust state the pairing runtime

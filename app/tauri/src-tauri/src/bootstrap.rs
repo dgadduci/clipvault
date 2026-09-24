@@ -5821,6 +5821,14 @@ mod tests {
         ) -> Result<(), TransportError> {
             Ok(())
         }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn install_fetch_handler(
+            &self,
+            _handler: Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
+        ) -> Result<(), TransportError> {
+            Ok(())
+        }
     }
 
     /// Build a `tempfile::TempDir` + `AppContext` with the scriptable

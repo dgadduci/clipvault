@@ -3513,3 +3513,167 @@ pub fn clipvault_peer_history_forget(state: State<'_, SharedState>, peer_id: Str
     let service = context.peer_text_history();
     service.forget_peer(&peer_id);
 }
+
+// ---------------------------------------------------------------------------
+// `peer-text-import` bridge.
+//
+// The command is a metadata-only thin adapter over
+// [`clipvault_core::peer_text_import::PeerImportService`]. The shell
+// calls it whenever the user activates `Importar` for a row of a
+// trusted, active peer; the runtime consults the in-memory trust /
+// active cache, dials the productive mTLS transport, validates the
+// body and commits the import transaction. Every typed failure
+// collapses into a discriminated variant so the renderer branches
+// on `kind` without inspecting free-form strings or content bytes.
+// The bridge never returns a typed `CommandError` for an import
+// request: every typed failure collapses into a variant.
+// ---------------------------------------------------------------------------
+
+/// Wire representation of
+/// [`clipvault_core::peer_text_import::PeerImportOutcome`]. The
+/// frontend branches on `kind` to render the matching copy
+/// without inspecting the inner list. The bridge never returns
+/// a `CommandError` for an import request: every typed failure
+/// collapses into a discriminated variant so the renderer
+/// stays a thin adapter over the union.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerImportResponse {
+    /// The import transaction committed. `entry_id` is the
+    /// local row the dedupe path produced (existing or freshly
+    /// created); `collection_id` is the peer-bound collection
+    /// the entry was added to; `deduplicated` distinguishes a
+    /// fresh insert from a snapshot that reused an existing
+    /// local entry.
+    Imported {
+        entry_id: i64,
+        collection_id: i64,
+        deduplicated: bool,
+    },
+    /// The peer is not currently eligible to serve an import
+    /// (no known row, not trusted, or not active). The runtime
+    /// never opened a network call; the renderer surfaces the
+    /// stable reason copy.
+    PeerUnavailable { reason: &'static str },
+    /// The fetch transport rejected the request. The renderer
+    /// surfaces the typed reason without retrying blindly.
+    TransportUnavailable { reason: &'static str },
+    /// The body the host returned exceeded the 1 MiB cap. The
+    /// runtime collapsed the rejection into a typed outcome
+    /// without persisting anything.
+    BodyTooLarge,
+    /// The body the host returned was not valid UTF-8. The
+    /// runtime collapsed the rejection into a typed outcome
+    /// without persisting anything.
+    InvalidUtf8,
+    /// The remote entry the user asked to import no longer
+    /// exists on the host or is no longer transferrable. The
+    /// runtime surfaces the typed outcome without mutating
+    /// SQLite.
+    NotTransferable,
+    /// The imported body was empty after trimming. The runtime
+    /// refuses to store empty entries; this outcome collapses
+    /// the typed reason the renderer surfaces.
+    EmptyContent,
+    /// The remote title the host returned failed local title
+    /// validation (too long after trimming). The runtime
+    /// continues to import the entry without persisting the
+    /// invalid title.
+    TitleInvalid,
+    /// The local SQLite layer refused the commit. The runtime
+    /// rolled the whole transaction back so the local database
+    /// stays consistent.
+    PersistenceError { reason: &'static str },
+}
+
+impl PeerImportResponse {
+    fn from_outcome(outcome: clipvault_core::peer_text_import::PeerImportOutcome) -> Self {
+        use clipvault_core::peer_text_import::PeerImportOutcome as Core;
+        match outcome {
+            Core::Imported {
+                entry_id,
+                collection_id,
+                deduplicated,
+            } => PeerImportResponse::Imported {
+                entry_id,
+                collection_id,
+                deduplicated,
+            },
+            Core::PeerUnavailable { reason } => PeerImportResponse::PeerUnavailable { reason },
+            Core::TransportUnavailable { reason } => {
+                PeerImportResponse::TransportUnavailable { reason }
+            }
+            Core::BodyTooLarge => PeerImportResponse::BodyTooLarge,
+            Core::InvalidUtf8 => PeerImportResponse::InvalidUtf8,
+            Core::NotTransferable => PeerImportResponse::NotTransferable,
+            Core::EmptyContent => PeerImportResponse::EmptyContent,
+            Core::TitleInvalid => PeerImportResponse::TitleInvalid,
+            Core::PersistenceError { reason } => PeerImportResponse::PersistenceError { reason },
+        }
+    }
+}
+
+/// Import the canonical UTF-8 text of a remote entry. The
+/// runtime consults the in-memory trust / active cache and
+/// refuses to dial when the peer is not trusted, not present
+/// or unknown. Once the gate opens, the service reaches the
+/// remote listener through the productive mTLS dial driver the
+/// pairing change installed; the local SQLite commit happens
+/// inside a single transaction so a failure rolls the whole
+/// import back. The command never writes to the clipboard,
+/// never invokes the paste path and never emits a
+/// `history-updated` event carrying the imported body.
+#[tauri::command]
+pub fn clipvault_peer_import_fetch(
+    state: State<'_, SharedState>,
+    peer_id: String,
+    remote_entry_id: String,
+    display_name: String,
+) -> PeerImportResponse {
+    let context = state.context();
+    let service = context.peer_text_import();
+    let cert_fingerprint = match context.peer_pairing().cert_fingerprint_for(&peer_id) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => {
+            return PeerImportResponse::PeerUnavailable {
+                reason: "not_trusted",
+            };
+        }
+    };
+    let outcome = service.import(&peer_id, &cert_fingerprint, &remote_entry_id, &display_name);
+    PeerImportResponse::from_outcome(outcome)
+}
+
+/// Best-effort sync hook the shell calls after every peer
+/// snapshot / health probe so the in-memory trust / active cache
+/// the [`clipvault_peer_import_fetch`] command consults cannot
+/// outrun the runtime transition that should invalidate it.
+/// The hook is metadata-only: it never mutates SQLite, never
+/// opens a network call, and never emits a `history-updated`
+/// event.
+#[tauri::command]
+pub fn clipvault_peer_import_record_state(
+    state: State<'_, SharedState>,
+    peer_id: String,
+    trusted: bool,
+    active: bool,
+) {
+    let context = state.context();
+    let service = context.peer_text_import();
+    service.record_peer_state(
+        &peer_id,
+        clipvault_core::peer_text_import::PeerImportTrustState { trusted, active },
+    );
+}
+
+/// Forget the cache entry for `peer_id`. The shell calls this
+/// after `Desvincular`, `Bloquear` and `Desbloquear` so a
+/// subsequent import collapses to
+/// [`PeerImportResponse::PeerUnavailable`] without a network
+/// round-trip.
+#[tauri::command]
+pub fn clipvault_peer_import_forget(state: State<'_, SharedState>, peer_id: String) {
+    let context = state.context();
+    let service = context.peer_text_import();
+    service.forget_peer(&peer_id);
+}

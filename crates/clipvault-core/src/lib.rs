@@ -30,8 +30,10 @@ pub mod paste;
 pub mod paste_suppression;
 pub mod peer_discovery;
 pub mod peer_identity;
+mod peer_import_sqlite;
 pub mod peer_pairing;
 pub mod peer_text_history;
+pub mod peer_text_import;
 pub mod platform;
 pub mod platform_adapters;
 pub mod privacy;
@@ -163,6 +165,14 @@ pub use peer_text_history::{
     RemoteTextHistoryPage, RemoteTextPreview, CURSOR_SECRET_BYTES, DEFAULT_PAGE_ROWS,
     MAX_PAGE_ROWS, PREVIEW_MAX_CHARS, PREVIEW_MAX_LINES,
 };
+pub use peer_text_import::{
+    ImportClock, InMemoryImportPersistence, NoopPeerFetchTransport, PeerFetchRequest,
+    PeerFetchResponse, PeerFetchTransport, PeerFetchTransportError, PeerImportError,
+    PeerImportOutcome, PeerImportPersistence, PeerImportPersistenceError, PeerImportService,
+    PeerImportTrustState, SystemImportClock, IMPORT_MAX_BODY_BYTES,
+};
+#[cfg(feature = "local-peer-pairing-tls")]
+pub use peer_text_import::{PeerPairingFetchTransportAdapter, PeerTextImportHostHandlerAdapter};
 pub use platform_adapters::PlatformAdapters;
 pub use privacy::{CaptureDecision, CoreBlacklistMatcher, PrivacyGate};
 pub use redact::{redact, RedactingMakeWriter, RedactingWriter};

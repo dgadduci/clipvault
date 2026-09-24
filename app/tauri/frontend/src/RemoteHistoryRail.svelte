@@ -497,7 +497,12 @@
           data-testid="remote-history-rail-card-slot"
           data-remote-entry-id={row.remote_entry_id}
         >
-          <RemotePreviewCard {row} rowTestId={`remote-history-rail-card-${index}`} />
+          <RemotePreviewCard
+            {row}
+            rowTestId={`remote-history-rail-card-${index}`}
+            peerId={peerId}
+            displayName={activeEntry?.display_name ?? null}
+          />
         </div>
       {/each}
     </div>

@@ -14,6 +14,7 @@ mod ignored_apps;
 mod known_peers;
 mod migration;
 mod organization;
+mod peer_import_repository;
 mod registry;
 pub mod source_app;
 
@@ -39,6 +40,10 @@ pub use organization::{
     CollectionKind, OrganizationError, OrganizationRepository, Tag, DEFAULT_COLLECTION_PALETTE,
     HISTORY_DEFAULT_COLOR_HEX, HISTORY_DISPLAY_NAME, HISTORY_STABLE_KEY,
     MAX_ORGANIZATION_NAME_CHARS,
+};
+pub use peer_import_repository::{
+    find_binding_in_tx, PeerCollectionBinding, PeerImportRepository, PeerImportRepositoryError,
+    RemoteImportRecord,
 };
 pub use registry::builtin_migrations;
 pub use source_app::SourceAppFilter;

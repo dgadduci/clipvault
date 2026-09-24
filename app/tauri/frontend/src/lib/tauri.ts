@@ -32,6 +32,7 @@ import type {
   PeerPairingOutcomeResponse,
   PeerPairingSessionSnapshot,
   PeerHistoryBrowseResponse,
+  PeerImportResponse,
   PeerTrustOperationResponse,
   PickAndAddResponse,
   PlatformSettingsTarget,
@@ -491,6 +492,59 @@ export const peerHistoryForgetCommand: ClipvaultCommandArg<
   { peer_id: string }
 > = (args) =>
   invoke<void>("clipvault_peer_history_forget", {
+    peerId: args.peer_id,
+  });
+
+/**
+ * Bridge for the `peer-text-import` change. The command dials
+ * the productive mTLS transport the runtime already wired, the
+ * importer commits the import transaction through the shared
+ * SQLite handle and the discriminated union the bridge returns
+ * carries only metadata: `entry_id`, `collection_id` and
+ * `deduplicated` identify the local snapshot without leaking the
+ * imported text. The frontend branches on `kind` to render the
+ * matching copy.
+ */
+export const peerImportFetchCommand: ClipvaultCommandArg<
+  PeerImportResponse,
+  { peer_id: string; remote_entry_id: string; display_name: string }
+> = (args) =>
+  invoke<PeerImportResponse>("clipvault_peer_import_fetch", {
+    peerId: args.peer_id,
+    remoteEntryId: args.remote_entry_id,
+    displayName: args.display_name,
+  });
+
+/**
+ * Best-effort sync hook the shell calls after every peer
+ * snapshot / health probe so the in-memory trust / active cache
+ * the [`peerImportFetchCommand`] consults cannot outrun the
+ * runtime transition that should invalidate it. The hook is
+ * metadata-only: it never mutates SQLite, never opens a network
+ * call, and never emits a `history-updated` event.
+ */
+export const peerImportRecordStateCommand: ClipvaultCommandArg<
+  void,
+  { peer_id: string; trusted: boolean; active: boolean }
+> = (args) =>
+  invoke<void>("clipvault_peer_import_record_state", {
+    peerId: args.peer_id,
+    trusted: args.trusted,
+    active: args.active,
+  });
+
+/**
+ * Forget the cache entry for `peer_id`. The shell calls this
+ * after `Desvincular`, `Bloquear` and `Desbloquear` so a
+ * subsequent import collapses to
+ * [`PeerImportResponse.peer_unavailable`] without a network
+ * round-trip.
+ */
+export const peerImportForgetCommand: ClipvaultCommandArg<
+  void,
+  { peer_id: string }
+> = (args) =>
+  invoke<void>("clipvault_peer_import_forget", {
     peerId: args.peer_id,
   });
 

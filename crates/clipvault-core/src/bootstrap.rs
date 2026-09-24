@@ -257,6 +257,15 @@ pub struct AppContext {
     /// by construction: it never mutates SQLite in response to a
     /// browsing call and never emits a `history-updated` event.
     peer_text_history: crate::peer_text_history::PeerTextHistoryService,
+    /// Explicit-import façade the shell drives when the user
+    /// activates `Importar` for a row of a trusted active peer.
+    /// The service is metadata-only by construction: it never
+    /// mutates SQLite outside the documented
+    /// `peer-text-import` change, never writes to the clipboard,
+    /// never invokes PrivacyGate / paste, and never carries the
+    /// imported body outside the authenticated fetch + commit
+    /// window.
+    peer_text_import: crate::peer_text_import::PeerImportService,
     /// Concrete mDNS adapter the bootstrap installed for
     /// discovery. The toggle command wires this handle into the
     /// `PairingAdvertisement` the productive pairing transport
@@ -553,6 +562,14 @@ impl AppContext {
     /// service is cheap to clone (every field is `Arc`-shared).
     pub fn peer_text_history(&self) -> &crate::peer_text_history::PeerTextHistoryService {
         &self.peer_text_history
+    }
+
+    /// Accessor the shell drives to import the canonical text
+    /// of a remote entry through the explicit `Importar` action.
+    /// The service is cheap to clone (every field is
+    /// `Arc`-shared).
+    pub fn peer_text_import(&self) -> &crate::peer_text_import::PeerImportService {
+        &self.peer_text_import
     }
 
     /// Best-effort wire of the local peer identity the runtime
@@ -1189,8 +1206,10 @@ impl AppBootstrap {
             );
         let peer_text_history =
             crate::peer_text_history::PeerTextHistoryService::new(peer_text_history_transport);
-        let peer_pairing =
-            crate::peer_pairing::PairingRuntime::new(pairing_transport, pairing_persistence);
+        let peer_pairing = crate::peer_pairing::PairingRuntime::new(
+            pairing_transport.clone(),
+            pairing_persistence,
+        );
         // Install the in-memory cursor-secret cache the pairing
         // runtime updates every time it persists a trust
         // transition. The cache lives behind the
@@ -1240,6 +1259,65 @@ impl AppBootstrap {
                 );
             }
         }
+        // Build the productive host-side fetch handler the
+        // listener drives when an authenticated peer asks for
+        // `fetch_text`. The bootstrap installs the adapter
+        // *before* the very first inbound connection so the wire
+        // contract stays stable across rebuilds: a productive host
+        // always serves the body, a build without the productive
+        // feature pair collapses to the documented `not_available`
+        // reason without ever exposing a half-configured
+        // listener. The persistence adapter borrows the same
+        // shared database handle the runtime already holds, so
+        // SQLite never reaches across the platform boundary.
+        #[cfg(feature = "local-peer-pairing-tls")]
+        {
+            let fetch_persistence: Arc<dyn crate::peer_text_import::PeerImportPersistence> =
+                Arc::new(crate::peer_import_sqlite::SqliteImportPersistence::new(
+                    Arc::clone(&database_handle),
+                ));
+            let fetch_handler: Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler> =
+                Arc::new(
+                    crate::peer_text_import::PeerTextImportHostHandlerAdapter::new(
+                        fetch_persistence,
+                    ),
+                );
+            if let Err(error) = peer_pairing.install_fetch_handler_inner(fetch_handler) {
+                tracing::warn!(
+                    ?error,
+                    "productive fetch handler install failed; bootstrap continues with no host import"
+                );
+            }
+        }
+        // Build the explicit-import facade the shell drives when
+        // the user activates `Importar` for a row of a trusted,
+        // active peer. The service piggy-backs on the same
+        // pairing transport the productive install wired so the
+        // mTLS dial loop is shared with the history browse; the
+        // persistence adapter borrows the same shared database
+        // handle the runtime already holds. Cross-compiles and
+        // unsupported targets fall back to the noop transport so
+        // the runtime surfaces a typed `TransportUnavailable`
+        // reason instead of silently spawning a half-broken
+        // import.
+        let peer_text_import_transport: Arc<dyn crate::peer_text_import::PeerFetchTransport> =
+            peer_text_import_transport_for(
+                #[cfg(feature = "local-peer-pairing-tls")]
+                Arc::clone(&pairing_transport),
+            );
+        let peer_text_import_persistence: Arc<dyn crate::peer_text_import::PeerImportPersistence> =
+            Arc::new(crate::peer_import_sqlite::SqliteImportPersistence::new(
+                Arc::clone(&database_handle),
+            ));
+        let peer_text_import = crate::peer_text_import::PeerImportService::new(
+            peer_text_import_transport,
+            peer_text_import_persistence,
+            Arc::new(crate::peer_text_import::SystemImportClock),
+        );
+        #[cfg(feature = "local-peer-pairing-tls")]
+        let _pairing_transport_arc = Arc::clone(&pairing_transport);
+        #[cfg(not(feature = "local-peer-pairing-tls"))]
+        let _pairing_transport_arc = ();
         // Pre-populate the per-peer HMAC secret cache from the
         // persisted `known_peers.cursor_secret` rows. The cache is
         // the only place the runtime stores the secret; the
@@ -1354,6 +1432,7 @@ impl AppBootstrap {
             peer_discovery,
             peer_pairing,
             peer_text_history,
+            peer_text_import,
             // The capture-debug sink is either the caller-supplied
             // handle (tests) or the production wiring that consults
             // `CLIPVAULT_DEBUG_CAPTURE` exactly once at startup. When
@@ -1418,6 +1497,29 @@ fn peer_text_history_transport_for(
     {
         let _ = ();
         Arc::new(crate::peer_text_history::NoopPeerHistoryTransport)
+    }
+}
+
+/// Resolve the [`crate::peer_text_import::PeerFetchTransport`]
+/// the bootstrap installs behind the client-side facade. The
+/// productive install path piggy-backs on the productive pairing
+/// transport the bootstrap already wired; cross-compiles and
+/// unsupported targets fall back to a noop transport that surfaces
+/// [`crate::peer_text_import::PeerFetchTransportError::Unavailable`]
+/// so the runtime never reaches for half-broken transport state.
+fn peer_text_import_transport_for(
+    #[cfg(feature = "local-peer-pairing-tls")] pairing_transport: Arc<
+        dyn crate::peer_pairing::PeerTransport,
+    >,
+) -> Arc<dyn crate::peer_text_import::PeerFetchTransport> {
+    #[cfg(feature = "local-peer-pairing-tls")]
+    {
+        Arc::new(crate::peer_text_import::PeerPairingFetchTransportAdapter::new(pairing_transport))
+    }
+    #[cfg(not(feature = "local-peer-pairing-tls"))]
+    {
+        let _ = ();
+        Arc::new(crate::peer_text_import::NoopPeerFetchTransport)
     }
 }
 

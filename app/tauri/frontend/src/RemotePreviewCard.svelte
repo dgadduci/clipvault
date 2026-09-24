@@ -9,9 +9,12 @@
    * pointer drag, never copies content to the clipboard and
    * never opens the local edit / pin / menu flows the local
    * card controls. The card carries a single menu entry —
-   * `Importar (próximamente)` — that is permanently disabled:
-   * the menu exists only to communicate that the future import
-   * flow will plug into this surface, never to mutate state.
+   * `Importar` — that triggers the explicit `peer-text-import`
+   * flow: the runtime dials the productive mTLS transport, the
+   * importer commits the import transaction through the
+   * shared SQLite handle and the discriminated union the
+   * bridge returns identifies the local snapshot without
+   * leaking the imported text.
    *
    * The payload is metadata-only by construction. The card
    * NEVER receives the entry body or any field the spec /
@@ -20,7 +23,8 @@
    * simply does not have a slot for those fields; the bridge
    * refuses to forward them.
    */
-  import type { PeerHistoryRow } from "./types";
+  import type { PeerHistoryRow, PeerImportResponse } from "./types";
+  import { peerImportFetchCommand } from "./lib/tauri";
 
   export let row: PeerHistoryRow;
   /**
@@ -32,6 +36,19 @@
    * hosts that mint the id with a different prefix.
    */
   export let rowTestId: string | null = null;
+  /**
+   * `peer_id` the parent passes through so the import bridge
+   * can dial the productive mTLS transport. The component
+   * never inspects the value beyond forwarding it verbatim.
+   */
+  export let peerId: string | null = null;
+  /**
+   * Display name the parent renders for the active peer. The
+   * bridge forwards the value to the importer so the
+   * peer-bound collection uses the same visible name the UI
+   * already shows.
+   */
+  export let displayName: string | null = null;
 
   /**
    * Localised content-type label. The remote rows arrive with
@@ -79,19 +96,65 @@
     }
   }
 
-  /**
-   * The menu is permanently disabled. The future `peer-text-import`
-   * change replaces the disabled button with a productive one;
-   * for now the placeholder is the only menu entry so the
-   * renderer can communicate the upcoming flow without
-   * mutating local state.
-   */
   let menuOpen = false;
+  let busy = false;
+  /**
+   * Metadata-only feedback the card surfaces after the
+   * importer resolves the request. The shape is the
+   * discriminated union the bridge returns — the renderer
+   * never has to inspect free-form strings or content bytes.
+   */
+  let lastResult: { kind: "ok" | "error"; summary: string } | null = null;
   function toggleMenu(): void {
     menuOpen = !menuOpen;
   }
-  function closeMenu(): void {
+  function describeOutcome(outcome: PeerImportResponse): string {
+    switch (outcome.kind) {
+      case "imported":
+        return outcome.deduplicated
+          ? "Importado (ya existía)"
+          : "Importado";
+      case "peer_unavailable":
+        return `No disponible (${outcome.reason})`;
+      case "transport_unavailable":
+        return `No disponible (${outcome.reason})`;
+      case "body_too_large":
+        return "Cuerpo demasiado grande";
+      case "invalid_utf8":
+        return "Cuerpo no válido";
+      case "not_transferable":
+        return "No transferible";
+      case "empty_content":
+        return "Contenido vacío";
+      case "title_invalid":
+        return "Título no válido";
+      case "persistence_error":
+        return "Error al guardar";
+    }
+  }
+  async function importEntry(): Promise<void> {
+    if (peerId === null || busy) return;
+    busy = true;
+    lastResult = null;
     menuOpen = false;
+    try {
+      const outcome = await peerImportFetchCommand({
+        peer_id: peerId,
+        remote_entry_id: row.remote_entry_id,
+        display_name: displayName ?? "",
+      });
+      lastResult = {
+        kind: outcome.kind === "imported" ? "ok" : "error",
+        summary: describeOutcome(outcome),
+      };
+    } catch (err) {
+      lastResult = {
+        kind: "error",
+        summary: err instanceof Error ? err.message : String(err),
+      };
+    } finally {
+      busy = false;
+    }
   }
 </script>
 
@@ -157,16 +220,26 @@
               type="button"
               role="menuitem"
               class="remote-preview-card-menu-item"
-              data-testid="remote-preview-card-import-placeholder"
-              disabled
-              aria-disabled="true"
-              on:click={closeMenu}
-              title="Disponible próximamente"
+              data-testid="remote-preview-card-import"
+              disabled={busy || peerId === null}
+              aria-disabled={busy || peerId === null}
+              aria-busy={busy}
+              on:click={importEntry}
             >
-              Importar (próximamente)
+              {busy ? "Importando…" : "Importar"}
             </button>
           </li>
         </ul>
+      {/if}
+      {#if lastResult}
+        <p
+          class="remote-preview-card-result"
+          data-testid="remote-preview-card-result"
+          data-result-kind={lastResult.kind}
+          role={lastResult.kind === "error" ? "alert" : "status"}
+        >
+          {lastResult.summary}
+        </p>
       {/if}
     </div>
   </footer>
@@ -282,11 +355,28 @@
     padding: 0.45rem 0.65rem;
     text-align: left;
     border-radius: 4px;
-    cursor: not-allowed;
+    cursor: pointer;
     font: inherit;
-    opacity: 0.55;
   }
   .remote-preview-card-menu-item:disabled {
     cursor: not-allowed;
+    opacity: 0.55;
+  }
+  .remote-preview-card-result {
+    margin: 0.35rem 0 0;
+    padding: 0.35rem 0.55rem;
+    font-size: 0.7rem;
+    line-height: 1.3;
+    border-radius: 6px;
+    border: 1px solid var(--cv-border, #30363d);
+    background: rgba(255, 255, 255, 0.04);
+    color: inherit;
+    min-width: 12rem;
+    max-width: 18rem;
+  }
+  .remote-preview-card-result[data-result-kind="error"] {
+    border-color: rgba(248, 113, 113, 0.55);
+    background: rgba(248, 113, 113, 0.12);
+    color: #fee2e2;
   }
 </style>
