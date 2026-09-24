@@ -29,6 +29,7 @@
   import {
     peerHistoryBrowseCommand,
     peerHistoryRecordStateCommand,
+    peerImportRecordStateCommand,
   } from "./lib/tauri";
   import type {
     PeerHistoryBrowseResponse,
@@ -174,30 +175,33 @@
   }
 
   /**
-   * Best-effort sync hook that keeps the runtime trust /
-   * active cache aligned with the latest snapshot. The runtime
-   * uses the cache to decide whether to project the page
-   * request; calling the hook every time the parent supplies a
-   * fresh snapshot guarantees a stale `trust_state` flip can
-   * never resurrect a revoked peer.
+   * Best-effort sync hook that keeps the history and import
+   * runtime trust / active caches aligned with the latest
+   * snapshot. Both actions apply the same eligibility gate: a
+   * remote row that was safe to browse must not be rejected as
+   * an unknown peer when the user explicitly chooses Importar.
    */
   async function refreshPeerState(targetPeerId: string): Promise<void> {
     const entry = (snapshot?.entries ?? []).find(
       (candidate) => candidate.peer_id === targetPeerId,
     );
-    await peerHistoryRecordStateCommand({
+    const peerState = {
       peer_id: targetPeerId,
       trusted: entry?.trust_state === "trusted",
       active: entry?.is_present ?? false,
-    });
+    };
+    await Promise.all([
+      peerHistoryRecordStateCommand(peerState),
+      peerImportRecordStateCommand(peerState),
+    ]);
   }
 
   /**
    * Populate the runtime's local trust/presence gate before the first browse.
-   * The two Tauri commands are independent IPC requests, so firing them in
-   * parallel could let `browse` observe an empty cache and reject a healthy
-   * peer. The generation check retains the stale-response protection when the
-   * user changes selection while the state sync is in flight.
+   * The history and import cache writes are independent, but this function
+   * awaits both before browse can run. The generation check retains the
+   * stale-response protection when the user changes selection while the state
+   * sync is in flight.
    */
   async function loadInitialPage(
     targetPeerId: string,

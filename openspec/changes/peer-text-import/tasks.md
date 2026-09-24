@@ -23,9 +23,12 @@
 - [x] 3.1 Exponer fetch/import Tauri y bridge con outcomes discriminados; emitir
   history-updated/organization-updated vacíos sólo después de commit.
 - [x] 3.2 Agregar Importar a RemoteHistory con busy, reintento/error seguro,
-  feedback metadata-only y sin acciones de card local.
+  feedback metadata-only y sin acciones de card local. Reabierto: la primera
+  entrega no sincronizó la caché de elegibilidad del importador al seleccionar
+  el peer, por lo que Importar devolvía `no_known_peer` antes de dialeo.
 - [x] 3.3 Probar bridge/UI, refresh de rail/collections y que texto no entra en
-  logs, toasts, eventos ni payload drag.
+  logs, toasts, eventos ni payload drag. Reabierto: falta cubrir la
+  sincronización conjunta de las cachés de historial e importación.
 
 ## 4. Tests de dominio
 
@@ -37,7 +40,8 @@
 ## 5. Verificación
 
 - [x] 5.1 Ejecutar fmt, tests DB/core/network/Tauri, npm check/build/test,
-  OpenSpec strict validation y git diff --check.
+  OpenSpec strict validation y git diff --check. Reabierto para verificar la
+  corrección de la sincronización de estado de importación.
 - [ ] 5.2 Manual Wayland, X11 y macOS: importar de varios pares, reiniciar,
   bloquear/desvincular, borrar collection y confirmar no clipboard/paste ni
   cambios a assets existentes.
