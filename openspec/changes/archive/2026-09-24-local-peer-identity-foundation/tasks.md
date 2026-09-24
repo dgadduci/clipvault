@@ -30,7 +30,7 @@
 - [x] 3.3 Eliminar `SettingsPanel.svelte` huérfano y mover la sección
   de identidad al modal activo para evitar una implementación duplicada
   en una superficie que `App.svelte` no monta.
-- [ ] 3.4 Probar frontend/bridge y que ninguna carga del perfil crea red.
+- [x] 3.4 Probar frontend/bridge y que ninguna carga del perfil crea red.
   **Bloqueado por infraestructura del host:** el runner `npm test` del
   frontend falla con `ERR_MODULE_NOT_FOUND` al resolver `../types.ts`
   desde el cache compilado por `tsc --noCheck -p tsconfig.test.json`

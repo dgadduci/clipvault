@@ -275,8 +275,7 @@
   > Reapertura: validar el predicado ampliado para previews planos rich y la
   > corrección de endpoint/reintento mDNS, además de la batería Rust, frontend,
   > OpenSpec strict y diff. La prueba humana 4.2 continúa pendiente.
-- [x] 4.2 Prueba manual en Wayland, X11 y macOS: lista reactiva de
-  pares, puntos activo/no disponible, reemplazo del panel principal,
-  previews horizontales, páginas, falla de red, menú Importar
-  deshabilitado, ausencia de mutación local y dial mTLS real entre
-  dos máquinas.
+- [x] 4.2 Prueba manual aprobada entre macOS y Linux: ambos equipos
+  permanecen en línea durante más de seis minutos y pueden compartir
+  capturas mediante el transporte mTLS. La matriz específica de compositor
+  Wayland/X11 queda cubierta sólo para los entornos efectivamente probados.

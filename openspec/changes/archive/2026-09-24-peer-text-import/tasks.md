@@ -44,4 +44,6 @@
   corrección de la sincronización de estado de importación.
 - [x] 5.2 Manual Wayland, X11 y macOS: importar de varios pares, reiniciar,
   bloquear/desvincular, borrar collection y confirmar no clipboard/paste ni
-  cambios a assets existentes.
+  cambios a assets existentes. Aprobada manualmente en la matriz indicada:
+  los pares permanecen disponibles, la importación funciona entre Linux y
+  macOS, y no se observaron mutaciones del clipboard ni de assets existentes.

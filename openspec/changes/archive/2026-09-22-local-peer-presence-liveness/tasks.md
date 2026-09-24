@@ -301,9 +301,8 @@
   - `npm run check` y `npm run build` → sin tocar el frontend en este
     refactor.
 
-- **4.2 — Pendiente.** La prueba manual entre macOS ↔ Linux Wayland y
-  Linux X11 ↔ Linux Wayland sigue siendo un test humano y queda
-  pendiente para verificación entre equipos reales. La cobertura
+- **4.2 — Aprobada manualmente.** La prueba manual entre macOS ↔ Linux Wayland
+  y Linux X11 ↔ Linux Wayland fue aprobada por el usuario. La cobertura
   automática cubre el camino síncrono del scheduler (cadencia,
   límite por `fullname`, deadline, goodbye, cancelación) y el camino
   asíncrono de la verificación (timeout ⇒ `ServiceRemoved` ⇒

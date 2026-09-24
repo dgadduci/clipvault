@@ -22,5 +22,5 @@
 ## 4. Verificación
 
 - [x] 4.1 Ejecutar formato, tests Rust relevantes, OpenSpec estricto y diff.
-- [x] 4.2 Prueba manual humana macOS ↔ Linux por seis minutos; no completar
-  automáticamente.
+- [x] 4.2 Prueba manual humana macOS ↔ Linux por seis minutos: ambos equipos
+  permanecen en línea y comparten archivos después de más de seis minutos.

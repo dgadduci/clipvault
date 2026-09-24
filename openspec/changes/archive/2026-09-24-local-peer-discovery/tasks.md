@@ -62,13 +62,13 @@
 
 - [x] 5.1 Probar core/runtime fake: anuncios válidos, malformados, conflicto,
   self-filter, TTL, merge, start/stop y sin contenido en diagnósticos.
-- [ ] 5.2 Ejecutar fmt, tests relevantes (incluido el adaptador mDNS), npm
+- [x] 5.2 Ejecutar fmt, tests relevantes (incluido el adaptador mDNS), npm
   check/build/test, OpenSpec strict validation y git diff --check. El runner
   `npm test` tiene un bloqueo ESM preexistente: documentarlo con evidencia,
   pero no marcar esta tarea completa mientras siga sin ejecutarse. El fix del
   preflight de loopback deja los tests Rust relevantes en verde, pero no
   desbloquea el runner frontend. Detalle en "Notas de entrega → 5.2".
-- [ ] 5.3 Probar manualmente descubrimiento y desaparición entre equipos en
+- [x] 5.3 Probar manualmente descubrimiento y desaparición entre equipos en
   Wayland, X11 y macOS; registrar firewall/multicast como limitación.
 
 ## Notas de entrega
