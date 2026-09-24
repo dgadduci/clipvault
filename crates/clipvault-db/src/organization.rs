@@ -98,6 +98,15 @@ pub enum OrganizationError {
 /// repository persists: lowercase, opaque, no alpha. The migration
 /// that introduced the column assigned `HISTORY_DEFAULT_COLOR_HEX`
 /// to every pre-existing row so the field is always present.
+///
+/// `is_peer_bound` and `peer_display_name` are projection-only
+/// fields populated by the metadata-only left join with
+/// `peer_collection_bindings` (and `known_peers` when the peer is
+/// still around). They never carry the `peer_id`, the certificate
+/// fingerprint, the network identity, the imported content or any
+/// other secret: the column projection is the canonical "is this
+/// collection bound to a remote origin" check the sidebar and
+/// every downstream consumer should read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Collection {
     pub id: i64,
@@ -110,6 +119,22 @@ pub struct Collection {
     pub color_hex: String,
     pub created_at: String,
     pub updated_at: String,
+    /// `true` when the row is bound to a `peer_id` through
+    /// `peer_collection_bindings`. The persistence contract pins the
+    /// binding by `peer_id`; renaming the collection (or even
+    /// deleting and recreating it) is what flips this back to
+    /// `false` because the FK cascade removes the binding row.
+    /// System collections are never bound.
+    #[serde(default)]
+    pub is_peer_bound: bool,
+    /// Current visible peer display name resolved through the
+    /// `known_peers` join. `None` when the peer row is missing (the
+    /// `known_peers.peer_id` FK cascade already removed the
+    /// binding) or when the persisted `display_name` is empty. The
+    /// repository never serialises the `peer_id` itself: the UI
+    /// surfaces a generic safe label when this field is `None`.
+    #[serde(default)]
+    pub peer_display_name: Option<String>,
 }
 
 impl Collection {
@@ -185,13 +210,23 @@ impl<'a> OrganizationRepository<'a> {
 
     /// List every collection sorted so the system `Historial` row
     /// always comes first and user collections follow in a
-    /// deterministic case-insensitive order.
+    /// deterministic case-insensitive order. The query performs a
+    /// metadata-only left join with `peer_collection_bindings`
+    /// (and `known_peers` when the binding is present) so the
+    /// projection can carry the `is_peer_bound` flag and the
+    /// current visible peer name without serialising the raw
+    /// `peer_id`, certificate fingerprint or any other secret.
     pub fn list_collections(&self) -> Result<Vec<Collection>, OrganizationError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, stable_key, name, kind, color_hex, created_at, updated_at
-             FROM collections
-             ORDER BY CASE WHEN kind = 'system' THEN 0 ELSE 1 END,
-                      name COLLATE NOCASE ASC",
+            "SELECT c.id, c.stable_key, c.name, c.kind, c.color_hex,
+                    c.created_at, c.updated_at,
+                    CASE WHEN pcb.peer_id IS NULL THEN 0 ELSE 1 END AS is_peer_bound,
+                    NULLIF(TRIM(kp.display_name), '') AS peer_display_name
+             FROM collections c
+             LEFT JOIN peer_collection_bindings pcb ON pcb.collection_id = c.id
+             LEFT JOIN known_peers kp ON kp.peer_id = pcb.peer_id
+             ORDER BY CASE WHEN c.kind = 'system' THEN 0 ELSE 1 END,
+                      c.name COLLATE NOCASE ASC",
         )?;
         let rows = stmt.query_map([], row_to_collection)?;
         let mut out = Vec::new();
@@ -203,13 +238,23 @@ impl<'a> OrganizationRepository<'a> {
 
     /// Look up a collection by id. Returns `None` when the row does
     /// not exist (for example because it was deleted between two
-    /// consecutive calls).
+    /// consecutive calls). The helper performs the same
+    /// metadata-only left join with `peer_collection_bindings` and
+    /// `known_peers` so the caller's `is_peer_bound` /
+    /// `peer_display_name` view stays consistent with
+    /// [`Self::list_collections`].
     pub fn find_collection(&self, id: i64) -> Result<Option<Collection>, OrganizationError> {
         let record = self
             .conn
             .query_row(
-                "SELECT id, stable_key, name, kind, color_hex, created_at, updated_at
-                 FROM collections WHERE id = ?1",
+                "SELECT c.id, c.stable_key, c.name, c.kind, c.color_hex,
+                        c.created_at, c.updated_at,
+                        CASE WHEN pcb.peer_id IS NULL THEN 0 ELSE 1 END AS is_peer_bound,
+                        NULLIF(TRIM(kp.display_name), '') AS peer_display_name
+                 FROM collections c
+                 LEFT JOIN peer_collection_bindings pcb ON pcb.collection_id = c.id
+                 LEFT JOIN known_peers kp ON kp.peer_id = pcb.peer_id
+                 WHERE c.id = ?1",
                 params![id],
                 row_to_collection,
             )
@@ -248,6 +293,8 @@ impl<'a> OrganizationRepository<'a> {
             color_hex: normalised,
             created_at: ts.clone(),
             updated_at: ts,
+            is_peer_bound: false,
+            peer_display_name: None,
         })
     }
 
@@ -794,6 +841,7 @@ fn row_to_collection(row: &rusqlite::Row<'_>) -> rusqlite::Result<Collection> {
             Box::new(OrganizationError::Sqlite(rusqlite::Error::InvalidQuery)),
         )
     })?;
+    let is_peer_bound_raw: i64 = row.get(7)?;
     Ok(Collection {
         id: row.get(0)?,
         stable_key: row.get(1)?,
@@ -802,6 +850,8 @@ fn row_to_collection(row: &rusqlite::Row<'_>) -> rusqlite::Result<Collection> {
         color_hex: row.get(4)?,
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
+        is_peer_bound: is_peer_bound_raw != 0,
+        peer_display_name: row.get(8)?,
     })
 }
 
@@ -1101,6 +1151,7 @@ mod tests {
 
     use crate::entry::{ContentType, NewEntry};
     use crate::entry_repository::EntryRepository;
+    use crate::Database;
     use time::macros::datetime;
 
     fn insert_text_entry(conn: &mut Connection, content: &str, when: OffsetDateTime) -> i64 {
@@ -1230,5 +1281,365 @@ mod tests {
         );
         let target_tags = repo.entry_tag_ids(target).expect("ids");
         assert_eq!(target_tags, vec![tag_id]);
+    }
+
+    // -----------------------------------------------------------------
+    // `peer-import-collection-visibility` regression coverage.
+    //
+    // The change projects two metadata-only fields onto every
+    // collection row: `is_peer_bound` (true when the row is bound to
+    // a `peer_id` through `peer_collection_bindings`) and the
+    // current `peer_display_name` resolved through the
+    // `known_peers` join. The tests below pin the projection contract
+    // the sidebar depends on without leaking the raw `peer_id`,
+    // certificate fingerprint or any other secret through the
+    // serialised payload.
+    // -----------------------------------------------------------------
+
+    fn seed_peer(db: &mut Database, peer_id: &str, display_name: &str) {
+        let conn = db.connection_mut();
+        let mut repo = crate::KnownPeerRepository::new(conn);
+        repo.upsert_observation(&crate::PeerObservation {
+            peer_id: peer_id.to_string(),
+            public_key_fingerprint: "ab".repeat(32),
+            full_public_key_fingerprint: Some("cd".repeat(32)),
+            display_name: display_name.to_string(),
+            protocol_major: 1,
+            capability: "pairing".to_string(),
+            observed_at: OffsetDateTime::now_utc(),
+        })
+        .expect("upsert peer");
+    }
+
+    #[test]
+    fn list_collections_marks_unbound_rows_as_not_peer_bound() {
+        // Baseline: a freshly-created user collection must surface
+        // `is_peer_bound = false` and `peer_display_name = None`
+        // even after another peer has been seeded so the join does
+        // not cross-pollinate rows that share no binding.
+        let (_dir, mut db) = open_temp_db();
+        seed_peer(&mut db, "peer-a", "Equipo A");
+        let when = OffsetDateTime::now_utc();
+        let mut org_repo = OrganizationRepository::new(db.connection_mut());
+        let created = org_repo
+            .create_user_collection("Trabajo", HISTORY_DEFAULT_COLOR_HEX, when)
+            .expect("create");
+        let rows = org_repo.list_collections().expect("list");
+        let row = rows
+            .iter()
+            .find(|c| c.id == created.id)
+            .expect("created row");
+        assert!(!row.is_peer_bound);
+        assert!(row.peer_display_name.is_none());
+        // The system row stays unbound as well.
+        let history = rows
+            .iter()
+            .find(|c| c.stable_key.as_deref() == Some(HISTORY_STABLE_KEY))
+            .expect("historial");
+        assert!(!history.is_peer_bound);
+        assert!(history.peer_display_name.is_none());
+    }
+
+    #[test]
+    fn list_collections_projects_binding_and_peer_display_name() {
+        // A user collection bound to a known peer must surface
+        // `is_peer_bound = true` and the current peer display
+        // name. The serialised payload never carries the raw
+        // `peer_id`.
+        let (_dir, mut db) = open_temp_db();
+        seed_peer(&mut db, "peer-a", "Equipo A");
+        let when = OffsetDateTime::now_utc();
+        let collection_id = {
+            let mut org_repo = OrganizationRepository::new(db.connection_mut());
+            org_repo
+                .create_user_collection("Equipo A", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("create")
+                .id
+        };
+        {
+            let mut import_repo = crate::PeerImportRepository::new(db.connection_mut());
+            import_repo
+                .upsert_binding("peer-a", collection_id, when)
+                .expect("upsert");
+        }
+        let row = {
+            let org_repo = OrganizationRepository::new(db.connection_mut());
+            org_repo
+                .list_collections()
+                .expect("list")
+                .into_iter()
+                .find(|c| c.id == collection_id)
+                .expect("row")
+        };
+        assert!(row.is_peer_bound);
+        assert_eq!(row.peer_display_name.as_deref(), Some("Equipo A"));
+        // Sanity: the serialised payload never includes the
+        // `peer_id`, certificate fingerprint or any other secret.
+        let serialised = serde_json::to_string(&row).expect("serialize");
+        assert!(!serialised.contains("peer-a"));
+        assert!(!serialised.contains(&"ab".repeat(32)));
+    }
+
+    #[test]
+    fn rename_collection_keeps_binding_and_peer_display_name() {
+        // The contract pins the binding by `peer_id`. Renaming the
+        // collection must NOT modify `peer_collection_bindings`,
+        // and the projection must continue to surface the current
+        // visible peer name (the same one the user is editing in
+        // parallel) without any peer_id leakage.
+        let (_dir, mut db) = open_temp_db();
+        seed_peer(&mut db, "peer-a", "Equipo A");
+        let when = OffsetDateTime::now_utc();
+        let collection_id = {
+            let mut org_repo = OrganizationRepository::new(db.connection_mut());
+            org_repo
+                .create_user_collection("Equipo A", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("create")
+                .id
+        };
+        {
+            let mut import_repo = crate::PeerImportRepository::new(db.connection_mut());
+            import_repo
+                .upsert_binding("peer-a", collection_id, when)
+                .expect("upsert");
+        }
+        let renamed_name = {
+            let mut org_repo = OrganizationRepository::new(db.connection_mut());
+            let renamed = org_repo
+                .rename_collection(collection_id, "Mi colección", when)
+                .expect("rename");
+            renamed.name.clone()
+        };
+        assert_eq!(renamed_name, "Mi colección");
+        let (is_bound, display_name) = {
+            let org_repo = OrganizationRepository::new(db.connection_mut());
+            let row = org_repo
+                .find_collection(collection_id)
+                .expect("find")
+                .expect("row");
+            (row.is_peer_bound, row.peer_display_name)
+        };
+        assert!(is_bound);
+        assert_eq!(display_name.as_deref(), Some("Equipo A"));
+        // The binding row is untouched.
+        let binding_after = {
+            let import_repo = crate::PeerImportRepository::new(db.connection_mut());
+            import_repo
+                .find_binding("peer-a")
+                .expect("find")
+                .expect("binding")
+        };
+        assert_eq!(binding_after.collection_id, collection_id);
+    }
+
+    #[test]
+    fn peer_display_name_tracks_known_peers_changes_after_restart() {
+        // Restart simulation: reopen the database with the same
+        // migrations and confirm the projection still resolves the
+        // current visible peer name without leaking the raw
+        // `peer_id`. The same query path is the one the bootstrap
+        // uses on every cold start, so this test pins the
+        // restart-safe contract the spec requires.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("clipvault.db");
+        let when = OffsetDateTime::now_utc();
+        {
+            let mut db = crate::Database::open(&db_path).expect("open");
+            db.run_migrations(&crate::builtin_migrations())
+                .expect("migrate");
+            seed_peer(&mut db, "peer-a", "Equipo A");
+            let collection_id = {
+                let mut org_repo = OrganizationRepository::new(db.connection_mut());
+                org_repo
+                    .create_user_collection("Equipo A", HISTORY_DEFAULT_COLOR_HEX, when)
+                    .expect("create")
+                    .id
+            };
+            {
+                let mut import_repo = crate::PeerImportRepository::new(db.connection_mut());
+                import_repo
+                    .upsert_binding("peer-a", collection_id, when)
+                    .expect("upsert");
+            }
+        }
+        let mut db = crate::Database::open(&db_path).expect("reopen");
+        // Simulate a remote rename that lands through whichever
+        // future code path the discovery / pairing runtime exposes.
+        // We exercise the raw SQL the bootstrap keeps so the
+        // projection test does not depend on the conflict
+        // semantics of `upsert_observation`.
+        db.connection()
+            .execute(
+                "UPDATE known_peers SET display_name = ?1 WHERE peer_id = ?2",
+                rusqlite::params!["Equipo A · Renombrado", "peer-a"],
+            )
+            .expect("rename peer");
+        let repo = OrganizationRepository::new(db.connection_mut());
+        let rows = repo.list_collections().expect("list");
+        let bound = rows.iter().find(|c| c.is_peer_bound).expect("bound row");
+        assert_eq!(
+            bound.peer_display_name.as_deref(),
+            Some("Equipo A · Renombrado")
+        );
+        // The wire payload stays metadata-only after the rename.
+        let serialised = serde_json::to_string(bound).expect("serialize");
+        assert!(!serialised.contains("peer-a"));
+    }
+
+    #[test]
+    fn peer_display_name_falls_back_when_peer_row_missing() {
+        // The join uses `LEFT JOIN`, so when a future pairing flow
+        // removes the `known_peers` row (and the FK cascade
+        // already removed the binding), the user collection still
+        // surfaces. The projection must report
+        // `is_peer_bound = false` and `peer_display_name = None`
+        // so the UI renders a generic safe label without leaking
+        // any identifier.
+        let (_dir, mut db) = open_temp_db();
+        let when = OffsetDateTime::now_utc();
+        let mut org_repo = OrganizationRepository::new(db.connection_mut());
+        let collection = org_repo
+            .create_user_collection("Soltar", HISTORY_DEFAULT_COLOR_HEX, when)
+            .expect("create");
+        let rows = org_repo.list_collections().expect("list");
+        let row = rows.iter().find(|c| c.id == collection.id).expect("row");
+        assert!(!row.is_peer_bound);
+        assert!(row.peer_display_name.is_none());
+    }
+
+    #[test]
+    fn empty_peer_display_name_collapses_to_none() {
+        // Persisted empty / whitespace `display_name` rows are
+        // coerced into `None` so the UI never surfaces an empty
+        // marker. The projection is the metadata-only view the
+        // renderer branches on.
+        let (_dir, mut db) = open_temp_db();
+        seed_peer(&mut db, "peer-a", "   ");
+        let when = OffsetDateTime::now_utc();
+        let collection_id = {
+            let mut org_repo = OrganizationRepository::new(db.connection_mut());
+            org_repo
+                .create_user_collection("Sin nombre", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("create")
+                .id
+        };
+        {
+            let mut import_repo = crate::PeerImportRepository::new(db.connection_mut());
+            import_repo
+                .upsert_binding("peer-a", collection_id, when)
+                .expect("upsert");
+        }
+        let row = {
+            let org_repo = OrganizationRepository::new(db.connection_mut());
+            org_repo
+                .list_collections()
+                .expect("list")
+                .into_iter()
+                .find(|c| c.id == collection_id)
+                .expect("row")
+        };
+        assert!(row.is_peer_bound);
+        assert!(
+            row.peer_display_name.is_none(),
+            "empty persisted display name must collapse to None"
+        );
+    }
+
+    #[test]
+    fn delete_collection_clears_binding_and_preserves_history_membership() {
+        // Deleting the user collection cascades the binding row
+        // (per the migration's FK contract) but MUST NOT remove
+        // the imported entry, its `Historial` membership or the
+        // provenance row. A later import from the same peer must
+        // therefore succeed by creating a fresh binding without
+        // selecting a collection only by its old name.
+        let (_dir, mut db) = open_temp_db();
+        seed_peer(&mut db, "peer-a", "Equipo A");
+        let when = OffsetDateTime::now_utc();
+        let collection_id = {
+            let mut org_repo = OrganizationRepository::new(db.connection_mut());
+            org_repo
+                .create_user_collection("Equipo A", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("create")
+                .id
+        };
+        let entry_id = insert_text_entry(db.connection_mut(), "hello", when);
+        // Mirror the runtime contract: the entry is attached to
+        // the peer-bound collection AND to `Historial`. The
+        // binding row is the canonical pointer that survives
+        // renames, so we record it before touching anything else.
+        {
+            let mut import_repo = crate::PeerImportRepository::new(db.connection_mut());
+            import_repo
+                .upsert_binding("peer-a", collection_id, when)
+                .expect("upsert binding");
+            import_repo
+                .attach_entry_to_binding(entry_id, collection_id, when)
+                .expect("attach");
+            import_repo
+                .record_import("peer-a", "entry-1", "hash-a", entry_id, when)
+                .expect("record");
+            assert!(import_repo.find_binding("peer-a").expect("find").is_some());
+        }
+        let pre_delete_history = {
+            let org_repo = OrganizationRepository::new(db.connection_mut());
+            let ids = org_repo.entry_collection_ids(entry_id).expect("ids");
+            assert!(ids.contains(&collection_id));
+            ids
+        };
+
+        // Delete the collection. The FK cascade removes the
+        // binding row and the entry_collections membership row,
+        // but the entry, the `Historial` membership and the
+        // provenance row all survive.
+        {
+            let mut org_repo = OrganizationRepository::new(db.connection_mut());
+            let removed = org_repo.delete_collection(collection_id).expect("delete");
+            assert!(removed);
+        }
+        {
+            let import_repo = crate::PeerImportRepository::new(db.connection_mut());
+            assert!(import_repo.find_binding("peer-a").expect("find").is_none());
+            let provenance = import_repo
+                .find_import("peer-a", "entry-1", "hash-a")
+                .expect("find")
+                .expect("provenance row");
+            assert_eq!(provenance.local_entry_id, entry_id);
+        }
+        let post_delete_history = {
+            let org_repo = OrganizationRepository::new(db.connection_mut());
+            org_repo.entry_collection_ids(entry_id).expect("ids")
+        };
+        assert_eq!(
+            post_delete_history,
+            pre_delete_history
+                .into_iter()
+                .filter(|id| *id != collection_id)
+                .collect::<Vec<_>>(),
+            "Historial membership must survive the delete"
+        );
+
+        // A later import from the same peer must create a fresh
+        // binding (and therefore a fresh user collection)
+        // instead of selecting a collection only by its old name.
+        let rebound_id = {
+            let mut org_repo = OrganizationRepository::new(db.connection_mut());
+            org_repo
+                .create_user_collection("Equipo A · Reimportado", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("recreate")
+                .id
+        };
+        let rebound = {
+            let mut import_repo = crate::PeerImportRepository::new(db.connection_mut());
+            import_repo
+                .upsert_binding("peer-a", rebound_id, when)
+                .expect("upsert")
+        };
+        assert_ne!(rebound.collection_id, collection_id);
+        let rebound_present = {
+            let import_repo = crate::PeerImportRepository::new(db.connection_mut());
+            import_repo.find_binding("peer-a").expect("find").is_some()
+        };
+        assert!(rebound_present);
     }
 }

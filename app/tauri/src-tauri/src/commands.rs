@@ -3623,9 +3623,18 @@ impl PeerImportResponse {
 /// import back. The command never writes to the clipboard,
 /// never invokes the paste path and never emits a
 /// `history-updated` event carrying the imported body.
+///
+/// On a successful `Imported` outcome the command emits the
+/// existing `clipvault://organization-updated` event so the
+/// sidebar refreshes the projection (the peer-bound collection
+/// becomes visible and the origin marker is rendered) without a
+/// manual re-fetch. The event payload is metadata-only (`()`)
+/// so the body, the imported hash and the binding's `peer_id`
+/// never cross the bridge.
 #[tauri::command]
 pub fn clipvault_peer_import_fetch(
     state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
     peer_id: String,
     remote_entry_id: String,
     display_name: String,
@@ -3641,6 +3650,12 @@ pub fn clipvault_peer_import_fetch(
         }
     };
     let outcome = service.import(&peer_id, &cert_fingerprint, &remote_entry_id, &display_name);
+    if matches!(
+        outcome,
+        clipvault_core::peer_text_import::PeerImportOutcome::Imported { .. }
+    ) {
+        emit_organization_updated(&handle);
+    }
     PeerImportResponse::from_outcome(outcome)
 }
 

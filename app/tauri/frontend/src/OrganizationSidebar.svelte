@@ -265,6 +265,31 @@
     return collection.kind === "system";
   }
 
+  /**
+   * Accessible label that surfaces the remote origin the
+   * `peer-import-collection-visibility` change binds to a user
+   * collection. The sidebar reads the metadata-only
+   * `peer_display_name` the backend join produces and falls back
+   * to a generic safe label when the peer is missing. The
+   * sidebar never renders the raw `peer_id` so a regression
+   * that forwards the binding key cannot leak through this
+   * surface.
+   */
+  function remoteOriginLabel(collection: Collection): string {
+    if (!collection.is_peer_bound) {
+      return "";
+    }
+    const peerName = (collection.peer_display_name ?? "").trim();
+    if (peerName.length > 0) {
+      return `Importadas de ${peerName}`;
+    }
+    return "Importadas de equipo remoto";
+  }
+
+  function hasRemoteOrigin(collection: Collection): boolean {
+    return collection.is_peer_bound === true && collection.kind === "user";
+  }
+
   function onCreateKeydown(event: KeyboardEvent): void {
     if (event.key === "Enter") {
       event.preventDefault();
@@ -647,6 +672,16 @@
               >
                 sistema
               </span>
+            {:else if hasRemoteOrigin(collection)}
+              <span
+                class="badge remote"
+                data-testid="sidebar-collection-remote-origin"
+                data-peer-bound="true"
+                aria-label={remoteOriginLabel(collection)}
+                title={remoteOriginLabel(collection)}
+              >
+                importadas
+              </span>
             {/if}
           </button>
           <button
@@ -945,6 +980,24 @@
     font-size: 0.65rem;
     padding: 0.05rem 0.45rem;
     border: 1px solid #30363d;
+    text-transform: lowercase;
+  }
+  /*
+   * Remote-origin marker rendered next to a user collection
+   * bound to a `peer_id`. The badge carries the accessible
+   * label `Importadas de <peer>` (with a safe fallback when the
+   * persisted display name is empty) so screen readers and
+   * tooltips describe the binding without exposing the raw
+   * `peer_id`, certificate fingerprint or any other secret.
+   */
+  .badge.remote {
+    flex: 0 0 auto;
+    background: #0c2c1f;
+    color: #6ee7b7;
+    border-radius: 999px;
+    font-size: 0.65rem;
+    padding: 0.05rem 0.45rem;
+    border: 1px solid #115e3a;
     text-transform: lowercase;
   }
   .color-square {

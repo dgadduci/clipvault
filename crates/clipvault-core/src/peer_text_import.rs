@@ -606,6 +606,8 @@ impl PeerImportPersistence for InMemoryImportPersistence {
                 color_hex: color_hex.to_string(),
                 created_at: ts.clone(),
                 updated_at: ts,
+                is_peer_bound: true,
+                peer_display_name: Some(name.to_string()),
             },
         );
         Ok(id)

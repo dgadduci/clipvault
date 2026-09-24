@@ -1041,6 +1041,25 @@ export interface Collection {
   color_hex: string;
   created_at: string;
   updated_at: string;
+  /**
+   * `true` when the row is bound to a remote `peer_id` through
+   * `peer_collection_bindings`. The contract pins the binding by
+   * `peer_id`, so renaming the collection does not flip the flag:
+   * only deleting (which cascades the binding row) or removing the
+   * peer entirely clears it. System collections are always
+   * `false`. The wire payload never carries the `peer_id` itself.
+   */
+  is_peer_bound?: boolean;
+  /**
+   * Current visible peer display name resolved through the
+   * `known_peers` join. `null` (or absent) when the peer row is
+   * missing or the persisted `display_name` is empty. The
+   * frontend uses the value to render the accessible
+   * `Importadas de <peer>` marker; when it is `null` the
+   * sidebar falls back to a generic safe label and never
+   * displays the raw `peer_id`.
+   */
+  peer_display_name?: string | null;
 }
 
 export interface Tag {
