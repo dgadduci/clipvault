@@ -57,6 +57,8 @@
 - [x] 3.6 Actualizar `known_peers.caps_extra` en observaciones compatibles
   existentes para que los peers emparejados antes de `image_import` reciban la
   capacidad en su siguiente anuncio mDNS.
+- [x] 3.7 Compartir con historial de imágenes el secreto persistido de cada
+  peer trusted en el backfill de bootstrap y en los cambios de pairing.
 
 ## 4. Tauri y frontend
 
@@ -97,6 +99,8 @@
 - [x] 5.8 Añadir regresiones de refresh de capability en peers existentes,
   proyección de `caps_extra` al snapshot y preservación de filas de texto
   cuando imágenes no están disponibles.
+- [x] 5.9 Cubrir restauración del cursor secret en ambos historiales durante
+  bootstrap y sincronización install/clear en transiciones de pairing.
 
 ## 6. Verificación y regresiones
 
@@ -114,6 +118,8 @@
 - [x] 6.8 Ejecutar tests DB/core/frontend, `npm run check`, build afectado,
   regresión de drag-and-drop, formato, `git diff --check` y validación
   OpenSpec.
+- [x] 6.9 Ejecutar los tests enfocados de bootstrap y pairing para la caché
+  compartida de cursor secrets, además del formato y `git diff --check`.
 - [ ] 6.5 Ejecutar la matriz manual en macOS, Linux X11 y Linux Wayland cuando
   estén disponibles: importación, dedupe, edición remota, restart,
   revoke/block, peer unavailable, asset inválido y fallo de persistencia.

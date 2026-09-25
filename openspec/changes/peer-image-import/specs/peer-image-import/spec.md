@@ -28,6 +28,28 @@ tags, collections, favorites or source-application metadata.
   does not advertise `image_import`
 - **THEN** the image listing is denied with a typed safe outcome and no rows
 
+### Requirement: Image history shares the trusted peer cursor secret
+
+The image-history host SHALL use the persisted per-peer `cursor_secret` that
+the pairing runtime manages for text history. Bootstrap SHALL install it in
+both history services for every trusted peer, and pairing trust transitions
+SHALL install or clear both runtime caches together. Image browsing MUST NOT
+become trusted solely because the secret exists; active trust and the
+`image_import` capability checks remain required.
+
+#### Scenario: Existing trusted peer browses images after restart
+
+- **WHEN** a trusted peer has a valid persisted cursor secret and both hosts
+  restart
+- **THEN** bootstrap restores that secret to both the text and image history
+  services, and the peer can browse eligible images without re-pairing
+
+#### Scenario: Pairing updates both history services
+
+- **WHEN** pairing promotes a peer to trusted or clears its trust
+- **THEN** the runtime installs or removes that peer's cursor secret in both
+  text and image history caches before serving subsequent requests
+
 ### Requirement: Missing image capability does not block text history
 
 The remote history rail SHALL treat text and image browse results as

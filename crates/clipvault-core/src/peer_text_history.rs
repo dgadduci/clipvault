@@ -1246,6 +1246,32 @@ mod tests {
     use super::*;
     use clipvault_db::{ContentType, EntryRecord, IMAGE_CONTENT_SENTINEL, IMAGE_MIME_PNG};
 
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn pairing_cursor_secret_cache_updates_text_and_image_services_together() {
+        let text_service = PeerTextHistoryService::new(Arc::new(NoopPeerHistoryTransport));
+        let image_service = crate::peer_image_history::PeerImageHistoryService::new(Arc::new(
+            crate::peer_image_history::NoopPeerImageHistoryTransport,
+        ));
+        let cache = PeerHistoryCursorSecretCache::new(text_service.clone(), image_service.clone());
+        let secret = PeerCursorSecret::generate();
+        let secret_hex = secret.to_hex();
+
+        crate::peer_pairing::PeerCursorSecretCache::install(&cache, "peer-shared", secret);
+        assert_eq!(
+            text_service.cursor_secret_hex("peer-shared"),
+            Some(secret_hex.clone())
+        );
+        assert_eq!(
+            image_service.cursor_secret_hex("peer-shared"),
+            Some(secret_hex)
+        );
+
+        crate::peer_pairing::PeerCursorSecretCache::clear(&cache, "peer-shared");
+        assert!(text_service.cursor_secret_hex("peer-shared").is_none());
+        assert!(image_service.cursor_secret_hex("peer-shared").is_none());
+    }
+
     fn record(id: i64, content_type: ContentType, content: &str, created_at: &str) -> EntryRecord {
         EntryRecord {
             id,
@@ -3050,36 +3076,44 @@ fn map_pairing_transport_error(
 
 /// Production adapter the bootstrap installs into
 /// [`crate::peer_pairing::PairingRuntime::install_cursor_secret_cache`].
-/// The adapter mirrors every cursor-secret update the runtime
-/// commits to the database so the listener can serve the next
-/// `list_recent_text` request without re-reading SQLite. The
-/// adapter never inspects the secret bytes; it forwards the typed
-/// [`PeerCursorSecret`] the runtime already mints through
-/// [`PeerCursorSecret::generate`] so the raw key material cannot
-/// leak through a log statement.
+/// It mirrors every persisted cursor-secret transition into both
+/// history services, whose caches are projections of the same
+/// trusted `known_peers` row. The adapter never logs or exposes
+/// the raw key material.
 #[cfg(feature = "local-peer-pairing-tls")]
-pub struct PeerTextHistoryCursorSecretCache {
-    service: PeerTextHistoryService,
+pub struct PeerHistoryCursorSecretCache {
+    text_service: PeerTextHistoryService,
+    image_service: crate::peer_image_history::PeerImageHistoryService,
 }
 
 #[cfg(feature = "local-peer-pairing-tls")]
-impl PeerTextHistoryCursorSecretCache {
-    /// Build the cache adapter the bootstrap wires against the
-    /// productive pairing runtime. The helper clones the
-    /// [`PeerTextHistoryService`] because both the runtime and
-    /// the listener keep their own handle.
-    pub fn new(service: PeerTextHistoryService) -> Self {
-        Self { service }
+impl PeerHistoryCursorSecretCache {
+    /// Build the shared cache adapter the bootstrap wires against
+    /// the productive pairing runtime. Both services are cheap
+    /// `Arc`-backed clones and retain independent cursor types.
+    pub fn new(
+        text_service: PeerTextHistoryService,
+        image_service: crate::peer_image_history::PeerImageHistoryService,
+    ) -> Self {
+        Self {
+            text_service,
+            image_service,
+        }
     }
 }
 
 #[cfg(feature = "local-peer-pairing-tls")]
-impl crate::peer_pairing::PeerCursorSecretCache for PeerTextHistoryCursorSecretCache {
+impl crate::peer_pairing::PeerCursorSecretCache for PeerHistoryCursorSecretCache {
     fn install(&self, peer_id: &str, secret: PeerCursorSecret) {
-        self.service.set_cursor_secret(peer_id, secret);
+        let image_secret =
+            crate::peer_image_history::PeerImageCursorSecret::from_hex(&secret.to_hex())
+                .expect("text and image cursor secrets share the persisted 32-byte encoding");
+        self.text_service.set_cursor_secret(peer_id, secret);
+        self.image_service.set_cursor_secret(peer_id, image_secret);
     }
 
     fn clear(&self, peer_id: &str) {
-        self.service.clear_cursor_secret(peer_id);
+        self.text_service.clear_cursor_secret(peer_id);
+        self.image_service.clear_cursor_secret(peer_id);
     }
 }

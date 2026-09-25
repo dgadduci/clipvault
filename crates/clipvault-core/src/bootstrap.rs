@@ -1246,20 +1246,6 @@ impl AppBootstrap {
             pairing_transport.clone(),
             pairing_persistence,
         );
-        // Install the in-memory cursor-secret cache the pairing
-        // runtime updates every time it persists a trust
-        // transition. The cache lives behind the
-        // [`crate::peer_pairing::PeerCursorSecretCache`] trait so
-        // the runtime stays decoupled from the platform crate's
-        // listener wiring; the productive adapter forwards every
-        // mint / clear to the [`PeerTextHistoryService`] the
-        // listener already consults when serving `list_recent_text`.
-        #[cfg(feature = "local-peer-pairing-tls")]
-        peer_pairing.install_cursor_secret_cache(Arc::new(
-            crate::peer_text_history::PeerTextHistoryCursorSecretCache::new(
-                peer_text_history.clone(),
-            ),
-        ));
         // Build the productive host-side history handler the
         // listener drives when an authenticated peer asks for
         // `list_recent_text`. The bootstrap installs the adapter
@@ -1438,6 +1424,18 @@ impl AppBootstrap {
         let peer_image_history =
             crate::peer_image_history::PeerImageHistoryService::new(peer_image_history_transport)
                 .with_capability_resolver(Arc::clone(&image_capability_resolver));
+        // Pairing persists one per-peer cursor secret. Keep both
+        // history services' independent runtime caches synchronized
+        // with that row so trust promotion, revocation and restart
+        // have identical authorization semantics for text and image
+        // browsing.
+        #[cfg(feature = "local-peer-pairing-tls")]
+        peer_pairing.install_cursor_secret_cache(Arc::new(
+            crate::peer_text_history::PeerHistoryCursorSecretCache::new(
+                peer_text_history.clone(),
+                peer_image_history.clone(),
+            ),
+        ));
         // Build the explicit-image-import facade the shell drives
         // when the user activates `Importar` for an image row of a
         // trusted, active peer. The service piggy-backs on the same
@@ -1537,12 +1535,10 @@ impl AppBootstrap {
         let _pairing_transport_arc = Arc::clone(&pairing_transport);
         #[cfg(not(feature = "local-peer-pairing-tls"))]
         let _pairing_transport_arc = ();
-        // Pre-populate the per-peer HMAC secret cache from the
-        // persisted `known_peers.cursor_secret` rows. The cache is
-        // the only place the runtime stores the secret; the
-        // listener signs and verifies cursors with the value the
-        // bootstrap loaded so a restart never invalidates cursors
-        // the peer already holds. The preload is best-effort and
+        // Pre-populate both per-peer HMAC secret caches from the
+        // persisted `known_peers.cursor_secret` rows. The services
+        // mirror this persisted secret so a restart never invalidates
+        // cursors the peer already holds. The preload is best-effort and
         // also performs the `trusted` backfill the
         // `peer-text-history-browser` change requires: rows that
         // were `trusted` before the column landed carry an empty
@@ -1561,7 +1557,9 @@ impl AppBootstrap {
         // content ever crosses the log boundary.
         {
             let mut db = database_handle.lock();
-            if let Err(error) = preload_cursor_secrets(&mut db, &peer_text_history) {
+            if let Err(error) =
+                preload_cursor_secrets(&mut db, &peer_text_history, &peer_image_history)
+            {
                 tracing::warn!(
                     ?error,
                     "known_peers preload failed; cursor secrets will mint on next trust promotion"
@@ -1878,7 +1876,8 @@ fn default_peer_discovery_adapter() -> impl clipvault_platform::PeerDiscoveryAda
 /// the remaining rows so the bootstrap stays alive.
 pub(super) fn preload_cursor_secrets(
     database: &mut clipvault_db::Database,
-    service: &crate::peer_text_history::PeerTextHistoryService,
+    text_service: &crate::peer_text_history::PeerTextHistoryService,
+    image_service: &crate::peer_image_history::PeerImageHistoryService,
 ) -> Result<(), clipvault_db::KnownPeersError> {
     let conn = database.connection_mut();
     let repo = clipvault_db::KnownPeerRepository::new(conn);
@@ -1894,7 +1893,8 @@ pub(super) fn preload_cursor_secrets(
             // 32-byte secret. Install it verbatim; a follow-up
             // `set_cursor_secret` would invalidate every cursor
             // the peer already holds.
-            let _ = service.install_cursor_secret_hex(&row.peer_id, &row.cursor_secret);
+            let _ = text_service.install_cursor_secret_hex(&row.peer_id, &row.cursor_secret);
+            let _ = image_service.install_cursor_secret_hex(&row.peer_id, &row.cursor_secret);
             continue;
         }
         // Backfill path: empty / short / non-hexadecimal column.
@@ -1912,7 +1912,8 @@ pub(super) fn preload_cursor_secrets(
         let mut repo_mut = clipvault_db::KnownPeerRepository::new(conn);
         match repo_mut.set_cursor_secret(&row.peer_id, &minted_hex) {
             Ok(()) => {
-                let _ = service.install_cursor_secret_hex(&row.peer_id, &minted_hex);
+                let _ = text_service.install_cursor_secret_hex(&row.peer_id, &minted_hex);
+                let _ = image_service.install_cursor_secret_hex(&row.peer_id, &minted_hex);
             }
             Err(_) => {
                 tracing::warn!(
@@ -2280,7 +2281,10 @@ mod tests {
         let service = crate::peer_text_history::PeerTextHistoryService::new(Arc::new(
             crate::peer_text_history::NoopPeerHistoryTransport,
         ));
-        preload_cursor_secrets(&mut db, &service).expect("preload");
+        let image_service = crate::peer_image_history::PeerImageHistoryService::new(Arc::new(
+            crate::peer_image_history::NoopPeerImageHistoryTransport,
+        ));
+        preload_cursor_secrets(&mut db, &service, &image_service).expect("preload");
 
         // Reload the rows so the test never inspects the in-memory
         // cache directly: the contract the runtime consumes is the
@@ -2332,13 +2336,39 @@ mod tests {
             .cursor_secret_hex(trusted_no_secret_id)
             .expect("backfilled cache hit");
         assert_eq!(backfilled_secret, backfilled.cursor_secret);
+        assert_eq!(
+            image_service.cursor_secret_hex(trusted_no_secret_id),
+            Some(backfilled.cursor_secret.clone()),
+            "the image-history cache must mirror the backfilled trusted secret"
+        );
         let preserved_secret = service
             .cursor_secret_hex(trusted_with_secret_id)
             .expect("preserved cache hit");
         assert_eq!(preserved_secret, valid_secret_hex);
+        assert_eq!(
+            image_service.cursor_secret_hex(trusted_with_secret_id),
+            Some(valid_secret_hex.clone()),
+            "the image-history cache must retain the persisted trusted secret"
+        );
+        let empty_image_source = crate::peer_image_history::InMemoryHostImageHistorySource::new();
+        assert!(matches!(
+            image_service.serve(
+                trusted_with_secret_id,
+                None,
+                crate::peer_image_history::MAX_IMAGE_PAGE_ROWS as u32,
+                &empty_image_source,
+            ),
+            crate::peer_image_history::HostImageHistoryResponse::Ok(..)
+        ));
         assert!(
             service.cursor_secret_hex(unverified_no_secret_id).is_none(),
             "non-trusted peer must NOT be cached"
+        );
+        assert!(
+            image_service
+                .cursor_secret_hex(unverified_no_secret_id)
+                .is_none(),
+            "non-trusted peer must NOT be cached for image history"
         );
     }
 
@@ -2388,7 +2418,10 @@ mod tests {
         let service = crate::peer_text_history::PeerTextHistoryService::new(Arc::new(
             crate::peer_text_history::NoopPeerHistoryTransport,
         ));
-        preload_cursor_secrets(&mut db, &service).expect("preload");
+        let image_service = crate::peer_image_history::PeerImageHistoryService::new(Arc::new(
+            crate::peer_image_history::NoopPeerImageHistoryTransport,
+        ));
+        preload_cursor_secrets(&mut db, &service, &image_service).expect("preload");
 
         let conn = db.connection_mut();
         let repo = clipvault_db::KnownPeerRepository::new(conn);
@@ -2401,6 +2434,11 @@ mod tests {
         );
         let cached = service.cursor_secret_hex(malformed_id).expect("cache hit");
         assert_eq!(cached, row.cursor_secret);
+        assert_eq!(
+            image_service.cursor_secret_hex(malformed_id),
+            Some(row.cursor_secret),
+            "malformed persisted secret must be rotated into both history caches"
+        );
     }
 
     /// Certificate pins live in the productive TLS transport's
@@ -2433,6 +2471,7 @@ mod tests {
                     display_name: "Studio".to_string(),
                     protocol_major: 1,
                     capability: "pairing".to_string(),
+                    caps_extra: String::new(),
                     observed_at: time::OffsetDateTime::UNIX_EPOCH,
                 })
                 .expect("seed observation");

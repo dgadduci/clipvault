@@ -79,6 +79,23 @@ correctamente, el merge consume la respuesta de texto y considera agotado sólo
 el stream de imágenes; la ausencia opcional de imágenes no invalida el
 historial de texto ni produce un error global de carga.
 
+### Secreto de cursor compartido por las rutas de historial
+
+`known_peers.cursor_secret` es el secreto persistido por peer para firmar
+cursores de historial bajo el estado `trusted`. El bootstrap debe instalar
+ese mismo secreto en las cachés de `PeerTextHistoryService` y
+`PeerImageHistoryService`: tanto en el backfill de filas trusted durante el
+arranque como en cada transición de pairing que instala o limpia el secreto.
+El contrato no crea un segundo secreto ni relaja la autorización; la ruta de
+imágenes sigue requiriendo peer trusted, presente y con `image_import`.
+
+Las dos cachés son estado runtime derivado de la misma fila SQLite. Si sólo la
+caché de texto recibe el secreto, texto seguirá funcionando pero el host de
+imágenes rechazará su primer browse como `not_trusted`, incluso cuando el peer
+esté emparejado correctamente. La regresión se cubre en bootstrap para el
+backfill persistido y en el adaptador de pairing para instalar/limpiar ambas
+cachés.
+
 ## Listado remoto y preview
 
 El host proyectará únicamente entradas de imagen que cumplan todas estas
