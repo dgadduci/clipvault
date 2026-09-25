@@ -458,6 +458,7 @@ name = "clipvault-platform"
 version = "0.0.15"
 dependencies = [
  "arboard",
+ "base64 0.22.1",
  "block2",
  "clipvault-core",
  "dirs 5.0.1",

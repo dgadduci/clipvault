@@ -151,6 +151,13 @@ x11-dl = { workspace = true, optional = true }
 # own the wire contract without `clipvault-core` having to depend on
 # runtime-only Linux code.
 serde_json = { workspace = true }
+# Base64 framing used by the `peer-image-import` change to keep the
+# `FetchImageAck` envelope bounded by the
+# [`FETCH_IMAGE_MAX_RESPONSE_BYTES`] cap while shipping a fully
+# valid 16 MiB PNG payload. Already in the workspace graph through
+# `clipvault-core`; surfaced here so the platform owns the wire
+# contract without `clipvault-core` having to expose the helper.
+base64 = "0.22"
 # `resvg` ships `usvg` (SVG parser), `tiny-skia` (rasterizer) and a
 # thin renderer under a single crate. With `default-features = false`
 # we get the no-text / no-fonts / no-raster-images path, which is the

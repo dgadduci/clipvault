@@ -30,13 +30,22 @@
     peerHistoryBrowseCommand,
     peerHistoryRecordStateCommand,
     peerImportRecordStateCommand,
+    peerImageBrowseCommand,
+    peerImageRecordStateCommand,
+    peerImageImportRecordStateCommand,
   } from "./lib/tauri";
   import type {
-    PeerHistoryBrowseResponse,
-    PeerHistoryRow,
     PeerSnapshot,
   } from "./types";
   import RemotePreviewCard from "./RemotePreviewCard.svelte";
+  import {
+    INITIAL_CURSORS,
+    applyResponses as mergeResponses,
+    pickNextCursors,
+    promoteBuffers,
+    type PageState,
+    type RemoteRailRow,
+  } from "./lib/remoteHistoryMerge";
 
   /**
    * Snapshot the parent supplies so the rail can keep the
@@ -68,15 +77,6 @@
    * outside the in-memory map. The structure is keyed by peer
    * id; the parent decides which peer the main panel shows.
    */
-  type PageState = {
-    rows: PeerHistoryRow[];
-    cursor: string;
-    snapshotId: string;
-    loading: boolean;
-    error: string | null;
-    /** True when the host reported no more pages. */
-    exhausted: boolean;
-  };
   const pageCache = new Map<string, PageState>();
 
   /**
@@ -84,12 +84,15 @@
    * is always a fresh shallow copy so Svelte picks up the
    * mutations the async responses cause.
    */
-  let rows: PeerHistoryRow[] = [];
+  let rows: RemoteRailRow[] = [];
   let cursor: string = "";
+  let imageCursor: string = "";
   let snapshotId: string = "";
   let loading = false;
   let error: string | null = null;
   let exhausted = false;
+  let textBuffer: RemoteRailRow[] = [];
+  let imageBuffer: RemoteRailRow[] = [];
   // Start detached from the prop so the initial reactive pass treats an
   // already-selected peer exactly like a later selection. Initialising this
   // from `peerId` skipped the only branch that loads the first remote page.
@@ -117,6 +120,14 @@
       : null;
   $: activeIsTrusted = activeEntry?.trust_state === "trusted";
   $: activeIsPresent = activeEntry?.is_present ?? false;
+  // Comma-separated capability tokens the parent observed for the
+  // active peer. The rail forwards the value verbatim to each
+  // remote preview card so a peer that did not advertise
+  // `image_import` can disable the Import action before the user
+  // reaches for the bridge. The host / client core additionally
+  // re-validate the gate so a regression in the UI cannot bypass
+  // the security check.
+  $: activePeerCapability = activeEntry?.capability ?? null;
   // The exact predicate the linked list uses to colour the dot;
   // mirroring it here guarantees the rail and the dot can never
   // disagree. A peer that is NOT `trusted && is_present` MUST NOT
@@ -147,7 +158,10 @@
     } else if (railShouldShowUnavailable) {
       rows = [];
       cursor = "";
+      imageCursor = "";
       snapshotId = "";
+      textBuffer = [];
+      imageBuffer = [];
       loading = false;
       error = null;
       exhausted = false;
@@ -157,6 +171,9 @@
       if (cached) {
         rows = cached.rows;
         cursor = cached.cursor;
+        imageCursor = cached.imageCursor;
+        textBuffer = cached.textBuffer;
+        imageBuffer = cached.imageBuffer;
         snapshotId = cached.snapshotId;
         loading = cached.loading;
         error = cached.error;
@@ -165,7 +182,10 @@
       } else {
         rows = [];
         cursor = "";
+        imageCursor = "";
         snapshotId = "";
+        textBuffer = [];
+        imageBuffer = [];
         loading = false;
         error = null;
         exhausted = false;
@@ -193,6 +213,8 @@
     await Promise.all([
       peerHistoryRecordStateCommand(peerState),
       peerImportRecordStateCommand(peerState),
+      peerImageRecordStateCommand(peerState),
+      peerImageImportRecordStateCommand(peerState),
     ]);
   }
 
@@ -223,16 +245,30 @@
     ) {
       return;
     }
-    await requestPage(null, { append: false });
+    // The initial load MUST hit both endpoints with the empty
+    // cursor so the bridge decodes each into a "start from the
+    // beginning" request. Passing `null` for either stream would
+    // collapse the call to `Promise.resolve({ kind: "text-skip" })`
+    // and leave the rail empty until the user pressed Siguiente.
+    await requestPage(INITIAL_CURSORS, { append: false });
   }
 
   /**
    * Drive a single page request through the typed bridge. The
    * helper captures the current `loadGeneration` so a response
    * for the previous peer / previous page is silently dropped.
+   *
+   * `cursors.text` / `cursors.image` are the per-stream cursors
+   * the rail forwards verbatim to each endpoint. Both streams
+   * MUST receive their own cursor so a mixed-collections row set
+   * (text exhausted, image still paging, …) never trips the
+   * contract that the spec scenario "Pagination: streams are
+   * independent" pins. A `null` cursor skips the matching
+   * endpoint entirely so the runtime never re-requests the first
+   * page from an exhausted stream while the other still has rows.
    */
   async function requestPage(
-    nextCursor: string | null,
+    cursors: { text: string | null; image: string | null },
     options: { append: boolean },
   ): Promise<void> {
     if (peerId === null) return;
@@ -242,115 +278,134 @@
       // Replace mode: drop the cursor + cache state so the
       // helper exposes the loading state immediately and the
       // user sees the placeholder disappear.
-      cursor = nextCursor ?? "";
+      cursor = cursors.text ?? "";
+      imageCursor = cursors.image ?? "";
       rows = [];
+      textBuffer = [];
+      imageBuffer = [];
       exhausted = false;
     }
     loading = true;
     error = null;
     persistCache();
-    let response: PeerHistoryBrowseResponse;
-    try {
-      response = await peerHistoryBrowseCommand({
-        peer_id: targetPeer,
-        cursor: nextCursor ?? "",
-      });
-    } catch (err) {
-      if (generation !== loadGeneration) return;
-      loading = false;
-      error = err instanceof Error ? err.message : String(err);
-      persistCache();
-      return;
-    }
+    const textCursorPayload = cursors.text;
+    const imageCursorPayload = cursors.image;
+    const textPromise =
+      textCursorPayload === null
+        ? Promise.resolve({ kind: "text-skip" as const })
+        : peerHistoryBrowseCommand({
+            peer_id: targetPeer,
+            cursor: textCursorPayload,
+          }).then(
+            (response) => ({ kind: "text" as const, response }),
+            (err) => ({ kind: "text-error" as const, err }),
+          );
+    const imagePromise =
+      imageCursorPayload === null
+        ? Promise.resolve({ kind: "image-skip" as const })
+        : peerImageBrowseCommand({
+            peer_id: targetPeer,
+            cursor: imageCursorPayload,
+          }).then(
+            (response) => ({ kind: "image" as const, response }),
+            (err) => ({ kind: "image-error" as const, err }),
+          );
+    const [textOutcome, imageOutcome] = await Promise.all([textPromise, imagePromise]);
     if (generation !== loadGeneration) return;
-    applyResponse(response, options);
+    consumeMergeResult(
+      mergeResponses(textOutcome, imageOutcome, snapshotState(), options),
+    );
   }
 
-  function applyResponse(
-    response: PeerHistoryBrowseResponse,
-    options: { append: boolean },
-  ): void {
-    if (peerId === null) return;
-    switch (response.kind) {
-      case "ok": {
-        const nextRows = options.append ? rows.concat(response.rows) : response.rows;
-        rows = nextRows;
-        cursor = response.next_cursor ?? "";
-        snapshotId = response.snapshot_id;
-        loading = false;
-        error = null;
-        exhausted = response.next_cursor.length === 0 || response.rows.length === 0;
-        persistCache();
-        break;
-      }
-      case "invalid_cursor": {
-        // The cursor the renderer submitted is no longer valid;
-        // the safest action is to clear the cursor and refetch
-        // the first page so the user does not stay stuck on a
-        // placeholder that no longer matches the host.
-        loading = false;
-        error = "invalid_cursor";
-        cursor = "";
-        exhausted = false;
-        rows = [];
-        persistCache();
-        void requestFirstPage();
-        break;
-      }
-      case "peer_unavailable": {
-        loading = false;
-        error = `peer_unavailable:${response.reason}`;
-        rows = [];
-        cursor = "";
-        snapshotId = "";
-        exhausted = true;
-        persistCache();
-        break;
-      }
-      case "transport_unavailable": {
-        // The productive mTLS transport rejected the page
-        // request. The previous page (if any) is preserved so a
-        // transient failure does not blank the rail; the user
-        // can retry by clicking `Reintentar`. The transport
-        // reason is metadata-only — never a content byte, an
-        // IP, a port or a cert fingerprint.
-        loading = false;
-        error = `transport_unavailable:${response.reason}`;
-        persistCache();
-        break;
-      }
+  function snapshotState(): PageState {
+    return {
+      rows,
+      cursor,
+      imageCursor,
+      textBuffer,
+      imageBuffer,
+      snapshotId,
+      error,
+      loading,
+      exhausted,
+      requestInvalidCursor: false,
+    };
+  }
+
+  function consumeMergeResult(next: PageState): void {
+    rows = next.rows;
+    cursor = next.cursor;
+    imageCursor = next.imageCursor;
+    textBuffer = next.textBuffer;
+    imageBuffer = next.imageBuffer;
+    snapshotId = next.snapshotId;
+    error = next.error;
+    loading = next.loading;
+    exhausted = next.exhausted;
+    persistCache();
+    if (next.requestInvalidCursor) {
+      // Surface the typed reason the merge helper computed and
+      // ask for the first page so the rail refetches from
+      // scratch. The retry MUST use the empty cursor so both
+      // endpoints are dialled with "start from the beginning".
+      void requestFirstPage();
     }
   }
 
   function requestFirstPage(): void {
-    void requestPage(null, { append: false });
+    // The bridge collapses an empty cursor into "start from the
+    // beginning", so a retry after an `invalid_cursor` outcome
+    // re-issues the first-page request through BOTH endpoints.
+    // Passing `null` for either stream would skip the matching
+    // endpoint and leave the rail empty.
+    void requestPage(INITIAL_CURSORS, { append: false });
   }
 
   function requestNextPage(): void {
     if (peerId === null) return;
-    if (cursor.length === 0) return;
     if (exhausted) return;
-    void requestPage(cursor, { append: true });
+    // The text + image streams are paginated independently.
+    // "Siguiente" first drains the per-stream buffers the previous
+    // response left hidden (this is the spec scenario
+    // "Per-stream buffers surface before the next host request"):
+    // those rows are already known to the client, so promoting
+    // them is synchronous and keeps the user advancing even when
+    // both cursors are empty. Only when both buffers are empty do
+    // we ask the host for the next page via `pickNextCursors`.
+    // If both buffers AND both cursors are empty, the rail is
+    // genuinely exhausted and the helper flips `exhausted = true`
+    // so the button stays disabled.
+    if (textBuffer.length > 0 || imageBuffer.length > 0) {
+      consumeMergeResult(promoteBuffers(snapshotState()));
+      return;
+    }
+    if (cursor.length === 0 && imageCursor.length === 0) {
+      // No buffered rows AND no cursors: the helper already
+      // pinned `exhausted = true` in `applyResponses`. The
+      // explicit assignment keeps the invariant robust against
+      // an out-of-band mutation that bypasses the helper.
+      exhausted = true;
+      persistCache();
+      return;
+    }
+    const cursors = pickNextCursors(snapshotState());
+    void requestPage(cursors, { append: true });
   }
 
   function requestPreviousPage(): void {
     // The bridge exposes a newest-first cursor — there is no
     // "previous" direction in the metadata-only contract, so
     // the rail always re-issues the first-page request and the
-    // user keeps the option to scroll down again.
-    void requestPage(null, { append: false });
+    // user keeps the option to scroll down again. The empty
+    // cursor forces both endpoints to be dialled with
+    // `start_from_beginning` semantics; passing `null` would
+    // skip each endpoint and leave the rail blank.
+    void requestPage(INITIAL_CURSORS, { append: false });
   }
 
   function persistCache(): void {
     if (peerId === null) return;
-    pageCache.set(peerId, {
-      rows,
-      cursor,
-      snapshotId,
-      loading,
-      error,
-      exhausted,
-    });
+    pageCache.set(peerId, snapshotState());
   }
 
   /**
@@ -366,6 +421,8 @@
     rows = [];
     cursor = "";
     snapshotId = "";
+    textBuffer = [];
+    imageBuffer = [];
     loading = false;
     error = null;
     exhausted = false;
@@ -468,7 +525,7 @@
         class="remote-history-rail-pager"
         data-testid="remote-history-rail-next"
         on:click={requestNextPage}
-        disabled={exhausted || cursor.length === 0}
+        disabled={exhausted}
       >
         Siguiente
       </button>
@@ -494,19 +551,38 @@
       data-testid="remote-history-rail-cards"
       role="list"
     >
-      {#each rows as row, index (row.remote_entry_id)}
+      {#each rows as item, index (item.row.remote_entry_id)}
         <div
           role="listitem"
           class="remote-history-rail-card-slot"
           data-testid="remote-history-rail-card-slot"
-          data-remote-entry-id={row.remote_entry_id}
+          data-remote-entry-id={item.row.remote_entry_id}
+          data-row-kind={item.kind}
         >
-          <RemotePreviewCard
-            {row}
-            rowTestId={`remote-history-rail-card-${index}`}
-            peerId={peerId}
-            displayName={activeEntry?.display_name ?? null}
-          />
+          {#if item.kind === "text"}
+            <RemotePreviewCard
+              row={item.row}
+              rowTestId={`remote-history-rail-card-${index}`}
+              peerId={peerId}
+              displayName={activeEntry?.display_name ?? null}
+              peerCapability={activePeerCapability}
+            />
+          {:else}
+            <RemotePreviewCard
+              row={{
+                remote_entry_id: item.row.remote_entry_id,
+                title: item.row.title,
+                content_type: item.row.content_type,
+                created_at: item.row.created_at,
+                preview: `${item.row.width}×${item.row.height} · ${Math.round(item.row.byte_size / 1024)} KB`,
+              }}
+              rowTestId={`remote-history-rail-card-${index}`}
+              peerId={peerId}
+              displayName={activeEntry?.display_name ?? null}
+              isImageRow={true}
+              peerCapability={activePeerCapability}
+            />
+          {/if}
         </div>
       {/each}
     </div>

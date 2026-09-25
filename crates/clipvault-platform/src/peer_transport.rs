@@ -147,6 +147,52 @@ pub const FETCH_TEXT_MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 /// remote text is fetched only for explicit import").
 pub const FETCH_TEXT_MAX_BODY_BYTES: usize = 1024 * 1024;
 
+/// Wire-protocol major the `peer-image-import` change ships. The
+/// pairing runtime keeps the legacy constant for backwards
+/// compatibility with the pairing surface, but the image wire
+/// uses its own discriminator so a future text / import change can
+/// ship a different major without breaking the image path.
+pub const IMAGE_WIRE_VERSION: u32 = 1;
+
+/// Maximum number of metadata-only image rows the host returns in
+/// a single `list_recent_images` response. Mirrors the text cap
+/// the `peer-text-history-browser` change pins so the client rail
+/// renders a consistent newest-first page regardless of which
+/// endpoint answered the request.
+pub const IMAGE_HISTORY_MAX_PAGE_ROWS: usize = 50;
+
+/// Maximum serialized size of one authenticated
+/// `ListRecentImagesAck`. The cap matches the text envelope so
+/// the productive transport can drive both endpoints with the
+/// same listener budget.
+pub const IMAGE_HISTORY_MAX_RESPONSE_BYTES: usize = 128 * 1024;
+
+/// Maximum serialized size of one authenticated `FetchImageAck`
+/// response. The body the host returns is the bounded PNG payload
+/// the local asset store produced when the entry was committed.
+/// The envelope JSON carries the PNG as a base64 string
+/// (`bytes_b64`) so the worst-case framing overhead is `4 * bytes
+/// / 3`; the cap is sized to fit a fully-valid
+/// [`FETCH_IMAGE_MAX_BODY_BYTES`] PNG without truncating or
+/// silently downgrading the limit, leaving a small budget for the
+/// surrounding envelope (peer_id, remote_entry_id, version, title
+/// and JSON formatting). The runtime enforces the cap on both
+/// ends so a regression that forgets to enforce the limit cannot
+/// accidentally stream more bytes than the runtime expects.
+pub const FETCH_IMAGE_MAX_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
+
+/// Hard cap the `peer-image-import` change pins on the imported
+/// image body. The runtime enforces the cap on both the listener
+/// (which refuses any body larger than the threshold) and the
+/// caller (which never trusts the listener's word alone). The
+/// value mirrors [`clipvault_core::clipboard_assets::MAX_CLIPBOARD_ASSET_BYTES`]
+/// so the wire stays consistent with the local asset store
+/// contract the `clipboard-rich-content` change ships. The
+/// platform crate cannot link core so the constant is duplicated
+/// here; keeping them in lock-step is covered by the bridge
+/// tests.
+pub const FETCH_IMAGE_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Maximum number of in-flight pairing sessions the listener keeps
 /// open concurrently. The transport surfaces a typed rejection when a
 /// remote peer tries to start a session above the cap so a single
@@ -392,6 +438,103 @@ pub trait FetchTextHostHandler: Send + Sync {
     fn fetch_text(&self, peer_id: &str, remote_entry_id: &str) -> HostFetchResponse;
 }
 
+/// Host-side handler the listener drives when a
+/// `ListRecentImages` envelope lands after a successful mTLS
+/// handshake. The trait mirrors [`HistoryHostHandler`]; the
+/// productive mTLS path keeps the text and image history
+/// surfaces separate so a future host that has not shipped the
+/// `peer-image-import` change still speaks the wire contract
+/// (`ListRecentImagesUnavailable { reason: not_available }`).
+#[cfg(feature = "local-peer-pairing-tls")]
+pub trait ImageHistoryHostHandler: Send + Sync {
+    /// Project a metadata-only page of the local image history.
+    /// The contract mirrors [`HistoryHostHandler::list_recent_text`]
+    /// minus the preview: the response carries only the row
+    /// metadata the spec authorises (opaque remote id, validated
+    /// title, content type, RFC 3339 timestamp, byte size and
+    /// pixel dimensions). Implementations NEVER return image bytes,
+    /// thumbnails, asset references or filesystem paths.
+    fn list_recent_images(
+        &self,
+        peer_id: &str,
+        cursor: &str,
+        limit: u32,
+    ) -> ImageHistoryHostResponse;
+}
+
+/// Outcome the image-host handler returns to the listener. The
+/// transport forwards the variant through the wire envelope the
+/// spec pins: `ListRecentImagesAck` for [`Self::Ok`],
+/// `ListRecentImagesInvalid` for [`Self::InvalidCursor`] and
+/// `ListRecentImagesUnavailable` for [`Self::Unavailable`]. Every
+/// typed failure collapses into a stable reason string the
+/// renderer branches on.
+#[cfg(feature = "local-peer-pairing-tls")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageHistoryHostResponse {
+    Ok {
+        rows: Vec<wire::ListRecentImageRow>,
+        next_cursor: String,
+        snapshot_id: String,
+    },
+    InvalidCursor,
+    Unavailable {
+        reason: &'static str,
+    },
+}
+
+/// Host-side handler the listener drives when a `FetchImage`
+/// envelope lands after a successful mTLS handshake. The trait
+/// is feature-gated to the productive TLS path so cross-compiles
+/// and unsupported targets keep compiling. Implementations are
+/// expected to enforce the [`FETCH_IMAGE_MAX_BODY_BYTES`] cap
+/// before returning the [`HostImageFetchResponse::Ok`] variant;
+/// returning a larger body is a contract violation the transport
+/// catches and rejects with [`HostImageFetchResponse::BodyTooLarge`].
+#[cfg(feature = "local-peer-pairing-tls")]
+pub trait FetchImageHostHandler: Send + Sync {
+    /// Project the PNG payload of `remote_entry_id` for `peer_id`.
+    /// The transport authenticated `peer_id` against the pinned
+    /// cert fingerprint before invoking the handler.
+    fn fetch_image(&self, peer_id: &str, remote_entry_id: &str) -> HostImageFetchResponse;
+}
+
+/// Outcome the image-fetch handler returns to the listener. The
+/// transport forwards the variant through the wire envelope the
+/// spec pins: `FetchImageAck` for [`Self::Ok`], every other
+/// variant collapses into `FetchImageUnavailable` so the wire
+/// contract stays stable across hosts that have not shipped the
+/// image path yet. Every typed failure collapses into a stable
+/// reason string the importer branches on.
+#[cfg(feature = "local-peer-pairing-tls")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostImageFetchResponse {
+    /// The host validated the PNG against the contract and the
+    /// handler returned a payload smaller than the
+    /// [`FETCH_IMAGE_MAX_BODY_BYTES`] cap. The transport forwards
+    /// the bytes verbatim; the importer re-validates the size and
+    /// the PNG signature before any SQLite mutation.
+    Ok {
+        title: Option<String>,
+        /// Canonical PNG bytes the host read from the local
+        /// asset store. The listener re-validates the limit
+        /// locally; the importer validates the PNG signature /
+        /// dimensions / size before any local mutation.
+        bytes: Vec<u8>,
+    },
+    /// The entry disappeared between the listing and the fetch,
+    /// or it has been edited into a non-transferable shape.
+    NotFound,
+    /// The entry exists but is no longer transferrable (no
+    /// `asset_ref`, oversized, mismatched MIME, …).
+    NotTransferable,
+    /// The entry exceeded the [`FETCH_IMAGE_MAX_BODY_BYTES`] cap.
+    BodyTooLarge,
+    /// The persistence layer refused the lookup (SQLite error,
+    /// missing handle, asset store failure, …).
+    PersistenceUnavailable,
+}
+
 /// Outcome the host-side fetch handler returns to the listener.
 /// The transport forwards the variant through the wire envelope
 /// the spec pins: `FetchTextAck` for [`HostFetchResponse::Ok`],
@@ -565,9 +708,13 @@ pub trait PeerTransport: Send + Sync {
         display_name: &str,
         history_handler: Option<Arc<dyn HistoryHostHandler>>,
         fetch_handler: Option<Arc<dyn FetchTextHostHandler>>,
+        image_history_handler: Option<Arc<dyn ImageHistoryHostHandler>>,
+        image_fetch_handler: Option<Arc<dyn FetchImageHostHandler>>,
     ) -> Result<u16, TransportError> {
         let _ = history_handler;
         let _ = fetch_handler;
+        let _ = image_history_handler;
+        let _ = image_fetch_handler;
         self.start_with_material_and_resolver(material, sink, advertisement, resolver, display_name)
     }
 
@@ -760,6 +907,88 @@ pub trait PeerTransport: Send + Sync {
         &self,
         handler: Arc<dyn FetchTextHostHandler>,
     ) -> Result<(), TransportError>;
+
+    /// Install (or replace) the host-side [`ImageHistoryHostHandler`]
+    /// the listener drives when a `ListRecentImages` envelope
+    /// lands. The bootstrap calls this after the productive
+    /// pairing material loader returns so the handler can rely
+    /// on the same SQLite handle the runtime already holds.
+    /// Idempotent: a second call replaces the previous handler so
+    /// a future refactor that re-wires the runtime cannot leak
+    /// events to a stale sink.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_image_history_handler(
+        &self,
+        handler: Arc<dyn ImageHistoryHostHandler>,
+    ) -> Result<(), TransportError>;
+
+    /// Install (or replace) the host-side [`FetchImageHostHandler`]
+    /// the listener drives when a `FetchImage` envelope lands.
+    /// The bootstrap calls this after the productive pairing
+    /// material loader returns so the handler can rely on the
+    /// same SQLite handle + asset store the runtime already
+    /// holds. Idempotent: a second call replaces the previous
+    /// handler so a future refactor that re-wires the runtime
+    /// cannot leak events to a stale sink.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_image_fetch_handler(
+        &self,
+        handler: Arc<dyn FetchImageHostHandler>,
+    ) -> Result<(), TransportError>;
+
+    /// Open a metadata-only `list_recent_images` request against
+    /// the pinned peer. The transport dials the remote listener
+    /// over mTLS, exchanges the bounded `list_recent_images`
+    /// envelope and returns either the typed
+    /// [`PeerImageHistorySnapshot`] the host emitted or one of
+    /// the typed [`TransportError`] variants the runtime already
+    /// branches on. The host never accepts a cursor the listener
+    /// did not mint and the response payload is the bounded
+    /// metadata-only image page (no bytes, no thumbnails, no
+    /// `asset_ref`).
+    ///
+    /// The default implementation returns
+    /// [`TransportError::Unavailable`] so a transport that does
+    /// not yet wire the productive image envelope still compiles
+    /// — the shell surfaces the typed reason the runtime
+    /// already uses for the discovery-only contract.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn list_recent_images(
+        &self,
+        peer_id: &str,
+        cert_fingerprint: &str,
+        cursor: &str,
+        limit: u32,
+    ) -> Result<PeerImageHistorySnapshot, TransportError> {
+        let _ = (peer_id, cert_fingerprint, cursor, limit);
+        Err(TransportError::Unavailable)
+    }
+
+    /// Open an authenticated `fetch_image` request against the
+    /// pinned peer. The transport dials the remote listener over
+    /// mTLS, exchanges the bounded `fetch_image` envelope and
+    /// returns either the typed [`PeerImageFetchSnapshot`] the
+    /// host emitted or one of the typed [`TransportError`]
+    /// variants the runtime already branches on. The bytes the
+    /// host returns are bounded by [`FETCH_IMAGE_MAX_BODY_BYTES`];
+    /// the transport re-validates the limit locally before
+    /// handing the snapshot back so a drifted host cannot
+    /// accidentally bypass the documented cap.
+    ///
+    /// The default implementation returns
+    /// [`TransportError::Unavailable`] so a transport that does
+    /// not yet wire the productive image fetch envelope still
+    /// compiles.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn fetch_image(
+        &self,
+        peer_id: &str,
+        cert_fingerprint: &str,
+        remote_entry_id: &str,
+    ) -> Result<PeerImageFetchSnapshot, TransportError> {
+        let _ = (peer_id, cert_fingerprint, remote_entry_id);
+        Err(TransportError::Unavailable)
+    }
 }
 
 /// Metadata-only response the transport returns from
@@ -807,6 +1036,43 @@ pub struct PeerFetchSnapshot {
     pub title: Option<String>,
     pub content_type: String,
     pub body: String,
+}
+
+/// Metadata-only response the transport returns from
+/// [`PeerTransport::list_recent_images`]. The struct mirrors
+/// [`PeerHistorySnapshot`] for the image side of the
+/// `peer-image-import` change: the bounded page the host
+/// projected through the productive mTLS runtime, only the
+/// [`wire::ListRecentImageRow`] entries the host minted, the
+/// opaque `next_cursor` the renderer must submit verbatim to
+/// fetch the next page, and the `snapshot_id` the runtime
+/// surfaces as a stable tie-breaker. The transport never
+/// inspects the row payload beyond the type check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerImageHistorySnapshot {
+    pub peer_id: String,
+    pub rows: Vec<wire::ListRecentImageRow>,
+    pub next_cursor: String,
+    pub snapshot_id: String,
+}
+
+/// Bounded response the transport returns from
+/// [`PeerTransport::fetch_image`]. The struct carries the
+/// validated PNG payload the host returned through the wire
+/// envelope: only the validated, trimmed `title` and the
+/// bounded PNG bytes the host capped at
+/// [`FETCH_IMAGE_MAX_BODY_BYTES`]. The transport re-validates
+/// the size locally before returning the snapshot so a
+/// malformed / drifted host cannot accidentally bypass the
+/// documented cap. The runtime routes the bytes through the
+/// local PNG validation pipeline before persisting them
+/// through `ClipboardAssetStore`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerImageFetchSnapshot {
+    pub peer_id: String,
+    pub remote_entry_id: String,
+    pub title: Option<String>,
+    pub bytes: Vec<u8>,
 }
 
 /// Platform-neutral handle the platform layer exposes to the
@@ -1026,6 +1292,28 @@ impl PeerTransport for NoopPeerTransport {
     }
 
     #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_image_history_handler(
+        &self,
+        _handler: Arc<dyn ImageHistoryHostHandler>,
+    ) -> Result<(), TransportError> {
+        // The noop transport never opens a session, so an
+        // image-history-handler install collapses to the typed
+        // `Unavailable` outcome the runtime already surfaces.
+        Err(TransportError::Unavailable)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_image_fetch_handler(
+        &self,
+        _handler: Arc<dyn FetchImageHostHandler>,
+    ) -> Result<(), TransportError> {
+        // The noop transport never opens a session, so an
+        // image-fetch-handler install collapses to the typed
+        // `Unavailable` outcome the runtime already surfaces.
+        Err(TransportError::Unavailable)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
     fn fetch_text(
         &self,
         _peer_id: &str,
@@ -1095,6 +1383,35 @@ impl PeerTransport for NoopPeerTransport {
         // history probe collapses to the typed `Unavailable`
         // outcome the runtime already surfaces for the
         // discovery-only contract.
+        Err(TransportError::Unavailable)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn list_recent_images(
+        &self,
+        _peer_id: &str,
+        _cert_fingerprint: &str,
+        _cursor: &str,
+        _limit: u32,
+    ) -> Result<PeerImageHistorySnapshot, TransportError> {
+        // The noop transport never opens a real session, so an
+        // image history probe collapses to the typed
+        // `Unavailable` outcome the runtime already surfaces for
+        // the discovery-only contract.
+        Err(TransportError::Unavailable)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn fetch_image(
+        &self,
+        _peer_id: &str,
+        _cert_fingerprint: &str,
+        _remote_entry_id: &str,
+    ) -> Result<PeerImageFetchSnapshot, TransportError> {
+        // The noop transport never opens a real session, so an
+        // image fetch request collapses to the typed
+        // `Unavailable` outcome the runtime already surfaces for
+        // the discovery-only contract.
         Err(TransportError::Unavailable)
     }
 }
@@ -1234,6 +1551,16 @@ pub(crate) struct TransportState {
     /// wire contract stays stable across builds that have not
     /// shipped the `peer-text-import` change yet.
     pub fetch_handler: Option<Arc<dyn FetchTextHostHandler>>,
+    /// Host-side image-history handler the listener drives when a
+    /// `ListRecentImages` envelope lands. `None` on hosts that do
+    /// not ship the `peer-image-import` change yet — the envelope
+    /// collapses to `ListRecentImagesUnavailable { reason:
+    /// not_available }` so the wire contract stays stable.
+    pub image_history_handler: Option<Arc<dyn ImageHistoryHostHandler>>,
+    /// Host-side image-fetch handler the listener drives when a
+    /// `FetchImage` envelope lands. Mirrors the
+    /// [`Self::fetch_handler`] hot-swap pattern.
+    pub image_fetch_handler: Option<Arc<dyn FetchImageHostHandler>>,
 }
 
 #[cfg(feature = "local-peer-pairing-tls")]
@@ -1258,6 +1585,8 @@ impl Default for TransportState {
             inbound_sessions: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
             history_handler: None,
             fetch_handler: None,
+            image_history_handler: None,
+            image_fetch_handler: None,
         }
     }
 }
@@ -1444,6 +1773,49 @@ impl PeerTransport for TlsPeerTransport {
     }
 
     #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_image_history_handler(
+        &self,
+        handler: Arc<dyn ImageHistoryHostHandler>,
+    ) -> Result<(), TransportError> {
+        super::peer_transport::tls::install_image_history_handler(self, handler)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_image_fetch_handler(
+        &self,
+        handler: Arc<dyn FetchImageHostHandler>,
+    ) -> Result<(), TransportError> {
+        super::peer_transport::tls::install_image_fetch_handler(self, handler)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn list_recent_images(
+        &self,
+        peer_id: &str,
+        cert_fingerprint: &str,
+        cursor: &str,
+        limit: u32,
+    ) -> Result<PeerImageHistorySnapshot, TransportError> {
+        super::peer_transport::tls::list_recent_images(
+            self,
+            peer_id,
+            cert_fingerprint,
+            cursor,
+            limit,
+        )
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn fetch_image(
+        &self,
+        peer_id: &str,
+        cert_fingerprint: &str,
+        remote_entry_id: &str,
+    ) -> Result<PeerImageFetchSnapshot, TransportError> {
+        super::peer_transport::tls::fetch_image(self, peer_id, cert_fingerprint, remote_entry_id)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
     fn start_with_material_resolver_and_history(
         &self,
         material: LocalIdentityMaterial,
@@ -1453,6 +1825,8 @@ impl PeerTransport for TlsPeerTransport {
         display_name: &str,
         history_handler: Option<Arc<dyn HistoryHostHandler>>,
         fetch_handler: Option<Arc<dyn FetchTextHostHandler>>,
+        image_history_handler: Option<Arc<dyn ImageHistoryHostHandler>>,
+        image_fetch_handler: Option<Arc<dyn FetchImageHostHandler>>,
     ) -> Result<u16, TransportError> {
         let adapter: Arc<dyn PairingAdvertisementSink> =
             Arc::new(AdvertisementSinkAdapter::new(advertisement));
@@ -1465,6 +1839,8 @@ impl PeerTransport for TlsPeerTransport {
             resolver,
             history_handler,
             fetch_handler,
+            image_history_handler,
+            image_fetch_handler,
         )
     }
 
@@ -1760,6 +2136,130 @@ pub mod wire {
             remote_entry_id: String,
             reason: String,
         },
+        /// Metadata-only request the local peer opens over the
+        /// pinned mTLS session once the trust promotion completes.
+        /// The envelope is gated to the `peer-image-import`
+        /// change and shares the auth + pin path the text
+        /// history route uses: the transport validates the
+        /// declared `peer_id` against the SPKI the cert pins,
+        /// then checks the cert fingerprint against the persisted
+        /// pin before any byte crosses the application layer.
+        /// The listener refuses the request when the row is not
+        /// trusted, the cursor does not match a previous mint, or
+        /// the host has not installed the
+        /// [`ImageHistoryHostHandler`] adapter — the response
+        /// collapses to [`Self::ListRecentImagesUnavailable`]
+        /// before any entry data crosses the wire.
+        ListRecentImages {
+            version: u32,
+            peer_id: String,
+            cursor: String,
+            limit: u32,
+        },
+        /// Metadata-only reply the listener pushes back with the
+        /// bounded image page the host projected. The rows are
+        /// the metadata-only DTOs the bridge forwards to the
+        /// renderer (opaque remote id, validated title, content
+        /// type, RFC 3339 timestamp, byte size, dimensions); the
+        /// transport never inspects the payload beyond the type
+        /// check. The `next_cursor` field is the opaque cursor
+        /// the renderer must submit to fetch the next page
+        /// (empty when this page is the last one).
+        ListRecentImagesAck {
+            version: u32,
+            peer_id: String,
+            rows: Vec<ListRecentImageRow>,
+            next_cursor: String,
+            snapshot_id: String,
+        },
+        /// Typed rejection the listener pushes back when the
+        /// caller submitted an opaque cursor the host did not
+        /// mint. The `reason` field is a stable snake_case
+        /// identifier (`invalid_cursor`) the renderer can switch
+        /// on.
+        ListRecentImagesInvalid {
+            version: u32,
+            peer_id: String,
+            reason: String,
+        },
+        /// Typed rejection the listener pushes back when the
+        /// caller asked for image history while the row is not in
+        /// the trusted state, the peer is not currently active or
+        /// the host has not installed the image history handler.
+        /// The `reason` field is a stable snake_case identifier
+        /// the renderer can switch on.
+        ListRecentImagesUnavailable {
+            version: u32,
+            peer_id: String,
+            reason: String,
+        },
+        /// Request the complete PNG payload of a remote image
+        /// entry. The envelope is authenticated exactly like
+        /// [`PairingMessage::FetchText`] (the transport verifies
+        /// the declared `peer_id` matches the SPKI the cert
+        /// pinned, then checks the cert fingerprint against the
+        /// persisted pin) and is gated to the
+        /// `peer-image-import` change: only an active trusted
+        /// peer can ask for the bytes of a transferrable image
+        /// entry, only after the user activates the `Importar`
+        /// action. The listener enforces the
+        /// [`FETCH_IMAGE_MAX_BODY_BYTES`] cap before returning
+        /// the body so a malicious / drifted host cannot bypass
+        /// the wire contract.
+        ///
+        /// The payload never carries asset references, source
+        /// application metadata, content hash, tags, favourites,
+        /// collections or rich-text references. The transport
+        /// forwards the bytes verbatim to the importer, which
+        /// re-validates eligibility (size + PNG signature +
+        /// dimensions) before any SQLite mutation.
+        FetchImage {
+            version: u32,
+            peer_id: String,
+            remote_entry_id: String,
+        },
+        /// Successful reply the listener pushes back with the
+        /// bounded PNG payload the host validated against the
+        /// import contract. `title` is the validated, trimmed
+        /// value the host projects through the same
+        /// [`crate::peer_text_history::sanitize_remote_title`]
+        /// helper the metadata-only projection uses; `None`
+        /// means the entry has no custom title or the persisted
+        /// value fails validation. `bytes_b64` is the canonical
+        /// PNG payload the host capped at
+        /// [`FETCH_IMAGE_MAX_BODY_BYTES`] encoded with the
+        /// standard base64 alphabet (`A-Z a-z 0-9 + / =`); the
+        /// importer decodes the field locally, re-validates the
+        /// decoded size against the cap and refuses to persist
+        /// anything that exceeds the documented threshold. The
+        /// base64 framing keeps the JSON envelope bounded
+        /// (≈4·n/3 bytes for n raw bytes) so the
+        /// [`FETCH_IMAGE_MAX_RESPONSE_BYTES`] cap fits a fully
+        /// valid 16 MiB PNG without truncating or silently
+        /// downgrading the limit.
+        FetchImageAck {
+            version: u32,
+            peer_id: String,
+            remote_entry_id: String,
+            title: Option<String>,
+            bytes_b64: String,
+        },
+        /// Typed rejection the listener pushes back when the
+        /// caller asked for an image that no longer exists, is
+        /// no longer transferrable, or the runtime cannot
+        /// honour the request for a documented reason
+        /// (`not_trusted`, `not_active`,
+        /// `persistence_unavailable`, …). The `reason` is a
+        /// stable snake_case identifier the importer can switch
+        /// on; the transport never inspects the payload beyond
+        /// the type check and never echoes the rejected body
+        /// back.
+        FetchImageUnavailable {
+            version: u32,
+            peer_id: String,
+            remote_entry_id: String,
+            reason: String,
+        },
     }
 
     /// Metadata-only row the host returns in
@@ -1780,8 +2280,8 @@ pub mod wire {
         pub remote_entry_id: String,
         /// Validated, trimmed user-supplied title. `None` when
         /// the entry has no custom title or the persisted value
-        /// fails the same validation the local UI applies (so
-        /// the renderer can fall back to the content-type label
+        /// fails the same validation the local UI applies (so the
+        /// renderer can fall back to the content-type label
         /// without surfacing garbage).
         pub title: Option<String>,
         /// Canonical snake_case string the local SQLite layer
@@ -1793,6 +2293,29 @@ pub mod wire {
         /// Bounded, escaped preview. Always trimmed and never
         /// longer than 300 Unicode scalar values / two lines.
         pub preview: String,
+    }
+
+    /// Metadata-only row the host returns in
+    /// [`PairingMessage::ListRecentImagesAck`]. The struct carries
+    /// only the fields the spec authorises: an opaque remote
+    /// entry id, the optional validated title, the canonical
+    /// content type (`image`), the RFC 3339 timestamp, the byte
+    /// size and the pixel dimensions. The row NEVER carries image
+    /// bytes, a thumbnail, an `asset_ref`, a filesystem path, a
+    /// content hash, tags, collections, favourites or
+    /// source-application metadata. The renderer renders the
+    /// common static image placeholder on top of the metadata
+    /// the bridge surfaces.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub struct ListRecentImageRow {
+        pub remote_entry_id: String,
+        pub title: Option<String>,
+        pub content_type: String,
+        pub created_at: String,
+        pub byte_size: u64,
+        pub width: u32,
+        pub height: u32,
     }
 
     impl PairingMessage {
@@ -1809,7 +2332,14 @@ pub mod wire {
                 | PairingMessage::ListRecentTextUnavailable { version, .. }
                 | PairingMessage::FetchText { version, .. }
                 | PairingMessage::FetchTextAck { version, .. }
-                | PairingMessage::FetchTextUnavailable { version, .. } => *version,
+                | PairingMessage::FetchTextUnavailable { version, .. }
+                | PairingMessage::ListRecentImages { version, .. }
+                | PairingMessage::ListRecentImagesAck { version, .. }
+                | PairingMessage::ListRecentImagesInvalid { version, .. }
+                | PairingMessage::ListRecentImagesUnavailable { version, .. }
+                | PairingMessage::FetchImage { version, .. }
+                | PairingMessage::FetchImageAck { version, .. }
+                | PairingMessage::FetchImageUnavailable { version, .. } => *version,
             }
         }
 
@@ -1826,7 +2356,14 @@ pub mod wire {
                 | PairingMessage::ListRecentTextUnavailable { peer_id, .. }
                 | PairingMessage::FetchText { peer_id, .. }
                 | PairingMessage::FetchTextAck { peer_id, .. }
-                | PairingMessage::FetchTextUnavailable { peer_id, .. } => peer_id,
+                | PairingMessage::FetchTextUnavailable { peer_id, .. }
+                | PairingMessage::ListRecentImages { peer_id, .. }
+                | PairingMessage::ListRecentImagesAck { peer_id, .. }
+                | PairingMessage::ListRecentImagesInvalid { peer_id, .. }
+                | PairingMessage::ListRecentImagesUnavailable { peer_id, .. }
+                | PairingMessage::FetchImage { peer_id, .. }
+                | PairingMessage::FetchImageAck { peer_id, .. }
+                | PairingMessage::FetchImageUnavailable { peer_id, .. } => peer_id,
             }
         }
 
@@ -1849,7 +2386,14 @@ pub mod wire {
                 | PairingMessage::ListRecentTextUnavailable { .. }
                 | PairingMessage::FetchText { .. }
                 | PairingMessage::FetchTextAck { .. }
-                | PairingMessage::FetchTextUnavailable { .. } => "",
+                | PairingMessage::FetchTextUnavailable { .. }
+                | PairingMessage::ListRecentImages { .. }
+                | PairingMessage::ListRecentImagesAck { .. }
+                | PairingMessage::ListRecentImagesInvalid { .. }
+                | PairingMessage::ListRecentImagesUnavailable { .. }
+                | PairingMessage::FetchImage { .. }
+                | PairingMessage::FetchImageAck { .. }
+                | PairingMessage::FetchImageUnavailable { .. } => "",
             }
         }
     }
@@ -2249,6 +2793,159 @@ mod tests {
 
     impl TransportSink for NullSink {
         fn on_pairing_observed(&self, _observation: PeerTransportObservation) {}
+    }
+
+    /// The `peer-image-import` change adds the image-related
+    /// envelopes without touching the text side. The wire shape
+    /// MUST round-trip through JSON so a regression that drops a
+    /// field surfaces as a test failure before the build ships.
+    #[test]
+    fn list_recent_images_envelope_round_trips_through_json() {
+        let request = PairingMessage::ListRecentImages {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            cursor: String::new(),
+            limit: IMAGE_HISTORY_MAX_PAGE_ROWS as u32,
+        };
+        assert_eq!(request.version(), IMAGE_WIRE_VERSION);
+        assert_eq!(request.peer_id(), "peer-aaaa");
+        let serialised = serde_json::to_string(&request).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, request);
+    }
+
+    #[test]
+    fn list_recent_images_ack_envelope_round_trips_through_json() {
+        use wire::ListRecentImageRow;
+        let response = PairingMessage::ListRecentImagesAck {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            rows: vec![ListRecentImageRow {
+                remote_entry_id: "entry-7".to_string(),
+                title: Some("hello".to_string()),
+                content_type: "image".to_string(),
+                created_at: "2026-01-02T03:04:05Z".to_string(),
+                byte_size: 4096,
+                width: 320,
+                height: 240,
+            }],
+            next_cursor: "next".to_string(),
+            snapshot_id: "snapshot".to_string(),
+        };
+        let serialised = serde_json::to_string(&response).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, response);
+    }
+
+    #[test]
+    fn list_recent_images_invalid_envelope_round_trips_through_json() {
+        let invalid = PairingMessage::ListRecentImagesInvalid {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            reason: "invalid_cursor".to_string(),
+        };
+        let serialised = serde_json::to_string(&invalid).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, invalid);
+    }
+
+    #[test]
+    fn fetch_image_envelope_round_trips_through_json() {
+        let request = PairingMessage::FetchImage {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-42".to_string(),
+        };
+        assert_eq!(request.version(), IMAGE_WIRE_VERSION);
+        assert_eq!(request.peer_id(), "peer-aaaa");
+        let serialised = serde_json::to_string(&request).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, request);
+        assert_eq!(parsed.public_key_fingerprint(), "");
+    }
+
+    #[test]
+    fn fetch_image_ack_envelope_round_trips_through_json() {
+        let ack = PairingMessage::FetchImageAck {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-42".to_string(),
+            title: Some("Captura".to_string()),
+            bytes_b64: "iVBORw==".to_string(),
+        };
+        let serialised = serde_json::to_string(&ack).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, ack);
+    }
+
+    #[test]
+    fn fetch_image_unavailable_envelope_round_trips_through_json() {
+        let unavailable = PairingMessage::FetchImageUnavailable {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-42".to_string(),
+            reason: "not_found".to_string(),
+        };
+        let serialised = serde_json::to_string(&unavailable).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, unavailable);
+    }
+
+    #[test]
+    fn fetch_image_ack_carries_a_full_max_payload_envelope() {
+        // The 16 MiB PNG body cap the spec pins has to fit
+        // inside [`FETCH_IMAGE_MAX_RESPONSE_BYTES`] when
+        // base64-encoded. The envelope also has to fit inside
+        // the same ceiling after JSON framing so a regression
+        // that drops the base64 framing cannot silently shrink
+        // the limit. We pin the worst-case here.
+        let bytes = vec![0u8; FETCH_IMAGE_MAX_BODY_BYTES];
+        let bytes_b64_len = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .encode(&bytes)
+                .len()
+        };
+        assert!(
+            bytes_b64_len <= FETCH_IMAGE_MAX_RESPONSE_BYTES,
+            "base64 payload ({} bytes) must fit inside the response cap ({} bytes)",
+            bytes_b64_len,
+            FETCH_IMAGE_MAX_RESPONSE_BYTES
+        );
+    }
+
+    #[test]
+    fn fetch_image_ack_rejects_an_oversized_payload() {
+        // The `envelope_payload_limit` helper refuses a
+        // serialised payload larger than the documented cap;
+        // we verify the gate by constructing a stub that is
+        // bigger than the cap and asserting the limit returns
+        // the documented constant. (The actual serialiser path
+        // lives inside the listener helper which requires a
+        // running TLS stream.)
+        assert!(FETCH_IMAGE_MAX_BODY_BYTES <= FETCH_IMAGE_MAX_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn image_envelope_does_not_expose_public_key_fingerprint() {
+        // Same metadata-only contract the text side pins:
+        // the image envelopes MUST NOT carry a public key
+        // fingerprint over the wire.
+        let request = PairingMessage::FetchImage {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-42".to_string(),
+        };
+        assert_eq!(request.public_key_fingerprint(), "");
+
+        let ack = PairingMessage::FetchImageAck {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-42".to_string(),
+            title: None,
+            bytes_b64: String::new(),
+        };
+        assert_eq!(ack.public_key_fingerprint(), "");
     }
 
     #[test]

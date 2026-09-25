@@ -721,6 +721,125 @@ export interface PeerHistoryRow {
 }
 
 /**
+ * Wire representation of the metadata-only transferable image
+ * page the `peer-image-import` change ships. The discriminated
+ * union keeps the wire contract stable: the renderer branches on
+ * `kind` (`ok` / `invalid_cursor` / `peer_unavailable` /
+ * `transport_unavailable`) without inspecting free-form strings
+ * or content bytes. The bridge never returns a typed
+ * `CommandError` for the page request — every typed failure
+ * collapses into a variant.
+ */
+export type PeerImageBrowseResponse =
+  | {
+      kind: "ok";
+      rows: PeerImageBrowseRow[];
+      /**
+       * Opaque cursor the renderer submits verbatim to fetch the
+       * next page. Empty string when the host has no more rows.
+       */
+      next_cursor: string;
+      /**
+       * Stable fingerprint the renderer compares across page
+       * requests to detect a local capture that landed between
+       * the two.
+       */
+      snapshot_id: string;
+    }
+  | { kind: "invalid_cursor" }
+  | {
+      kind: "peer_unavailable";
+      /**
+       * Stable reason the renderer maps to copy
+       * (`no_known_peer` / `not_trusted` / `not_active` /
+       * `not_available`). The `not_available` branch is reserved
+       * for peers that did not advertise the `image_import`
+       * capability so the rail surfaces the typed reason and
+       * the card hides the Import action.
+       */
+      reason: "no_known_peer" | "not_trusted" | "not_active" | "not_available";
+    }
+  | {
+      kind: "transport_unavailable";
+      reason:
+        | "unavailable"
+        | "unknown_peer"
+        | "key_mismatch"
+        | "revoked"
+        | "blocked"
+        | "incompatible_protocol"
+        | "malformed";
+    };
+
+/**
+ * Metadata-only row the renderer renders for an image row of a
+ * paired, active peer. The struct carries only the fields the
+ * spec and the design authorise: an opaque remote entry id, the
+ * optional validated title, the content type (`image`), the RFC
+ * 3339 timestamp, the byte size and the pixel dimensions. The
+ * row never carries image bytes, a thumbnail, an `asset_ref`, a
+ * filesystem path, a content hash, tags, collections or
+ * source-application metadata.
+ */
+export interface PeerImageBrowseRow {
+  remote_entry_id: string;
+  title: string | null;
+  content_type: string;
+  created_at: string;
+  byte_size: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Discriminated union the `peer-image-import` change returns when
+ * the user activates `Importar` for an image row of a trusted
+ * active peer. Every variant collapses to a stable identifier
+ * the UI maps to a localised message; the metadata-only fields
+ * (`entry_id`, `collection_id`, `deduplicated`) identify the local
+ * snapshot and its bound collection without leaking the imported
+ * bytes.
+ */
+export type PeerImageImportResponse =
+  | {
+      kind: "imported";
+      entry_id: number;
+      collection_id: number;
+      deduplicated: boolean;
+    }
+  | {
+      kind: "peer_unavailable";
+      /**
+       * Stable reason the runtime maps to copy
+       * (`no_known_peer` / `not_trusted` / `not_active` /
+       * `not_available`). The `not_available` branch is reserved
+       * for peers that did not advertise the `image_import`
+       * capability so the card can surface a dedicated copy
+       * instead of a generic `not_trusted` reason.
+       */
+      reason: "no_known_peer" | "not_trusted" | "not_active" | "not_available";
+    }
+  | {
+      kind: "transport_unavailable";
+      reason:
+        | "unavailable"
+        | "unknown_peer"
+        | "key_mismatch"
+        | "revoked"
+        | "blocked"
+        | "incompatible_protocol"
+        | "malformed"
+        | "not_transferable"
+        | "body_too_large"
+        | "persistence_unavailable";
+    }
+  | { kind: "body_too_large" }
+  | { kind: "invalid_image" }
+  | { kind: "not_transferable" }
+  | { kind: "title_invalid" }
+  | { kind: "persistence_error"; reason: string };
+
+/**
  * Discriminated union the `peer-text-import` change returns when
  * the user activates `Importar` for a row of a trusted active
  * peer. The bridge never carries the imported body: the

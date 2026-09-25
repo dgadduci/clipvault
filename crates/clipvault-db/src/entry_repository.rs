@@ -287,6 +287,38 @@ impl<'a> EntryRepository<'a> {
         fetch_by_id(self.conn, id)
     }
 
+    /// Refresh only the `updated_at` / `last_seen_at` columns of
+    /// the supplied entry id. The helper is metadata-only: it
+    /// does not touch `title`, `is_pinned`, `asset_ref`, the
+    /// payload, the rich-text references or any other column the
+    /// `peer-image-import` change ships. The `peer-image-import`
+    /// service calls this when it dedupes an existing image row
+    /// so the row stays inside the rail ordering without
+    /// overwriting user-edited metadata.
+    ///
+    /// Returns the refreshed record when the id exists; `None`
+    /// when the id was already removed (the helper is a no-op
+    /// for missing rows so the import transaction can keep the
+    /// dedupe contract).
+    pub fn touch_last_seen(
+        &self,
+        id: i64,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<Option<EntryRecord>, EntryRepositoryError> {
+        let last_seen = format_timestamp(last_seen_at);
+        let updated = self.conn.execute(
+            "UPDATE clipboard_entries
+             SET updated_at = ?1,
+                 last_seen_at = ?1
+             WHERE id = ?2",
+            params![last_seen, id],
+        )?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        fetch_by_id(self.conn, id)
+    }
+
     /// Most recent entries first, capped by `limit`. The desktop rail
     /// orders by the original capture datetime so a fresh capture
     /// always appears on the left edge, even when an older pinned
@@ -456,7 +488,7 @@ impl<'a> EntryRepository<'a> {
     ///
     /// The repository intentionally exposes a `text_entries_after`
     /// helper instead of a `text_entries_with_preview` projection:
-    /// the cursor projection lives in `clipvault-core` because the
+    /// the cursor projection lives in `clipboard-core` because the
     /// preview escaping, the cursor encoding and the wire shaping
     /// are the core's responsibility, not the SQL layer's.
     ///
@@ -489,6 +521,66 @@ impl<'a> EntryRepository<'a> {
                AND (created_at < ?1 OR (created_at = ?1 AND id < ?2))
              ORDER BY created_at DESC, id DESC
              LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![created_at, id, limit], row_to_record)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    /// Cursor-paginated transferable image page.
+    ///
+    /// `peer-image-import` projects a bounded metadata-only
+    /// image page for a remote peer. The projection filters on
+    /// the image content type plus the asset / namespace /
+    /// dimension / size predicates the spec authorises: every
+    /// row must carry a non-empty `asset_ref`, the canonical
+    /// `image/png` MIME type and the documented width / height
+    /// fields. The projection is purely metadata-only: the query
+    /// never returns image bytes — the host-side handler reads
+    /// the persisted bytes through `ClipboardAssetStore` after
+    /// the cursor + persistence checks pass.
+    ///
+    /// The cursor projection mirrors the text side: sort
+    /// newest-first and break ties with `id DESC`. The cursor is
+    /// the `(created_at, id)` pair of the last row the previous
+    /// page returned; the query pages strictly after the cursor
+    /// with a `<` comparison so a future row that shares the same
+    /// `created_at` (a batch capture) stays correctly ordered by
+    /// the stable `id`.
+    ///
+    /// The helper stays metadata-only by construction: it never
+    /// loads image bytes, never inspects the asset's path and
+    /// never returns more than `limit` rows. The
+    /// `peer-image-import` change pins the contract on the
+    /// runtime side; tests inject an in-memory source so the SQL
+    /// boundary is never reached through a fake source.
+    pub fn image_entries_after(
+        &self,
+        created_at: &str,
+        id: i64,
+        limit: usize,
+    ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
+        let limit = limit as i64;
+        let sql = format!(
+            "SELECT {ENTRY_COLUMNS}
+             FROM clipboard_entries
+             WHERE content_type = '{image_type}'
+               AND asset_ref IS NOT NULL
+               AND asset_ref != ''
+               AND asset_ref LIKE 'clipboard/%'
+               AND mime_type IS NOT NULL
+               AND payload_width IS NOT NULL
+               AND payload_height IS NOT NULL
+               AND content_size IS NOT NULL
+               AND content_size > 0
+               AND (created_at < ?1 OR (created_at = ?1 AND id < ?2))
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?3",
+            image_type = ContentType::Image.as_str()
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![created_at, id, limit], row_to_record)?;
@@ -593,6 +685,67 @@ impl<'a> EntryRepository<'a> {
             records.push(row?);
         }
         Ok(records)
+    }
+
+    /// Stable `(created_at, id)` pair the cursor projection uses
+    /// as the snapshot fingerprint for the image side of the
+    /// `peer-image-import` change. `None` when no transferable
+    /// image row exists yet. The query mirrors the predicate the
+    /// [`Self::image_entries_after`] helper applies so the
+    /// snapshot only counts rows the wire can ship.
+    pub fn latest_transferable_image_snapshot(
+        &self,
+    ) -> Result<Option<(String, i64)>, EntryRepositoryError> {
+        let sql = format!(
+            "SELECT created_at, id FROM clipboard_entries
+             WHERE content_type = '{image_type}'
+               AND asset_ref IS NOT NULL
+               AND asset_ref != ''
+               AND asset_ref LIKE 'clipboard/%'
+               AND mime_type IS NOT NULL
+               AND payload_width IS NOT NULL
+               AND payload_height IS NOT NULL
+               AND content_size IS NOT NULL
+               AND content_size > 0
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+            image_type = ContentType::Image.as_str()
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(params![])?;
+        if let Some(row) = rows.next()? {
+            let created_at: String = row.get(0)?;
+            let id: i64 = row.get(1)?;
+            Ok(Some((created_at, id)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Total number of transferable image rows currently stored.
+    /// The `peer-image-import` change folds the value into the
+    /// snapshot fingerprint so a local capture that landed
+    /// between page requests always bumps the fingerprint the
+    /// client compares against. The predicate mirrors the
+    /// [`Self::image_entries_after`] query so the count matches
+    /// the metadata-only surface the host exposes.
+    pub fn transferable_image_count(&self) -> Result<i64, EntryRepositoryError> {
+        let sql = format!(
+            "SELECT COUNT(*) FROM clipboard_entries
+             WHERE content_type = '{image_type}'
+               AND asset_ref IS NOT NULL
+               AND asset_ref != ''
+               AND asset_ref LIKE 'clipboard/%'
+               AND mime_type IS NOT NULL
+               AND payload_width IS NOT NULL
+               AND payload_height IS NOT NULL
+               AND content_size IS NOT NULL
+               AND content_size > 0",
+            image_type = ContentType::Image.as_str()
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let count: i64 = stmt.query_row(params![], |row| row.get(0))?;
+        Ok(count)
     }
 
     /// Same as [`Self::text_entries`] but optionally restricted to the

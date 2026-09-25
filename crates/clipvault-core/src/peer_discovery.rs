@@ -89,6 +89,38 @@ pub const DISCOVERY_ONLY_CAPABILITY: &str = "discovery_only";
 /// and the bridge can share a single string.
 pub const PAIRING_CAPABILITY: &str = "pairing";
 
+/// Capability the `peer-image-import` change ships. A peer that
+/// advertises `image_import` accepts the productive
+/// `list_recent_images` and `fetch_image` envelopes the
+/// `peer-image-import` bridge uses; a peer that does not
+/// announce the capability continues to expose only the text
+/// endpoints so the gating UI surfaces the absence. The
+/// capability lives in the discovery module so the validation
+/// path and the bridge can share a single string.
+///
+/// The capability is announced alongside `pairing` (the wire
+/// preserves a single `capability` field) by separating the
+/// values with a comma: `pairing,image_import`. The discovery
+/// validator splits the field, recognises each token
+/// independently and rejects unknown tokens so a future
+/// capability addition can opt in without breaking the
+/// existing surface.
+pub const IMAGE_IMPORT_CAPABILITY: &str = "image_import";
+
+/// Decode the comma-separated `capability` field into a
+/// normalised `Vec<String>`. Empty / whitespace-only tokens
+/// are dropped so a TXT record with `pairing,` decodes the
+/// same way as one with `pairing`. The order is preserved so
+/// tests can pin the value verbatim when they need to.
+pub fn decode_capabilities(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Service type the runtime browses / registers. The trailing dot
 /// is intentional: `mdns-sd` treats it as a fully-qualified name
 /// (RFC 6762 §3).
@@ -175,7 +207,22 @@ pub struct PeerObservationRecord {
     pub full_public_key_fingerprint: Option<String>,
     pub display_name: String,
     pub protocol_major: i64,
+    /// Canonical `capability` token the host advertises. Stays
+    /// at `pairing` / `discovery_only` exactly so a legacy
+    /// client that only accepts the exact literal keeps
+    /// recognising the record; the runtime persists the value
+    /// verbatim in `known_peers.capability` so the bootstrap
+    /// resolver can combine it with the additive
+    /// [`Self::caps_extra`] tokens when resolving the peer's
+    /// capabilities.
     pub capability: String,
+    /// Additive capability tokens the host advertises through
+    /// the separate `caps_extra` TXT field. The field is
+    /// `Vec<String>` so a host that supports several additive
+    /// surfaces (image_import, future rich_text_share, …) can
+    /// publish them in a single TXT key without breaking the
+    /// legacy contract.
+    pub caps_extra: Vec<String>,
     pub observed_at: OffsetDateTime,
 }
 
@@ -223,14 +270,34 @@ impl PeerObservationRecord {
                 observed: raw.protocol_major,
             });
         }
-        // The runtime accepts both `discovery_only` and
-        // `pairing` advertisements. The pairing advertisement
-        // additionally carries the full public-key fingerprint
-        // in the `pairing_fingerprint` field; the runtime refuses
-        // pairing records that lack a well-formed 64-hex full
-        // fingerprint so the pairing layer never receives a
-        // half-pinned row.
-        match raw.capability.as_str() {
+        // Decode the canonical `capability` field. The legacy
+        // contract pins the value to a single token
+        // (`discovery_only` or `pairing`) so a strict parser
+        // that does not understand the additive surface keeps
+        // recognising the record. The runtime rejects any
+        // comma-separated additional token in the legacy field
+        // so a host that accidentally publishes the additive
+        // capability in the wrong field is rejected as
+        // `UnsupportedCapability` instead of silently bypassing
+        // the capability gate.
+        let tokens = decode_capabilities(&raw.capability);
+        if tokens.is_empty() {
+            return Err(PeerRecordValidationError::UnsupportedCapability {
+                capability: raw.capability.clone(),
+            });
+        }
+        let primary = tokens[0].as_str();
+        if tokens.len() > 1 {
+            // The legacy `capability` field is reserved for a
+            // single token (`pairing` / `discovery_only`). A
+            // host that publishes additive tokens in the wrong
+            // field is rejected so the strict-legacy-parser
+            // contract stays consistent across the runtime.
+            return Err(PeerRecordValidationError::UnsupportedCapability {
+                capability: raw.capability.clone(),
+            });
+        }
+        match primary {
             DISCOVERY_ONLY_CAPABILITY => {}
             PAIRING_CAPABILITY => {
                 let full = raw.pairing_fingerprint.as_deref().unwrap_or("");
@@ -248,7 +315,20 @@ impl PeerObservationRecord {
                 });
             }
         }
-        let full_public_key_fingerprint = if raw.capability == PAIRING_CAPABILITY {
+        // Validate the additive `caps_extra` surface. Only the
+        // tokens the runtime currently understands are
+        // accepted; unknown tokens surface as
+        // `UnsupportedCapability` so a future capability
+        // addition cannot silently bypass the capability gate
+        // when the host upgrades before the runtime does.
+        for token in &raw.caps_extra {
+            if !matches!(token.as_str(), IMAGE_IMPORT_CAPABILITY) {
+                return Err(PeerRecordValidationError::UnsupportedCapability {
+                    capability: format!("caps_extra:{}", token),
+                });
+            }
+        }
+        let full_public_key_fingerprint = if primary == PAIRING_CAPABILITY {
             raw.pairing_fingerprint.clone()
         } else {
             None
@@ -260,13 +340,33 @@ impl PeerObservationRecord {
             display_name,
             protocol_major: raw.protocol_major,
             capability: raw.capability.clone(),
+            caps_extra: raw.caps_extra.clone(),
             observed_at: raw.observed_at,
         })
     }
 
+    /// `true` when the record was published by a peer that
+    /// opts into the `peer-image-import` capability. The check
+    /// runs against the additive `caps_extra` surface the
+    /// runtime reads from the dedicated TXT field; the legacy
+    /// `capability` field never carries the token so a strict
+    /// parser that only accepts the canonical value keeps
+    /// pairing without seeing the additive surface. The
+    /// persisted `caps_extra` column stays empty for legacy
+    /// rows so no schema migration is required.
+    pub fn has_image_import_capability(&self) -> bool {
+        self.caps_extra
+            .iter()
+            .any(|token| token == IMAGE_IMPORT_CAPABILITY)
+    }
+
     /// Convert into the database-shaped [`PeerObservation`]. The
     /// runtime calls this immediately before persistence so the
-    /// repository never sees unvalidated bytes.
+    /// repository never sees unvalidated bytes. The additive
+    /// `caps_extra` surface travels through verbatim so the
+    /// bootstrap resolver can combine it with the canonical
+    /// `capability` value when it gates the productive image
+    /// routes.
     pub fn into_persistence(self) -> PeerObservation {
         PeerObservation {
             peer_id: self.peer_id,
@@ -275,6 +375,7 @@ impl PeerObservationRecord {
             display_name: self.display_name,
             protocol_major: self.protocol_major,
             capability: self.capability,
+            caps_extra: self.caps_extra.join(","),
             observed_at: self.observed_at,
         }
     }
@@ -808,6 +909,7 @@ impl PeerDiscoveryRuntime {
             display_name: observation.display_name.clone(),
             protocol_major: observation.protocol_major,
             capability: observation.capability.clone(),
+            caps_extra: observation.caps_extra.join(","),
             observed_at: observation.observed_at,
         });
         self.presence.write().record(&observation.peer_id, now);
@@ -918,6 +1020,7 @@ fn apply_event(handles: &WorkerHandles, event: DiscoveryEvent) {
                             display_name: observation.display_name.clone(),
                             protocol_major: observation.protocol_major,
                             capability: observation.capability.clone(),
+                            caps_extra: observation.caps_extra.join(","),
                             observed_at: observation.observed_at,
                         });
                         handles.presence.write().record(&observation.peer_id, now);
@@ -1092,6 +1195,7 @@ mod tests {
                             paired_at: existing.paired_at.clone(),
                             paired_protocol_major: existing.paired_protocol_major,
                             cursor_secret: existing.cursor_secret.clone(),
+                            caps_extra: observation.caps_extra.clone(),
                         };
                         guard.push(refreshed.clone());
                         UpsertObservationOutcome::Stored(refreshed)
@@ -1119,6 +1223,7 @@ mod tests {
                         paired_at: String::new(),
                         paired_protocol_major: 0,
                         cursor_secret: String::new(),
+                        caps_extra: observation.caps_extra.clone(),
                     };
                     guard.push(row.clone());
                     UpsertObservationOutcome::Stored(row)
@@ -1254,6 +1359,148 @@ mod tests {
             validated.full_public_key_fingerprint.as_deref(),
             Some("f".repeat(64).as_str())
         );
+    }
+
+    #[test]
+    fn validation_accepts_pairing_image_import_capability() {
+        // The `peer-image-import` change ships the
+        // `image_import` capability alongside `pairing`. The
+        // validator must accept the additive form (the legacy
+        // `capability` field stays at `pairing` exactly so a
+        // strict parser keeps recognising the record; the new
+        // `caps_extra` field carries `image_import`) and
+        // expose the helper the runtime / UI consults to gate
+        // the image surface.
+        let raw = TxtRecord {
+            capability: PAIRING_CAPABILITY.to_string(),
+            caps_extra: vec![IMAGE_IMPORT_CAPABILITY.to_string()],
+            pairing_fingerprint: Some("f".repeat(64)),
+            ..txt(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+                "Studio",
+            )
+        };
+        let validated = PeerObservationRecord::from_txt_record(&raw)
+            .expect("pairing+image_import must validate");
+        assert_eq!(validated.capability, PAIRING_CAPABILITY);
+        assert_eq!(
+            validated.caps_extra,
+            vec![IMAGE_IMPORT_CAPABILITY.to_string()]
+        );
+        assert!(validated.has_image_import_capability());
+        // The full pairing fingerprint is preserved.
+        assert_eq!(
+            validated.full_public_key_fingerprint.as_deref(),
+            Some("f".repeat(64).as_str())
+        );
+    }
+
+    #[test]
+    fn validation_rejects_legacy_comma_separated_capability() {
+        // Regression: a host that publishes `pairing,image_import`
+        // in the legacy `capability` field MUST be rejected.
+        // The strict legacy parser would refuse the record
+        // because it does not match `pairing` exactly; the
+        // runtime surfaces the rejection as
+        // `UnsupportedCapability` so a host that accidentally
+        // publishes the additive capability in the wrong field
+        // does not silently opt into the image surface.
+        let raw = TxtRecord {
+            capability: format!("{},{}", PAIRING_CAPABILITY, IMAGE_IMPORT_CAPABILITY),
+            pairing_fingerprint: Some("f".repeat(64)),
+            ..txt(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+                "Studio",
+            )
+        };
+        let err = PeerObservationRecord::from_txt_record(&raw)
+            .expect_err("comma-separated capability must fail");
+        assert!(matches!(
+            err,
+            PeerRecordValidationError::UnsupportedCapability { .. }
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_unknown_caps_extra_token() {
+        // Future-proofing: a token outside the documented
+        // additive capability set is rejected so a typo or a
+        // future capability addition cannot silently bypass
+        // the capability gate when the host upgrades before
+        // the runtime does.
+        let raw = TxtRecord {
+            capability: PAIRING_CAPABILITY.to_string(),
+            caps_extra: vec!["future_token".to_string()],
+            pairing_fingerprint: Some("f".repeat(64)),
+            ..txt(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+                "Studio",
+            )
+        };
+        let err = PeerObservationRecord::from_txt_record(&raw)
+            .expect_err("unknown caps_extra token must fail");
+        assert!(matches!(
+            err,
+            PeerRecordValidationError::UnsupportedCapability { .. }
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_unknown_capability_token() {
+        // Future-proofing: a token outside the documented
+        // capability set is rejected so a typo cannot silently
+        // sneak past the discovery validator.
+        let raw = TxtRecord {
+            capability: format!("{},bogus", PAIRING_CAPABILITY),
+            pairing_fingerprint: Some("f".repeat(64)),
+            ..txt(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+                "Studio",
+            )
+        };
+        let err =
+            PeerObservationRecord::from_txt_record(&raw).expect_err("unknown capability must fail");
+        assert!(matches!(
+            err,
+            PeerRecordValidationError::UnsupportedCapability { .. }
+        ));
+    }
+
+    #[test]
+    fn decode_capabilities_handles_csv_whitespace_and_dedup() {
+        // Helper sanity check: a TXT record that ships
+        // `pairing, image_import,` (trailing comma + extra
+        // whitespace) decodes into the two canonical tokens.
+        assert_eq!(
+            decode_capabilities("pairing, image_import,"),
+            vec![
+                PAIRING_CAPABILITY.to_string(),
+                IMAGE_IMPORT_CAPABILITY.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn pair_only_record_lacks_image_import_capability() {
+        // Regression: a `pairing` record that does not advertise
+        // `image_import` must keep returning `false` from the
+        // helper so the UI can gate the surface.
+        let raw = TxtRecord {
+            capability: PAIRING_CAPABILITY.into(),
+            pairing_fingerprint: Some("f".repeat(64)),
+            ..txt(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+                "Studio",
+            )
+        };
+        let validated =
+            PeerObservationRecord::from_txt_record(&raw).expect("pairing must validate");
+        assert!(!validated.has_image_import_capability());
     }
 
     #[test]
@@ -1490,6 +1737,7 @@ mod tests {
                 paired_at: String::new(),
                 paired_protocol_major: 0,
                 cursor_secret: String::new(),
+                caps_extra: String::new(),
             },
         );
         runtime.start().expect("start");
@@ -1501,6 +1749,7 @@ mod tests {
             display_name: "Impostor".to_string(),
             protocol_major: PROTOCOL_MAJOR,
             capability: DISCOVERY_ONLY_CAPABILITY.to_string(),
+            caps_extra: Vec::new(),
             observed_at: datetime!(2026-01-02 03:04:05 UTC),
         }));
         wait_for_drain(&runtime, 2_000);
@@ -1529,6 +1778,7 @@ mod tests {
             display_name: "Studio".to_string(),
             protocol_major: PROTOCOL_MAJOR,
             capability: DISCOVERY_ONLY_CAPABILITY.to_string(),
+            caps_extra: Vec::new(),
             observed_at: datetime!(2026-01-02 03:04:05 UTC),
         }));
         wait_for_drain(&runtime, 2_000);

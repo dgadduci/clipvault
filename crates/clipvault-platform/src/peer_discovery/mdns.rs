@@ -70,7 +70,17 @@ const TXT_FINGERPRINT: &str = "fp";
 const TXT_PAIRING_FINGERPRINT: &str = "pfp";
 const TXT_DISPLAY_NAME: &str = "name";
 const TXT_PROTOCOL_MAJOR: &str = "pmajor";
+/// Legacy `capability` field. Stays at the canonical value
+/// (`pairing` / `discovery_only`) so a parser that only accepts
+/// the exact literal keeps recognising the record.
 const TXT_CAPABILITY: &str = "cap";
+/// Additive capability tokens the host advertises through a
+/// separate TXT field. The field is optional so a legacy client
+/// that does not understand the additive surface keeps ignoring
+/// it; a runtime that does understand the field combines it with
+/// the canonical [`TXT_CAPABILITY`] value when resolving the
+/// peer's capabilities.
+const TXT_CAPS_EXTRA: &str = "caps_extra";
 
 /// Background adapter the production shell wires into the
 /// runtime on macOS / Linux. The adapter is owned by the
@@ -758,6 +768,7 @@ fn translate_resolved(info: &mdns_sd::ServiceInfo) -> Option<TxtRecord> {
     let protocol_major = read_int_property(properties, TXT_PROTOCOL_MAJOR)?;
     let capability = read_string_property(properties, TXT_CAPABILITY)?;
     let pairing_fingerprint = read_optional_string_property(properties, TXT_PAIRING_FINGERPRINT);
+    let caps_extra = read_optional_caps_extra(properties, TXT_CAPS_EXTRA);
     let mut record = TxtRecord::new(
         peer_id,
         fingerprint,
@@ -767,6 +778,7 @@ fn translate_resolved(info: &mdns_sd::ServiceInfo) -> Option<TxtRecord> {
         time::OffsetDateTime::now_utc(),
     );
     record.pairing_fingerprint = pairing_fingerprint;
+    record.caps_extra = caps_extra;
     Some(record)
 }
 
@@ -785,7 +797,27 @@ fn read_int_property(properties: &mdns_sd::TxtProperties, key: &str) -> Option<i
     read_string_property(properties, key).and_then(|value| value.parse::<i64>().ok())
 }
 
-fn build_txt_properties(advertisement: &DiscoveryAdvertisement) -> [(String, String); 6] {
+fn read_optional_caps_extra(properties: &mdns_sd::TxtProperties, key: &str) -> Vec<String> {
+    let Some(raw) = read_string_property(properties, key) else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn build_txt_properties(advertisement: &DiscoveryAdvertisement) -> [(String, String); 7] {
+    // The TXT record carries seven keys: the six legacy fields
+    // (peer_id, fingerprint, display_name, protocol_major,
+    // capability, pairing_fingerprint) plus the additive
+    // `caps_extra` field. The canonical `capability` stays at
+    // `pairing` / `discovery_only` exactly so a legacy parser
+    // that only accepts those literal values keeps
+    // recognising the record; the additive surface travels
+    // through the separate field so a future capability can
+    // opt in without breaking the legacy contract.
     let mut properties = [
         (TXT_PEER_ID.to_string(), advertisement.peer_id.clone()),
         (
@@ -812,6 +844,14 @@ fn build_txt_properties(advertisement: &DiscoveryAdvertisement) -> [(String, Str
                 .pairing_fingerprint
                 .clone()
                 .unwrap_or_default(),
+        ),
+        // Additive capability tokens (e.g. `image_import`)
+        // travel through this separate field. The empty string
+        // makes mDNS-sd omit the entry from the wire so a legacy
+        // client does not see the key at all.
+        (
+            TXT_CAPS_EXTRA.to_string(),
+            advertisement.caps_extra.join(","),
         ),
     ];
     if advertisement.pairing_fingerprint.is_none() {
@@ -891,6 +931,9 @@ mod tests {
 
         let refreshed = announced.snapshot();
         assert_eq!(refreshed.get_port(), 65000);
+        // The legacy `capability` field stays at `pairing` (no
+        // comma-separated `image_import` suffix) so a strict
+        // legacy parser keeps recognising the record.
         assert_eq!(
             refreshed.get_property_val_str(TXT_CAPABILITY),
             Some("pairing")
@@ -898,6 +941,12 @@ mod tests {
         assert_eq!(
             refreshed.get_property_val_str(TXT_PAIRING_FINGERPRINT),
             Some(pairing_fingerprint.as_str())
+        );
+        // The additive capability travels through the separate
+        // `caps_extra` field.
+        assert_eq!(
+            refreshed.get_property_val_str(TXT_CAPS_EXTRA),
+            Some(IMAGE_IMPORT_CAPABILITY),
         );
     }
 
@@ -913,6 +962,10 @@ mod tests {
         assert_eq!(map[TXT_DISPLAY_NAME], "Studio");
         assert_eq!(map[TXT_PROTOCOL_MAJOR], "1");
         assert_eq!(map[TXT_CAPABILITY], "discovery_only");
+        // The empty `caps_extra` keeps the key off the wire; the
+        // mDNS-sd parser collapses an empty string into a missing
+        // property so a legacy client never sees the key at all.
+        assert_eq!(map[TXT_CAPS_EXTRA], "");
     }
 
     /// translate_resolved must ignore the address set / hostname /

@@ -68,6 +68,17 @@ fn emit_organization_updated<R: Runtime>(handle: &AppHandle<R>) {
     }
 }
 
+/// Emit [`crate::bootstrap::HISTORY_UPDATED_EVENT`] after a
+/// successful history mutation (capture, edit, import). The
+/// metadata-only payload keeps the contract stable; the bridge
+/// re-reads the snapshot through the corresponding Tauri
+/// command so a missed event only delays the visible refresh.
+fn emit_history_updated<R: Runtime>(handle: &AppHandle<R>) {
+    if let Err(error) = handle.emit(crate::bootstrap::HISTORY_UPDATED_EVENT, ()) {
+        warn!(error = %error, "failed to emit history-updated event");
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct CommandError {
     pub kind: &'static str,
@@ -3690,5 +3701,279 @@ pub fn clipvault_peer_import_record_state(
 pub fn clipvault_peer_import_forget(state: State<'_, SharedState>, peer_id: String) {
     let context = state.context();
     let service = context.peer_text_import();
+    service.forget_peer(&peer_id);
+}
+
+// ---------------------------------------------------------------------------
+// `peer-image-import` bridge.
+//
+// The shell calls [`clipvault_peer_image_browse`] when the user opens
+// a paired, active peer and the rail needs to render the transferable
+// image rows the host projects. The shell calls
+// [`clipvault_peer_image_fetch`] when the user activates `Importar`
+// for an image row. Both commands are metadata-only thin adapters over
+// the [`clipvault_core::peer_image_history::PeerImageHistoryService`]
+// and [`clipvault_core::peer_image_import::PeerImageImportService`]
+// the bootstrap installed against the shared SQLite handle and the
+// productive mTLS pairing transport. The discriminated unions the
+// bridge returns keep the wire contract stable: the renderer
+// branches on `kind` (`ok` / `invalid_cursor` /
+// `peer_unavailable` / `transport_unavailable` for the browse call;
+// `imported` / `peer_unavailable` / `transport_unavailable` /
+// `body_too_large` / `invalid_image` / `not_transferable` /
+// `persistence_error` for the fetch call) without inspecting
+// free-form strings or content bytes.
+// ---------------------------------------------------------------------------
+
+/// Wire representation of
+/// [`clipvault_core::peer_image_history::PeerImageHistoryOutcome`].
+/// The frontend branches on `kind` to render the matching copy
+/// without inspecting the inner list. The bridge never returns a
+/// `CommandError` for a page request: every typed failure collapses
+/// into a discriminated variant so the renderer stays a thin
+/// adapter over the union.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerImageBrowseResponse {
+    /// The page was rendered.
+    Ok {
+        rows: Vec<PeerImageBrowseRow>,
+        /// Opaque cursor the renderer submits verbatim to fetch the
+        /// next page. Empty string when the host has no more rows.
+        next_cursor: String,
+        /// Stable fingerprint the renderer compares across page
+        /// requests to detect a local capture that landed between
+        /// the two.
+        snapshot_id: String,
+    },
+    /// The cursor was not minted by this host or signed under a
+    /// rotated secret.
+    InvalidCursor,
+    /// The peer is not Active / not trusted / not present.
+    PeerUnavailable { reason: &'static str },
+    /// The productive mTLS transport rejected the page request.
+    TransportUnavailable { reason: &'static str },
+}
+
+/// Metadata-only row the renderer renders for an image row of a
+/// paired, active peer. The struct mirrors the
+/// [`clipvault_core::peer_image_history::RemoteImagePreview`]
+/// projection the host emits and never carries image bytes,
+/// thumbnails or asset references.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PeerImageBrowseRow {
+    pub remote_entry_id: String,
+    pub title: Option<String>,
+    pub content_type: String,
+    pub created_at: String,
+    pub byte_size: u64,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl PeerImageBrowseResponse {
+    fn from_outcome(outcome: clipvault_core::peer_image_history::PeerImageHistoryOutcome) -> Self {
+        use clipvault_core::peer_image_history::PeerImageHistoryOutcome as Core;
+        match outcome {
+            Core::Ok { page, snapshot_id } => PeerImageBrowseResponse::Ok {
+                rows: page
+                    .rows
+                    .into_iter()
+                    .map(|row| PeerImageBrowseRow {
+                        remote_entry_id: row.remote_entry_id,
+                        title: row.title,
+                        content_type: row.content_type,
+                        created_at: row.created_at,
+                        byte_size: row.byte_size,
+                        width: row.width,
+                        height: row.height,
+                    })
+                    .collect(),
+                next_cursor: page
+                    .next_cursor
+                    .map(|c| c.as_str().to_string())
+                    .unwrap_or_default(),
+                snapshot_id,
+            },
+            Core::InvalidCursor => PeerImageBrowseResponse::InvalidCursor,
+            Core::PeerUnavailable { reason } => PeerImageBrowseResponse::PeerUnavailable { reason },
+            Core::TransportUnavailable { reason } => {
+                PeerImageBrowseResponse::TransportUnavailable { reason }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub fn clipvault_peer_image_browse(
+    state: State<'_, SharedState>,
+    peer_id: String,
+    cursor: Option<String>,
+    limit: Option<u32>,
+) -> PeerImageBrowseResponse {
+    let context = state.context();
+    let service = context.peer_image_history();
+    let cursor = cursor
+        .filter(|value| !value.is_empty())
+        .map(clipvault_core::peer_image_history::RemoteImageHistoryCursor::from_string);
+    let limit = limit
+        .unwrap_or(clipvault_core::peer_image_history::DEFAULT_IMAGE_PAGE_ROWS as u32)
+        .min(clipvault_core::peer_image_history::MAX_IMAGE_PAGE_ROWS as u32)
+        .max(1);
+    let cert_fingerprint = match context.peer_pairing().cert_fingerprint_for(&peer_id) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => {
+            return PeerImageBrowseResponse::PeerUnavailable {
+                reason: "not_trusted",
+            };
+        }
+    };
+    let outcome = service.browse(&peer_id, &cert_fingerprint, cursor.as_ref(), limit);
+    PeerImageBrowseResponse::from_outcome(outcome)
+}
+
+#[tauri::command]
+pub fn clipvault_peer_image_record_state(
+    state: State<'_, SharedState>,
+    peer_id: String,
+    trusted: bool,
+    active: bool,
+) {
+    let context = state.context();
+    let service = context.peer_image_history();
+    service.record_peer_state(
+        &peer_id,
+        clipvault_core::peer_image_history::PeerImageActiveState { trusted, active },
+    );
+}
+
+#[tauri::command]
+pub fn clipvault_peer_image_forget(state: State<'_, SharedState>, peer_id: String) {
+    let context = state.context();
+    let service = context.peer_image_history();
+    service.forget_peer(&peer_id);
+}
+
+/// Wire representation of
+/// [`clipvault_core::peer_image_import::PeerImageImportOutcome`].
+/// Every variant is metadata-only; the bridge never returns a
+/// `CommandError` for an image import request: every typed failure
+/// collapses into a discriminated variant so the renderer stays a
+/// thin adapter over the union.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerImageImportResponse {
+    /// The import transaction committed.
+    Imported {
+        entry_id: i64,
+        collection_id: i64,
+        deduplicated: bool,
+    },
+    /// The peer is not currently eligible to serve an import.
+    PeerUnavailable { reason: &'static str },
+    /// The fetch transport rejected the request.
+    TransportUnavailable { reason: &'static str },
+    /// The body the host returned exceeded the cap.
+    BodyTooLarge,
+    /// The body the host returned failed PNG validation.
+    InvalidImage,
+    /// The remote entry the user asked to import no longer exists.
+    NotTransferable,
+    /// The remote title the host returned failed local validation.
+    TitleInvalid,
+    /// The local SQLite layer refused the commit.
+    PersistenceError { reason: &'static str },
+}
+
+impl PeerImageImportResponse {
+    fn from_outcome(outcome: clipvault_core::peer_image_import::PeerImageImportOutcome) -> Self {
+        use clipvault_core::peer_image_import::PeerImageImportOutcome as Core;
+        match outcome {
+            Core::Imported {
+                entry_id,
+                collection_id,
+                deduplicated,
+            } => PeerImageImportResponse::Imported {
+                entry_id,
+                collection_id,
+                deduplicated,
+            },
+            Core::PeerUnavailable { reason } => PeerImageImportResponse::PeerUnavailable { reason },
+            Core::TransportUnavailable { reason } => {
+                PeerImageImportResponse::TransportUnavailable { reason }
+            }
+            Core::BodyTooLarge => PeerImageImportResponse::BodyTooLarge,
+            Core::InvalidImage => PeerImageImportResponse::InvalidImage,
+            Core::NotTransferable => PeerImageImportResponse::NotTransferable,
+            Core::TitleInvalid => PeerImageImportResponse::TitleInvalid,
+            Core::PersistenceError { reason } => {
+                PeerImageImportResponse::PersistenceError { reason }
+            }
+            // The image-import service does not surface the
+            // `AssetError` / `EmptyContent` typed variants the
+            // `peer-text-import` change keeps; they are
+            // collapsed into the typed `persistence_error`
+            // reason the renderer surfaces.
+            Core::AssetError => PeerImageImportResponse::PersistenceError {
+                reason: "asset_error",
+            },
+        }
+    }
+}
+
+#[tauri::command]
+pub fn clipvault_peer_image_fetch(
+    state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
+    peer_id: String,
+    remote_entry_id: String,
+    display_name: String,
+) -> PeerImageImportResponse {
+    let context = state.context();
+    let service = context.peer_image_import();
+    let cert_fingerprint = match context.peer_pairing().cert_fingerprint_for(&peer_id) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => {
+            return PeerImageImportResponse::PeerUnavailable {
+                reason: "not_trusted",
+            };
+        }
+    };
+    let outcome = service.import(&peer_id, &cert_fingerprint, &remote_entry_id, &display_name);
+    // Emit both events AFTER a successful commit so Historial
+    // and the peer-bound collection refresh the metadata-only
+    // bridge the spec pins. Both events are fired exactly once
+    // per successful commit; a failure path keeps the local
+    // state untouched (the importer never produced a row).
+    if matches!(
+        outcome,
+        clipvault_core::peer_image_import::PeerImageImportOutcome::Imported { .. }
+    ) {
+        emit_history_updated(&handle);
+        emit_organization_updated(&handle);
+    }
+    PeerImageImportResponse::from_outcome(outcome)
+}
+
+#[tauri::command]
+pub fn clipvault_peer_image_import_record_state(
+    state: State<'_, SharedState>,
+    peer_id: String,
+    trusted: bool,
+    active: bool,
+) {
+    let context = state.context();
+    let service = context.peer_image_import();
+    service.record_peer_state(
+        &peer_id,
+        clipvault_core::peer_image_import::PeerImageImportTrustState { trusted, active },
+    );
+}
+
+#[tauri::command]
+pub fn clipvault_peer_image_import_forget(state: State<'_, SharedState>, peer_id: String) {
+    let context = state.context();
+    let service = context.peer_image_import();
     service.forget_peer(&peer_id);
 }

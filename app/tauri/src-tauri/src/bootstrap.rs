@@ -5829,6 +5829,22 @@ mod tests {
         ) -> Result<(), TransportError> {
             Ok(())
         }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn install_image_history_handler(
+            &self,
+            _handler: Arc<dyn clipvault_platform::peer_transport::ImageHistoryHostHandler>,
+        ) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn install_image_fetch_handler(
+            &self,
+            _handler: Arc<dyn clipvault_platform::peer_transport::FetchImageHostHandler>,
+        ) -> Result<(), TransportError> {
+            Ok(())
+        }
     }
 
     /// Build a `tempfile::TempDir` + `AppContext` with the scriptable

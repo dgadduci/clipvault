@@ -908,6 +908,61 @@ const MIGRATION_0017_PEER_IMPORT_BINDINGS: Migration = Migration {
     DROP TABLE IF EXISTS peer_collection_bindings;",
 };
 
+/// `peer-image-import`: persist the additive `caps_extra` TXT
+/// field the runtime receives through the dedicated `caps_extra`
+/// mDNS key. The legacy `capability` column stays at the canonical
+/// `pairing` / `discovery_only` token so a strict legacy parser keeps
+/// recognising the record; the additive surface lives in its own
+/// column so a future capability addition can opt in without
+/// rewriting the legacy contract. The column carries a
+/// comma-separated list of additive tokens (empty for legacy rows)
+/// and the runtime consults it through the same helper
+/// ([`crate::peer_discovery::decode_capabilities`]) the legacy
+/// field uses so the allowlist validation stays consistent. The
+/// `down` step rebuilds the table through the SQLite
+/// table-rebuild pattern so a rollback drops the column without
+/// losing any of the pre-existing trust metadata.
+const MIGRATION_0018_KNOWN_PEERS_CAPS_EXTRA: Migration = Migration {
+    version: 18,
+    description: "peer-image-import: persist additive caps_extra TXT field in known_peers",
+    up_sql: "ALTER TABLE known_peers ADD COLUMN caps_extra TEXT NOT NULL DEFAULT '';",
+    down_sql: "DROP INDEX IF EXISTS idx_known_peers_trust_state;
+    CREATE TABLE known_peers_caps_extra_rollback (
+        peer_id TEXT PRIMARY KEY,
+        public_key_fingerprint TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        protocol_major INTEGER NOT NULL,
+        capability TEXT NOT NULL,
+        first_seen_at TEXT NOT NULL,
+        last_discovered_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        trust_state TEXT NOT NULL DEFAULT 'unverified',
+        tls_cert_fingerprint TEXT NOT NULL DEFAULT '',
+        paired_at TEXT NOT NULL DEFAULT '',
+        paired_protocol_major INTEGER NOT NULL DEFAULT 0,
+        full_public_key_fingerprint TEXT NOT NULL DEFAULT '',
+        cursor_secret TEXT NOT NULL DEFAULT ''
+    );
+    INSERT INTO known_peers_caps_extra_rollback
+        (peer_id, public_key_fingerprint, display_name, protocol_major,
+         capability, first_seen_at, last_discovered_at, updated_at,
+         trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major,
+         full_public_key_fingerprint, cursor_secret)
+    SELECT peer_id, public_key_fingerprint, display_name, protocol_major,
+           capability, first_seen_at, last_discovered_at, updated_at,
+           trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major,
+           full_public_key_fingerprint, cursor_secret
+    FROM known_peers;
+    DROP TABLE known_peers;
+    ALTER TABLE known_peers_caps_extra_rollback RENAME TO known_peers;
+    CREATE INDEX idx_known_peers_last_discovered_at
+        ON known_peers (last_discovered_at DESC);
+    CREATE INDEX idx_known_peers_first_seen_at
+        ON known_peers (first_seen_at);
+    CREATE INDEX idx_known_peers_trust_state
+        ON known_peers (trust_state);",
+};
+
 /// Returns the migrations shipped with ClipVault. Each new migration is
 /// appended to this slice to keep ordering deterministic.
 pub fn builtin_migrations() -> Vec<Migration> {
@@ -929,6 +984,7 @@ pub fn builtin_migrations() -> Vec<Migration> {
         MIGRATION_0015_KNOWN_PEERS_PAIRING_FULL_FINGERPRINT,
         MIGRATION_0016_KNOWN_PEERS_CURSOR_SECRET,
         MIGRATION_0017_PEER_IMPORT_BINDINGS,
+        MIGRATION_0018_KNOWN_PEERS_CAPS_EXTRA,
     ]
 }
 

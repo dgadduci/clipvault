@@ -266,6 +266,23 @@ pub struct AppContext {
     /// imported body outside the authenticated fetch + commit
     /// window.
     peer_text_import: crate::peer_text_import::PeerImportService,
+    /// Metadata-only browser for the transferable image history
+    /// of a trusted, active peer. The shell drives
+    /// [`PeerImageHistoryService::browse`] from the
+    /// `peer-image-import` Tauri command and reads
+    /// [`PeerImageHistoryService::record_peer_state`] to keep the
+    /// in-memory trust / active cache aligned with the discovery
+    /// + pairing runtimes. The service is metadata-only by
+    /// construction: it never mutates SQLite in response to a
+    /// browsing call and never emits a `history-updated` event.
+    peer_image_history: crate::peer_image_history::PeerImageHistoryService,
+    /// Explicit-import façade the shell drives when the user
+    /// activates `Importar` for an image row of a trusted active
+    /// peer. The service is metadata-only by construction: it
+    /// never writes to the clipboard, never invokes PrivacyGate
+    /// / paste, and never carries the imported bytes outside the
+    /// authenticated fetch + commit window.
+    peer_image_import: crate::peer_image_import::PeerImageImportService,
     /// Concrete mDNS adapter the bootstrap installed for
     /// discovery. The toggle command wires this handle into the
     /// `PairingAdvertisement` the productive pairing transport
@@ -570,6 +587,19 @@ impl AppContext {
     /// `Arc`-shared).
     pub fn peer_text_import(&self) -> &crate::peer_text_import::PeerImportService {
         &self.peer_text_import
+    }
+
+    /// Accessor the shell drives to render the metadata-only
+    /// transferable image history of a trusted, active peer.
+    pub fn peer_image_history(&self) -> &crate::peer_image_history::PeerImageHistoryService {
+        &self.peer_image_history
+    }
+
+    /// Accessor the shell drives to import the canonical PNG
+    /// payload of a remote image entry through the explicit
+    /// `Importar` action.
+    pub fn peer_image_import(&self) -> &crate::peer_image_import::PeerImageImportService {
+        &self.peer_image_import
     }
 
     /// Best-effort wire of the local peer identity the runtime
@@ -1067,6 +1097,11 @@ impl AppBootstrap {
         // namespaces and never touch the developer's real
         // `~/.clipvault/assets`.
         let asset_store = ClipboardAssetStore::new(platform.data_dir.clone());
+        // Share the same in-process asset mutation lock with the
+        // capture pipeline. Peer-import rollback must not unlink an
+        // asset between local image capture's store/reuse and SQLite
+        // insert.
+        let peer_image_import_asset_store = asset_store.clone();
         let rich_asset_store = RichTextAssetStore::new(platform.data_dir.clone());
         let history = TextHistoryService::new(
             Arc::clone(&self.options.clipboard),
@@ -1151,6 +1186,7 @@ impl AppBootstrap {
                             display_name: observation.display_name.clone(),
                             protocol_major: observation.protocol_major,
                             capability: observation.capability.clone(),
+                            caps_extra: observation.caps_extra.clone(),
                             first_seen_at: String::new(),
                             last_discovered_at: String::new(),
                             updated_at: String::new(),
@@ -1314,6 +1350,189 @@ impl AppBootstrap {
             peer_text_import_persistence,
             Arc::new(crate::peer_text_import::SystemImportClock),
         );
+        // ----------------------------------------------------------------
+        // `peer-image-import` wiring.
+        //
+        // Build the metadata-only image-history browser the shell
+        // drives when the user opens a trusted, active peer. The
+        // transport piggy-backs on the productive pairing transport
+        // the bootstrap already wired so the mTLS dial loop is
+        // shared with the text history / import routes. Cross-
+        // compiles and unsupported targets fall back to the noop
+        // transport.
+        let peer_image_history_transport: Arc<
+            dyn crate::peer_image_history::PeerImageHistoryTransport,
+        > = peer_image_history_transport_for(
+            #[cfg(feature = "local-peer-pairing-tls")]
+            Arc::clone(&pairing_transport),
+        );
+        // SQLite-backed resolver the image routes consult before
+        // serving or accepting any image request. A peer that did
+        // not advertise the `image_import` capability (an old
+        // build, a legacy `pairing` only record, …) collapses to
+        // `false` so the host never serves image metadata to a
+        // caller that did not opt into the contract. The
+        // resolver is the same closure the client-side façade
+        // uses, so the two surfaces stay in lockstep regardless
+        // of which endpoint reaches the host first.
+        let image_capability_resolver: crate::peer_image_history::PeerCapabilityResolver = Arc::new(
+            {
+                let database_for_resolver = Arc::clone(&database_handle);
+                move |peer_id: &str| -> bool {
+                    let mut db = database_for_resolver.lock();
+                    let conn = db.connection_mut();
+                    let repo = clipvault_db::KnownPeerRepository::new(conn);
+                    match repo.get(peer_id) {
+                        Ok(Some(row)) => {
+                            // The legacy `capability` column stays at
+                            // the canonical token; the additive
+                            // `image_import` capability travels
+                            // through the dedicated `caps_extra`
+                            // column. The bootstrap combines the two
+                            // so a host that ships
+                            // `capability=pairing` plus
+                            // `caps_extra=image_import` resolves to
+                            // the productive image surface.
+                            crate::peer_discovery::decode_capabilities(&row.caps_extra)
+                                .iter()
+                                .any(|token| {
+                                    token == crate::peer_discovery::IMAGE_IMPORT_CAPABILITY
+                                })
+                        }
+                        Ok(None) => false,
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "image capability resolver: known_peers lookup failed; defaulting to capability absent"
+                            );
+                            false
+                        }
+                    }
+                }
+            },
+        );
+        let peer_image_import_capability_resolver:
+            crate::peer_image_import::PeerImageCapabilityResolver = Arc::new({
+                let database_for_resolver = Arc::clone(&database_handle);
+                move |peer_id: &str| -> bool {
+                    let mut db = database_for_resolver.lock();
+                    let conn = db.connection_mut();
+                    let repo = clipvault_db::KnownPeerRepository::new(conn);
+                    match repo.get(peer_id) {
+                        Ok(Some(row)) => crate::peer_discovery::decode_capabilities(
+                            &row.caps_extra,
+                        )
+                        .iter()
+                        .any(|token| token == crate::peer_discovery::IMAGE_IMPORT_CAPABILITY),
+                        Ok(None) => false,
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "image capability resolver: known_peers lookup failed; defaulting to capability absent"
+                            );
+                            false
+                        }
+                    }
+                }
+            });
+        let peer_image_history =
+            crate::peer_image_history::PeerImageHistoryService::new(peer_image_history_transport)
+                .with_capability_resolver(Arc::clone(&image_capability_resolver));
+        // Build the explicit-image-import facade the shell drives
+        // when the user activates `Importar` for an image row of a
+        // trusted, active peer. The service piggy-backs on the same
+        // pairing transport the productive install wired; the
+        // persistence adapter borrows the same shared database
+        // handle the runtime already holds.
+        let peer_image_import_transport: Arc<
+            dyn crate::peer_image_import::PeerFetchImageTransport,
+        > = peer_image_import_transport_for(
+            #[cfg(feature = "local-peer-pairing-tls")]
+            Arc::clone(&pairing_transport),
+        );
+        let peer_image_import_persistence: Arc<
+            dyn crate::peer_image_import::PeerImageImportPersistence,
+        > = Arc::new(crate::peer_image_sqlite::SqliteImageImportPersistence::new(
+            Arc::clone(&database_handle),
+            peer_image_import_asset_store.clone(),
+        ));
+        let peer_image_import = crate::peer_image_import::PeerImageImportService::new(
+            peer_image_import_transport,
+            peer_image_import_persistence,
+            Arc::new(crate::peer_image_import::SystemImageImportClock),
+        )
+        .with_capability_resolver(Arc::clone(&peer_image_import_capability_resolver));
+        // Install the host-side image history + image fetch
+        // handlers the listener drives when a peer asks for
+        // `list_recent_images` or `fetch_image`. The bootstrap
+        // installs the adapters before the very first inbound
+        // connection so the wire contract stays stable across
+        // rebuilds: a productive host always serves the request,
+        // a build without the productive feature pair collapses to
+        // the documented `not_available` reason.
+        #[cfg(feature = "local-peer-pairing-tls")]
+        {
+            // The asset validator the host source uses to drop
+            // rows whose backing PNG is missing or invalid. The
+            // closure runs against the `ClipboardAssetStore` the
+            // local capture pipeline owns so an entry that
+            // points at a missing / out-of-namespace PNG is
+            // removed from the wire projection without ever
+            // asking the peer to import a broken asset. The
+            // validator reuses the asset store's full validation
+            // pipeline (path / namespace / size / PNG signature /
+            // decode / dimensions) so corrupt, oversized or
+            // out-of-namespace references never reach the wire.
+            // The helper reads the file locally to validate it
+            // and never returns the bytes — the wire contract
+            // stays metadata-only and the asset store enforces a
+            // single source of truth for the validation rules.
+            let asset_validator_store = peer_image_import_asset_store.clone();
+            let image_host_source: Arc<dyn crate::peer_image_history::HostImageHistorySource> =
+                Arc::new(
+                    crate::peer_image_history::EntryRepositoryHostImageHistorySource::with_asset_validator(
+                        Arc::clone(&database_handle),
+                        move |asset_ref: &str| asset_validator_store.validate(asset_ref).is_ok(),
+                    ),
+                );
+            let image_history_handler: Arc<
+                dyn clipvault_platform::peer_transport::ImageHistoryHostHandler,
+            > = Arc::new(
+                crate::peer_pairing::PeerImageHistoryHostHandlerAdapter::new(
+                    peer_image_history.clone(),
+                    Arc::clone(&image_host_source),
+                ),
+            );
+            if let Err(error) =
+                peer_pairing.install_image_history_handler_inner(image_history_handler)
+            {
+                tracing::warn!(
+                    ?error,
+                    "productive image history handler install failed; bootstrap continues with no host image history"
+                );
+            }
+            let image_fetch_persistence: Arc<
+                dyn crate::peer_image_import::PeerImageImportPersistence,
+            > = Arc::new(crate::peer_image_sqlite::SqliteImageImportPersistence::new(
+                Arc::clone(&database_handle),
+                peer_image_import_asset_store.clone(),
+            ));
+            let image_fetch_handler: Arc<
+                dyn clipvault_platform::peer_transport::FetchImageHostHandler,
+            > = Arc::new(
+                crate::peer_image_import::PeerImageImportHostHandlerAdapter::new(
+                    image_fetch_persistence,
+                )
+                .with_capability_resolver(Arc::clone(&peer_image_import_capability_resolver)),
+            );
+            if let Err(error) = peer_pairing.install_image_fetch_handler_inner(image_fetch_handler)
+            {
+                tracing::warn!(
+                    ?error,
+                    "productive image fetch handler install failed; bootstrap continues with no host image import"
+                );
+            }
+        }
         #[cfg(feature = "local-peer-pairing-tls")]
         let _pairing_transport_arc = Arc::clone(&pairing_transport);
         #[cfg(not(feature = "local-peer-pairing-tls"))]
@@ -1433,6 +1652,8 @@ impl AppBootstrap {
             peer_pairing,
             peer_text_history,
             peer_text_import,
+            peer_image_history,
+            peer_image_import,
             // The capture-debug sink is either the caller-supplied
             // handle (tests) or the production wiring that consults
             // `CLIPVAULT_DEBUG_CAPTURE` exactly once at startup. When
@@ -1520,6 +1741,50 @@ fn peer_text_import_transport_for(
     {
         let _ = ();
         Arc::new(crate::peer_text_import::NoopPeerFetchTransport)
+    }
+}
+
+/// Resolve the [`crate::peer_image_history::PeerImageHistoryTransport`]
+/// the bootstrap installs behind the client-side facade. Mirrors
+/// [`peer_text_history_transport_for`].
+fn peer_image_history_transport_for(
+    #[cfg(feature = "local-peer-pairing-tls")] pairing_transport: Arc<
+        dyn crate::peer_pairing::PeerTransport,
+    >,
+) -> Arc<dyn crate::peer_image_history::PeerImageHistoryTransport> {
+    #[cfg(feature = "local-peer-pairing-tls")]
+    {
+        Arc::new(
+            crate::peer_image_history::PeerPairingImageHistoryTransportAdapter::new(
+                pairing_transport,
+            ),
+        )
+    }
+    #[cfg(not(feature = "local-peer-pairing-tls"))]
+    {
+        let _ = ();
+        Arc::new(crate::peer_image_history::NoopPeerImageHistoryTransport)
+    }
+}
+
+/// Resolve the [`crate::peer_image_import::PeerFetchImageTransport`]
+/// the bootstrap installs behind the client-side facade. Mirrors
+/// [`peer_text_import_transport_for`].
+fn peer_image_import_transport_for(
+    #[cfg(feature = "local-peer-pairing-tls")] pairing_transport: Arc<
+        dyn crate::peer_pairing::PeerTransport,
+    >,
+) -> Arc<dyn crate::peer_image_import::PeerFetchImageTransport> {
+    #[cfg(feature = "local-peer-pairing-tls")]
+    {
+        Arc::new(
+            crate::peer_image_import::PeerPairingFetchImageTransportAdapter::new(pairing_transport),
+        )
+    }
+    #[cfg(not(feature = "local-peer-pairing-tls"))]
+    {
+        let _ = ();
+        Arc::new(crate::peer_image_import::NoopPeerFetchImageTransport)
     }
 }
 
@@ -1971,6 +2236,7 @@ mod tests {
                         display_name: "Studio".to_string(),
                         protocol_major: 1,
                         capability: "pairing".to_string(),
+                        caps_extra: String::new(),
                         observed_at: time::OffsetDateTime::UNIX_EPOCH,
                     })
                     .expect("seed observation");
@@ -2101,6 +2367,7 @@ mod tests {
                 display_name: "Studio".to_string(),
                 protocol_major: 1,
                 capability: "pairing".to_string(),
+                caps_extra: String::new(),
                 observed_at: time::OffsetDateTime::UNIX_EPOCH,
             })
             .expect("seed observation");

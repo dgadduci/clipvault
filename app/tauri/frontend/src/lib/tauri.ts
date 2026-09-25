@@ -33,6 +33,8 @@ import type {
   PeerPairingSessionSnapshot,
   PeerHistoryBrowseResponse,
   PeerImportResponse,
+  PeerImageBrowseResponse,
+  PeerImageImportResponse,
   PeerTrustOperationResponse,
   PickAndAddResponse,
   PlatformSettingsTarget,
@@ -545,6 +547,112 @@ export const peerImportForgetCommand: ClipvaultCommandArg<
   { peer_id: string }
 > = (args) =>
   invoke<void>("clipvault_peer_import_forget", {
+    peerId: args.peer_id,
+  });
+
+/**
+ * Bridge for the `peer-image-import` change. The command dials
+ * the productive mTLS transport the runtime already wired, the
+ * host projects a metadata-only image page through the
+ * [`HostImageHistorySource`] adapter the bootstrap installed and
+ * the discriminated union the bridge returns carries only
+ * metadata: the opaque remote id, the validated title, the
+ * canonical content type, the RFC 3339 timestamp, the byte size
+ * and the pixel dimensions. The frontend branches on `kind` to
+ * render the matching copy without inspecting free-form strings
+ * or content bytes.
+ */
+export const peerImageBrowseCommand: ClipvaultCommandArg<
+  PeerImageBrowseResponse,
+  { peer_id: string; cursor?: string; limit?: number }
+> = (args) =>
+  invoke<PeerImageBrowseResponse>("clipvault_peer_image_browse", {
+    peerId: args.peer_id,
+    cursor: args.cursor ?? null,
+    limit: args.limit ?? null,
+  });
+
+/**
+ * Best-effort sync hook the shell calls after every peer
+ * snapshot / health probe so the in-memory trust / active cache
+ * the [`peerImageBrowseCommand`] consults cannot outrun the
+ * runtime transition that should invalidate it. The hook is
+ * metadata-only: it never mutates SQLite, never opens a network
+ * call, and never emits a `history-updated` event.
+ */
+export const peerImageRecordStateCommand: ClipvaultCommandArg<
+  void,
+  { peer_id: string; trusted: boolean; active: boolean }
+> = (args) =>
+  invoke<void>("clipvault_peer_image_record_state", {
+    peerId: args.peer_id,
+    trusted: args.trusted,
+    active: args.active,
+  });
+
+/**
+ * Forget the cache entry for `peer_id`. The shell calls this
+ * after `Desvincular`, `Bloquear` and `Desbloquear` so a
+ * subsequent image browse collapses to
+ * [`PeerImageBrowseResponse.peer_unavailable`] without a
+ * network round-trip.
+ */
+export const peerImageForgetCommand: ClipvaultCommandArg<
+  void,
+  { peer_id: string }
+> = (args) =>
+  invoke<void>("clipvault_peer_image_forget", {
+    peerId: args.peer_id,
+  });
+
+/**
+ * Bridge for the explicit image import action the `peer-image-
+ * import` change exposes. The command dials the productive mTLS
+ * transport the runtime already wired, the importer commits the
+ * import transaction through the shared SQLite handle and the
+ * discriminated union the bridge returns carries only metadata
+ * (`entry_id`, `collection_id`, `deduplicated`). The frontend
+ * branches on `kind` to render the matching copy without
+ * inspecting free-form strings or content bytes.
+ */
+export const peerImageFetchCommand: ClipvaultCommandArg<
+  PeerImageImportResponse,
+  { peer_id: string; remote_entry_id: string; display_name: string }
+> = (args) =>
+  invoke<PeerImageImportResponse>("clipvault_peer_image_fetch", {
+    peerId: args.peer_id,
+    remoteEntryId: args.remote_entry_id,
+    displayName: args.display_name,
+  });
+
+/**
+ * Best-effort sync hook the shell calls after every peer
+ * snapshot / health probe so the in-memory trust / active cache
+ * the [`peerImageFetchCommand`] consults cannot outrun the
+ * runtime transition that should invalidate it.
+ */
+export const peerImageImportRecordStateCommand: ClipvaultCommandArg<
+  void,
+  { peer_id: string; trusted: boolean; active: boolean }
+> = (args) =>
+  invoke<void>("clipvault_peer_image_import_record_state", {
+    peerId: args.peer_id,
+    trusted: args.trusted,
+    active: args.active,
+  });
+
+/**
+ * Forget the cache entry for `peer_id`. The shell calls this
+ * after `Desvincular`, `Bloquear` and `Desbloquear` so a
+ * subsequent image import collapses to
+ * [`PeerImageImportResponse.peer_unavailable`] without a
+ * network round-trip.
+ */
+export const peerImageImportForgetCommand: ClipvaultCommandArg<
+  void,
+  { peer_id: string }
+> = (args) =>
+  invoke<void>("clipvault_peer_image_import_forget", {
     peerId: args.peer_id,
   });
 

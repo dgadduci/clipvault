@@ -66,6 +66,15 @@ pub struct DiscoveryAdvertisement {
     pub display_name: String,
     pub protocol_major: i64,
     pub capability: String,
+    /// Additive capability tokens the host advertises through a
+    /// separate TXT field (`caps_extra`). The field is optional
+    /// so a legacy client / browser can ignore it without
+    /// breaking the record layout; the discovery validator
+    /// combines the canonical `capability` token with the
+    /// additive `caps_extra` tokens so a build that only knows
+    /// about `pairing` keeps pairing while a newer build
+    /// additionally opts into `image_import`.
+    pub caps_extra: Vec<String>,
 }
 
 impl DiscoveryAdvertisement {
@@ -88,6 +97,7 @@ impl DiscoveryAdvertisement {
             display_name: display_name.into(),
             protocol_major,
             capability: capability.into(),
+            caps_extra: Vec::new(),
         }
     }
 
@@ -96,6 +106,14 @@ impl DiscoveryAdvertisement {
     /// also render) and the full SHA-256 (for the TLS listener).
     /// The helper exists so the productive pairing sink does not
     /// have to reach into struct fields directly.
+    ///
+    /// The advertised capability stays `pairing` exactly so a
+    /// legacy client that only accepts the canonical value keeps
+    /// recognising the record; the additive `image_import`
+    /// capability travels through the separate `caps_extra`
+    /// field instead. The legacy field never carries the new
+    /// token because some parsers reject unknown tokens outright
+    /// and would silently drop the host instead of pairing.
     pub fn new_pairing(
         peer_id: impl Into<String>,
         short_fingerprint: impl Into<String>,
@@ -109,10 +127,25 @@ impl DiscoveryAdvertisement {
             pairing_fingerprint: Some(pairing_fingerprint.into()),
             display_name: display_name.into(),
             protocol_major,
-            capability: "pairing".to_string(),
+            capability: PAIRING_CAPABILITY.to_string(),
+            caps_extra: vec![IMAGE_IMPORT_CAPABILITY.to_string()],
         }
     }
 }
+
+/// Canonical `capability` value the productive pairing
+/// advertisement publishes. Mirrored from
+/// [`clipvault_core::peer_discovery::PAIRING_CAPABILITY`] so the
+/// platform crate can write the canonical string without taking a
+/// dependency on the core crate.
+pub const PAIRING_CAPABILITY: &str = "pairing";
+
+/// Additive capability the `peer-image-import` change ships. The
+/// token travels through the `caps_extra` TXT field rather than
+/// the canonical `capability` field so legacy clients that only
+/// accept `pairing` keep pairing. Mirrored from
+/// [`clipvault_core::peer_discovery::IMAGE_IMPORT_CAPABILITY`].
+pub const IMAGE_IMPORT_CAPABILITY: &str = "image_import";
 
 /// Platform-neutral callback the production adapter uses to
 /// surface browse / removal events to the runtime.
@@ -183,7 +216,18 @@ pub struct TxtRecord {
     pub pairing_fingerprint: Option<String>,
     pub display_name: String,
     pub protocol_major: i64,
+    /// Canonical `capability` token the host advertises. Stays
+    /// at `pairing` (or `discovery_only`) exactly so a legacy
+    /// parser that only accepts those literal values keeps
+    /// recognising the record.
     pub capability: String,
+    /// Additive capability tokens the host publishes through
+    /// the separate `caps_extra` TXT field. The field is optional
+    /// (empty when the host advertises no additive capabilities)
+    /// and the discovery validator combines it with
+    /// [`Self::capability`] when it decides which routes the
+    /// peer supports.
+    pub caps_extra: Vec<String>,
     pub observed_at: time::OffsetDateTime,
 }
 
@@ -209,6 +253,7 @@ impl TxtRecord {
             display_name: display_name.into(),
             protocol_major,
             capability: capability.into(),
+            caps_extra: Vec::new(),
             observed_at,
         }
     }
@@ -484,6 +529,45 @@ mod tests {
         assert_eq!(cloned.display_name, ad.display_name);
         assert_eq!(cloned.protocol_major, ad.protocol_major);
         assert_eq!(cloned.capability, ad.capability);
+    }
+
+    #[test]
+    fn new_pairing_advertises_image_import_capability() {
+        // The productive pairing advertisement MUST publish the
+        // canonical `pairing` capability through the legacy
+        // field (no comma-separated `image_import` suffix, so a
+        // strict legacy parser keeps recognising the record)
+        // AND publish the additive `image_import` capability
+        // through the dedicated `caps_extra` field so a
+        // newer build opts into the image surface. A regression
+        // that drops either the canonical capability or the
+        // additive surface would break either the legacy
+        // compatibility or the end-to-end image routes the
+        // spec scenario pins.
+        let ad = DiscoveryAdvertisement::new_pairing(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            "f".repeat(64),
+            "Studio",
+            1,
+        );
+        assert_eq!(ad.capability, PAIRING_CAPABILITY);
+        assert_eq!(ad.caps_extra, vec![IMAGE_IMPORT_CAPABILITY.to_string()]);
+    }
+
+    #[test]
+    fn new_discovery_advertisement_has_empty_caps_extra() {
+        // The discovery-only helper builds an advertisement with
+        // an empty additive surface so a legacy browser does
+        // not see the `caps_extra` key on the wire.
+        let ad = DiscoveryAdvertisement::new(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            "Studio",
+            1,
+            "discovery_only",
+        );
+        assert!(ad.caps_extra.is_empty());
     }
 
     #[test]

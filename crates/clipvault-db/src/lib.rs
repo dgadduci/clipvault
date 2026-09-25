@@ -42,8 +42,8 @@ pub use organization::{
     MAX_ORGANIZATION_NAME_CHARS,
 };
 pub use peer_import_repository::{
-    find_binding_in_tx, PeerCollectionBinding, PeerImportRepository, PeerImportRepositoryError,
-    RemoteImportRecord,
+    find_binding_in_tx, ImageImportOutcome, ImageImportSpec, PeerCollectionBinding,
+    PeerImportRepository, PeerImportRepositoryError, RemoteImportRecord,
 };
 pub use registry::builtin_migrations;
 pub use source_app::SourceAppFilter;

@@ -563,6 +563,23 @@ struct PairingRuntimeInner {
     #[cfg(feature = "local-peer-pairing-tls")]
     fetch_handler:
         RwLock<Option<Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>>>,
+    /// Optional host-side
+    /// [`clipvault_platform::peer_transport::ImageHistoryHostHandler`]
+    /// the bootstrap installs so every inbound `ListRecentImages`
+    /// envelope can be served from the very first connection. The
+    /// runtime caches the handler the same way it caches the
+    /// history handler so the toggle flow can re-inject it on
+    /// every `start_with_material_and_resolver`.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    image_history_handler:
+        RwLock<Option<Arc<dyn clipvault_platform::peer_transport::ImageHistoryHostHandler>>>,
+    /// Optional host-side
+    /// [`clipvault_platform::peer_transport::FetchImageHostHandler`]
+    /// the bootstrap installs so every inbound `FetchImage`
+    /// envelope can be served from the very first connection.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    image_fetch_handler:
+        RwLock<Option<Arc<dyn clipvault_platform::peer_transport::FetchImageHostHandler>>>,
 }
 
 /// In-memory mirror of the persisted `known_peers.cursor_secret`
@@ -760,6 +777,10 @@ impl PairingRuntime {
             history_handler: RwLock::new(None),
             #[cfg(feature = "local-peer-pairing-tls")]
             fetch_handler: RwLock::new(None),
+            #[cfg(feature = "local-peer-pairing-tls")]
+            image_history_handler: RwLock::new(None),
+            #[cfg(feature = "local-peer-pairing-tls")]
+            image_fetch_handler: RwLock::new(None),
         };
         Self {
             inner: Arc::new(inner),
@@ -852,6 +873,55 @@ impl PairingRuntime {
         &self,
     ) -> Option<Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>> {
         self.inner.fetch_handler.read().clone()
+    }
+
+    /// Forward the typed handler the listener drives when an
+    /// authenticated peer asks for `list_recent_images`. The
+    /// bootstrap calls this before binding the very first
+    /// productive listener so a `ListRecentImages` envelope that
+    /// lands on the very first inbound connection can already be
+    /// served.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub fn install_image_history_handler_inner(
+        &self,
+        handler: Arc<dyn clipvault_platform::peer_transport::ImageHistoryHostHandler>,
+    ) -> Result<(), clipvault_platform::peer_transport::TransportError> {
+        *self.inner.image_history_handler.write() = Some(Arc::clone(&handler));
+        self.inner.transport.install_image_history_handler(handler)
+    }
+
+    /// Read-only accessor for the host-side image history handler
+    /// the runtime cached on the last
+    /// [`Self::install_image_history_handler_inner`] call.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub fn cached_image_history_handler(
+        &self,
+    ) -> Option<Arc<dyn clipvault_platform::peer_transport::ImageHistoryHostHandler>> {
+        self.inner.image_history_handler.read().clone()
+    }
+
+    /// Forward the typed handler the listener drives when an
+    /// authenticated peer asks for `fetch_image`. The bootstrap
+    /// calls this before binding the very first productive
+    /// listener so a `FetchImage` envelope that lands on the very
+    /// first inbound connection can already be served.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub fn install_image_fetch_handler_inner(
+        &self,
+        handler: Arc<dyn clipvault_platform::peer_transport::FetchImageHostHandler>,
+    ) -> Result<(), clipvault_platform::peer_transport::TransportError> {
+        *self.inner.image_fetch_handler.write() = Some(Arc::clone(&handler));
+        self.inner.transport.install_image_fetch_handler(handler)
+    }
+
+    /// Read-only accessor for the host-side image fetch handler
+    /// the runtime cached on the last
+    /// [`Self::install_image_fetch_handler_inner`] call.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    pub fn cached_image_fetch_handler(
+        &self,
+    ) -> Option<Arc<dyn clipvault_platform::peer_transport::FetchImageHostHandler>> {
+        self.inner.image_fetch_handler.read().clone()
     }
 
     /// Restore a certificate pin persisted by an earlier successful
@@ -1004,6 +1074,8 @@ impl PairingRuntime {
         let transport = self.inner.transport.clone();
         let history_handler = self.inner.history_handler.read().clone();
         let fetch_handler = self.inner.fetch_handler.read().clone();
+        let image_history_handler = self.inner.image_history_handler.read().clone();
+        let image_fetch_handler = self.inner.image_fetch_handler.read().clone();
         transport
             .start_with_material_resolver_and_history(
                 material,
@@ -1013,6 +1085,8 @@ impl PairingRuntime {
                 display_name,
                 history_handler,
                 fetch_handler,
+                image_history_handler,
+                image_fetch_handler,
             )
             .map_err(|_error| TransportOutcome::Unavailable)
     }
@@ -1249,7 +1323,14 @@ impl PairingRuntime {
             | PairingMessage::ListRecentTextUnavailable { .. }
             | PairingMessage::FetchText { .. }
             | PairingMessage::FetchTextAck { .. }
-            | PairingMessage::FetchTextUnavailable { .. } => {
+            | PairingMessage::FetchTextUnavailable { .. }
+            | PairingMessage::ListRecentImages { .. }
+            | PairingMessage::ListRecentImagesAck { .. }
+            | PairingMessage::ListRecentImagesInvalid { .. }
+            | PairingMessage::ListRecentImagesUnavailable { .. }
+            | PairingMessage::FetchImage { .. }
+            | PairingMessage::FetchImageAck { .. }
+            | PairingMessage::FetchImageUnavailable { .. } => {
                 // The metadata-only history / health probes and the
                 // content fetch envelopes never reach the runtime
                 // state machine. The productive transport handles
@@ -2078,6 +2159,96 @@ impl clipvault_platform::peer_transport::HistoryHostHandler for PeerTextHistoryH
     }
 }
 
+/// Production adapter that translates the
+/// [`clipvault_platform::peer_transport::ImageHistoryHostHandler`]
+/// trait into the
+/// [`crate::peer_image_history::PeerImageHistoryService::serve`]
+/// call against the typed
+/// [`crate::peer_image_history::HostImageHistorySource`] trait the
+/// runtime owns. The platform crate never reaches across the
+/// boundary to the SQLite handle and the adapter never inspects
+/// the cursor payload beyond the typed call into the runtime.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub struct PeerImageHistoryHostHandlerAdapter {
+    service: crate::peer_image_history::PeerImageHistoryService,
+    source: Arc<dyn crate::peer_image_history::HostImageHistorySource>,
+}
+
+#[cfg(feature = "local-peer-pairing-tls")]
+impl PeerImageHistoryHostHandlerAdapter {
+    pub fn new(
+        service: crate::peer_image_history::PeerImageHistoryService,
+        source: Arc<dyn crate::peer_image_history::HostImageHistorySource>,
+    ) -> Self {
+        Self { service, source }
+    }
+}
+
+#[cfg(feature = "local-peer-pairing-tls")]
+impl clipvault_platform::peer_transport::ImageHistoryHostHandler
+    for PeerImageHistoryHostHandlerAdapter
+{
+    fn list_recent_images(
+        &self,
+        peer_id: &str,
+        cursor: &str,
+        limit: u32,
+    ) -> clipvault_platform::peer_transport::ImageHistoryHostResponse {
+        let clamped_limit = crate::peer_image_history::clamp_image_history_limit(limit) as u32;
+        let cursor_opt: Option<crate::peer_image_history::RemoteImageHistoryCursor> =
+            if cursor.is_empty() {
+                None
+            } else {
+                Some(
+                    crate::peer_image_history::RemoteImageHistoryCursor::from_string(
+                        cursor.to_string(),
+                    ),
+                )
+            };
+        let response = self.service.serve(
+            peer_id,
+            cursor_opt.as_ref(),
+            clamped_limit,
+            self.source.as_ref(),
+        );
+        match response {
+            crate::peer_image_history::HostImageHistoryResponse::Ok(page, snapshot_id) => {
+                let rows: Vec<clipvault_platform::peer_transport::wire::ListRecentImageRow> = page
+                    .rows
+                    .into_iter()
+                    .take(clamped_limit as usize)
+                    .map(
+                        |row| clipvault_platform::peer_transport::wire::ListRecentImageRow {
+                            remote_entry_id: row.remote_entry_id,
+                            title: row.title,
+                            content_type: row.content_type,
+                            created_at: row.created_at,
+                            byte_size: row.byte_size,
+                            width: row.width,
+                            height: row.height,
+                        },
+                    )
+                    .collect();
+                let next_cursor = page
+                    .next_cursor
+                    .map(|c| c.as_str().to_string())
+                    .unwrap_or_default();
+                clipvault_platform::peer_transport::ImageHistoryHostResponse::Ok {
+                    rows,
+                    next_cursor,
+                    snapshot_id,
+                }
+            }
+            crate::peer_image_history::HostImageHistoryResponse::InvalidCursor => {
+                clipvault_platform::peer_transport::ImageHistoryHostResponse::InvalidCursor
+            }
+            crate::peer_image_history::HostImageHistoryResponse::Unavailable(reason) => {
+                clipvault_platform::peer_transport::ImageHistoryHostResponse::Unavailable { reason }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2129,6 +2300,7 @@ mod tests {
             paired_at: String::new(),
             paired_protocol_major: 0,
             cursor_secret: String::new(),
+            caps_extra: String::new(),
         }
     }
 
@@ -3086,7 +3258,23 @@ mod tests {
             &self,
             _handler: Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
         ) -> Result<(), TransportError> {
-            Ok(())
+            Err(TransportError::Unavailable)
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn install_image_history_handler(
+            &self,
+            _handler: Arc<dyn clipvault_platform::peer_transport::ImageHistoryHostHandler>,
+        ) -> Result<(), TransportError> {
+            Err(TransportError::Unavailable)
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fn install_image_fetch_handler(
+            &self,
+            _handler: Arc<dyn clipvault_platform::peer_transport::FetchImageHostHandler>,
+        ) -> Result<(), TransportError> {
+            Err(TransportError::Unavailable)
         }
 
         #[cfg(feature = "local-peer-pairing-tls")]
@@ -3124,6 +3312,12 @@ mod tests {
             >,
             _fetch_handler: Option<
                 Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
+            >,
+            _image_history_handler: Option<
+                Arc<dyn clipvault_platform::peer_transport::ImageHistoryHostHandler>,
+            >,
+            _image_fetch_handler: Option<
+                Arc<dyn clipvault_platform::peer_transport::FetchImageHostHandler>,
             >,
         ) -> Result<u16, TransportError> {
             Err(TransportError::Unavailable)
@@ -3328,6 +3522,20 @@ mod tests {
                 Ok(())
             }
             #[cfg(feature = "local-peer-pairing-tls")]
+            fn install_image_history_handler(
+                &self,
+                _handler: Arc<dyn clipvault_platform::peer_transport::ImageHistoryHostHandler>,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            #[cfg(feature = "local-peer-pairing-tls")]
+            fn install_image_fetch_handler(
+                &self,
+                _handler: Arc<dyn clipvault_platform::peer_transport::FetchImageHostHandler>,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            #[cfg(feature = "local-peer-pairing-tls")]
             fn list_recent_text(
                 &self,
                 _peer_id: &str,
@@ -3351,6 +3559,12 @@ mod tests {
                 >,
                 _fetch_handler: Option<
                     Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
+                >,
+                _image_history_handler: Option<
+                    Arc<dyn clipvault_platform::peer_transport::ImageHistoryHostHandler>,
+                >,
+                _image_fetch_handler: Option<
+                    Arc<dyn clipvault_platform::peer_transport::FetchImageHostHandler>,
                 >,
             ) -> Result<u16, TransportError> {
                 Err(TransportError::Unavailable)
@@ -3695,6 +3909,20 @@ mod tests {
                 let _ = handler;
                 Ok(())
             }
+            #[cfg(feature = "local-peer-pairing-tls")]
+            fn install_image_history_handler(
+                &self,
+                _handler: Arc<dyn clipvault_platform::peer_transport::ImageHistoryHostHandler>,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            #[cfg(feature = "local-peer-pairing-tls")]
+            fn install_image_fetch_handler(
+                &self,
+                _handler: Arc<dyn clipvault_platform::peer_transport::FetchImageHostHandler>,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
             fn list_recent_text(
                 &self,
                 _peer_id: &str,
@@ -3726,6 +3954,12 @@ mod tests {
                 >,
                 _fetch_handler: Option<
                     Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
+                >,
+                _image_history_handler: Option<
+                    Arc<dyn clipvault_platform::peer_transport::ImageHistoryHostHandler>,
+                >,
+                _image_fetch_handler: Option<
+                    Arc<dyn clipvault_platform::peer_transport::FetchImageHostHandler>,
                 >,
             ) -> Result<u16, TransportError> {
                 self.calls.lock().expect("call lock").push(history_handler);
@@ -4280,6 +4514,20 @@ mod tests {
                 Ok(())
             }
             #[cfg(feature = "local-peer-pairing-tls")]
+            fn install_image_history_handler(
+                &self,
+                _handler: Arc<dyn clipvault_platform::peer_transport::ImageHistoryHostHandler>,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            #[cfg(feature = "local-peer-pairing-tls")]
+            fn install_image_fetch_handler(
+                &self,
+                _handler: Arc<dyn clipvault_platform::peer_transport::FetchImageHostHandler>,
+            ) -> Result<(), TransportError> {
+                Ok(())
+            }
+            #[cfg(feature = "local-peer-pairing-tls")]
             fn list_recent_text(
                 &self,
                 _peer_id: &str,
@@ -4303,6 +4551,12 @@ mod tests {
                 >,
                 _fetch_handler: Option<
                     Arc<dyn clipvault_platform::peer_transport::FetchTextHostHandler>,
+                >,
+                _image_history_handler: Option<
+                    Arc<dyn clipvault_platform::peer_transport::ImageHistoryHostHandler>,
+                >,
+                _image_fetch_handler: Option<
+                    Arc<dyn clipvault_platform::peer_transport::FetchImageHostHandler>,
                 >,
             ) -> Result<u16, TransportError> {
                 Err(TransportError::Unavailable)

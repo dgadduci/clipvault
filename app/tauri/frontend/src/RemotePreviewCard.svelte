@@ -10,21 +10,30 @@
    * never opens the local edit / pin / menu flows the local
    * card controls. The card carries a single menu entry —
    * `Importar` — that triggers the explicit `peer-text-import`
-   * flow: the runtime dials the productive mTLS transport, the
-   * importer commits the import transaction through the
-   * shared SQLite handle and the discriminated union the
-   * bridge returns identifies the local snapshot without
-   * leaking the imported text.
+   * (or `peer-image-import`) flow: the runtime dials the
+   * productive mTLS transport, the importer commits the import
+   * transaction through the shared SQLite handle and the
+   * discriminated union the bridge returns identifies the
+   * local snapshot without leaking the imported body or bytes.
    *
    * The payload is metadata-only by construction. The card
-   * NEVER receives the entry body or any field the spec /
-   * design forbid (tags, collections, favourites, source-app
-   * metadata, content hash, asset references). The component
-   * simply does not have a slot for those fields; the bridge
-   * refuses to forward them.
+   * NEVER receives the entry body, image bytes or any field
+   * the spec / design forbid (tags, collections, favourites,
+   * source-app metadata, content hash, asset references). The
+   * component simply does not have a slot for those fields;
+   * the bridge refuses to forward them.
    */
-  import type { PeerHistoryRow, PeerImportResponse } from "./types";
-  import { peerImportFetchCommand } from "./lib/tauri";
+  import { onDestroy, onMount } from "svelte";
+  import type {
+    PeerHistoryRow,
+    PeerImportResponse,
+    PeerImageImportResponse,
+  } from "./types";
+  import {
+    peerImportFetchCommand,
+    peerImageFetchCommand,
+  } from "./lib/tauri";
+  import { formatElapsedTime, type ElapsedTime } from "./lib/elapsedTime";
 
   export let row: PeerHistoryRow;
   /**
@@ -49,6 +58,42 @@
    * already shows.
    */
   export let displayName: string | null = null;
+  /**
+   * Whether the row represents an image capture. When `true`,
+   * the menu action delegates to the `peer-image-import`
+   * bridge; otherwise it delegates to the `peer-text-import`
+   * bridge. The bridge never receives bytes for either path.
+   */
+  export let isImageRow: boolean = false;
+  /**
+   * Comma-separated capability tokens the parent observed for
+   * the active peer (the same `capability` field the
+   * `Equipos` view reads from `known_peers`). The card uses
+   * the value to gate the image Import action so a peer that
+   * did not advertise `image_import` never offers a successful
+   * import path. The host / client core additionally re-validates
+   * the gate so a regression in the UI cannot bypass the
+   * security check.
+   */
+  export let peerCapability: string | null = null;
+
+  /**
+   * Stable predicate the template and the action handlers use
+   * to disable the Import button when the peer lacks the
+   * `image_import` capability. Empty / missing values mean
+   * "unknown" and the predicate defaults to allow; the bridge
+   * surfaces the typed `peer_unavailable { reason:
+   * "not_available" }` outcome so a stale UI never reaches a
+   * successful import.
+   */
+  $: peerSupportsImageImport = (() => {
+    if (!isImageRow) return true;
+    if (peerCapability === null) return true;
+    return peerCapability
+      .split(",")
+      .map((token) => token.trim())
+      .some((token) => token === "image_import");
+  })();
 
   /**
    * Localised content-type label. The remote rows arrive with
@@ -96,6 +141,35 @@
     }
   }
 
+  function describeImageOutcome(outcome: PeerImageImportResponse): string {
+    switch (outcome.kind) {
+      case "imported":
+        return outcome.deduplicated ? "Importado (ya existía)" : "Importado";
+      case "peer_unavailable":
+        // The host surfaces `reason = not_available` when the
+        // peer did not advertise `image_import`. The card
+        // renders a dedicated copy so the user understands the
+        // gate is a peer-version mismatch, not a transient
+        // transport failure.
+        if (outcome.reason === "not_available") {
+          return "Este equipo no admite la importación de imágenes.";
+        }
+        return `No disponible (${outcome.reason})`;
+      case "transport_unavailable":
+        return `No disponible (${outcome.reason})`;
+      case "body_too_large":
+        return "Imagen demasiado grande";
+      case "invalid_image":
+        return "Imagen no válida";
+      case "not_transferable":
+        return "No transferible";
+      case "title_invalid":
+        return "Título no válido";
+      case "persistence_error":
+        return `Error al guardar (${outcome.reason})`;
+    }
+  }
+
   let menuOpen = false;
   let busy = false;
   /**
@@ -105,6 +179,23 @@
    * never has to inspect free-form strings or content bytes.
    */
   let lastResult: { kind: "ok" | "error"; summary: string } | null = null;
+  /**
+   * Live elapsed-time label the card renders in the same
+   * shape every local card uses (`formatElapsedTime`). The
+   * anchor is refreshed by a local timer so a long-lived
+   * rail keeps the metadata accurate without driving a new
+   * bridge round-trip; the formatter itself is pure and
+   * shared with the local cards so the visual + accessible
+   * strings stay consistent.
+   */
+  const METADATA_REFRESH_MS = 30_000;
+  let nowAnchor = Date.now();
+  let metadataTimer: ReturnType<typeof setInterval> | null = null;
+  $: elapsed = formatElapsedTime(row.created_at, new Date(nowAnchor));
+  $: elapsedLabel = (() => {
+    const value: ElapsedTime = elapsed;
+    return { aria: value.accessible, visual: value.visual };
+  })();
   function toggleMenu(): void {
     menuOpen = !menuOpen;
   }
@@ -134,19 +225,44 @@
   }
   async function importEntry(): Promise<void> {
     if (peerId === null || busy) return;
+    // Defence in depth: refuse the import locally when the
+    // peer did not advertise the `image_import` capability. The
+    // host enforces the same gate so the bridge never carries a
+    // request the listener would reject; the UI guard avoids
+    // a wasted round-trip and surfaces the typed reason before
+    // the user sees a generic error copy.
+    if (isImageRow && !peerSupportsImageImport) {
+      lastResult = {
+        kind: "error",
+        summary: "Este equipo no admite la importación de imágenes.",
+      };
+      return;
+    }
     busy = true;
     lastResult = null;
     menuOpen = false;
     try {
-      const outcome = await peerImportFetchCommand({
-        peer_id: peerId,
-        remote_entry_id: row.remote_entry_id,
-        display_name: displayName ?? "",
-      });
-      lastResult = {
-        kind: outcome.kind === "imported" ? "ok" : "error",
-        summary: describeOutcome(outcome),
-      };
+      if (isImageRow) {
+        const outcome = await peerImageFetchCommand({
+          peer_id: peerId,
+          remote_entry_id: row.remote_entry_id,
+          display_name: displayName ?? "",
+        });
+        lastResult = {
+          kind: outcome.kind === "imported" ? "ok" : "error",
+          summary: describeImageOutcome(outcome),
+        };
+      } else {
+        const outcome = await peerImportFetchCommand({
+          peer_id: peerId,
+          remote_entry_id: row.remote_entry_id,
+          display_name: displayName ?? "",
+        });
+        lastResult = {
+          kind: outcome.kind === "imported" ? "ok" : "error",
+          summary: describeOutcome(outcome),
+        };
+      }
     } catch (err) {
       lastResult = {
         kind: "error",
@@ -156,6 +272,19 @@
       busy = false;
     }
   }
+  function refreshNowAnchor(): void {
+    nowAnchor = Date.now();
+  }
+  onMount(() => {
+    refreshNowAnchor();
+    metadataTimer = setInterval(refreshNowAnchor, METADATA_REFRESH_MS);
+  });
+  onDestroy(() => {
+    if (metadataTimer !== null) {
+      clearInterval(metadataTimer);
+      metadataTimer = null;
+    }
+  });
 </script>
 
 <article
@@ -190,13 +319,49 @@
   >
     {row.preview}
   </p>
+  {#if isImageRow}
+    <div
+      class="remote-preview-card-image-placeholder"
+      data-testid="remote-preview-card-image-placeholder"
+      data-placeholder-kind="static"
+      aria-hidden="true"
+    >
+      <svg
+        class="remote-preview-card-image-placeholder-svg"
+        viewBox="0 0 64 64"
+        xmlns="http://www.w3.org/2000/svg"
+        role="img"
+        aria-label="Marcador estático de imagen remota"
+      >
+        <rect
+          x="2"
+          y="2"
+          width="60"
+          height="60"
+          rx="8"
+          ry="8"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        />
+        <circle cx="22" cy="22" r="5" fill="currentColor" opacity="0.55" />
+        <path
+          d="M6 50 L24 32 L36 44 L46 34 L58 50 Z"
+          fill="currentColor"
+          opacity="0.45"
+        />
+      </svg>
+    </div>
+  {/if}
   <footer class="remote-preview-card-footer">
     <time
       class="remote-preview-card-date"
       data-testid="remote-preview-card-date"
       datetime={row.created_at}
+      aria-label={elapsedLabel.aria}
+      title={row.created_at}
     >
-      {row.created_at}
+      {elapsedLabel.visual}
     </time>
     <div class="remote-preview-card-menu">
       <button
@@ -221,12 +386,16 @@
               role="menuitem"
               class="remote-preview-card-menu-item"
               data-testid="remote-preview-card-import"
-              disabled={busy || peerId === null}
-              aria-disabled={busy || peerId === null}
+              disabled={busy || peerId === null || !peerSupportsImageImport}
+              aria-disabled={busy || peerId === null || !peerSupportsImageImport}
               aria-busy={busy}
               on:click={importEntry}
             >
-              {busy ? "Importando…" : "Importar"}
+              {busy
+                ? "Importando…"
+                : isImageRow && !peerSupportsImageImport
+                  ? "No disponible"
+                  : "Importar"}
             </button>
           </li>
         </ul>
@@ -297,6 +466,24 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
     word-break: break-word;
+  }
+  .remote-preview-card-image-placeholder {
+    margin: 0;
+    align-self: center;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    border-radius: 6px;
+    border: 1px dashed var(--cv-border, #30363d);
+    background: rgba(148, 163, 184, 0.06);
+    color: var(--cv-fg-muted, #94a3b8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+  }
+  .remote-preview-card-image-placeholder-svg {
+    width: 56%;
+    height: 56%;
   }
   .remote-preview-card-footer {
     display: flex;

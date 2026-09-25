@@ -30,6 +30,9 @@ pub mod paste;
 pub mod paste_suppression;
 pub mod peer_discovery;
 pub mod peer_identity;
+pub mod peer_image_history;
+pub mod peer_image_import;
+mod peer_image_sqlite;
 mod peer_import_sqlite;
 pub mod peer_pairing;
 pub mod peer_text_history;
@@ -148,6 +151,29 @@ pub use peer_identity::{
     InMemoryPeerIdentityStore, LocalPeerIdentity, LocalPeerProfile, PeerFingerprint, PeerId,
     PeerIdentityError, PeerIdentityOutcome, PeerIdentityService, PeerIdentityStore,
     PEER_IDENTITY_SERVICE, PEER_IDENTITY_USERNAME,
+};
+#[cfg(feature = "local-peer-pairing-tls")]
+pub use peer_image_history::PeerPairingImageHistoryTransportAdapter;
+pub use peer_image_history::{
+    clamp_image_history_limit, compute_image_page_fingerprint, image_entry_is_transferable,
+    EntryRepositoryHostImageHistorySource, HostImageHistorySource, InMemoryHostImageHistorySource,
+    ListRecentImagesRequest, NoopPeerImageHistoryTransport, PeerImageActiveState,
+    PeerImageCursorSecret, PeerImageHistoryCursorError, PeerImageHistoryOutcome,
+    PeerImageHistoryPersistenceError, PeerImageHistoryService, PeerImageHistoryTransport,
+    PeerImageHistoryTransportError, RemoteImageHistoryCursor, RemoteImageHistoryPage,
+    RemoteImagePreview, DEFAULT_IMAGE_PAGE_ROWS, IMAGE_CURSOR_SECRET_BYTES, IMAGE_FETCH_MAX_BYTES,
+    MAX_IMAGE_PAGE_ROWS,
+};
+pub use peer_image_import::{
+    ImageImportClock, InMemoryImageImportPersistence, NoopPeerFetchImageTransport,
+    PeerFetchImageRequest, PeerFetchImageResponse, PeerFetchImageTransport,
+    PeerFetchImageTransportError, PeerImageImportError, PeerImageImportOutcome,
+    PeerImageImportPersistence, PeerImageImportPersistenceError, PeerImageImportService,
+    PeerImageImportTrustState, StagedImageAsset, SystemImageImportClock, IMPORT_MAX_IMAGE_BYTES,
+};
+#[cfg(feature = "local-peer-pairing-tls")]
+pub use peer_image_import::{
+    PeerImageImportHostHandlerAdapter, PeerPairingFetchImageTransportAdapter,
 };
 pub use peer_pairing::{
     compute_sas, default_peer_transport, PairingError, PairingMessage, PairingOutcome,

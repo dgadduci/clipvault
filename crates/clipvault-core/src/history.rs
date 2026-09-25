@@ -569,7 +569,12 @@ impl TextHistoryService {
             }
         };
 
-        let outcome = match store.store_image(&normalized) {
+        // Keep the shared asset mutation lock until the SQLite row is
+        // committed. A peer-import rollback may otherwise remove a
+        // freshly written file after this capture reuses it but before
+        // `insert_or_touch` creates the owning row.
+        let asset_mutation_guard = store.lock_mutations();
+        let outcome = match store.store_image_with_guard(&normalized, &asset_mutation_guard) {
             Ok(outcome) => outcome,
             Err(error) => {
                 warn!(reason = error.kind_str(), "clipboard asset write failed");
@@ -638,7 +643,9 @@ impl TextHistoryService {
             code_language: None,
         };
 
-        self.commit(context, new_entry, source_app.as_deref())
+        let result = self.commit(context, new_entry, source_app.as_deref());
+        drop(asset_mutation_guard);
+        result
     }
 
     /// Shared tail of both persistence paths: one transaction, then a

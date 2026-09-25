@@ -1306,6 +1306,7 @@ mod tests {
             display_name: display_name.to_string(),
             protocol_major: 1,
             capability: "pairing".to_string(),
+            caps_extra: String::new(),
             observed_at: OffsetDateTime::now_utc(),
         })
         .expect("upsert peer");

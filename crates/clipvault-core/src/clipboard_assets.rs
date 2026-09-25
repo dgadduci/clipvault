@@ -59,8 +59,10 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use clipvault_platform::{checked_rgba_len, ClipboardImage, MAX_CLIPBOARD_IMAGE_DIM};
+use parking_lot::{Mutex, MutexGuard};
 use sha2::{Digest, Sha256};
 
 /// Sub-directory under `<data_dir>/assets` that holds persisted
@@ -1525,17 +1527,28 @@ impl StoreOutcome {
 
 /// Filesystem-backed store for clipboard payload assets.
 ///
-/// Cheap to clone: it only holds the resolved data directory.
+/// Cheap to clone: clones share the resolved data directory and a
+/// mutation lock so asset creation cannot race transactional cleanup.
 #[derive(Debug, Clone)]
 pub struct ClipboardAssetStore {
     data_dir: PathBuf,
+    mutation_lock: Arc<Mutex<()>>,
 }
 
 impl ClipboardAssetStore {
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
         Self {
             data_dir: data_dir.into(),
+            mutation_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Serialize a larger operation that must keep an asset in place
+    /// across both file staging and its SQLite commit. The guard is
+    /// shared by clones of this store; callers must use the guarded
+    /// store helpers below while holding it.
+    pub(crate) fn lock_mutations(&self) -> MutexGuard<'_, ()> {
+        self.mutation_lock.lock()
     }
 
     /// `<data_dir>/assets/clipboard`.
@@ -1551,6 +1564,19 @@ impl ClipboardAssetStore {
     /// directory) and idempotent: a second call with the same bytes
     /// reuses the existing file and reports [`StoreOutcome::Reused`].
     pub fn store_image(&self, image: &NormalizedImage) -> Result<StoreOutcome, AssetError> {
+        let guard = self.lock_mutations();
+        self.store_image_with_guard(image, &guard)
+    }
+
+    /// Variant for callers that need to hold the mutation lock through
+    /// a larger transaction (for example, image capture's asset write
+    /// and SQLite insert). The caller must keep `guard` alive until the
+    /// transaction has committed or failed.
+    pub(crate) fn store_image_with_guard(
+        &self,
+        image: &NormalizedImage,
+        _guard: &MutexGuard<'_, ()>,
+    ) -> Result<StoreOutcome, AssetError> {
         let root = self.root();
         fs::create_dir_all(&root).map_err(io_error)?;
         let file_name = format!("{}.{CLIPBOARD_ASSET_EXTENSION}", image.hash());
@@ -1642,8 +1668,59 @@ impl ClipboardAssetStore {
     /// This is the single entry point the Tauri asset command uses.
     /// Every rejection path returns a typed error and **no** bytes.
     pub fn read_bytes(&self, asset_ref: &str) -> Result<Vec<u8>, AssetError> {
+        let _guard = self.lock_mutations();
         let path = self.resolve(asset_ref)?;
         read_validated_png(&path)
+    }
+
+    /// Validate the PNG behind `asset_ref` without surfacing the
+    /// bytes. The helper drives the same pipeline as
+    /// [`Self::read_bytes`] (path / namespace / size / PNG signature /
+    /// decode / dimensions) so a host that browses transferable
+    /// images can reject corrupt / oversized / out-of-namespace
+    /// references before shipping metadata. The bytes stay inside
+    /// the backend; the wire contract never carries them, only the
+    /// typed outcome the caller forwards to the renderer.
+    pub fn validate(&self, asset_ref: &str) -> Result<(), AssetError> {
+        let _guard = self.lock_mutations();
+        let path = self.resolve(asset_ref)?;
+        read_validated_png(&path)?;
+        Ok(())
+    }
+
+    /// Remove the asset file referenced by `asset_ref`. The
+    /// helper is reserved for transactional cleanup paths
+    /// (the `peer-image-import` rollback contract) and is
+    /// deliberately narrower than the resolve API:
+    ///
+    /// - the helper returns `Ok(false)` when the asset is
+    ///   missing on disk so a stale rollback is a no-op rather
+    ///   than an error;
+    /// - the helper returns `Ok(true)` only after a successful
+    ///   `unlink` of the canonical file the [`Self::resolve`]
+    ///   helper accepted (so empty / absolute / traversal /
+    ///   symlink-escape references are still rejected with the
+    ///   same typed error);
+    /// - the helper never recurses, never walks the directory
+    ///   and never follows symlinks.
+    pub fn delete_if_present(&self, asset_ref: &str) -> Result<bool, AssetError> {
+        let guard = self.lock_mutations();
+        self.delete_if_present_with_guard(asset_ref, &guard)
+    }
+
+    /// Variant for a rollback that must keep the same mutation lock
+    /// while checking SQLite references and unlinking the asset.
+    pub(crate) fn delete_if_present_with_guard(
+        &self,
+        asset_ref: &str,
+        _guard: &MutexGuard<'_, ()>,
+    ) -> Result<bool, AssetError> {
+        let path = self.resolve(asset_ref)?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(io_error(error)),
+        }
     }
 
     /// Run the full validation pipeline against `asset_ref` and report
@@ -2112,6 +2189,73 @@ mod tests {
         let outcome = store.store_image(&normalized).expect("write");
         let bytes = store.read_bytes(outcome.asset_ref()).expect("read");
         assert_eq!(bytes, normalized.png());
+    }
+
+    #[test]
+    fn validate_accepts_a_persisted_asset_without_returning_bytes() {
+        let (_dir, store) = store();
+        let normalized = normalize_image(&bitmap(4, 4, 0x33)).expect("normalize");
+        let outcome = store.store_image(&normalized).expect("write");
+        store.validate(outcome.asset_ref()).expect("validate");
+    }
+
+    #[test]
+    fn validate_rejects_a_missing_asset() {
+        let (_dir, store) = store();
+        let missing =
+            "clipboard/0000000000000000000000000000000000000000000000000000000000000000.png";
+        assert_eq!(store.validate(missing).unwrap_err(), AssetError::NotFound);
+    }
+
+    #[test]
+    fn validate_rejects_a_corrupted_png() {
+        let (_dir, store) = store();
+        let normalized = normalize_image(&bitmap(2, 2, 0x55)).expect("normalize");
+        let outcome = store.store_image(&normalized).expect("write");
+        // Corrupt the file in place so the asset reference stays
+        // valid (matches the persisted filename) but the bytes
+        // fail the PNG signature check the validator enforces.
+        let path = store.resolve(outcome.asset_ref()).expect("resolve");
+        std::fs::write(&path, b"not a png").expect("corrupt");
+        assert_eq!(
+            store.validate(outcome.asset_ref()).unwrap_err(),
+            AssetError::NotPng
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_oversized_asset() {
+        // The asset store refuses to write anything larger than
+        // the documented cap, so the only path to land an
+        // oversized file on disk is to bypass `store_image` and
+        // write directly. We do exactly that to validate the
+        // validator surfaces the typed `TooLarge` outcome
+        // instead of silently accepting or returning a
+        // generic `NotFound` / `Io` error.
+        let (_dir, store) = store();
+        // Build a synthetic file that exceeds the cap by one
+        // byte. The file lives inside the clipboard namespace
+        // so `resolve` succeeds and the metadata size check is
+        // the only rejection that fires.
+        let canonical_root = store.root();
+        std::fs::create_dir_all(&canonical_root).expect("mkdir");
+        let oversized_name = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff.png";
+        let oversized_path = canonical_root.join(oversized_name);
+        std::fs::write(&oversized_path, vec![0u8; MAX_CLIPBOARD_ASSET_BYTES + 1])
+            .expect("write oversized");
+        let asset_ref = format!("clipboard/{oversized_name}");
+        let outcome = store.validate(&asset_ref).unwrap_err();
+        assert!(
+            matches!(outcome, AssetError::TooLarge { .. }),
+            "expected TooLarge, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_out_of_namespace_assets() {
+        let (_dir, store) = store();
+        let foreign = "application-icons/foo.png";
+        assert_eq!(store.validate(foreign).unwrap_err(), AssetError::OutOfScope);
     }
 
     #[test]
