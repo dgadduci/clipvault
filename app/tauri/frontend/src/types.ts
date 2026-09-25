@@ -493,6 +493,8 @@ export interface PeerSnapshotEntry {
   display_name: string;
   protocol_major: number;
   capability: string;
+  /** Additive peer features advertised in the separate TXT field. */
+  caps_extra: string;
   /** Persisted local trust relationship, independent from mDNS presence. */
   trust_state: PeerTrustState;
   /** Time of reciprocal approval; absent until the peer is trusted. */

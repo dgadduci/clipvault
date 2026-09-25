@@ -58,6 +58,13 @@ tokens y aplica la verificación de capability con la lista combinada. La
 adición de capacidades futuras (p. ej. `rich_text_share`) reutilizará el mismo
 mecanismo: añadir el token a `caps_extra` sin modificar `capability`.
 
+Cada observación compatible de mDNS actualiza `known_peers.caps_extra`, además
+de los timestamps y cualquier transición de `capability`. Así una fila creada
+antes de que `image_import` existiera recibe el token en su siguiente
+observación y los resolvers SQLite dejan de tratarla como peer legacy. El
+snapshot metadata-only también proyecta `caps_extra` para que el renderer
+pueda habilitar Importar sin reinterpretar el campo legacy.
+
 Se añadirá la capacidad `image_import` al contrato de capacidades. El cambio
 usará endpoints DTO separados para imágenes, manteniendo `list_recent_text` y
 `fetch_text` sin cambios para peers anteriores. La implementación puede
@@ -66,7 +73,11 @@ payload genérico de bytes al core o al bridge.
 
 Si el peer remoto no anuncia `image_import` (ni en `capability` legacy ni en
 `caps_extra`), la UI no ofrecerá una acción de importación de imagen. Los
-peers que sólo soportan texto conservarán el flujo actual.
+peers que sólo soportan texto conservarán el flujo actual. Si el endpoint de
+imágenes responde `not_available` mientras el endpoint de texto responde
+correctamente, el merge consume la respuesta de texto y considera agotado sólo
+el stream de imágenes; la ausencia opcional de imágenes no invalida el
+historial de texto ni produce un error global de carga.
 
 ## Listado remoto y preview
 

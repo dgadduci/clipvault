@@ -27,6 +27,14 @@ two token lists, and reject any token outside the documented allowlist.
   and `image_import` capabilities and the productive image routes accept
   the request
 
+#### Scenario: Existing peer refreshes additive capabilities
+
+- **WHEN** a previously persisted trusted peer is observed again with
+  `capability = pairing` and `caps_extra = image_import`
+- **THEN** the database refreshes its persisted `caps_extra` value and the
+  peer snapshot exposes that value so the image capability resolver and UI
+  gate both recognize `image_import`
+
 #### Scenario: Unknown token in caps_extra is rejected
 
 - **WHEN** a host's TXT record carries an additive token outside the

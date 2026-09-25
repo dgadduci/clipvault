@@ -563,6 +563,28 @@ test("behaviour: peer_unavailable on text clears the page", () => {
   assert.equal(result.rows.length, 0);
 });
 
+test("behaviour: missing image capability preserves a successful text page", () => {
+  const row = buildTextRow("text-only-peer-entry", "2026-01-04T00:00:00Z");
+  const result = applyResponses(
+    { kind: "text", response: textOk([row], "text-next") },
+    {
+      kind: "image",
+      response: { kind: "peer_unavailable", reason: "not_available" },
+    },
+    emptyPage(),
+    { append: false },
+  );
+
+  assert.deepEqual(
+    result.rows.map((item) => item.row.remote_entry_id),
+    ["text-only-peer-entry"],
+  );
+  assert.equal(result.cursor, "text-next");
+  assert.equal(result.imageCursor, "");
+  assert.equal(result.error, null);
+  assert.equal(result.exhausted, false);
+});
+
 test("behaviour: exhausted stream + no buffered rows flips the `exhausted` flag", () => {
   const previous: PageState = {
     ...emptyPage(),
@@ -878,6 +900,19 @@ test("Rail hides the Import button when the peer lacks image_import", () => {
     cardSource,
     /peer_unavailable/,
     "card must surface a typed peer_unavailable outcome",
+  );
+});
+
+test("RemoteHistoryRail combines additive caps_extra for image capability gating", () => {
+  assert.match(
+    railSource,
+    /activeEntry\.caps_extra/,
+    "the peer snapshot's additive capabilities must reach remote preview cards",
+  );
+  assert.match(
+    mergeSource,
+    /reason !== "not_available"/,
+    "a missing optional image capability must not become a global history error",
   );
 });
 

@@ -456,6 +456,10 @@ pub struct PeerSnapshotEntry {
     pub display_name: String,
     pub protocol_major: i64,
     pub capability: String,
+    /// Additive capability tokens observed in the `caps_extra` TXT
+    /// field. The renderer needs these independently of the legacy
+    /// `capability` token to gate image import correctly.
+    pub caps_extra: String,
     /// Persisted trust state, projected as its stable wire string.
     /// Discovery owns presence; pairing owns this independent
     /// relationship state. Including it in the same metadata-only
@@ -494,6 +498,7 @@ impl PeerSnapshotEntry {
             display_name: row.display_name,
             protocol_major: row.protocol_major,
             capability: row.capability,
+            caps_extra: row.caps_extra,
             trust_state: row.trust_state.as_str().to_string(),
             paired_at: (!row.paired_at.is_empty()).then_some(row.paired_at),
             first_seen_at: row.first_seen_at,
@@ -1661,6 +1666,7 @@ mod tests {
             let mut rows = storage.lock().expect("storage");
             rows[0].trust_state = TrustState::Trusted;
             rows[0].paired_at = "2026-09-21T00:00:00Z".to_string();
+            rows[0].caps_extra = IMAGE_IMPORT_CAPABILITY.to_string();
         }
 
         let snapshot =
@@ -1668,6 +1674,8 @@ mod tests {
         let entry = snapshot.entries.first().expect("trusted peer");
         assert_eq!(entry.trust_state, "trusted");
         assert_eq!(entry.paired_at.as_deref(), Some("2026-09-21T00:00:00Z"));
+        assert_eq!(entry.capability, DISCOVERY_ONLY_CAPABILITY);
+        assert_eq!(entry.caps_extra, IMAGE_IMPORT_CAPABILITY);
         runtime.stop().expect("stop");
     }
 

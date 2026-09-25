@@ -282,15 +282,6 @@ export function applyResponses(
       error: `transport_unavailable:image:${imageResponse.reason}`,
     };
   }
-  if (imageResponse !== null && imageResponse.kind === "peer_unavailable") {
-    return {
-      ...previous,
-      imageCursor: "",
-      loading: false,
-      error: `peer_unavailable:image:${imageResponse.reason}`,
-    };
-  }
-
   // Either endpoint collapsing to `ok` exposes the bounded page
   // the host minted. We translate each row into the
   // [`RemoteRailRow`] union the rail renders, then merge +
@@ -327,7 +318,9 @@ export function applyResponses(
   const nextImageCursor =
     imageResponse !== null && imageResponse.kind === "ok"
       ? imageResponse.next_cursor
-      : previous.imageCursor;
+      : imageResponse !== null && imageResponse.kind === "peer_unavailable"
+        ? ""
+        : previous.imageCursor;
   const snapshotId =
     textResponse !== null && textResponse.kind === "ok"
       ? textResponse.snapshot_id
@@ -346,6 +339,12 @@ export function applyResponses(
     nextImageCursor.length === 0;
   const noBufferedRows = textBuffer.length === 0 && imageBuffer.length === 0;
   const exhausted = textExhausted && imageExhausted && noBufferedRows;
+  const imageUnavailableError =
+    imageResponse !== null &&
+    imageResponse.kind === "peer_unavailable" &&
+    imageResponse.reason !== "not_available"
+      ? `peer_unavailable:image:${imageResponse.reason}`
+      : null;
 
   return {
     rows: visible,
@@ -354,7 +353,7 @@ export function applyResponses(
     textBuffer,
     imageBuffer,
     snapshotId,
-    error: null,
+    error: imageUnavailableError,
     loading: false,
     exhausted,
     requestInvalidCursor: false,

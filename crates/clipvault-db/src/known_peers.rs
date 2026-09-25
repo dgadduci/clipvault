@@ -14,12 +14,15 @@
 //! place; the repository never re-normalises.
 //!
 //! Re-observing a known peer is idempotent: the merge updates
-//! `last_discovered_at` and `updated_at`, and the public fields the
-//! core re-validates (fingerprint, display name and protocol).
+//! `last_discovered_at` and `updated_at`, and refreshes the public
+//! fields the core re-validates (fingerprint, display name, protocol
+//! and additive `caps_extra` capabilities).
 //! `discovery_only` and `pairing` are a live listener-state transition
 //! of that same identity, not a competing identity, so their transition
 //! updates the capability while preserving a previously learned full
-//! pairing fingerprint.
+//! pairing fingerprint. The `caps_extra` value always reflects the latest
+//! compatible advertisement so capability additions and withdrawals take
+//! effect for rows persisted by older builds.
 //! A conflicting announcement (a different `public_key_fingerprint`
 //! reusing an existing `peer_id`) is intentionally rejected by the
 //! repository: the core sees the rejection as an "ignore" and the
@@ -345,28 +348,19 @@ impl<'a> KnownPeerRepository<'a> {
                         .clone()
                         .filter(|value| !value.is_empty())
                         .unwrap_or_else(|| previous.full_public_key_fingerprint.clone());
-                    let capability_changed = previous.capability != observation.capability;
-                    if merged_full != previous.full_public_key_fingerprint || capability_changed {
-                        tx.execute(
-                            "UPDATE known_peers \
-                             SET full_public_key_fingerprint = ?1, capability = ?2, \
-                                 last_discovered_at = ?3, updated_at = ?3 \
-                             WHERE peer_id = ?4",
-                            params![
-                                merged_full,
-                                observation.capability,
-                                now,
-                                observation.peer_id
-                            ],
-                        )?;
-                    } else {
-                        tx.execute(
-                            "UPDATE known_peers \
-                             SET last_discovered_at = ?1, updated_at = ?1 \
-                             WHERE peer_id = ?2",
-                            params![now, observation.peer_id],
-                        )?;
-                    }
+                    tx.execute(
+                        "UPDATE known_peers \
+                         SET full_public_key_fingerprint = ?1, capability = ?2, caps_extra = ?3, \
+                             last_discovered_at = ?4, updated_at = ?4 \
+                         WHERE peer_id = ?5",
+                        params![
+                            merged_full,
+                            observation.capability,
+                            observation.caps_extra,
+                            now,
+                            observation.peer_id
+                        ],
+                    )?;
                     let refreshed = tx
                         .query_row(
                             "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
@@ -906,6 +900,56 @@ mod tests {
         assert_eq!(row.last_discovered_at, format_timestamp(second));
         assert_eq!(row.updated_at, format_timestamp(second));
         assert_eq!(repo.count().expect("count"), 1);
+    }
+
+    #[test]
+    fn upsert_refreshes_additive_capabilities_for_an_existing_peer() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let mut repo = KnownPeerRepository::new(db.connection_mut());
+        repo.upsert_observation(&observation(
+            "peer-aaaa",
+            "0123456789abcdef",
+            "Studio",
+            1,
+            "pairing",
+            when,
+        ))
+        .expect("insert legacy peer");
+
+        let mut image_capable = observation(
+            "peer-aaaa",
+            "0123456789abcdef",
+            "Studio",
+            1,
+            "pairing",
+            when + time::Duration::minutes(1),
+        );
+        image_capable.caps_extra = "image_import".to_string();
+        let UpsertObservationOutcome::Stored(row) = repo
+            .upsert_observation(&image_capable)
+            .expect("refresh image capability")
+        else {
+            panic!("expected compatible observation to be stored");
+        };
+        assert_eq!(row.capability, "pairing");
+        assert_eq!(row.caps_extra, "image_import");
+
+        let withdrawn = observation(
+            "peer-aaaa",
+            "0123456789abcdef",
+            "Studio",
+            1,
+            "pairing",
+            when + time::Duration::minutes(2),
+        );
+        let UpsertObservationOutcome::Stored(row) = repo
+            .upsert_observation(&withdrawn)
+            .expect("refresh withdrawn capability")
+        else {
+            panic!("expected compatible observation to be stored");
+        };
+        assert!(row.caps_extra.is_empty());
     }
 
     #[test]

@@ -120,14 +120,16 @@
       : null;
   $: activeIsTrusted = activeEntry?.trust_state === "trusted";
   $: activeIsPresent = activeEntry?.is_present ?? false;
-  // Comma-separated capability tokens the parent observed for the
-  // active peer. The rail forwards the value verbatim to each
-  // remote preview card so a peer that did not advertise
-  // `image_import` can disable the Import action before the user
-  // reaches for the bridge. The host / client core additionally
-  // re-validate the gate so a regression in the UI cannot bypass
-  // the security check.
-  $: activePeerCapability = activeEntry?.capability ?? null;
+  // Combine the legacy capability token and additive capabilities
+  // from the peer snapshot. The renderer must not infer
+  // `image_import` from the legacy `pairing` field because strict
+  // legacy parsers require that field to remain exactly `pairing`.
+  // The host / client core still revalidates the gate.
+  $: activePeerCapability = activeEntry
+    ? [activeEntry.capability, activeEntry.caps_extra]
+        .filter((token) => token.length > 0)
+        .join(",")
+    : null;
   // The exact predicate the linked list uses to colour the dot;
   // mirroring it here guarantees the rail and the dot can never
   // disagree. A peer that is NOT `trusted && is_present` MUST NOT

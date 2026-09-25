@@ -28,6 +28,22 @@ tags, collections, favorites or source-application metadata.
   does not advertise `image_import`
 - **THEN** the image listing is denied with a typed safe outcome and no rows
 
+### Requirement: Missing image capability does not block text history
+
+The remote history rail SHALL treat text and image browse results as
+independent streams. If the image endpoint reports `peer_unavailable` because
+the peer does not advertise `image_import`, the rail SHALL mark only the image
+stream exhausted and SHALL still apply a successful text response from the
+same request. The expected absence of an optional image capability SHALL NOT
+be shown as a global history-load failure.
+
+#### Scenario: Text-only peer keeps its text previews
+
+- **WHEN** a text-compatible peer returns a valid text page while the image
+  endpoint returns `peer_unavailable { reason: not_available }`
+- **THEN** the rail renders the text rows, records the image stream as
+  exhausted and shows no global load error
+
 ### Requirement: Complete image bytes are fetched only for explicit import
 
 ClipVault SHALL request complete remote image bytes only when the user

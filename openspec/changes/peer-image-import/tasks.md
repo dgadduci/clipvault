@@ -54,6 +54,9 @@
   del commit, con payload metadata-only y sin clipboard/paste/watcher.
 - [x] 3.5 Sincronizar la reserva de cleanup de assets con nuevos stages y con
   capturas locales hasta su commit SQLite, sin abrir una ventana de unlink.
+- [x] 3.6 Actualizar `known_peers.caps_extra` en observaciones compatibles
+  existentes para que los peers emparejados antes de `image_import` reciban la
+  capacidad en su siguiente anuncio mDNS.
 
 ## 4. Tauri y frontend
 
@@ -66,6 +69,10 @@
   refresh de Historial y collections después de commit.
 - [x] 4.4 Mantener la tarjeta remota sin drag, pin, edición, copia o pegado y
   conservar intactos los contratos del drag-and-drop de cards locales.
+- [x] 4.5 Exponer `caps_extra` en el snapshot metadata-only de peers y
+  combinarlo con el campo legacy en el gate de Importar del frontend.
+- [x] 4.6 Si el endpoint de imagen responde `not_available`, aplicar la página
+  de texto que sí tuvo éxito y agotar sólo el stream de imágenes.
 
 ## 5. Tests de dominio y transporte
 
@@ -87,6 +94,9 @@
   `WorkLimitReached`, de un stage iniciado durante el cleanup reservado,
   de una captura local concurrente con rollback y de una página vacía que
   lleva cursor de continuación.
+- [x] 5.8 Añadir regresiones de refresh de capability en peers existentes,
+  proyección de `caps_extra` al snapshot y preservación de filas de texto
+  cuando imágenes no están disponibles.
 
 ## 6. Verificación y regresiones
 
@@ -101,6 +111,9 @@
   escriben, renombran ni limpian `~/.clipvault`.
 - [x] 6.7 Reejecutar los tests enfocados de paginación, leases SQLite y el
   contrato frontend de cursor no agotado en página vacía.
+- [x] 6.8 Ejecutar tests DB/core/frontend, `npm run check`, build afectado,
+  regresión de drag-and-drop, formato, `git diff --check` y validación
+  OpenSpec.
 - [ ] 6.5 Ejecutar la matriz manual en macOS, Linux X11 y Linux Wayland cuando
   estén disponibles: importación, dedupe, edición remota, restart,
   revoke/block, peer unavailable, asset inválido y fallo de persistencia.
