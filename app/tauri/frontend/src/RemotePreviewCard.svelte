@@ -28,12 +28,21 @@
     PeerHistoryRow,
     PeerImportResponse,
     PeerImageImportResponse,
+    PeerImageThumbnailResponse,
   } from "./types";
   import {
     peerImportFetchCommand,
     peerImageFetchCommand,
+    peerImageThumbnailFetchCommand,
   } from "./lib/tauri";
   import { formatElapsedTime, type ElapsedTime } from "./lib/elapsedTime";
+  import {
+    isCurrentThumbnailRequest,
+    remoteImageThumbnailCardIdentity,
+    shouldRequestRemoteImageThumbnail,
+    supportsRemoteImageThumbnails,
+    type RemoteImageThumbnailPhase,
+  } from "./lib/remoteImageThumbnailState";
 
   export let row: PeerHistoryRow;
   /**
@@ -76,6 +85,8 @@
    * security check.
    */
   export let peerCapability: string | null = null;
+  /** True only after the parent synchronized this peer's runtime state. */
+  export let peerStateReady: boolean = false;
 
   /**
    * Stable predicate the template and the action handlers use
@@ -93,6 +104,20 @@
       .split(",")
       .map((token) => token.trim())
       .some((token) => token === "image_import");
+  })();
+
+  /**
+   * Stable predicate the
+   * `peer-image-preview-thumbnails` change ships. The helper
+   * mirrors [`peerSupportsImageImport`] but reads the additive
+   * `image_preview_thumbnail` capability the host advertises
+   * through the `caps_extra` TXT field. The thumbnail route
+   * additionally requires `image_import`; both predicates are
+   * evaluated together so a peer that ships only one of the
+   * two capabilities never opens the thumbnail route.
+   */
+  $: peerSupportsImagePreviewThumbnail = (() => {
+    return isImageRow && supportsRemoteImageThumbnails(peerCapability);
   })();
 
   /**
@@ -179,6 +204,46 @@
    * never has to inspect free-form strings or content bytes.
    */
   let lastResult: { kind: "ok" | "error"; summary: string } | null = null;
+
+  /**
+   * Thumbnail request state the `peer-image-preview-thumbnails`
+   * change ships. The card only requests a thumbnail when
+   * the row represents an image AND the peer advertises both
+   * `image_import` and `image_preview_thumbnail`. The state
+   * machine has four discrete phases the template branches
+   * on without inspecting free-form strings or content bytes.
+   *
+   * `loading` is also the phase the static placeholder shows
+   * while the bridge call is in flight; `error` is reserved
+   * for malformed / invalid / busy outcomes the renderer
+   * surfaces as a still-placeholder (so a stale / drifted /
+   * unauthorised caller cannot leak the original image bytes
+   * through an error envelope).
+   */
+  let thumbnailPhase: RemoteImageThumbnailPhase = "idle";
+  let thumbnailUrl: string | null = null;
+  /**
+   * Stable token the thumbnail fetcher increments on every
+   * entry that may invalidate an in-flight request (peer
+   * change, page change, card change, unmount, busy /
+   * revoke / block). The fetcher compares the captured token
+   * with the live token before applying the response so a
+   * late response can never replace the placeholder of
+   * another card.
+   */
+  let thumbnailRequestToken = 0;
+  let thumbnailCardIdentity: string | null = null;
+  /**
+   * Container the `IntersectionObserver` watches. The card
+   * only fires the thumbnail request when the visible
+   * element intersects the root scroller; the observer is
+   * detached the moment the card unmounts or the peer /
+   * page / row changes so the bridge never sees a request
+   * for a stale identifier.
+   */
+  let cardElement: HTMLElement | null = null;
+  let thumbnailObserver: IntersectionObserver | null = null;
+  let thumbnailRequestInFlight = false;
   /**
    * Live elapsed-time label the card renders in the same
    * shape every local card uses (`formatElapsedTime`). The
@@ -275,6 +340,202 @@
   function refreshNowAnchor(): void {
     nowAnchor = Date.now();
   }
+
+  /**
+   * Decode a base64 PNG payload into a transient
+   * `URL.createObjectURL` handle. The renderer MUST release
+   * the URL with `URL.revokeObjectURL` on replacement /
+   * unmount / peer change so the bytes never linger outside
+   * the lifetime of the rendered card.
+   */
+  function bytesB64ToObjectUrl(bytesB64: string): string | null {
+    if (typeof atob !== "function") return null;
+    try {
+      const binary = atob(bytesB64);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      const blob = new Blob([bytes], { type: "image/png" });
+      return URL.createObjectURL(blob);
+    } catch (err) {
+      // Defence in depth: a malformed base64 string collapses
+      // to a still-placeholder without surfacing the bytes.
+      console.warn("remote thumbnail decode failed", err);
+      return null;
+    }
+  }
+
+  /**
+   * Apply a thumbnail response to the live card. The helper
+   * is the single place where the renderer builds the Object
+   * URL; every entry point that could receive a response
+   * MUST go through this function so the stale-token guard
+   * stays correct.
+   */
+  function applyThumbnail(
+    token: number,
+    response: PeerImageThumbnailResponse,
+  ): void {
+    if (!isCurrentThumbnailRequest(token, thumbnailRequestToken)) {
+      // The peer / page / card changed since the request
+      // was issued. The renderer MUST discard the response so
+      // a stale thumbnail can never replace the placeholder of
+      // another row.
+      return;
+    }
+    thumbnailRequestInFlight = false;
+    if (response.kind === "ok") {
+      const next = bytesB64ToObjectUrl(response.bytes_b64);
+      if (next === null) {
+        thumbnailPhase = "error";
+        if (thumbnailUrl !== null) {
+          URL.revokeObjectURL(thumbnailUrl);
+          thumbnailUrl = null;
+        }
+        return;
+      }
+      if (thumbnailUrl !== null) {
+        URL.revokeObjectURL(thumbnailUrl);
+      }
+      thumbnailUrl = next;
+      thumbnailPhase = "ready";
+      return;
+    }
+    // Every failure variant collapses to the static
+    // placeholder. The renderer never surfaces a global rail
+    // error; the original-image bytes never cross the bridge
+    // on a failure path.
+    thumbnailPhase = "error";
+  }
+
+  /**
+   * Fire a thumbnail request for the current row. The helper
+   * is the only entry point the IntersectionObserver calls;
+   * it short-circuits when the gate is not satisfied, when a
+   * request is already in flight, or when the row no longer
+   * matches the live card.
+   */
+  async function requestThumbnail(): Promise<void> {
+    if (peerId === null) return;
+    if (
+      !shouldRequestRemoteImageThumbnail({
+        isImageRow,
+        isIntersecting: true,
+        peerId,
+        peerStateReady,
+        peerCapability,
+        requestInFlight: thumbnailRequestInFlight,
+        phase: thumbnailPhase,
+      })
+    ) {
+      return;
+    }
+    const token = thumbnailRequestToken;
+    thumbnailRequestInFlight = true;
+    thumbnailPhase = "loading";
+    try {
+      const outcome = await peerImageThumbnailFetchCommand({
+        peer_id: peerId,
+        remote_entry_id: row.remote_entry_id,
+      });
+      applyThumbnail(token, outcome);
+    } catch (err) {
+      applyThumbnail(token, {
+        kind: "transport_unavailable",
+        reason: "unavailable",
+      });
+      // The bridge surfaced an exception; log the metadata
+      // only — the renderer never persists the bytes nor the
+      // message string.
+      console.warn("peer thumbnail fetch failed", err);
+    }
+  }
+
+  /**
+   * Detach the IntersectionObserver and release every Object
+   * URL the card allocated. The helper runs on unmount and
+   * on every transition that may invalidate the live card
+   * (peer change, page change, card change) so the bytes
+   * never linger outside the lifetime of the rendered card.
+   */
+  function releaseThumbnail(): void {
+    if (thumbnailObserver !== null) {
+      thumbnailObserver.disconnect();
+      thumbnailObserver = null;
+    }
+    if (thumbnailUrl !== null) {
+      URL.revokeObjectURL(thumbnailUrl);
+      thumbnailUrl = null;
+    }
+    thumbnailRequestToken += 1;
+    thumbnailRequestInFlight = false;
+    thumbnailPhase = "idle";
+  }
+
+  $: {
+    // Reactive guard: every time the parent swaps the live
+    // card (different row, different peer, different page)
+    // the renderer invalidates the in-flight request and
+    // releases the Object URL the previous card allocated.
+    // `bind:this` and the card identity are reactive dependencies,
+    // so the observer is attached to the live node after Svelte
+    // applies a peer / row replacement.
+    const nextCardIdentity = remoteImageThumbnailCardIdentity(
+      peerId,
+      row.remote_entry_id,
+      row.created_at,
+      row.title,
+      row.preview,
+      isImageRow,
+      peerCapability,
+    );
+    if (
+      thumbnailCardIdentity !== null &&
+      thumbnailCardIdentity !== nextCardIdentity
+    ) {
+      releaseThumbnail();
+    }
+    thumbnailCardIdentity = nextCardIdentity;
+    if (
+      isImageRow &&
+      peerStateReady &&
+      peerSupportsImagePreviewThumbnail &&
+      typeof IntersectionObserver !== "undefined" &&
+      cardElement !== null &&
+      thumbnailObserver === null
+    ) {
+      thumbnailObserver = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (
+              shouldRequestRemoteImageThumbnail({
+                isImageRow,
+                isIntersecting: entry.isIntersecting,
+                peerId,
+                peerStateReady,
+                peerCapability,
+                requestInFlight: thumbnailRequestInFlight,
+                phase: thumbnailPhase,
+              })
+            ) {
+              void requestThumbnail();
+              return;
+            }
+          }
+        },
+        { root: null, threshold: 0.05 },
+      );
+      thumbnailObserver.observe(cardElement);
+    } else if (
+      (!isImageRow || !peerStateReady || !peerSupportsImagePreviewThumbnail) &&
+      thumbnailObserver !== null
+    ) {
+      thumbnailObserver.disconnect();
+      thumbnailObserver = null;
+    }
+  }
+
   onMount(() => {
     refreshNowAnchor();
     metadataTimer = setInterval(refreshNowAnchor, METADATA_REFRESH_MS);
@@ -284,6 +545,7 @@
       clearInterval(metadataTimer);
       metadataTimer = null;
     }
+    releaseThumbnail();
   });
 </script>
 
@@ -293,6 +555,7 @@
   data-remote-entry-id={row.remote_entry_id}
   data-row-test-id={rowTestId}
   draggable="false"
+  bind:this={cardElement}
   aria-label={row.title ?? "Vista previa remota"}
 >
   <header class="remote-preview-card-header">
@@ -323,34 +586,44 @@
     <div
       class="remote-preview-card-image-placeholder"
       data-testid="remote-preview-card-image-placeholder"
-      data-placeholder-kind="static"
-      aria-hidden="true"
+      data-placeholder-kind={thumbnailPhase === "ready" ? "thumbnail" : "static"}
+      aria-hidden={thumbnailPhase === "ready" ? "false" : "true"}
     >
-      <svg
-        class="remote-preview-card-image-placeholder-svg"
-        viewBox="0 0 64 64"
-        xmlns="http://www.w3.org/2000/svg"
-        role="img"
-        aria-label="Marcador estático de imagen remota"
-      >
-        <rect
-          x="2"
-          y="2"
-          width="60"
-          height="60"
-          rx="8"
-          ry="8"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
+      {#if thumbnailPhase === "ready" && thumbnailUrl !== null}
+        <img
+          class="remote-preview-card-image-thumbnail"
+          data-testid="remote-preview-card-image-thumbnail"
+          src={thumbnailUrl}
+          alt={row.title ?? "Miniatura remota"}
+          draggable="false"
         />
-        <circle cx="22" cy="22" r="5" fill="currentColor" opacity="0.55" />
-        <path
-          d="M6 50 L24 32 L36 44 L46 34 L58 50 Z"
-          fill="currentColor"
-          opacity="0.45"
-        />
-      </svg>
+      {:else}
+        <svg
+          class="remote-preview-card-image-placeholder-svg"
+          viewBox="0 0 64 64"
+          xmlns="http://www.w3.org/2000/svg"
+          role="img"
+          aria-label="Marcador estático de imagen remota"
+        >
+          <rect
+            x="2"
+            y="2"
+            width="60"
+            height="60"
+            rx="8"
+            ry="8"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          />
+          <circle cx="22" cy="22" r="5" fill="currentColor" opacity="0.55" />
+          <path
+            d="M6 50 L24 32 L36 44 L46 34 L58 50 Z"
+            fill="currentColor"
+            opacity="0.45"
+          />
+        </svg>
+      {/if}
     </div>
   {/if}
   <footer class="remote-preview-card-footer">
@@ -480,10 +753,18 @@
     align-items: center;
     justify-content: center;
     pointer-events: none;
+    overflow: hidden;
   }
   .remote-preview-card-image-placeholder-svg {
     width: 56%;
     height: 56%;
+  }
+  .remote-preview-card-image-thumbnail {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+    user-select: none;
   }
   .remote-preview-card-footer {
     display: flex;

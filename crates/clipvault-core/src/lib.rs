@@ -33,6 +33,7 @@ pub mod peer_identity;
 pub mod peer_image_history;
 pub mod peer_image_import;
 mod peer_image_sqlite;
+pub mod peer_image_thumbnail;
 mod peer_import_sqlite;
 pub mod peer_pairing;
 pub mod peer_text_history;
@@ -174,6 +175,20 @@ pub use peer_image_import::{
 #[cfg(feature = "local-peer-pairing-tls")]
 pub use peer_image_import::{
     PeerImageImportHostHandlerAdapter, PeerPairingFetchImageTransportAdapter,
+};
+#[cfg(feature = "local-peer-pairing-tls")]
+pub use peer_image_thumbnail::PeerPairingFetchImageThumbnailTransportAdapter;
+pub use peer_image_thumbnail::{
+    thumbnail_png_for_entry, EncodedThumbnail, HostImageThumbnailBytes, HostInFlightGuard,
+    InMemoryImageThumbnailHostPersistence, NoopPeerFetchImageThumbnailTransport,
+    PeerFetchImageThumbnailRequest, PeerFetchImageThumbnailResponse,
+    PeerFetchImageThumbnailTransport, PeerFetchImageThumbnailTransportError,
+    PeerImageThumbnailCapabilityResolver, PeerImageThumbnailError, PeerImageThumbnailHostError,
+    PeerImageThumbnailHostGate, PeerImageThumbnailHostHandler, PeerImageThumbnailHostPersistence,
+    PeerImageThumbnailHostSource, PeerImageThumbnailOutcome, PeerImageThumbnailService,
+    PeerImageThumbnailTrustState, SqliteImageThumbnailHostPersistence, ThumbnailEncodeError,
+    THUMBNAIL_CLIENT_MAX_INFLIGHT_PER_PEER, THUMBNAIL_HOST_MAX_INFLIGHT_PER_PEER,
+    THUMBNAIL_MAX_BODY_BYTES, THUMBNAIL_MAX_LONGEST_SIDE,
 };
 pub use peer_pairing::{
     compute_sas, default_peer_transport, PairingError, PairingMessage, PairingOutcome,

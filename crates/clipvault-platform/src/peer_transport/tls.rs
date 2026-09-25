@@ -56,6 +56,7 @@ use super::wire::{compute_sas, PairingMessage};
 use super::{
     derive_cert_fingerprint, PairingAdvertisementSink, PeerTransportObservation, TransportError,
     TransportSink, FETCH_IMAGE_MAX_BODY_BYTES, FETCH_IMAGE_MAX_RESPONSE_BYTES,
+    FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES, FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES,
     FETCH_TEXT_MAX_BODY_BYTES, FETCH_TEXT_MAX_RESPONSE_BYTES, HISTORY_MAX_RESPONSE_BYTES,
     HISTORY_WIRE_VERSION, IMAGE_HISTORY_MAX_RESPONSE_BYTES, IMAGE_WIRE_VERSION,
     PAIRING_MAX_IN_FLIGHT_SESSIONS, PAIRING_WIRE_VERSION,
@@ -640,6 +641,7 @@ pub fn install_with_material_and_resolver(
     let preserved_fetch_handler = state_guard.fetch_handler.clone();
     let preserved_image_history_handler = state_guard.image_history_handler.clone();
     let preserved_image_fetch_handler = state_guard.image_fetch_handler.clone();
+    let preserved_image_thumbnail_handler = state_guard.image_thumbnail_handler.clone();
     drop(state_guard);
     install_with_material_resolver_and_history(
         transport,
@@ -652,6 +654,7 @@ pub fn install_with_material_and_resolver(
         preserved_fetch_handler,
         preserved_image_history_handler,
         preserved_image_fetch_handler,
+        preserved_image_thumbnail_handler,
     )
 }
 
@@ -674,6 +677,7 @@ pub fn install_with_material_resolver_and_history(
     fetch_handler: Option<Arc<dyn super::FetchTextHostHandler>>,
     image_history_handler: Option<Arc<dyn super::ImageHistoryHostHandler>>,
     image_fetch_handler: Option<Arc<dyn super::FetchImageHostHandler>>,
+    image_thumbnail_handler: Option<Arc<dyn super::FetchImageThumbnailHostHandler>>,
 ) -> Result<u16, TransportError> {
     if transport
         .running
@@ -693,6 +697,7 @@ pub fn install_with_material_resolver_and_history(
         let mut state = transport.state.lock().expect("state lock");
         state.image_history_handler = image_history_handler.clone();
         state.image_fetch_handler = image_fetch_handler.clone();
+        state.image_thumbnail_handler = image_thumbnail_handler.clone();
     }
 
     let identity = material.identity().clone();
@@ -771,6 +776,7 @@ pub fn install_with_material_resolver_and_history(
         let fetch_handler_for_task = fetch_handler.as_ref().map(Arc::clone);
         let image_history_handler_for_task = image_history_handler.as_ref().map(Arc::clone);
         let image_fetch_handler_for_task = image_fetch_handler.as_ref().map(Arc::clone);
+        let image_thumbnail_handler_for_task = image_thumbnail_handler.as_ref().map(Arc::clone);
         let accept_handle = runtime.spawn(async move {
             run_accept_loop(
                 listener,
@@ -790,6 +796,7 @@ pub fn install_with_material_resolver_and_history(
                 fetch_handler_for_task,
                 image_history_handler_for_task,
                 image_fetch_handler_for_task,
+                image_thumbnail_handler_for_task,
             )
             .await;
         });
@@ -815,6 +822,7 @@ pub fn install_with_material_resolver_and_history(
         // historical handler pattern.
         state.image_history_handler = image_history_handler;
         state.image_fetch_handler = image_fetch_handler;
+        state.image_thumbnail_handler = image_thumbnail_handler;
         // The handshake pin lookup is the single source of
         // truth shared between the verifier, the inbound health
         // handler and `arm_pin` / `disarm_pin`. The install path
@@ -1283,6 +1291,16 @@ async fn run_accept_loop(
     // an authenticated peer asks for `fetch_image`. Mirrors
     // the `fetch_text` hot-swap pattern.
     image_fetch_handler: Option<Arc<dyn super::FetchImageHostHandler>>,
+    // Host-side image thumbnail handler the listener drives
+    // when an authenticated peer asks for
+    // `fetch_image_thumbnail`. The bootstrap installs the
+    // adapter through `install_image_thumbnail_handler`
+    // before any inbound connection lands so the very first
+    // envelope already sees the productive handler. The
+    // `peer-image-preview-thumbnails` change ships this
+    // handler so the remote rail can render a bounded
+    // thumbnail without shipping the original PNG.
+    image_thumbnail_handler: Option<Arc<dyn super::FetchImageThumbnailHostHandler>>,
 ) {
     loop {
         if cancel.load(Ordering::Acquire) {
@@ -1317,6 +1335,7 @@ async fn run_accept_loop(
         let fetch_handler_for_session = fetch_handler.as_ref().map(Arc::clone);
         let image_history_handler_for_session = image_history_handler.as_ref().map(Arc::clone);
         let image_fetch_handler_for_session = image_fetch_handler.as_ref().map(Arc::clone);
+        let image_thumbnail_handler_for_session = image_thumbnail_handler.as_ref().map(Arc::clone);
         tokio::spawn(async move {
             let outcome = handle_connection(
                 stream,
@@ -1337,6 +1356,7 @@ async fn run_accept_loop(
                 fetch_handler_for_session,
                 image_history_handler_for_session,
                 image_fetch_handler_for_session,
+                image_thumbnail_handler_for_session,
             )
             .await;
             if !matches!(outcome, ConnectionOutcome::Completed) {
@@ -1388,6 +1408,7 @@ async fn handle_connection(
     fetch_handler: Option<Arc<dyn super::FetchTextHostHandler>>,
     image_history_handler: Option<Arc<dyn super::ImageHistoryHostHandler>>,
     image_fetch_handler: Option<Arc<dyn super::FetchImageHostHandler>>,
+    image_thumbnail_handler: Option<Arc<dyn super::FetchImageThumbnailHostHandler>>,
 ) -> ConnectionOutcome {
     let _ = peer_addr;
     let tls_stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
@@ -1437,6 +1458,7 @@ async fn handle_connection(
             fetch_handler,
             image_history_handler,
             image_fetch_handler,
+            image_thumbnail_handler,
         ),
     )
     .await;
@@ -1498,6 +1520,7 @@ async fn run_pairing_session<IO>(
     fetch_handler: Option<Arc<dyn super::FetchTextHostHandler>>,
     image_history_handler: Option<Arc<dyn super::ImageHistoryHostHandler>>,
     image_fetch_handler: Option<Arc<dyn super::FetchImageHostHandler>>,
+    image_thumbnail_handler: Option<Arc<dyn super::FetchImageThumbnailHostHandler>>,
 ) -> Result<(), String>
 where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1597,6 +1620,23 @@ where
                 &peer_cert_slot,
                 handshake_pins,
                 image_fetch_handler,
+            )
+            .await;
+        }
+        PairingMessage::FetchImageThumbnail {
+            version,
+            peer_id,
+            remote_entry_id,
+        } => {
+            return handle_fetch_image_thumbnail_session(
+                &mut stream,
+                version,
+                peer_id,
+                remote_entry_id,
+                &local_peer_id,
+                &peer_cert_slot,
+                handshake_pins,
+                image_thumbnail_handler,
             )
             .await;
         }
@@ -2343,6 +2383,150 @@ where
     Ok(())
 }
 
+/// Handle a `FetchImageThumbnail` envelope the listener accepted.
+/// The handler mirrors the auth path the [`handle_fetch_image_session`]
+/// helper uses: the remote cert's SPKI must derive the declared
+/// `peer_id` and the runtime must have armed the matching pin
+/// before any byte crosses the application layer. The host-side
+/// bytes are delegated to the
+/// [`super::FetchImageThumbnailHostHandler`] the bootstrap
+/// installed; a `None` handler collapses to
+/// [`PairingMessage::FetchImageThumbnailUnavailable`] with
+/// `reason = not_available` so a future host that has not enabled
+/// the change still speaks the wire contract. The handler
+/// re-validates the [`FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES`] cap
+/// on the bytes before writing the envelope so a drifted handler
+/// cannot accidentally stream more than the documented limit.
+#[cfg(feature = "local-peer-pairing-tls")]
+async fn handle_fetch_image_thumbnail_session<IO>(
+    stream: &mut TlsStream<IO>,
+    version: u32,
+    peer_id: String,
+    remote_entry_id: String,
+    local_peer_id: &str,
+    peer_cert_slot: &Arc<PeerCertSlot>,
+    handshake_pins: Arc<HandshakePinLookup>,
+    image_thumbnail_handler: Option<Arc<dyn super::FetchImageThumbnailHostHandler>>,
+) -> Result<(), String>
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if version != IMAGE_WIRE_VERSION {
+        return Err("incompatible image wire version".to_string());
+    }
+    let remote_cert_der = peer_cert_slot
+        .take()
+        .ok_or_else(|| "remote peer cert not delivered".to_string())?;
+    let remote_public_key = extract_ed25519_public_key_from_cert(&remote_cert_der)
+        .ok_or_else(|| "remote peer cert does not embed an Ed25519 SPKI".to_string())?;
+    let remote_peer_id = super::peer_id_from_public_key(&{
+        let mut key = [0u8; 32];
+        if remote_public_key.len() != 32 {
+            return Err("remote public key has invalid length".to_string());
+        }
+        key.copy_from_slice(&remote_public_key);
+        key
+    });
+    if peer_id != remote_peer_id {
+        return Err("fetch_image_thumbnail peer_id does not match SPKI".to_string());
+    }
+    let presented = derive_cert_fingerprint(&remote_cert_der);
+    let pin = handshake_pins.lookup(&remote_peer_id);
+    match pin {
+        Some(expected) if expected == presented => {}
+        Some(_) => return Err("key mismatch".to_string()),
+        None => return Err("unknown peer".to_string()),
+    }
+
+    let reply = match image_thumbnail_handler {
+        Some(handler) => match handler.fetch_image_thumbnail(&remote_peer_id, &remote_entry_id) {
+            super::HostImageThumbnailResponse::Ok {
+                bytes,
+                width,
+                height,
+            } => {
+                if bytes.len() > FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES {
+                    // Defence in depth: the handler contract pins
+                    // the cap, but the listener refuses anything
+                    // larger as a safety net.
+                    PairingMessage::FetchImageThumbnailUnavailable {
+                        version: IMAGE_WIRE_VERSION,
+                        peer_id: local_peer_id.to_string(),
+                        remote_entry_id,
+                        reason: "body_too_large".to_string(),
+                    }
+                } else {
+                    // The wire envelope carries the PNG payload
+                    // as a base64 string so the JSON envelope
+                    // stays bounded by the
+                    // [`FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES`]
+                    // cap. The dialer decodes the value locally,
+                    // re-validates the PNG signature and the
+                    // dimension cap before turning the bytes into
+                    // an Object URL.
+                    let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    PairingMessage::FetchImageThumbnailAck {
+                        version: IMAGE_WIRE_VERSION,
+                        peer_id: local_peer_id.to_string(),
+                        remote_entry_id,
+                        bytes_b64,
+                        width,
+                        height,
+                    }
+                }
+            }
+            super::HostImageThumbnailResponse::NotFound => {
+                PairingMessage::FetchImageThumbnailUnavailable {
+                    version: IMAGE_WIRE_VERSION,
+                    peer_id: local_peer_id.to_string(),
+                    remote_entry_id,
+                    reason: "not_found".to_string(),
+                }
+            }
+            super::HostImageThumbnailResponse::NotTransferable => {
+                PairingMessage::FetchImageThumbnailUnavailable {
+                    version: IMAGE_WIRE_VERSION,
+                    peer_id: local_peer_id.to_string(),
+                    remote_entry_id,
+                    reason: "not_transferable".to_string(),
+                }
+            }
+            super::HostImageThumbnailResponse::Busy => {
+                PairingMessage::FetchImageThumbnailUnavailable {
+                    version: IMAGE_WIRE_VERSION,
+                    peer_id: local_peer_id.to_string(),
+                    remote_entry_id,
+                    reason: "busy".to_string(),
+                }
+            }
+            super::HostImageThumbnailResponse::BodyTooLarge => {
+                PairingMessage::FetchImageThumbnailUnavailable {
+                    version: IMAGE_WIRE_VERSION,
+                    peer_id: local_peer_id.to_string(),
+                    remote_entry_id,
+                    reason: "body_too_large".to_string(),
+                }
+            }
+            super::HostImageThumbnailResponse::PersistenceUnavailable => {
+                PairingMessage::FetchImageThumbnailUnavailable {
+                    version: IMAGE_WIRE_VERSION,
+                    peer_id: local_peer_id.to_string(),
+                    remote_entry_id,
+                    reason: "persistence_unavailable".to_string(),
+                }
+            }
+        },
+        None => PairingMessage::FetchImageThumbnailUnavailable {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: local_peer_id.to_string(),
+            remote_entry_id,
+            reason: "not_available".to_string(),
+        },
+    };
+    write_envelope(stream, &reply).await?;
+    Ok(())
+}
+
 /// Read a single length-prefixed envelope using the pairing request budget.
 async fn read_envelope<IO>(stream: &mut TlsStream<IO>) -> Result<PairingMessage, String>
 where
@@ -2382,6 +2566,7 @@ fn envelope_payload_limit(message: &PairingMessage) -> usize {
         PairingMessage::ListRecentTextAck { .. } => HISTORY_MAX_RESPONSE_BYTES,
         PairingMessage::ListRecentImagesAck { .. } => IMAGE_HISTORY_MAX_RESPONSE_BYTES,
         PairingMessage::FetchImageAck { .. } => FETCH_IMAGE_MAX_RESPONSE_BYTES,
+        PairingMessage::FetchImageThumbnailAck { .. } => FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES,
         _ => MAX_INBOUND_PAYLOAD,
     }
 }
@@ -2801,6 +2986,25 @@ pub fn install_image_fetch_handler(
     Ok(())
 }
 
+/// Install (or replace) the
+/// [`super::FetchImageThumbnailHostHandler`] the listener drives
+/// when a `FetchImageThumbnail` envelope lands. The bootstrap
+/// installs the adapter once it has loaded the productive
+/// pairing material so the very first inbound
+/// `FetchImageThumbnail` envelope can already be served without
+/// falling back to the typed `not_available` reason. Idempotent:
+/// a second call replaces the previous handler so the runtime
+/// can hot-swap the adapter without restarting the listener.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub fn install_image_thumbnail_handler(
+    transport: &super::TlsPeerTransport,
+    handler: Arc<dyn super::FetchImageThumbnailHostHandler>,
+) -> Result<(), super::TransportError> {
+    let mut state = transport.state.lock().expect("state lock");
+    state.image_thumbnail_handler = Some(handler);
+    Ok(())
+}
+
 /// Authenticated `list_recent_images` dial driver the
 /// `peer-image-import` change exposes through the productive
 /// transport. The transport dials the remote listener over
@@ -2970,6 +3174,101 @@ pub fn fetch_image(
                 return Err(super::TransportError::UnknownPeer);
             }
             if snapshot.bytes.len() > super::FETCH_IMAGE_MAX_BODY_BYTES {
+                return Err(super::TransportError::BodyTooLarge);
+            }
+            Ok(snapshot)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Authenticated `fetch_image_thumbnail` dial driver the
+/// `peer-image-preview-thumbnails` change exposes through the
+/// productive transport. The transport dials the remote
+/// listener over mTLS, exchanges the bounded
+/// `FetchImageThumbnail` envelope and returns either the
+/// bounded [`super::PeerImageThumbnailSnapshot`] the host
+/// emitted or one of the typed [`super::TransportError`]
+/// variants the runtime already branches on.
+///
+/// The transport re-validates the
+/// [`super::FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES`] cap locally
+/// before handing the snapshot back so a drifted host cannot
+/// accidentally bypass the documented threshold. The caller
+/// re-validates the PNG signature and the dimension cap before
+/// turning the bytes into an Object URL; the transport never
+/// persists the PNG or substitutes the snapshot for the
+/// original [`super::PeerImageFetchSnapshot`] the explicit
+/// `Importar` flow uses.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub fn fetch_image_thumbnail(
+    transport: &super::TlsPeerTransport,
+    peer_id: &str,
+    cert_fingerprint: &str,
+    remote_entry_id: &str,
+) -> Result<super::PeerImageThumbnailSnapshot, super::TransportError> {
+    use super::PeerTransport;
+    health_check(transport, peer_id, cert_fingerprint)?;
+
+    if !transport.is_running() {
+        return Err(super::TransportError::Unavailable);
+    }
+    let (material, resolver, runtime, pins) = {
+        let state = transport.state.lock().expect("state lock");
+        let material = state
+            .local_material
+            .clone()
+            .ok_or(super::TransportError::Crypto)?;
+        let resolver = state.resolver.clone();
+        let runtime_handle_opt = state.runtime.clone();
+        let pins = Arc::clone(&state.handshake_pins);
+        drop(state);
+        let runtime_handle = runtime_handle_opt.ok_or(super::TransportError::Unavailable)?;
+        (material, resolver, runtime_handle, pins)
+    };
+
+    let resolver = match resolver {
+        Some(resolver) => resolver,
+        None => return Err(super::TransportError::Unavailable),
+    };
+    let connector = build_dial_connector(&material, Arc::clone(&pins));
+    let remote_for_dial = remote_entry_id.to_string();
+    let result = runtime.block_on(async move {
+        let mut last_error = super::TransportError::PeerUnresolved;
+        for attempt in 0..HISTORY_DIAL_ATTEMPTS {
+            let Some(addr) = resolver.resolve(peer_id) else {
+                last_error = super::TransportError::PeerUnresolved;
+                if attempt + 1 < HISTORY_DIAL_ATTEMPTS {
+                    tokio::time::sleep(HISTORY_DIAL_RETRY_DELAY).await;
+                    continue;
+                }
+                break;
+            };
+            match dial_fetch_image_thumbnail_async(
+                connector.clone(),
+                addr,
+                material.clone(),
+                peer_id,
+                &remote_for_dial,
+            )
+            .await
+            {
+                Ok(snapshot) => return Ok(snapshot),
+                Err(super::TransportError::Unavailable) if attempt + 1 < HISTORY_DIAL_ATTEMPTS => {
+                    last_error = super::TransportError::Unavailable;
+                    tokio::time::sleep(HISTORY_DIAL_RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error)
+    });
+    match result {
+        Ok(snapshot) => {
+            if snapshot.peer_id != peer_id {
+                return Err(super::TransportError::UnknownPeer);
+            }
+            if snapshot.bytes.len() > super::FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES {
                 return Err(super::TransportError::BodyTooLarge);
             }
             Ok(snapshot)
@@ -4589,6 +4888,104 @@ async fn dial_fetch_image_async(
     }
 }
 
+/// Productive `fetch_image_thumbnail` dial driver the
+/// `peer-image-preview-thumbnails` change ships. The function
+/// dials the remote listener over mTLS, exchanges the bounded
+/// `FetchImageThumbnail` envelope and returns either the
+/// bounded [`super::PeerImageThumbnailSnapshot`] the host
+/// emitted or one of the typed [`super::TransportError`]
+/// variants the runtime already branches on.
+///
+/// The transport re-validates the
+/// [`FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES`] cap locally before
+/// returning the snapshot so a drifted host cannot bypass the
+/// documented threshold. The caller re-validates the PNG
+/// signature and the dimension cap before turning the bytes
+/// into an Object URL.
+async fn dial_fetch_image_thumbnail_async(
+    connector: tokio_rustls::TlsConnector,
+    remote_addr: SocketAddr,
+    material: LocalIdentityMaterial,
+    peer_id: &str,
+    remote_entry_id: &str,
+) -> Result<super::PeerImageThumbnailSnapshot, super::TransportError> {
+    use rustls::pki_types::ServerName;
+    let stream = tokio::net::TcpStream::connect(remote_addr)
+        .await
+        .map_err(|_| super::TransportError::Unavailable)?;
+    let server_name = ServerName::try_from("clipvault.local")
+        .map_err(|_| super::TransportError::Unavailable)?
+        .to_owned();
+    let mut tls_stream: TlsStream<tokio::net::TcpStream> = TlsStream::Client(
+        connector
+            .connect(server_name, stream)
+            .await
+            .map_err(|_| super::TransportError::KeyMismatch)?,
+    );
+    let request = PairingMessage::FetchImageThumbnail {
+        version: IMAGE_WIRE_VERSION,
+        peer_id: material.identity().peer_id.to_string(),
+        remote_entry_id: remote_entry_id.to_string(),
+    };
+    write_envelope(&mut tls_stream, &request)
+        .await
+        .map_err(|_| super::TransportError::Unavailable)?;
+    let reply = read_envelope_with_limit(&mut tls_stream, FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES)
+        .await
+        .map_err(|_| super::TransportError::Unavailable)?;
+    match reply {
+        PairingMessage::FetchImageThumbnailAck {
+            version: _,
+            peer_id: ack_peer_id,
+            remote_entry_id: ack_remote_entry_id,
+            bytes_b64,
+            width,
+            height,
+        } => {
+            if ack_peer_id != peer_id {
+                return Err(super::TransportError::UnknownPeer);
+            }
+            if ack_remote_entry_id != remote_entry_id {
+                return Err(super::TransportError::UnknownPeer);
+            }
+            // Decode the base64 envelope the host emitted. A
+            // malformed payload collapses to `Malformed` so the
+            // runtime never sees a partially-decoded byte
+            // stream. The dialer re-validates the size against
+            // the documented cap because the wire may have been
+            // drifted / malicious and the listener's own cap is
+            // a best-effort guard.
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(bytes_b64.as_bytes())
+            {
+                Ok(bytes) => bytes,
+                Err(_) => return Err(super::TransportError::Malformed),
+            };
+            if bytes.len() > FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES {
+                return Err(super::TransportError::BodyTooLarge);
+            }
+            Ok(super::PeerImageThumbnailSnapshot {
+                peer_id: ack_peer_id,
+                remote_entry_id: ack_remote_entry_id,
+                bytes,
+                width,
+                height,
+            })
+        }
+        PairingMessage::FetchImageThumbnailUnavailable { reason, .. } => match reason.as_str() {
+            "not_found" | "not_transferable" | "invalid_png" => {
+                Err(super::TransportError::Malformed)
+            }
+            "not_trusted" | "not_active" => Err(super::TransportError::Revoked),
+            "pin_invalid" | "capability_missing" => Err(super::TransportError::KeyMismatch),
+            "persistence_unavailable" | "busy" => Err(super::TransportError::Unavailable),
+            "body_too_large" => Err(super::TransportError::BodyTooLarge),
+            "not_available" => Err(super::TransportError::Unavailable),
+            _ => Err(super::TransportError::Unavailable),
+        },
+        _ => Err(super::TransportError::IncompatibleProtocol),
+    }
+}
+
 // Silence the unused-import lint when the test surface isn't
 // pulled in but keeps the symbols available for downstream
 // crates that consume them through re-exports.
@@ -5662,6 +6059,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("install host");
 
@@ -5833,6 +6231,7 @@ mod tests {
             "bare-host".to_string(),
             bare_advertisement,
             bare_sink,
+            None,
             None,
             None,
             None,

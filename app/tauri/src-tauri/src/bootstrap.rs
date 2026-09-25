@@ -5839,6 +5839,14 @@ mod tests {
         }
 
         #[cfg(feature = "local-peer-pairing-tls")]
+        fn install_image_thumbnail_handler(
+            &self,
+            _handler: Arc<dyn clipvault_platform::peer_transport::FetchImageThumbnailHostHandler>,
+        ) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        #[cfg(feature = "local-peer-pairing-tls")]
         fn install_image_fetch_handler(
             &self,
             _handler: Arc<dyn clipvault_platform::peer_transport::FetchImageHostHandler>,

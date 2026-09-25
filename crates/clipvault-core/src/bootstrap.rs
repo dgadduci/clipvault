@@ -283,6 +283,16 @@ pub struct AppContext {
     /// / paste, and never carries the imported bytes outside the
     /// authenticated fetch + commit window.
     peer_image_import: crate::peer_image_import::PeerImageImportService,
+    /// Bounded PNG thumbnail façade the
+    /// `peer-image-preview-thumbnails` change ships. The shell
+    /// drives [`PeerImageThumbnailService::fetch_thumbnail`]
+    /// from the new Tauri command when a remote image card
+    /// intersects the visible remote-history viewport; the
+    /// service collapses every failure mode into a typed
+    /// [`crate::peer_image_thumbnail::PeerImageThumbnailOutcome`]
+    /// so the renderer can keep the static placeholder without
+    /// surfacing a global rail error.
+    peer_image_thumbnail: crate::peer_image_thumbnail::PeerImageThumbnailService,
     /// Concrete mDNS adapter the bootstrap installed for
     /// discovery. The toggle command wires this handle into the
     /// `PairingAdvertisement` the productive pairing transport
@@ -600,6 +610,17 @@ impl AppContext {
     /// `Importar` action.
     pub fn peer_image_import(&self) -> &crate::peer_image_import::PeerImageImportService {
         &self.peer_image_import
+    }
+
+    /// Bounded PNG thumbnail façade the
+    /// `peer-image-preview-thumbnails` change ships. The shell
+    /// drives the service from the new Tauri command when a
+    /// remote image card intersects the visible remote-history
+    /// viewport. The façade is metadata-only by construction:
+    /// it never persists the generated PNG and never substitutes
+    /// the snapshot for the original `Importar` payload.
+    pub fn peer_image_thumbnail(&self) -> &crate::peer_image_thumbnail::PeerImageThumbnailService {
+        &self.peer_image_thumbnail
     }
 
     /// Best-effort wire of the local peer identity the runtime
@@ -1530,11 +1551,155 @@ impl AppBootstrap {
                     "productive image fetch handler install failed; bootstrap continues with no host image import"
                 );
             }
+
+            // Install the host-side image-thumbnail handler the
+            // `peer-image-preview-thumbnails` change ships. The
+            // handler borrows the same shared database handle +
+            // asset store the runtime already holds so the wire
+            // contract stays consistent with the image-fetch
+            // path. The bootstrap wires both capability
+            // resolvers (the thumbnail route additionally
+            // requires `image_import`) so a peer that only ships
+            // one of the two collapses to the typed
+            // `capability_missing` reason without persisting or
+            // serving the derivative.
+            let peer_image_thumbnail_capability_resolver:
+                crate::peer_image_thumbnail::PeerImageThumbnailCapabilityResolver = Arc::new({
+                let database_for_resolver = Arc::clone(&database_handle);
+                move |peer_id: &str| -> bool {
+                    let mut db = database_for_resolver.lock();
+                    let conn = db.connection_mut();
+                    let repo = clipvault_db::KnownPeerRepository::new(conn);
+                    match repo.get(peer_id) {
+                        Ok(Some(row)) => crate::peer_discovery::decode_capabilities(
+                            &row.caps_extra,
+                        )
+                        .iter()
+                        .any(|token| {
+                            token
+                                == crate::peer_discovery::IMAGE_PREVIEW_THUMBNAIL_CAPABILITY
+                        }),
+                        Ok(None) => false,
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "image thumbnail capability resolver: known_peers lookup failed; defaulting to capability absent"
+                            );
+                            false
+                        }
+                    }
+                }
+            });
+            // Host-side persistence adapter the listener drives
+            // when an authenticated peer asks for the bounded
+            // thumbnail. The adapter borrows the same shared
+            // SQLite handle + asset store the productive
+            // image-fetch adapter already uses, so the wire
+            // contract stays consistent with the rest of the
+            // peer-image pipeline.
+            let image_thumbnail_persistence: Arc<
+                dyn crate::peer_image_thumbnail::PeerImageThumbnailHostPersistence,
+            > = Arc::new(
+                crate::peer_image_thumbnail::SqliteImageThumbnailHostPersistence::new(
+                    Arc::clone(&database_handle),
+                    peer_image_import_asset_store.clone(),
+                ),
+            );
+            let image_thumbnail_gate =
+                Arc::new(crate::peer_image_thumbnail::PeerImageThumbnailHostGate::new());
+            // Host-side capability resolvers the handler
+            // consults before serving the thumbnail. The
+            // thumbnail route requires BOTH `image_import` and
+            // `image_preview_thumbnail` so a peer that ships
+            // only one collapses to the typed
+            // `capability_missing` reason.
+            let thumbnail_cap_resolver:
+                crate::peer_image_thumbnail::PeerImageThumbnailHostCapabilityResolver =
+                Arc::clone(&peer_image_thumbnail_capability_resolver);
+            let image_import_cap_resolver:
+                crate::peer_image_thumbnail::PeerImageThumbnailHostCapabilityResolver =
+                Arc::clone(&peer_image_import_capability_resolver);
+            let image_thumbnail_handler: Arc<
+                dyn clipvault_platform::peer_transport::FetchImageThumbnailHostHandler,
+            > = Arc::new(
+                crate::peer_image_thumbnail::PeerImageThumbnailHostHandler::new(
+                    image_thumbnail_persistence,
+                    image_thumbnail_gate,
+                )
+                .with_capability_resolvers(thumbnail_cap_resolver, image_import_cap_resolver),
+            );
+            if let Err(error) =
+                peer_pairing.install_image_thumbnail_handler_inner(image_thumbnail_handler)
+            {
+                tracing::warn!(
+                    ?error,
+                    "productive image thumbnail handler install failed; bootstrap continues with no host image thumbnails"
+                );
+            }
         }
         #[cfg(feature = "local-peer-pairing-tls")]
         let _pairing_transport_arc = Arc::clone(&pairing_transport);
         #[cfg(not(feature = "local-peer-pairing-tls"))]
         let _pairing_transport_arc = ();
+        // Build the client-side thumbnail façade the
+        // `peer-image-preview-thumbnails` change ships. The
+        // service borrows the same productive transport the
+        // bridge hands to the image-fetch / history façades so
+        // the mTLS dial loop is shared with the productive
+        // pairing routes; on builds without the TLS feature
+        // pair the service falls back to the noop transport the
+        // shell already uses for the image import bridge. The
+        // service is metadata-only by construction: it never
+        // persists the generated PNG and never substitutes the
+        // snapshot for the original `Importar` payload.
+        let peer_image_thumbnail_transport_for_context: Arc<
+            dyn crate::peer_image_thumbnail::PeerFetchImageThumbnailTransport,
+        > = {
+            #[cfg(feature = "local-peer-pairing-tls")]
+            {
+                Arc::new(
+                    crate::peer_image_thumbnail::PeerPairingFetchImageThumbnailTransportAdapter::new(
+                        Arc::clone(&_pairing_transport_arc),
+                    ),
+                )
+            }
+            #[cfg(not(feature = "local-peer-pairing-tls"))]
+            {
+                Arc::new(crate::peer_image_thumbnail::NoopPeerFetchImageThumbnailTransport)
+            }
+        };
+        let peer_image_thumbnail_capability_resolver_for_context:
+            crate::peer_image_thumbnail::PeerImageThumbnailCapabilityResolver = Arc::new({
+            let database_for_resolver = Arc::clone(&database_handle);
+            move |peer_id: &str| -> bool {
+                let mut db = database_for_resolver.lock();
+                let conn = db.connection_mut();
+                let repo = clipvault_db::KnownPeerRepository::new(conn);
+                match repo.get(peer_id) {
+                    Ok(Some(row)) => crate::peer_discovery::decode_capabilities(
+                        &row.caps_extra,
+                    )
+                    .iter()
+                    .any(|token| {
+                        token == crate::peer_discovery::IMAGE_PREVIEW_THUMBNAIL_CAPABILITY
+                    }),
+                    Ok(None) => false,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "image thumbnail capability resolver: known_peers lookup failed; defaulting to capability absent"
+                        );
+                        false
+                    }
+                }
+            }
+        });
+        let peer_image_thumbnail = crate::peer_image_thumbnail::PeerImageThumbnailService::new(
+            peer_image_thumbnail_transport_for_context,
+        )
+        .with_capability_resolver(Arc::clone(
+            &peer_image_thumbnail_capability_resolver_for_context,
+        ));
         // Pre-populate both per-peer HMAC secret caches from the
         // persisted `known_peers.cursor_secret` rows. The services
         // mirror this persisted secret so a restart never invalidates
@@ -1652,6 +1817,7 @@ impl AppBootstrap {
             peer_text_import,
             peer_image_history,
             peer_image_import,
+            peer_image_thumbnail,
             // The capture-debug sink is either the caller-supplied
             // handle (tests) or the production wiring that consults
             // `CLIPVAULT_DEBUG_CAPTURE` exactly once at startup. When

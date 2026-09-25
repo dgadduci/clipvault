@@ -193,6 +193,28 @@ pub const FETCH_IMAGE_MAX_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
 /// tests.
 pub const FETCH_IMAGE_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
+/// Hard cap the `peer-image-preview-thumbnails` change pins on
+/// the encoded thumbnail body. The value mirrors the documented
+/// 384 KiB cap the design pins: the host MUST reject any
+/// generated PNG larger than this threshold with a typed
+/// `body_too_large` reason and never ship oversized bytes to
+/// the client. The caller re-validates the size against the
+/// decoded byte length so a drifted host cannot bypass the
+/// contract.
+pub const FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES: usize = 384 * 1024;
+
+/// Maximum serialized size of one authenticated
+/// `FetchImageThumbnailAck` envelope. The wire carries the
+/// bounded PNG payload as a base64 string so the worst-case
+/// framing overhead is `4 * bytes / 3`; the cap is sized so a
+/// fully-valid 384 KiB PNG fits the envelope (≈512 KiB) plus a
+/// small budget for the surrounding metadata (peer_id,
+/// remote_entry_id, version, dimensions and JSON formatting).
+/// The runtime enforces the cap on both the listener (which
+/// refuses any body larger than the threshold) and the
+/// caller (which never trusts the listener's word alone).
+pub const FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES: usize = 544 * 1024;
+
 /// Maximum number of in-flight pairing sessions the listener keeps
 /// open concurrently. The transport surfaces a typed rejection when a
 /// remote peer tries to start a session above the cap so a single
@@ -535,6 +557,83 @@ pub enum HostImageFetchResponse {
     PersistenceUnavailable,
 }
 
+/// Host-side handler the listener drives when a
+/// `FetchImageThumbnail` envelope lands after a successful mTLS
+/// handshake. The trait is feature-gated to the productive TLS
+/// path so cross-compiles and unsupported targets keep compiling.
+/// Implementations are expected to enforce the
+/// [`FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES`] cap on the generated
+/// PNG before returning the [`HostImageThumbnailResponse::Ok`]
+/// variant; returning a larger body is a contract violation the
+/// transport catches and rejects with
+/// [`HostImageThumbnailResponse::BodyTooLarge`].
+#[cfg(feature = "local-peer-pairing-tls")]
+pub trait FetchImageThumbnailHostHandler: Send + Sync {
+    /// Generate the bounded PNG thumbnail for `remote_entry_id`
+    /// and `peer_id`. The transport authenticated `peer_id`
+    /// against the pinned cert fingerprint before invoking the
+    /// handler. The implementation MUST re-validate the
+    /// capability gate, the entry eligibility and the asset
+    /// namespace before reading bytes; the runtime never trusts
+    /// client-supplied identifiers beyond the opaque
+    /// `remote_entry_id`.
+    fn fetch_image_thumbnail(
+        &self,
+        peer_id: &str,
+        remote_entry_id: &str,
+    ) -> HostImageThumbnailResponse;
+}
+
+/// Outcome the thumbnail-fetch handler returns to the listener.
+/// The transport forwards the variant through the wire envelope
+/// the spec pins: `FetchImageThumbnailAck` for [`Self::Ok`], every
+/// other variant collapses into `FetchImageThumbnailUnavailable`
+/// so the wire contract stays stable across hosts that have not
+/// shipped the thumbnail path yet. Every typed failure collapses
+/// into a stable reason string the client branches on; the
+/// generated PNG never crosses the wire on a failure path so the
+/// caller cannot leak the original image bytes through an error.
+#[cfg(feature = "local-peer-pairing-tls")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostImageThumbnailResponse {
+    /// The host re-validated the entry, generated the bounded
+    /// thumbnail and the resulting PNG body fits the
+    /// [`FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES`] cap. The
+    /// transport forwards the bytes verbatim; the client
+    /// re-validates the PNG signature and the dimension cap
+    /// before turning the bytes into an Object URL.
+    Ok {
+        /// Encoded PNG body, aspect ratio preserved, longest
+        /// side ≤ 256 px, transparency preserved when present.
+        bytes: Vec<u8>,
+        /// Width / height of the encoded PNG. The renderer can
+        /// use the dimensions to size the `<img>` element
+        /// without decoding the bytes.
+        width: u32,
+        height: u32,
+    },
+    /// The entry disappeared between the listing and the
+    /// thumbnail request, or it has been edited into a
+    /// non-transferable shape.
+    NotFound,
+    /// The entry exists but is no longer transferrable (no
+    /// `asset_ref`, oversized, mismatched MIME, …).
+    NotTransferable,
+    /// The host refused to start the resize because the
+    /// per-peer concurrency limit was reached. The caller
+    /// treats this as a transient unavailability without
+    /// surfacing a global rail error.
+    Busy,
+    /// The generated PNG exceeded the
+    /// [`FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES`] cap. The
+    /// transport never ships an oversized body and the
+    /// caller keeps the static placeholder.
+    BodyTooLarge,
+    /// The persistence layer refused the lookup (SQLite
+    /// error, missing handle, asset store failure, …).
+    PersistenceUnavailable,
+}
+
 /// Outcome the host-side fetch handler returns to the listener.
 /// The transport forwards the variant through the wire envelope
 /// the spec pins: `FetchTextAck` for [`HostFetchResponse::Ok`],
@@ -710,11 +809,13 @@ pub trait PeerTransport: Send + Sync {
         fetch_handler: Option<Arc<dyn FetchTextHostHandler>>,
         image_history_handler: Option<Arc<dyn ImageHistoryHostHandler>>,
         image_fetch_handler: Option<Arc<dyn FetchImageHostHandler>>,
+        image_thumbnail_handler: Option<Arc<dyn FetchImageThumbnailHostHandler>>,
     ) -> Result<u16, TransportError> {
         let _ = history_handler;
         let _ = fetch_handler;
         let _ = image_history_handler;
         let _ = image_fetch_handler;
+        let _ = image_thumbnail_handler;
         self.start_with_material_and_resolver(material, sink, advertisement, resolver, display_name)
     }
 
@@ -989,6 +1090,48 @@ pub trait PeerTransport: Send + Sync {
         let _ = (peer_id, cert_fingerprint, remote_entry_id);
         Err(TransportError::Unavailable)
     }
+
+    /// Install (or replace) the host-side
+    /// [`FetchImageThumbnailHostHandler`] the listener drives when
+    /// a `FetchImageThumbnail` envelope lands. The bootstrap calls
+    /// this after the productive pairing material loader returns
+    /// so the handler can rely on the same SQLite handle + asset
+    /// store the runtime already holds. Idempotent: a second call
+    /// replaces the previous handler so a future refactor that
+    /// re-wires the runtime cannot leak events to a stale sink.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_image_thumbnail_handler(
+        &self,
+        handler: Arc<dyn FetchImageThumbnailHostHandler>,
+    ) -> Result<(), TransportError>;
+
+    /// Open an authenticated `fetch_image_thumbnail` request
+    /// against the pinned peer. The transport dials the remote
+    /// listener over mTLS, exchanges the bounded
+    /// `fetch_image_thumbnail` envelope and returns either the
+    /// typed [`PeerImageThumbnailSnapshot`] the host emitted or
+    /// one of the typed [`TransportError`] variants the runtime
+    /// already branches on. The body the host returns is bounded
+    /// by [`FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES`]; the transport
+    /// re-validates the limit locally before handing the snapshot
+    /// back so a drifted host cannot accidentally bypass the
+    /// documented cap.
+    ///
+    /// The default implementation returns
+    /// [`TransportError::Unavailable`] so a transport that does
+    /// not yet wire the productive thumbnail envelope still
+    /// compiles — the shell surfaces the typed reason the
+    /// runtime already uses for the discovery-only contract.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn fetch_image_thumbnail(
+        &self,
+        peer_id: &str,
+        cert_fingerprint: &str,
+        remote_entry_id: &str,
+    ) -> Result<PeerImageThumbnailSnapshot, TransportError> {
+        let _ = (peer_id, cert_fingerprint, remote_entry_id);
+        Err(TransportError::Unavailable)
+    }
 }
 
 /// Metadata-only response the transport returns from
@@ -1073,6 +1216,27 @@ pub struct PeerImageFetchSnapshot {
     pub remote_entry_id: String,
     pub title: Option<String>,
     pub bytes: Vec<u8>,
+}
+
+/// Bounded response the transport returns from
+/// [`PeerTransport::fetch_image_thumbnail`]. The struct carries
+/// only the validated PNG body the host emitted through the
+/// dedicated thumbnail envelope: the bounded bytes the host
+/// capped at [`FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES`] and the
+/// resulting pixel dimensions. The transport re-validates the
+/// size locally before returning the snapshot so a drifted host
+/// cannot accidentally bypass the documented cap. The bytes are
+/// held in memory only between the fetch and the renderer; the
+/// caller never persists the PNG or substitutes the snapshot for
+/// the original [`PeerImageFetchSnapshot`] the explicit `Importar`
+/// flow uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerImageThumbnailSnapshot {
+    pub peer_id: String,
+    pub remote_entry_id: String,
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Platform-neutral handle the platform layer exposes to the
@@ -1309,6 +1473,17 @@ impl PeerTransport for NoopPeerTransport {
     ) -> Result<(), TransportError> {
         // The noop transport never opens a session, so an
         // image-fetch-handler install collapses to the typed
+        // `Unavailable` outcome the runtime already surfaces.
+        Err(TransportError::Unavailable)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_image_thumbnail_handler(
+        &self,
+        _handler: Arc<dyn FetchImageThumbnailHostHandler>,
+    ) -> Result<(), TransportError> {
+        // The noop transport never opens a session, so a
+        // thumbnail-handler install collapses to the typed
         // `Unavailable` outcome the runtime already surfaces.
         Err(TransportError::Unavailable)
     }
@@ -1561,6 +1736,17 @@ pub(crate) struct TransportState {
     /// `FetchImage` envelope lands. Mirrors the
     /// [`Self::fetch_handler`] hot-swap pattern.
     pub image_fetch_handler: Option<Arc<dyn FetchImageHostHandler>>,
+    /// Host-side image-thumbnail handler the listener drives
+    /// when a `FetchImageThumbnail` envelope lands. `None` on
+    /// hosts that do not ship the
+    /// `peer-image-preview-thumbnails` change yet — the
+    /// envelope collapses to `FetchImageThumbnailUnavailable
+    /// { reason: not_available }` so the wire contract stays
+    /// stable. The bootstrap installs the adapter after the
+    /// productive material loader returns so the handler can
+    /// rely on the same SQLite handle + asset store the
+    /// runtime already holds.
+    pub image_thumbnail_handler: Option<Arc<dyn FetchImageThumbnailHostHandler>>,
 }
 
 #[cfg(feature = "local-peer-pairing-tls")]
@@ -1587,6 +1773,7 @@ impl Default for TransportState {
             fetch_handler: None,
             image_history_handler: None,
             image_fetch_handler: None,
+            image_thumbnail_handler: None,
         }
     }
 }
@@ -1789,6 +1976,14 @@ impl PeerTransport for TlsPeerTransport {
     }
 
     #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_image_thumbnail_handler(
+        &self,
+        handler: Arc<dyn FetchImageThumbnailHostHandler>,
+    ) -> Result<(), TransportError> {
+        super::peer_transport::tls::install_image_thumbnail_handler(self, handler)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
     fn list_recent_images(
         &self,
         peer_id: &str,
@@ -1816,6 +2011,21 @@ impl PeerTransport for TlsPeerTransport {
     }
 
     #[cfg(feature = "local-peer-pairing-tls")]
+    fn fetch_image_thumbnail(
+        &self,
+        peer_id: &str,
+        cert_fingerprint: &str,
+        remote_entry_id: &str,
+    ) -> Result<PeerImageThumbnailSnapshot, TransportError> {
+        super::peer_transport::tls::fetch_image_thumbnail(
+            self,
+            peer_id,
+            cert_fingerprint,
+            remote_entry_id,
+        )
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
     fn start_with_material_resolver_and_history(
         &self,
         material: LocalIdentityMaterial,
@@ -1827,6 +2037,7 @@ impl PeerTransport for TlsPeerTransport {
         fetch_handler: Option<Arc<dyn FetchTextHostHandler>>,
         image_history_handler: Option<Arc<dyn ImageHistoryHostHandler>>,
         image_fetch_handler: Option<Arc<dyn FetchImageHostHandler>>,
+        image_thumbnail_handler: Option<Arc<dyn FetchImageThumbnailHostHandler>>,
     ) -> Result<u16, TransportError> {
         let adapter: Arc<dyn PairingAdvertisementSink> =
             Arc::new(AdvertisementSinkAdapter::new(advertisement));
@@ -1841,6 +2052,7 @@ impl PeerTransport for TlsPeerTransport {
             fetch_handler,
             image_history_handler,
             image_fetch_handler,
+            image_thumbnail_handler,
         )
     }
 
@@ -2260,6 +2472,85 @@ pub mod wire {
             remote_entry_id: String,
             reason: String,
         },
+        /// Request a bounded derived PNG thumbnail for a remote
+        /// image entry. The envelope is gated to the
+        /// `peer-image-preview-thumbnails` change: only an
+        /// active trusted peer that advertises both
+        /// `image_import` and `image_preview_thumbnail` can ask
+        /// for the thumbnail of a transferrable image entry,
+        /// and only after the card intersects the visible
+        /// remote-history viewport. The listener enforces the
+        /// same mTLS pin path [`PairingMessage::FetchImage`]
+        /// uses so a drift in either capability collapses to a
+        /// typed rejection before any byte crosses the wire.
+        ///
+        /// The payload never carries asset references, paths,
+        /// content hashes or any field the
+        /// `peer-image-preview-thumbnails` spec forbids. The
+        /// caller only submits the opaque `remote_entry_id` it
+        /// received from `ListRecentImagesAck`; the host
+        /// resolves the row internally and re-validates the
+        /// entry eligibility before generating the
+        /// derivative.
+        FetchImageThumbnail {
+            version: u32,
+            peer_id: String,
+            remote_entry_id: String,
+        },
+        /// Successful reply the listener pushes back with the
+        /// bounded PNG thumbnail the host generated in memory.
+        /// `width` / `height` mirror the encoded PNG
+        /// dimensions so the renderer can size the `<img>`
+        /// element without decoding the bytes. `bytes_b64` is
+        /// the canonical PNG payload the host capped at
+        /// [`FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES`] encoded
+        /// with the standard base64 alphabet (`A-Z a-z 0-9 +
+        /// / =`); the client decodes the field locally,
+        /// re-validates the size against the cap, validates
+        /// the PNG signature and refuses to surface a
+        /// thumbnail larger than the documented envelope. The
+        /// base64 framing keeps the JSON envelope bounded
+        /// (≈4·n/3 bytes for n raw bytes) so the
+        /// [`FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES`] cap
+        /// fits a fully-valid 384 KiB PNG without truncating
+        /// or silently downgrading the limit. The body is held
+        /// in memory only between the fetch and the renderer;
+        /// the runtime never persists the PNG or substitutes
+        /// the snapshot for the original `Importar` payload.
+        FetchImageThumbnailAck {
+            version: u32,
+            peer_id: String,
+            remote_entry_id: String,
+            bytes_b64: String,
+            width: u32,
+            height: u32,
+        },
+        /// Typed rejection the listener pushes back when the
+        /// caller asked for a thumbnail the runtime cannot
+        /// honour for a documented reason. The variant covers
+        /// every failure mode the
+        /// `peer-image-preview-thumbnails` change pins:
+        /// `not_available` (no thumbnail handler installed),
+        /// `not_trusted` / `not_active` (caller no longer
+        /// eligible), `not_transferable` (entry gone or no
+        /// longer transferable), `not_found` (entry
+        /// disappeared between listing and thumbnail fetch),
+        /// `busy` (per-peer concurrency limit reached),
+        /// `body_too_large` (generated PNG exceeded the 384
+        /// KiB cap), `persistence_unavailable` (SQLite or
+        /// asset store failure), `invalid_png` (the host
+        /// detected an invalid source asset mid-resize) or
+        /// `capability_missing` (caller advertised
+        /// `image_import` but not
+        /// `image_preview_thumbnail`). The transport never
+        /// inspects the payload beyond the type check and
+        /// never echoes the original-image bytes back.
+        FetchImageThumbnailUnavailable {
+            version: u32,
+            peer_id: String,
+            remote_entry_id: String,
+            reason: String,
+        },
     }
 
     /// Metadata-only row the host returns in
@@ -2339,7 +2630,10 @@ pub mod wire {
                 | PairingMessage::ListRecentImagesUnavailable { version, .. }
                 | PairingMessage::FetchImage { version, .. }
                 | PairingMessage::FetchImageAck { version, .. }
-                | PairingMessage::FetchImageUnavailable { version, .. } => *version,
+                | PairingMessage::FetchImageUnavailable { version, .. }
+                | PairingMessage::FetchImageThumbnail { version, .. }
+                | PairingMessage::FetchImageThumbnailAck { version, .. }
+                | PairingMessage::FetchImageThumbnailUnavailable { version, .. } => *version,
             }
         }
 
@@ -2363,7 +2657,10 @@ pub mod wire {
                 | PairingMessage::ListRecentImagesUnavailable { peer_id, .. }
                 | PairingMessage::FetchImage { peer_id, .. }
                 | PairingMessage::FetchImageAck { peer_id, .. }
-                | PairingMessage::FetchImageUnavailable { peer_id, .. } => peer_id,
+                | PairingMessage::FetchImageUnavailable { peer_id, .. }
+                | PairingMessage::FetchImageThumbnail { peer_id, .. }
+                | PairingMessage::FetchImageThumbnailAck { peer_id, .. }
+                | PairingMessage::FetchImageThumbnailUnavailable { peer_id, .. } => peer_id,
             }
         }
 
@@ -2393,7 +2690,10 @@ pub mod wire {
                 | PairingMessage::ListRecentImagesUnavailable { .. }
                 | PairingMessage::FetchImage { .. }
                 | PairingMessage::FetchImageAck { .. }
-                | PairingMessage::FetchImageUnavailable { .. } => "",
+                | PairingMessage::FetchImageUnavailable { .. }
+                | PairingMessage::FetchImageThumbnail { .. }
+                | PairingMessage::FetchImageThumbnailAck { .. }
+                | PairingMessage::FetchImageThumbnailUnavailable { .. } => "",
             }
         }
     }
@@ -2946,6 +3246,101 @@ mod tests {
             bytes_b64: String::new(),
         };
         assert_eq!(ack.public_key_fingerprint(), "");
+    }
+
+    #[test]
+    fn fetch_image_thumbnail_envelope_round_trips_through_json() {
+        let request = PairingMessage::FetchImageThumbnail {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-7".to_string(),
+        };
+        assert_eq!(request.version(), IMAGE_WIRE_VERSION);
+        assert_eq!(request.peer_id(), "peer-aaaa");
+        let serialised = serde_json::to_string(&request).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, request);
+    }
+
+    #[test]
+    fn fetch_image_thumbnail_ack_envelope_round_trips_through_json() {
+        let ack = PairingMessage::FetchImageThumbnailAck {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-7".to_string(),
+            bytes_b64: "iVBORw0KGgo=".to_string(),
+            width: 128,
+            height: 64,
+        };
+        let serialised = serde_json::to_string(&ack).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, ack);
+    }
+
+    #[test]
+    fn fetch_image_thumbnail_unavailable_envelope_round_trips_through_json() {
+        let unavailable = PairingMessage::FetchImageThumbnailUnavailable {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-7".to_string(),
+            reason: "capability_missing".to_string(),
+        };
+        let serialised = serde_json::to_string(&unavailable).expect("serialise");
+        let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
+        assert_eq!(parsed, unavailable);
+    }
+
+    #[test]
+    fn fetch_image_thumbnail_ack_carries_a_full_max_payload_envelope() {
+        // The 384 KiB PNG body cap the spec pins has to fit
+        // inside [`FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES`]
+        // when base64-encoded. We pin the worst-case here so
+        // a regression that drops the base64 framing cannot
+        // silently shrink the limit.
+        let bytes = vec![0u8; FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES];
+        let bytes_b64_len = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .encode(&bytes)
+                .len()
+        };
+        assert!(
+            bytes_b64_len <= FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES,
+            "base64 payload ({} bytes) must fit inside the response cap ({} bytes)",
+            bytes_b64_len,
+            FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES
+        );
+    }
+
+    #[test]
+    fn fetch_image_thumbnail_ack_rejects_an_oversized_payload() {
+        assert!(FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES <= FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn image_thumbnail_envelope_does_not_expose_public_key_fingerprint() {
+        let request = PairingMessage::FetchImageThumbnail {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-42".to_string(),
+        };
+        assert_eq!(request.public_key_fingerprint(), "");
+        let ack = PairingMessage::FetchImageThumbnailAck {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-42".to_string(),
+            bytes_b64: String::new(),
+            width: 128,
+            height: 128,
+        };
+        assert_eq!(ack.public_key_fingerprint(), "");
+        let unavailable = PairingMessage::FetchImageThumbnailUnavailable {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            remote_entry_id: "entry-42".to_string(),
+            reason: "busy".to_string(),
+        };
+        assert_eq!(unavailable.public_key_fingerprint(), "");
     }
 
     #[test]

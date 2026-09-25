@@ -73,7 +73,7 @@ pub struct DiscoveryAdvertisement {
     /// combines the canonical `capability` token with the
     /// additive `caps_extra` tokens so a build that only knows
     /// about `pairing` keeps pairing while a newer build
-    /// additionally opts into `image_import`.
+    /// additionally opts into image import and image thumbnails.
     pub caps_extra: Vec<String>,
 }
 
@@ -109,7 +109,8 @@ impl DiscoveryAdvertisement {
     ///
     /// The advertised capability stays `pairing` exactly so a
     /// legacy client that only accepts the canonical value keeps
-    /// recognising the record; the additive `image_import`
+    /// recognising the record; the additive `image_import` and
+    /// `image_preview_thumbnail` capabilities
     /// capability travels through the separate `caps_extra`
     /// field instead. The legacy field never carries the new
     /// token because some parsers reject unknown tokens outright
@@ -128,7 +129,10 @@ impl DiscoveryAdvertisement {
             display_name: display_name.into(),
             protocol_major,
             capability: PAIRING_CAPABILITY.to_string(),
-            caps_extra: vec![IMAGE_IMPORT_CAPABILITY.to_string()],
+            caps_extra: vec![
+                IMAGE_IMPORT_CAPABILITY.to_string(),
+                IMAGE_PREVIEW_THUMBNAIL_CAPABILITY.to_string(),
+            ],
         }
     }
 }
@@ -146,6 +150,11 @@ pub const PAIRING_CAPABILITY: &str = "pairing";
 /// accept `pairing` keep pairing. Mirrored from
 /// [`clipvault_core::peer_discovery::IMAGE_IMPORT_CAPABILITY`].
 pub const IMAGE_IMPORT_CAPABILITY: &str = "image_import";
+
+/// Additive capability the remote-image thumbnail feature
+/// publishes through `caps_extra`, keeping the legacy
+/// `capability=pairing` value unchanged.
+pub const IMAGE_PREVIEW_THUMBNAIL_CAPABILITY: &str = "image_preview_thumbnail";
 
 /// Platform-neutral callback the production adapter uses to
 /// surface browse / removal events to the runtime.
@@ -532,14 +541,13 @@ mod tests {
     }
 
     #[test]
-    fn new_pairing_advertises_image_import_capability() {
+    fn new_pairing_advertises_image_import_and_thumbnail_capabilities() {
         // The productive pairing advertisement MUST publish the
         // canonical `pairing` capability through the legacy
         // field (no comma-separated `image_import` suffix, so a
         // strict legacy parser keeps recognising the record)
-        // AND publish the additive `image_import` capability
-        // through the dedicated `caps_extra` field so a
-        // newer build opts into the image surface. A regression
+        // AND publish both additive image capabilities through
+        // the dedicated `caps_extra` field. A regression
         // that drops either the canonical capability or the
         // additive surface would break either the legacy
         // compatibility or the end-to-end image routes the
@@ -552,7 +560,13 @@ mod tests {
             1,
         );
         assert_eq!(ad.capability, PAIRING_CAPABILITY);
-        assert_eq!(ad.caps_extra, vec![IMAGE_IMPORT_CAPABILITY.to_string()]);
+        assert_eq!(
+            ad.caps_extra,
+            vec![
+                IMAGE_IMPORT_CAPABILITY.to_string(),
+                IMAGE_PREVIEW_THUMBNAIL_CAPABILITY.to_string(),
+            ]
+        );
     }
 
     #[test]

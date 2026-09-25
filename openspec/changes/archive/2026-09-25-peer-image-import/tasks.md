@@ -120,17 +120,19 @@
   OpenSpec.
 - [x] 6.9 Ejecutar los tests enfocados de bootstrap y pairing para la caché
   compartida de cursor secrets, además del formato y `git diff --check`.
-- [ ] 6.5 Ejecutar la matriz manual en macOS, Linux X11 y Linux Wayland cuando
+- [x] 6.5 Ejecutar la matriz manual en macOS, Linux X11 y Linux Wayland cuando
   estén disponibles: importación, dedupe, edición remota, restart,
-  revoke/block, peer unavailable, asset inválido y fallo de persistencia.
-- [ ] 6.6 Confirmar manualmente que el preview remoto usa siempre el
+  revoke/block, peer unavailable, asset inválido y fallo de persistencia
+  (aprobada manualmente por el usuario el 2026-09-25).
+- [x] 6.6 Confirmar manualmente que el preview remoto usa siempre el
   placeholder, que la imagen real sólo aparece tras importar, y que no se
-  modifica clipboard, pegado, drag payload ni assets existentes.
+  modifica clipboard, pegado, drag payload ni assets existentes (aprobado
+  manualmente por el usuario el 2026-09-25).
 
-> **Nota:** las tareas 6.5 y 6.6 son pruebas manuales que requieren
-> intervención humana en macOS, Linux X11 y Linux Wayland. Permanecen
-> abiertas hasta que una persona las ejecute en cada plataforma; la
-> cobertura automática NO las marca como completadas.
+> **Nota:** las tareas manuales 6.5 y 6.6 fueron aprobadas por el usuario
+> después de ejecutar la matriz de plataformas y verificar el contrato
+> visual/de no mutación; la cobertura automática por sí sola no las habría
+> marcado como completadas.
 
 ## 7. Entrega
 

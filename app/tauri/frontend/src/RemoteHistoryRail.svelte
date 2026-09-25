@@ -33,11 +33,13 @@
     peerImageBrowseCommand,
     peerImageRecordStateCommand,
     peerImageImportRecordStateCommand,
+    peerImageThumbnailRecordStateCommand,
   } from "./lib/tauri";
   import type {
     PeerSnapshot,
   } from "./types";
   import RemotePreviewCard from "./RemotePreviewCard.svelte";
+  import { remoteImageThumbnailCardKey } from "./lib/remoteImageThumbnailState";
   import {
     INITIAL_CURSORS,
     applyResponses as mergeResponses,
@@ -93,6 +95,10 @@
   let exhausted = false;
   let textBuffer: RemoteRailRow[] = [];
   let imageBuffer: RemoteRailRow[] = [];
+  let thumbnailPeerStateReady = false;
+  let peerStateSyncKey: string | null = null;
+  let peerStateSyncPromise: Promise<void> | null = null;
+  let peerStateSyncGeneration = 0;
   // Start detached from the prop so the initial reactive pass treats an
   // already-selected peer exactly like a later selection. Initialising this
   // from `peerId` skipped the only branch that loads the first remote page.
@@ -154,6 +160,7 @@
   $: if (peerId !== activePeerId) {
     activePeerId = peerId;
     loadGeneration += 1;
+    thumbnailPeerStateReady = false;
     error = null;
     if (peerId === null) {
       forgetRail();
@@ -203,7 +210,7 @@
    * remote row that was safe to browse must not be rejected as
    * an unknown peer when the user explicitly chooses Importar.
    */
-  async function refreshPeerState(targetPeerId: string): Promise<void> {
+  function refreshPeerState(targetPeerId: string): Promise<void> {
     const entry = (snapshot?.entries ?? []).find(
       (candidate) => candidate.peer_id === targetPeerId,
     );
@@ -212,12 +219,51 @@
       trusted: entry?.trust_state === "trusted",
       active: entry?.is_present ?? false,
     };
-    await Promise.all([
+    const syncKey = `${targetPeerId}\u0000${peerState.trusted}\u0000${peerState.active}`;
+    if (syncKey === peerStateSyncKey && peerStateSyncPromise !== null) {
+      return peerStateSyncPromise;
+    }
+    peerStateSyncKey = syncKey;
+    thumbnailPeerStateReady = false;
+    const generation = ++peerStateSyncGeneration;
+    peerStateSyncPromise = Promise.all([
       peerHistoryRecordStateCommand(peerState),
       peerImportRecordStateCommand(peerState),
       peerImageRecordStateCommand(peerState),
       peerImageImportRecordStateCommand(peerState),
-    ]);
+      peerImageThumbnailRecordStateCommand(peerState),
+    ])
+      .then(() => {
+        if (generation === peerStateSyncGeneration && peerId === targetPeerId) {
+          thumbnailPeerStateReady = true;
+        }
+      })
+      .catch((error: unknown) => {
+        if (generation === peerStateSyncGeneration) {
+          peerStateSyncKey = null;
+          peerStateSyncPromise = null;
+        }
+        throw error;
+      });
+    return peerStateSyncPromise;
+  }
+
+  // Keep the thumbnail client's in-memory trust/presence gate aligned with
+  // snapshot refreshes while the rail remains open. The signature dedupe in
+  // refreshPeerState avoids issuing Tauri commands when only unrelated peer
+  // metadata changed.
+  $: if (peerId !== null) {
+    const currentPeer = (snapshot?.entries ?? []).find(
+      (candidate) => candidate.peer_id === peerId,
+    );
+    const observedState = `${currentPeer?.trust_state ?? "unknown"}\u0000${currentPeer?.is_present ?? false}`;
+    void observedState;
+    void refreshPeerState(peerId).catch(() => undefined);
+  } else {
+    peerStateSyncGeneration += 1;
+    peerStateSyncKey = null;
+    peerStateSyncPromise = null;
+    thumbnailPeerStateReady = false;
   }
 
   /**
@@ -553,7 +599,7 @@
       data-testid="remote-history-rail-cards"
       role="list"
     >
-      {#each rows as item, index (item.row.remote_entry_id)}
+      {#each rows as item, index (remoteImageThumbnailCardKey(peerId, item.row.remote_entry_id))}
         <div
           role="listitem"
           class="remote-history-rail-card-slot"
@@ -583,6 +629,7 @@
               displayName={activeEntry?.display_name ?? null}
               isImageRow={true}
               peerCapability={activePeerCapability}
+              peerStateReady={thumbnailPeerStateReady}
             />
           {/if}
         </div>

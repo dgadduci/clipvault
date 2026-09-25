@@ -3977,3 +3977,140 @@ pub fn clipvault_peer_image_import_forget(state: State<'_, SharedState>, peer_id
     let service = context.peer_image_import();
     service.forget_peer(&peer_id);
 }
+
+/// Wire representation of
+/// [`clipvault_core::peer_image_thumbnail::PeerImageThumbnailOutcome`].
+/// Every variant is metadata-only; the bridge never returns a
+/// `CommandError` for a thumbnail request: every typed failure
+/// collapses into a discriminated variant so the renderer stays a
+/// thin adapter over the union. The PNG body never crosses the
+/// bridge on a failure path so a stale / drifted / unauthorised
+/// caller cannot leak the original image bytes through an error.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerImageThumbnailResponse {
+    /// The host returned a valid bounded PNG thumbnail. The
+    /// `bytes_b64` field is the canonical PNG payload encoded
+    /// with the standard base64 alphabet; the renderer decodes
+    /// the field locally, re-validates the size against the cap
+    /// and turns the bytes into an in-memory Object URL.
+    Ok {
+        bytes_b64: String,
+        width: u32,
+        height: u32,
+    },
+    /// The peer is not currently eligible to serve a thumbnail.
+    PeerUnavailable { reason: &'static str },
+    /// The peer did not advertise the `image_preview_thumbnail`
+    /// capability.
+    CapabilityMissing,
+    /// The fetch transport rejected the request.
+    TransportUnavailable { reason: &'static str },
+    /// The host reached the per-peer decode/resize concurrency
+    /// limit. The renderer keeps the static placeholder; a later
+    /// refresh can retry the call.
+    Busy,
+    /// The body the host returned exceeded the documented byte
+    /// cap.
+    BodyTooLarge,
+    /// The body the host returned failed PNG validation.
+    InvalidPng,
+    /// The remote entry the user asked to thumbnail no longer
+    /// exists on the host or is no longer transferable.
+    NotTransferable,
+}
+
+impl PeerImageThumbnailResponse {
+    fn from_outcome(
+        outcome: clipvault_core::peer_image_thumbnail::PeerImageThumbnailOutcome,
+    ) -> Self {
+        use clipvault_core::peer_image_thumbnail::PeerImageThumbnailOutcome as Core;
+        match outcome {
+            Core::Ok {
+                bytes_b64,
+                width,
+                height,
+            } => PeerImageThumbnailResponse::Ok {
+                bytes_b64,
+                width,
+                height,
+            },
+            Core::PeerUnavailable { reason } => {
+                PeerImageThumbnailResponse::PeerUnavailable { reason }
+            }
+            Core::CapabilityMissing => PeerImageThumbnailResponse::CapabilityMissing,
+            Core::TransportUnavailable { reason } => {
+                PeerImageThumbnailResponse::TransportUnavailable { reason }
+            }
+            Core::Busy => PeerImageThumbnailResponse::Busy,
+            Core::BodyTooLarge => PeerImageThumbnailResponse::BodyTooLarge,
+            Core::InvalidPng => PeerImageThumbnailResponse::InvalidPng,
+            Core::NotTransferable => PeerImageThumbnailResponse::NotTransferable,
+        }
+    }
+}
+
+/// Thin Tauri command the
+/// `peer-image-preview-thumbnails` change exposes through the
+/// bridge. The command is the metadata-only adapter the
+/// frontend drives when a remote image card intersects the
+/// visible remote-history viewport. The command delegates to
+/// [`clipvault_core::peer_image_thumbnail::PeerImageThumbnailService`]
+/// so the runtime owns the trust / active gate, the capability
+/// gate and the bytes validation; the bridge stays a thin
+/// adapter that only projects the typed outcome.
+#[tauri::command]
+pub fn clipvault_peer_image_thumbnail_fetch(
+    state: State<'_, SharedState>,
+    peer_id: String,
+    remote_entry_id: String,
+) -> PeerImageThumbnailResponse {
+    let context = state.context();
+    let service = context.peer_image_thumbnail();
+    // The runtime requires the mTLS pin to dial the remote
+    // listener; a missing pin collapses to the typed
+    // `not_trusted` reason the bridge surfaces so the renderer
+    // keeps the static placeholder without surfacing a global
+    // rail error.
+    let cert_fingerprint = match context.peer_pairing().cert_fingerprint_for(&peer_id) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => {
+            return PeerImageThumbnailResponse::PeerUnavailable {
+                reason: "not_trusted",
+            };
+        }
+    };
+    let outcome = service.fetch_thumbnail(&peer_id, &cert_fingerprint, &remote_entry_id);
+    PeerImageThumbnailResponse::from_outcome(outcome)
+}
+
+/// Mirror of [`clipvault_peer_image_import_record_state`] for
+/// the thumbnail service. The frontend calls this whenever the
+/// active peer's trust / active state changes so the service can
+/// short-circuit the network round-trip when the peer is no
+/// longer eligible.
+#[tauri::command]
+pub fn clipvault_peer_image_thumbnail_record_state(
+    state: State<'_, SharedState>,
+    peer_id: String,
+    trusted: bool,
+    active: bool,
+) {
+    let context = state.context();
+    let service = context.peer_image_thumbnail();
+    service.record_peer_state(
+        &peer_id,
+        clipvault_core::peer_image_thumbnail::PeerImageThumbnailTrustState { trusted, active },
+    );
+}
+
+/// Mirror of [`clipvault_peer_image_import_forget`] for the
+/// thumbnail service. The runtime calls this whenever the row
+/// leaves the trusted / active state (revoke, block) so a stale
+/// entry cannot resurrect the link.
+#[tauri::command]
+pub fn clipvault_peer_image_thumbnail_forget(state: State<'_, SharedState>, peer_id: String) {
+    let context = state.context();
+    let service = context.peer_image_thumbnail();
+    service.forget_peer(&peer_id);
+}

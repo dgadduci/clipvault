@@ -946,7 +946,7 @@ mod tests {
         // `caps_extra` field.
         assert_eq!(
             refreshed.get_property_val_str(TXT_CAPS_EXTRA),
-            Some(IMAGE_IMPORT_CAPABILITY),
+            Some("image_import,image_preview_thumbnail"),
         );
     }
 

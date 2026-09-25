@@ -842,6 +842,82 @@ export type PeerImageImportResponse =
   | { kind: "persistence_error"; reason: string };
 
 /**
+ * Discriminated union the `peer-image-preview-thumbnails` change
+ * returns when the renderer asks the runtime for a bounded PNG
+ * thumbnail of a remote image row. The bridge never returns
+ * the original image bytes: the `ok` variant carries only a
+ * base64-encoded PNG payload the renderer decodes locally into
+ * an in-memory Object URL, plus the resulting pixel dimensions.
+ * Every failure variant collapses to a stable identifier the
+ * renderer maps to copy without surfacing a global rail error.
+ *
+ * The PNG body never crosses the bridge on a failure path so a
+ * stale / drifted / unauthorised caller cannot leak the
+ * original image bytes through an error envelope.
+ */
+export type PeerImageThumbnailResponse =
+  | {
+      kind: "ok";
+      /**
+       * Canonical PNG payload encoded with the standard
+       * base64 alphabet. The renderer decodes the field
+       * locally, re-validates the size against the
+       * documented cap and turns the bytes into a
+       * transient `URL.createObjectURL` handle.
+       */
+      bytes_b64: string;
+      width: number;
+      height: number;
+    }
+  | {
+      kind: "peer_unavailable";
+      /**
+       * Stable reason the runtime maps to copy
+       * (`no_known_peer` / `not_trusted` / `not_active`).
+       * The card renders the static placeholder; the
+       * explicit `Importar` flow stays available.
+       */
+      reason: "no_known_peer" | "not_trusted" | "not_active";
+    }
+  | {
+      /**
+       * The peer did not advertise
+       * `image_preview_thumbnail`. The card keeps the
+       * static placeholder; the explicit `Importar`
+       * flow stays available.
+       */
+      kind: "capability_missing";
+    }
+  | {
+      kind: "transport_unavailable";
+      reason:
+        | "unavailable"
+        | "unknown_peer"
+        | "key_mismatch"
+        | "revoked"
+        | "blocked"
+        | "incompatible_protocol"
+        | "malformed"
+        | "not_transferable"
+        | "body_too_large"
+        | "persistence_unavailable"
+        | "busy";
+    }
+  | {
+      /**
+       * The host reached the per-peer decode/resize
+       * concurrency limit. The card keeps the static
+       * placeholder; a later refresh can retry the
+       * call. The renderer MUST NOT surface a global
+       * rail error.
+       */
+      kind: "busy";
+    }
+  | { kind: "body_too_large" }
+  | { kind: "invalid_png" }
+  | { kind: "not_transferable" };
+
+/**
  * Discriminated union the `peer-text-import` change returns when
  * the user activates `Importar` for a row of a trusted active
  * peer. The bridge never carries the imported body: the

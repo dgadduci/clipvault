@@ -59,8 +59,8 @@ const cardSource = loadSource("src/RemotePreviewCard.svelte");
 const mergeSource = loadSource("src/lib/remoteHistoryMerge.ts");
 
 // ---------------------------------------------------------------------------
-// 1. Static placeholder — the rail renders a single shared
-//    placeholder for every image row, never a downloaded thumbnail.
+// 1. Static placeholder — the rail retains one shared SVG
+//    fallback while an optional bounded thumbnail is unavailable.
 // ---------------------------------------------------------------------------
 
 test("RemoteHistoryRail renders the image row with isImageRow={true}", () => {
@@ -75,9 +75,8 @@ test("RemoteHistoryRail renders the image row with isImageRow={true}", () => {
 });
 
 test("RemotePreviewCard renders a static SVG placeholder for image rows", () => {
-  // The placeholder is the ONLY visual a remote image row ever
-  // gets before the user activates Importar. The wire contract
-  // guarantees the rail never fetches bytes during navigation.
+  // The placeholder remains the initial and failure visual. A
+  // successful bounded thumbnail may replace it independently of Importar.
   assert.match(
     cardSource,
     /remote-preview-card-image-placeholder/,
@@ -85,8 +84,8 @@ test("RemotePreviewCard renders a static SVG placeholder for image rows", () => 
   );
   assert.match(
     cardSource,
-    /data-placeholder-kind="static"/,
-    "placeholder must mark itself as static (no thumbnail download)",
+    /data-placeholder-kind=\{thumbnailPhase === "ready" \? "thumbnail" : "static"\}/,
+    "the shared placeholder must remain static until a thumbnail succeeds",
   );
   assert.match(
     cardSource,
@@ -95,15 +94,21 @@ test("RemotePreviewCard renders a static SVG placeholder for image rows", () => 
   );
 });
 
-test("RemotePreviewCard never sets an image src attribute for remote rows", () => {
-  // Defence in depth: a regression that introduces a thumbnail
-  // fetch (e.g. via `<img src=…>`) would silently pull bytes
-  // through the navigation, breaking the spec scenario
-  // "User only browses remote images".
+test("RemotePreviewCard renders thumbnails only through an in-memory object URL", () => {
+  assert.match(
+    cardSource,
+    /<img[\s\S]*?src=\{thumbnailUrl\}/,
+    "a successful thumbnail may render through its local object URL",
+  );
+  assert.match(
+    cardSource,
+    /URL\.createObjectURL\(blob\)/,
+    "thumbnail bytes must be held as a temporary in-memory object URL",
+  );
   assert.doesNotMatch(
     cardSource,
-    /<img\b[^>]*src=/,
-    "remote preview must not render an <img> element with a src attribute",
+    /resolveClipboardAsset|src\s*=\s*["'](?:asset:|file:|https?:\/\/)/,
+    "remote previews must not resolve local asset references or remote URLs",
   );
 });
 

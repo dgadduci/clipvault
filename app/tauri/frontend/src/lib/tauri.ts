@@ -35,6 +35,7 @@ import type {
   PeerImportResponse,
   PeerImageBrowseResponse,
   PeerImageImportResponse,
+  PeerImageThumbnailResponse,
   PeerTrustOperationResponse,
   PickAndAddResponse,
   PlatformSettingsTarget,
@@ -653,6 +654,63 @@ export const peerImageImportForgetCommand: ClipvaultCommandArg<
   { peer_id: string }
 > = (args) =>
   invoke<void>("clipvault_peer_image_import_forget", {
+    peerId: args.peer_id,
+  });
+
+/**
+ * Bridge the `peer-image-preview-thumbnails` change exposes for
+ * the lazy thumbnail fetch. The command dials the productive
+ * mTLS transport the runtime already wired, the host re-validates
+ * the entry against the metadata-only contract and returns a
+ * bounded PNG body that fits the documented cap. The
+ * discriminated union the bridge returns is metadata-only: the
+ * `ok` variant carries a base64 PNG payload + dimensions; every
+ * failure variant collapses to a stable identifier the renderer
+ * maps to copy without surfacing a global rail error.
+ *
+ * The renderer MUST discard the response when the active peer,
+ * visible page or card changes before the response arrives. The
+ * bytes are kept in memory only for the lifetime of the
+ * rendered card; the renderer releases the underlying Object
+ * URL on replacement / unmount / peer change.
+ */
+export const peerImageThumbnailFetchCommand: ClipvaultCommandArg<
+  PeerImageThumbnailResponse,
+  { peer_id: string; remote_entry_id: string }
+> = (args) =>
+  invoke<PeerImageThumbnailResponse>("clipvault_peer_image_thumbnail_fetch", {
+    peerId: args.peer_id,
+    remoteEntryId: args.remote_entry_id,
+  });
+
+/**
+ * Best-effort sync hook the shell calls after every peer
+ * snapshot / health probe so the in-memory trust / active cache
+ * the [`peerImageThumbnailFetchCommand`] consults cannot outrun
+ * the runtime transition that should invalidate it.
+ */
+export const peerImageThumbnailRecordStateCommand: ClipvaultCommandArg<
+  void,
+  { peer_id: string; trusted: boolean; active: boolean }
+> = (args) =>
+  invoke<void>("clipvault_peer_image_thumbnail_record_state", {
+    peerId: args.peer_id,
+    trusted: args.trusted,
+    active: args.active,
+  });
+
+/**
+ * Forget the cache entry for `peer_id`. The shell calls this
+ * after `Desvincular`, `Bloquear` and `Desbloquear` so a
+ * subsequent thumbnail request collapses to
+ * [`PeerImageThumbnailResponse.peer_unavailable`] without a
+ * network round-trip.
+ */
+export const peerImageThumbnailForgetCommand: ClipvaultCommandArg<
+  void,
+  { peer_id: string }
+> = (args) =>
+  invoke<void>("clipvault_peer_image_thumbnail_forget", {
     peerId: args.peer_id,
   });
 

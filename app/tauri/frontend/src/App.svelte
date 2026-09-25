@@ -42,6 +42,7 @@
     organizationSnapshotCommand,
     platformCapabilitiesCommand,
     peerHistoryForgetCommand,
+    peerImageThumbnailForgetCommand,
     peerSnapshotCommand,
     recentEntriesFilteredCommand,
     refreshCapabilitiesCommand,
@@ -435,6 +436,7 @@
     activePeerId = null;
     if (previous !== null) {
       void peerHistoryForgetCommand({ peer_id: previous });
+      void peerImageThumbnailForgetCommand({ peer_id: previous });
     }
   }
 

@@ -107,6 +107,27 @@ pub const PAIRING_CAPABILITY: &str = "pairing";
 /// existing surface.
 pub const IMAGE_IMPORT_CAPABILITY: &str = "image_import";
 
+/// Additive capability the `peer-image-preview-thumbnails`
+/// change ships. A peer that advertises
+/// `image_preview_thumbnail` accepts the dedicated
+/// `fetch_image_thumbnail` envelope the host uses to serve a
+/// bounded derived PNG before the user activates `Importar`.
+/// Hosts that do not advertise the capability keep the static
+/// placeholder on the remote image card and the client never
+/// opens the thumbnail route, so legacy peers do not need to
+/// know the token exists.
+///
+/// The capability is published through the additive
+/// `caps_extra` TXT field the `peer-image-import` change
+/// introduced; the legacy `capability` field stays at the
+/// canonical `pairing` value so a strict legacy parser keeps
+/// recognising the record. Clients MUST also advertise (or
+/// accept) [`IMAGE_IMPORT_CAPABILITY`] before opening the
+/// thumbnail route — the host re-validates both capabilities
+/// per request and the gated UI only enables the request when
+/// both tokens are present.
+pub const IMAGE_PREVIEW_THUMBNAIL_CAPABILITY: &str = "image_preview_thumbnail";
+
 /// Decode the comma-separated `capability` field into a
 /// normalised `Vec<String>`. Empty / whitespace-only tokens
 /// are dropped so a TXT record with `pairing,` decodes the
@@ -322,7 +343,10 @@ impl PeerObservationRecord {
         // addition cannot silently bypass the capability gate
         // when the host upgrades before the runtime does.
         for token in &raw.caps_extra {
-            if !matches!(token.as_str(), IMAGE_IMPORT_CAPABILITY) {
+            if !matches!(
+                token.as_str(),
+                IMAGE_IMPORT_CAPABILITY | IMAGE_PREVIEW_THUMBNAIL_CAPABILITY
+            ) {
                 return Err(PeerRecordValidationError::UnsupportedCapability {
                     capability: format!("caps_extra:{}", token),
                 });
@@ -358,6 +382,22 @@ impl PeerObservationRecord {
         self.caps_extra
             .iter()
             .any(|token| token == IMAGE_IMPORT_CAPABILITY)
+    }
+
+    /// `true` when the record advertises the
+    /// `peer-image-preview-thumbnails` capability. The helper
+    /// mirrors [`Self::has_image_import_capability`] and
+    /// reads the additive `caps_extra` surface so legacy
+    /// strict parsers keep pairing without seeing the token.
+    /// The thumbnail route additionally requires
+    /// [`Self::has_image_import_capability`]; the host / client
+    /// re-validate both tokens so a peer that only ships one
+    /// capability collapses to a typed unavailable outcome
+    /// instead of a partial response.
+    pub fn has_image_preview_thumbnail_capability(&self) -> bool {
+        self.caps_extra
+            .iter()
+            .any(|token| token == IMAGE_PREVIEW_THUMBNAIL_CAPABILITY)
     }
 
     /// Convert into the database-shaped [`PeerObservation`]. The
@@ -1367,18 +1407,21 @@ mod tests {
     }
 
     #[test]
-    fn validation_accepts_pairing_image_import_capability() {
+    fn validation_accepts_pairing_image_import_and_thumbnail_capabilities() {
         // The `peer-image-import` change ships the
         // `image_import` capability alongside `pairing`. The
         // validator must accept the additive form (the legacy
         // `capability` field stays at `pairing` exactly so a
         // strict parser keeps recognising the record; the new
-        // `caps_extra` field carries `image_import`) and
+        // `caps_extra` field carries both image capability tokens) and
         // expose the helper the runtime / UI consults to gate
         // the image surface.
         let raw = TxtRecord {
             capability: PAIRING_CAPABILITY.to_string(),
-            caps_extra: vec![IMAGE_IMPORT_CAPABILITY.to_string()],
+            caps_extra: vec![
+                IMAGE_IMPORT_CAPABILITY.to_string(),
+                IMAGE_PREVIEW_THUMBNAIL_CAPABILITY.to_string(),
+            ],
             pairing_fingerprint: Some("f".repeat(64)),
             ..txt(
                 "0123456789abcdef0123456789abcdef",
@@ -1387,11 +1430,14 @@ mod tests {
             )
         };
         let validated = PeerObservationRecord::from_txt_record(&raw)
-            .expect("pairing+image_import must validate");
+            .expect("pairing+image_import+image_preview_thumbnail must validate");
         assert_eq!(validated.capability, PAIRING_CAPABILITY);
         assert_eq!(
             validated.caps_extra,
-            vec![IMAGE_IMPORT_CAPABILITY.to_string()]
+            vec![
+                IMAGE_IMPORT_CAPABILITY.to_string(),
+                IMAGE_PREVIEW_THUMBNAIL_CAPABILITY.to_string(),
+            ]
         );
         assert!(validated.has_image_import_capability());
         // The full pairing fingerprint is preserved.
