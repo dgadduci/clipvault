@@ -1375,7 +1375,10 @@ impl PairingRuntime {
             | PairingMessage::FetchImageUnavailable { .. }
             | PairingMessage::FetchImageThumbnail { .. }
             | PairingMessage::FetchImageThumbnailAck { .. }
-            | PairingMessage::FetchImageThumbnailUnavailable { .. } => {
+            | PairingMessage::FetchImageThumbnailUnavailable { .. }
+            | PairingMessage::FetchSourceAppPresentation { .. }
+            | PairingMessage::FetchSourceAppPresentationAck { .. }
+            | PairingMessage::FetchSourceAppPresentationUnavailable { .. } => {
                 // The metadata-only history / health probes and the
                 // content fetch envelopes never reach the runtime
                 // state machine. The productive transport handles
@@ -2346,6 +2349,7 @@ mod tests {
             paired_protocol_major: 0,
             cursor_secret: String::new(),
             caps_extra: String::new(),
+            caps_extra_v2: String::new(),
         }
     }
 

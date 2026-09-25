@@ -82,6 +82,17 @@ const TXT_CAPABILITY: &str = "cap";
 /// peer's capabilities.
 const TXT_CAPS_EXTRA: &str = "caps_extra";
 
+/// Second-tier additive capability tokens the host advertises
+/// through the dedicated `caps_extra_v2` TXT field the
+/// `peer-source-app-presentation` change ships. The legacy
+/// `capability` field and the existing `caps_extra` field stay
+/// unchanged so a strict legacy parser that only knows the
+/// canonical surface keeps pairing without seeing the new key.
+/// New clients combine recognised tokens from both additive
+/// fields; old clients ignore the previously unknown TXT key
+/// entirely.
+const TXT_CAPS_EXTRA_V2: &str = "caps_extra_v2";
+
 /// Background adapter the production shell wires into the
 /// runtime on macOS / Linux. The adapter is owned by the
 /// runtime via [`std::sync::Arc`]; it owns its own
@@ -779,6 +790,7 @@ fn translate_resolved(info: &mdns_sd::ServiceInfo) -> Option<TxtRecord> {
     );
     record.pairing_fingerprint = pairing_fingerprint;
     record.caps_extra = caps_extra;
+    record.caps_extra_v2 = read_optional_caps_extra(properties, TXT_CAPS_EXTRA_V2);
     Some(record)
 }
 
@@ -808,16 +820,18 @@ fn read_optional_caps_extra(properties: &mdns_sd::TxtProperties, key: &str) -> V
         .collect()
 }
 
-fn build_txt_properties(advertisement: &DiscoveryAdvertisement) -> [(String, String); 7] {
-    // The TXT record carries seven keys: the six legacy fields
+fn build_txt_properties(advertisement: &DiscoveryAdvertisement) -> [(String, String); 8] {
+    // The TXT record carries eight keys: the six legacy fields
     // (peer_id, fingerprint, display_name, protocol_major,
     // capability, pairing_fingerprint) plus the additive
-    // `caps_extra` field. The canonical `capability` stays at
-    // `pairing` / `discovery_only` exactly so a legacy parser
-    // that only accepts those literal values keeps
-    // recognising the record; the additive surface travels
-    // through the separate field so a future capability can
-    // opt in without breaking the legacy contract.
+    // `caps_extra` field and the second-tier `caps_extra_v2`
+    // field the `peer-source-app-presentation` change ships.
+    // The canonical `capability` stays at `pairing` /
+    // `discovery_only` exactly so a legacy parser that only
+    // accepts those literal values keeps recognising the
+    // record; the additive surfaces travel through their own
+    // dedicated fields so a future capability can opt in
+    // without breaking the legacy contract.
     let mut properties = [
         (TXT_PEER_ID.to_string(), advertisement.peer_id.clone()),
         (
@@ -852,6 +866,15 @@ fn build_txt_properties(advertisement: &DiscoveryAdvertisement) -> [(String, Str
         (
             TXT_CAPS_EXTRA.to_string(),
             advertisement.caps_extra.join(","),
+        ),
+        // Second-tier additive capability tokens (e.g.
+        // `source_app_presentation`) travel through this
+        // dedicated field. The legacy parser never inspects the
+        // key so an unknown TXT entry stays ignored without
+        // breaking the record layout.
+        (
+            TXT_CAPS_EXTRA_V2.to_string(),
+            advertisement.caps_extra_v2.join(","),
         ),
     ];
     if advertisement.pairing_fingerprint.is_none() {
@@ -948,6 +971,14 @@ mod tests {
             refreshed.get_property_val_str(TXT_CAPS_EXTRA),
             Some("image_import,image_preview_thumbnail"),
         );
+        // The second-tier `source_app_presentation` capability
+        // travels through the dedicated `caps_extra_v2` field so
+        // a strict legacy parser that only knows the canonical
+        // surface keeps pairing without seeing the new token.
+        assert_eq!(
+            refreshed.get_property_val_str(TXT_CAPS_EXTRA_V2),
+            Some("source_app_presentation"),
+        );
     }
 
     #[test]
@@ -966,6 +997,10 @@ mod tests {
         // mDNS-sd parser collapses an empty string into a missing
         // property so a legacy client never sees the key at all.
         assert_eq!(map[TXT_CAPS_EXTRA], "");
+        // The empty `caps_extra_v2` keeps the second-tier key off
+        // the wire; an older client that does not recognise the
+        // key never sees it.
+        assert_eq!(map[TXT_CAPS_EXTRA_V2], "");
     }
 
     /// translate_resolved must ignore the address set / hostname /

@@ -40,6 +40,14 @@ pub struct PeerCollectionBinding {
 /// [`PeerImportRepository::commit_image_import_transaction`].
 /// The helper is metadata-only; the bytes never cross the
 /// repository boundary.
+///
+/// `source_app_name` and `source_app_icon_ref` carry the
+/// per-provenance source-application metadata the
+/// `peer-source-app-presentation` change ships. Both stay
+/// `None` for legacy peers that did not opt into the additive
+/// contract, and the repository writes `NULL` to the matching
+/// `remote_imports` columns so a future peer that does opt in
+/// never sees stale attribution.
 #[derive(Debug, Clone)]
 pub struct ImageImportSpec {
     pub peer_id: String,
@@ -52,6 +60,8 @@ pub struct ImageImportSpec {
     pub height: u32,
     pub content_size: i64,
     pub validated_title: Option<String>,
+    pub source_app_name: Option<String>,
+    pub source_app_icon_ref: Option<String>,
     pub now: OffsetDateTime,
 }
 
@@ -72,6 +82,13 @@ pub struct ImageImportOutcome {
 /// future remote snapshot edit (which produces a different
 /// `imported_content_hash`) can record a separate row without
 /// colliding with the previous one.
+///
+/// `source_app_name` and `source_app_icon_ref` are the
+/// per-provenance source-application metadata the
+/// `peer-source-app-presentation` change adds; both fields stay
+/// `None` for pre-existing rows and for imports that did not
+/// carry the optional fields, and the import transaction is the
+/// only writer that populates them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteImportRecord {
     pub peer_id: String,
@@ -79,6 +96,21 @@ pub struct RemoteImportRecord {
     pub imported_content_hash: String,
     pub local_entry_id: i64,
     pub imported_at: String,
+    /// Optional validated source-application display name the
+    /// host attached to the original import response. The
+    /// projection renders the value only inside the
+    /// peer-bound collection, never in general history or
+    /// another peer's collection.
+    pub source_app_name: Option<String>,
+    /// Optional locally-generated reference to the imported
+    /// source-application icon asset the writer persisted
+    /// under `<data_dir>/assets/application-icons/`. The
+    /// reference never encodes a remote path, a filename
+    /// supplied by the peer or a raw asset hash; the
+    /// projection renders it through the existing safe
+    /// local application-icon resolver with the static
+    /// imported-origin icon as a deterministic fallback.
+    pub source_app_icon_ref: Option<String>,
 }
 
 /// Typed error the import repository surfaces. The variants collapse
@@ -220,7 +252,8 @@ impl<'a> PeerImportRepository<'a> {
             .conn
             .query_row(
                 "SELECT peer_id, remote_entry_id, imported_content_hash,
-                        local_entry_id, imported_at
+                        local_entry_id, imported_at,
+                        source_app_name, source_app_icon_ref
                  FROM remote_imports
                  WHERE peer_id = ?1
                    AND remote_entry_id = ?2
@@ -235,7 +268,11 @@ impl<'a> PeerImportRepository<'a> {
     /// Record a fresh provenance row. The composite primary key
     /// guarantees that re-importing the same `(peer, remote entry,
     /// content)` triple is a no-op — the helper refuses to insert
-    /// a second row.
+    /// a second row. The optional source-app name and icon
+    /// reference travel through the `peer-source-app-presentation`
+    /// extension; both stay `None` for legacy imports so a
+    /// caller that does not know the field never has to construct
+    /// it.
     pub fn record_import(
         &mut self,
         peer_id: &str,
@@ -244,6 +281,36 @@ impl<'a> PeerImportRepository<'a> {
         local_entry_id: i64,
         now: OffsetDateTime,
     ) -> Result<RemoteImportRecord, PeerImportRepositoryError> {
+        Self::record_import_with_source_app(
+            self,
+            peer_id,
+            remote_entry_id,
+            imported_content_hash,
+            local_entry_id,
+            now,
+            None,
+            None,
+        )
+    }
+
+    /// Variant of [`Self::record_import`] that writes the
+    /// source-app name and icon reference atomically with the
+    /// provenance row. The previous baseline shipped a separate
+    /// `update_import_source_app` call that ran inside its own
+    /// transaction; the `peer-source-app-presentation` change
+    /// rejects that pattern so the row + its attribution
+    /// always land together. A legacy caller that still does
+    /// not know the fields should call [`Self::record_import`].
+    pub fn record_import_with_source_app(
+        &mut self,
+        peer_id: &str,
+        remote_entry_id: &str,
+        imported_content_hash: &str,
+        local_entry_id: i64,
+        now: OffsetDateTime,
+        source_app_name: Option<&str>,
+        source_app_icon_ref: Option<&str>,
+    ) -> Result<RemoteImportRecord, PeerImportRepositoryError> {
         ensure_peer_exists(self.conn, peer_id)?;
         ensure_entry_exists(self.conn, local_entry_id)?;
         let ts = format_timestamp(now);
@@ -251,14 +318,17 @@ impl<'a> PeerImportRepository<'a> {
         tx.execute(
             "INSERT OR IGNORE INTO remote_imports
                  (peer_id, remote_entry_id, imported_content_hash,
-                  local_entry_id, imported_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+                  local_entry_id, imported_at,
+                  source_app_name, source_app_icon_ref)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 peer_id,
                 remote_entry_id,
                 imported_content_hash,
                 local_entry_id,
-                ts
+                ts,
+                source_app_name,
+                source_app_icon_ref,
             ],
         )?;
         tx.commit()?;
@@ -268,7 +338,77 @@ impl<'a> PeerImportRepository<'a> {
             imported_content_hash: imported_content_hash.to_string(),
             local_entry_id,
             imported_at: ts,
+            source_app_name: source_app_name.map(str::to_string),
+            source_app_icon_ref: source_app_icon_ref.map(str::to_string),
         })
+    }
+
+    /// Persist the source-application metadata the
+    /// `peer-source-app-presentation` change attaches to a
+    /// `(peer_id, remote_entry_id, hash)` provenance row. The
+    /// helper is metadata-only: it accepts a validated display
+    /// name (already trimmed by the host / caller) and a
+    /// locally-generated icon reference the caller computed
+    /// through the application-icon writer; neither field ever
+    /// carries a remote path, a remote filename or icon bytes.
+    ///
+    /// The helper is a no-op when the supplied name is `None`
+    /// AND the icon reference is `None` so an import that does
+    /// not opt into the additive metadata never has to build a
+    /// call site. The transaction the helper opens is the
+    /// smaller of the import transaction the caller drives so
+    /// a rollback leaves the local database in a consistent
+    /// state — the icon staging lives outside the helper so the
+    /// caller is responsible for releasing the staged icon when
+    /// the helper returns an error.
+    pub fn update_import_source_app(
+        &mut self,
+        peer_id: &str,
+        remote_entry_id: &str,
+        imported_content_hash: &str,
+        source_app_name: Option<&str>,
+        source_app_icon_ref: Option<&str>,
+    ) -> Result<(), PeerImportRepositoryError> {
+        if source_app_name.is_none() && source_app_icon_ref.is_none() {
+            // Nothing to write; the helper still refreshes the
+            // `NULL` defaults so an existing row stays in sync
+            // with the caller's intent. The change is a pure
+            // no-op when both inputs are `None`.
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE remote_imports
+             SET source_app_name = COALESCE(?1, source_app_name),
+                 source_app_icon_ref = COALESCE(?2, source_app_icon_ref)
+             WHERE peer_id = ?3
+               AND remote_entry_id = ?4
+               AND imported_content_hash = ?5",
+            params![
+                source_app_name,
+                source_app_icon_ref,
+                peer_id,
+                remote_entry_id,
+                imported_content_hash,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Count committed provenance rows that keep a locally staged
+    /// source-app icon alive. The peer-supplied value is compared as
+    /// data only; callers must already have validated the local ref.
+    pub fn count_source_app_icon_references(
+        &self,
+        asset_ref: &str,
+    ) -> Result<i64, PeerImportRepositoryError> {
+        let count = self.conn.query_row(
+            "SELECT COUNT(*) FROM remote_imports WHERE source_app_icon_ref = ?1",
+            [asset_ref],
+            |row| row.get(0),
+        )?;
+        Ok(count)
     }
 
     /// Commit the full image import transaction in a single
@@ -417,14 +557,17 @@ impl<'a> PeerImportRepository<'a> {
         tx.execute(
             "INSERT OR IGNORE INTO remote_imports
                  (peer_id, remote_entry_id, imported_content_hash,
-                  local_entry_id, imported_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+                  local_entry_id, imported_at,
+                  source_app_name, source_app_icon_ref)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 spec.peer_id,
                 spec.remote_entry_id,
                 spec.canonical_hash,
                 entry_id,
                 ts,
+                spec.source_app_name.as_deref(),
+                spec.source_app_icon_ref.as_deref(),
             ],
         )?;
 
@@ -499,6 +642,8 @@ fn row_to_remote_import(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteImpor
         imported_content_hash: row.get(2)?,
         local_entry_id: row.get(3)?,
         imported_at: row.get(4)?,
+        source_app_name: row.get(5)?,
+        source_app_icon_ref: row.get(6)?,
     })
 }
 
@@ -625,6 +770,7 @@ mod tests {
             protocol_major: 1,
             capability: "pairing".to_string(),
             caps_extra: String::new(),
+            caps_extra_v2: String::new(),
             observed_at: OffsetDateTime::now_utc(),
         })
         .expect("upsert");
@@ -770,6 +916,220 @@ mod tests {
         assert_eq!(count, 1);
     }
 
+    #[test]
+    fn record_import_with_source_app_writes_name_and_icon_atomically() {
+        // The `peer-source-app-presentation` change rejects the
+        // separate-transaction pattern the previous baseline
+        // shipped. The helper MUST commit the provenance row
+        // and its source-app attribution in a single SQL
+        // statement so a half-committed import can never leave
+        // a row without its metadata, and vice-versa.
+        let (_dir, mut db) = isolated_db();
+        seed_peer(&mut db, "peer-a");
+        let entry_id = seed_entry(&mut db, "hello");
+        let conn = db.connection_mut();
+        let mut repo = PeerImportRepository::new(conn);
+        let record = repo
+            .record_import_with_source_app(
+                "peer-a",
+                "entry-1",
+                "hash-atomic",
+                entry_id,
+                OffsetDateTime::now_utc(),
+                Some("Visual Studio Code"),
+                Some("application-icons/vscode.png"),
+            )
+            .expect("record with source app");
+        assert_eq!(
+            record.source_app_name.as_deref(),
+            Some("Visual Studio Code")
+        );
+        assert_eq!(
+            record.source_app_icon_ref.as_deref(),
+            Some("application-icons/vscode.png")
+        );
+
+        // The previously-inserted row reads back the same
+        // values so a follow-up `find_import` for the same
+        // provenance triple returns the metadata.
+        let fetched = repo
+            .find_import("peer-a", "entry-1", "hash-atomic")
+            .expect("find")
+            .expect("present");
+        assert_eq!(
+            fetched.source_app_name.as_deref(),
+            Some("Visual Studio Code")
+        );
+        assert_eq!(
+            fetched.source_app_icon_ref.as_deref(),
+            Some("application-icons/vscode.png")
+        );
+    }
+
+    #[test]
+    fn record_import_with_source_app_is_idempotent_for_reimport() {
+        // The `peer-source-app-presentation` change pins a
+        // single-write contract: re-importing the same canonical
+        // entry from the same peer never produces a duplicate
+        // provenance row, even when the second call carries
+        // fresh source-app metadata. The composite primary key
+        // collapses the second insert to a no-op so the
+        // originally-written metadata survives unchanged.
+        let (_dir, mut db) = isolated_db();
+        seed_peer(&mut db, "peer-a");
+        let entry_id = seed_entry(&mut db, "hello");
+        let conn = db.connection_mut();
+        let mut repo = PeerImportRepository::new(conn);
+        repo.record_import_with_source_app(
+            "peer-a",
+            "entry-1",
+            "hash-idem",
+            entry_id,
+            OffsetDateTime::now_utc(),
+            Some("First"),
+            Some("application-icons/first.png"),
+        )
+        .expect("first");
+        repo.record_import_with_source_app(
+            "peer-a",
+            "entry-1",
+            "hash-idem",
+            entry_id,
+            OffsetDateTime::now_utc(),
+            Some("Second"),
+            Some("application-icons/second.png"),
+        )
+        .expect("second");
+        let fetched = repo
+            .find_import("peer-a", "entry-1", "hash-idem")
+            .expect("find")
+            .expect("present");
+        assert_eq!(fetched.source_app_name.as_deref(), Some("First"));
+        assert_eq!(
+            fetched.source_app_icon_ref.as_deref(),
+            Some("application-icons/first.png")
+        );
+    }
+
+    #[test]
+    fn commit_image_import_persists_source_app_metadata() {
+        // The image import transaction MUST persist the
+        // source-app name + icon ref atomically with the entry
+        // / binding / provenance rows. The previous baseline
+        // shipped a separate `update_import_source_app`
+        // transaction; the `peer-source-app-presentation`
+        // change rejects that pattern.
+        let (_dir, mut db) = isolated_db();
+        seed_peer(&mut db, "peer-a");
+        let outcome = {
+            let mut repo = PeerImportRepository::new(db.connection_mut());
+            repo.commit_image_import_transaction(ImageImportSpec {
+                peer_id: "peer-a".to_string(),
+                remote_entry_id: "entry-img".to_string(),
+                display_name: "Equipo A".to_string(),
+                canonical_hash: "hash-img-source".to_string(),
+                asset_ref: "clipboard/hash-img-source.png".to_string(),
+                mime_type: "image/png".to_string(),
+                width: 16,
+                height: 8,
+                content_size: 32,
+                validated_title: Some("Captura".to_string()),
+                source_app_name: Some("Terminal".to_string()),
+                source_app_icon_ref: Some("application-icons/terminal.png".to_string()),
+                now: OffsetDateTime::now_utc(),
+            })
+            .expect("commit")
+        };
+        let fetched = {
+            let repo = PeerImportRepository::new(db.connection_mut());
+            repo.find_import("peer-a", "entry-img", "hash-img-source")
+                .expect("find")
+                .expect("present")
+        };
+        assert_eq!(fetched.source_app_name.as_deref(), Some("Terminal"));
+        assert_eq!(
+            fetched.source_app_icon_ref.as_deref(),
+            Some("application-icons/terminal.png")
+        );
+        assert_eq!(fetched.local_entry_id, outcome.entry_id);
+    }
+
+    #[test]
+    fn commit_image_import_dedupes_two_peers_with_separate_metadata() {
+        // Two peers that ship the same canonical content hash
+        // collapse to a single local entry (the `peer-image-import`
+        // dedupe contract) but each peer keeps its own
+        // provenance metadata: the local icon ref the
+        // `peer-source-app-presentation` change persists belongs
+        // to that peer's import, never to a sibling peer.
+        let (_dir, mut db) = isolated_db();
+        seed_peer(&mut db, "peer-a");
+        seed_peer(&mut db, "peer-b");
+        let canonical_hash = "hash-shared-source";
+        let (a_outcome, b_outcome) = {
+            let mut repo = PeerImportRepository::new(db.connection_mut());
+            let a = repo
+                .commit_image_import_transaction(ImageImportSpec {
+                    peer_id: "peer-a".to_string(),
+                    remote_entry_id: "entry-shared".to_string(),
+                    display_name: "Equipo A".to_string(),
+                    canonical_hash: canonical_hash.to_string(),
+                    asset_ref: "clipboard/hash-shared-source.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    width: 8,
+                    height: 4,
+                    content_size: 16,
+                    validated_title: None,
+                    source_app_name: Some("App A".to_string()),
+                    source_app_icon_ref: Some("application-icons/a.png".to_string()),
+                    now: OffsetDateTime::now_utc(),
+                })
+                .expect("commit a");
+            let b = repo
+                .commit_image_import_transaction(ImageImportSpec {
+                    peer_id: "peer-b".to_string(),
+                    remote_entry_id: "entry-shared".to_string(),
+                    display_name: "Equipo B".to_string(),
+                    canonical_hash: canonical_hash.to_string(),
+                    asset_ref: "clipboard/hash-shared-source.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    width: 8,
+                    height: 4,
+                    content_size: 16,
+                    validated_title: None,
+                    source_app_name: Some("App B".to_string()),
+                    source_app_icon_ref: Some("application-icons/b.png".to_string()),
+                    now: OffsetDateTime::now_utc(),
+                })
+                .expect("commit b");
+            (a, b)
+        };
+        assert_eq!(a_outcome.entry_id, b_outcome.entry_id);
+
+        let a_fetched = {
+            let repo = PeerImportRepository::new(db.connection_mut());
+            repo.find_import("peer-a", "entry-shared", canonical_hash)
+                .expect("find a")
+                .expect("present")
+        };
+        let b_fetched = {
+            let repo = PeerImportRepository::new(db.connection_mut());
+            repo.find_import("peer-b", "entry-shared", canonical_hash)
+                .expect("find b")
+                .expect("present")
+        };
+        assert_eq!(a_fetched.source_app_name.as_deref(), Some("App A"));
+        assert_eq!(
+            a_fetched.source_app_icon_ref.as_deref(),
+            Some("application-icons/a.png")
+        );
+        assert_eq!(b_fetched.source_app_name.as_deref(), Some("App B"));
+        assert_eq!(
+            b_fetched.source_app_icon_ref.as_deref(),
+            Some("application-icons/b.png")
+        );
+    }
+
     fn seed_image_entry(db: &mut Database, hash: &str, asset_ref: &str) -> i64 {
         let now = OffsetDateTime::now_utc();
         let conn = db.connection_mut();
@@ -817,6 +1177,8 @@ mod tests {
                 content_size: 32,
                 validated_title: Some("Captura".to_string()),
                 now: OffsetDateTime::now_utc(),
+                source_app_name: None,
+                source_app_icon_ref: None,
             })
             .expect("commit")
         };
@@ -872,6 +1234,8 @@ mod tests {
                 content_size: 16,
                 validated_title: Some("Otro título".to_string()),
                 now: OffsetDateTime::now_utc(),
+                source_app_name: None,
+                source_app_icon_ref: None,
             })
             .expect("commit")
         };
@@ -908,6 +1272,8 @@ mod tests {
                     content_size: 8,
                     validated_title: None,
                     now: OffsetDateTime::now_utc(),
+                    source_app_name: None,
+                    source_app_icon_ref: None,
                 })
                 .expect("commit");
             let second = repo
@@ -923,6 +1289,8 @@ mod tests {
                     content_size: 8,
                     validated_title: None,
                     now: OffsetDateTime::now_utc(),
+                    source_app_name: None,
+                    source_app_icon_ref: None,
                 })
                 .expect("commit");
             (first, second)
@@ -962,6 +1330,8 @@ mod tests {
                     content_size: 8,
                     validated_title: None,
                     now: OffsetDateTime::now_utc(),
+                    source_app_name: None,
+                    source_app_icon_ref: None,
                 })
                 .expect("commit");
             let second = repo
@@ -977,6 +1347,8 @@ mod tests {
                     content_size: 8,
                     validated_title: None,
                     now: OffsetDateTime::now_utc(),
+                    source_app_name: None,
+                    source_app_icon_ref: None,
                 })
                 .expect("commit");
             (first, second)
@@ -1017,6 +1389,8 @@ mod tests {
                 content_size: 8,
                 validated_title: None,
                 now: OffsetDateTime::now_utc(),
+                source_app_name: None,
+                source_app_icon_ref: None,
             })
             .expect("commit")
         };
@@ -1043,6 +1417,8 @@ mod tests {
                     content_size: 8,
                     validated_title: None,
                     now: OffsetDateTime::now_utc(),
+                    source_app_name: None,
+                    source_app_icon_ref: None,
                 })
                 .expect("commit");
             let second = repo
@@ -1058,6 +1434,8 @@ mod tests {
                     content_size: 8,
                     validated_title: None,
                     now: OffsetDateTime::now_utc(),
+                    source_app_name: None,
+                    source_app_icon_ref: None,
                 })
                 .expect("commit");
             (first, second)
@@ -1103,6 +1481,8 @@ mod tests {
                 content_size: 8,
                 validated_title: None,
                 now: OffsetDateTime::now_utc(),
+                source_app_name: None,
+                source_app_icon_ref: None,
             })
             .expect("commit")
         };

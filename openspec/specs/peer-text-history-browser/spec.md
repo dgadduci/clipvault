@@ -56,7 +56,9 @@ SHALL contain an opaque remote reference, optional title, type, date, byte size
 and dimensions, but no image bytes or thumbnail. Neither row SHALL contain
 tags, collections, favorites, source metadata, filesystem paths, asset
 references or hashes. The host SHALL exclude `ContentType::Html` from the
-transferable set even when it is textual.
+transferable set even when it is textual. A thumbnail, when supported, SHALL
+be requested separately under the requirements of
+`peer-image-preview-thumbnails`.
 
 #### Scenario: First recent page over mTLS
 
@@ -69,8 +71,10 @@ transferable set even when it is textual.
 #### Scenario: Image or HTML row exists
 
 - **WHEN** the host contains a valid transferable image entry
-- **THEN** the row is included with metadata only and the client renders the
-  common static image placeholder without fetching image bytes
+- **THEN** the row is included with metadata only and the client initially
+  renders the common static image placeholder
+- **AND** a separate bounded thumbnail request MAY occur only when the card is
+  visible and both peers support the thumbnail capability
 
 #### Scenario: Invalid image or HTML row exists
 
@@ -187,10 +191,11 @@ collections, clipboard writes, paste events or complete content downloads. A
 remote card SHALL have no drag/drop, pin, edit, copy/paste or local menu
 actions. For a transferable text or image row it SHALL expose an explicit
 `Importar` action; while importing it SHALL show busy state and after failure
-it SHALL expose a safe retry. An image row SHALL render the common static
-placeholder, not a remote thumbnail. The remote card date SHALL use the same
-formatter as local cards, and local search/source-app/tag filters SHALL NOT
-apply to the remote rail.
+it SHALL expose a safe retry. An image row SHALL initially render the common
+static placeholder; a supported, visible row MAY replace it with the bounded
+thumbnail defined by `peer-image-preview-thumbnails`. The remote card date
+SHALL use the same formatter as local cards, and local search/source-app/tag
+filters SHALL NOT apply to the remote rail.
 
 #### Scenario: User switches peer while a page is loading
 
@@ -232,9 +237,12 @@ apply to the remote rail.
 
 #### Scenario: User opens an image preview card
 
-- **WHEN** a listed image row is rendered
-- **THEN** the card shows the static placeholder and metadata, and opening the
-  card does not download the image until the user activates Importar
+- **WHEN** a listed image card is visible in the rail
+- **THEN** it initially shows the common static placeholder
+- **AND** it requests only a bounded thumbnail if the peer advertises the
+  thumbnail capability
+- **AND** it never fetches the complete image unless the user activates
+  `Importar`
 
 #### Scenario: User imports an image from the remote card
 
@@ -247,7 +255,7 @@ apply to the remote rail.
 - **WHEN** a row is no longer eligible for import or the peer lacks the image
   capability
 - **THEN** the card does not offer a successful import path and no request for
-  complete content or image bytes is made
+  complete content or original image bytes is made
 
 #### Scenario: Remote card menu is visible before import exists
 
@@ -256,18 +264,29 @@ apply to the remote rail.
   action, while an ineligible row exposes no successful import action and the
   menu never downloads complete content by itself
 
+#### Scenario: Thumbnail response is stale or unavailable
+
+- **WHEN** the selected peer changes, the card unmounts, or thumbnail loading
+  fails
+- **THEN** a late response cannot affect the current peer or another row, the
+  placeholder remains available, and the remote rail has no global load error
+
 ### Requirement: Full text remains unavailable until the import change
 
-Remote browsing SHALL receive only bounded text previews or image metadata. The
-separate text and image import capabilities MAY fetch complete content only
-after the user activates Importar for that row. Browsing alone SHALL NOT create
-local entries or import records.
+Remote browsing SHALL receive only bounded text previews or image metadata in
+history-page responses. A separate visible-card thumbnail route MAY transfer
+only the bounded derived image specified by `peer-image-preview-thumbnails`.
+Complete text or original image bytes SHALL be fetched only after the user
+activates Importar for that row. Browsing alone SHALL NOT create local entries
+or import records.
 
 #### Scenario: User views a preview
 
-- **WHEN** a remote history page is rendered
+- **WHEN** a remote history page is rendered and an image card becomes
+  visible
 - **THEN** the client has received only bounded text preview data or image
-  metadata and no local entry or import record exists
+  metadata in the page, and at most the separately requested bounded image
+  thumbnail; no local entry or import record exists
 
 #### Scenario: User imports after browsing
 

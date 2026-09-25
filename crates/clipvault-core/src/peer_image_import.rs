@@ -167,6 +167,23 @@ pub struct PeerFetchImageResponse {
     /// Canonical PNG bytes the host validated against the asset
     /// store contract.
     pub bytes: Vec<u8>,
+    /// Validated source-application display name the
+    /// `peer-source-app-presentation` change attaches to the
+    /// original image response. The importer forwards the value
+    /// to the persistence trait so the import transaction
+    /// commits the name atomically with the entry / binding /
+    /// provenance rows. `None` when the host did not opt into
+    /// the additive contract or when validation refused the
+    /// supplied value; the import still succeeds.
+    pub source_app_name: Option<String>,
+    /// Validated source-application PNG icon bytes the host
+    /// attached to the response. The importer stages the bytes
+    /// through the asset store, captures the locally-generated
+    /// reference and forwards it to the persistence trait so the
+    /// icon ref is committed in the same transaction as the
+    /// provenance. `None` when the host did not opt into the
+    /// additive contract or when validation refused the bytes.
+    pub source_app_icon_bytes: Option<Vec<u8>>,
 }
 
 /// Metadata-only transport façade the import facade uses. The
@@ -353,6 +370,24 @@ pub trait PeerImageImportPersistence: Send + Sync {
     /// than [`IMPORT_MAX_IMAGE_BYTES`].
     fn read_image_bytes(&self, asset_ref: &str)
         -> Result<Vec<u8>, PeerImageImportPersistenceError>;
+    /// Stage the source-application PNG icon the host returned
+    /// through the local application-icon store. The helper
+    /// validates the bytes (signature, decode, dimensions, byte
+    /// cap), computes a content-addressed reference under
+    /// `application-icons/` and never accepts a peer-supplied
+    /// path / filename / reference. The returned
+    /// [`StagedImageAsset`] mirrors [`Self::stage_image_asset`]:
+    /// a [`StageKind::Written`] outcome signals a freshly created
+    /// file the caller is allowed to delete on rollback; a
+    /// [`StageKind::Reused`] outcome signals a shared icon the
+    /// rollback MUST keep. The helper returns
+    /// `Ok(None)` when the caller passes `None` (no icon was
+    /// sent by the host) so a peer that did not opt into the
+    /// additive contract never has to opt into the icon path.
+    fn stage_source_app_icon(
+        &self,
+        bytes: Option<&[u8]>,
+    ) -> Result<Option<StagedImageAsset>, PeerImageImportPersistenceError>;
     /// Re-validate a `(width, height, byte_size)` triple against
     /// the local limits the asset store enforces. Returns the
     /// valid triple the importer persists; the helper is
@@ -441,6 +476,18 @@ impl StageKind {
 /// needs; the persistence layer is responsible for projecting
 /// them into the typed repository helpers and committing the
 /// whole sequence in a single SQLite transaction.
+///
+/// `source_app_name` and `source_app_icon` are the additive
+/// fields the `peer-source-app-presentation` change attaches
+/// to a peer-bound provenance row. Both fields stay `None` for
+/// peers that did not opt into the additive contract (legacy
+/// flow) or when validation refused the supplied value; the
+/// persistence layer MUST treat the absence as a typed no-op
+/// and commit the remaining rows unchanged. When
+/// `source_app_icon` is `Some(StagedImageAsset)`, the caller is
+/// responsible for releasing the staged icon through
+/// [`PeerImageImportPersistence::release_staged_asset`] when
+/// the surrounding transaction rolls back.
 #[derive(Debug, Clone)]
 pub struct ImageImportTransactionSpec {
     pub peer_id: String,
@@ -448,6 +495,8 @@ pub struct ImageImportTransactionSpec {
     pub display_name: String,
     pub staged: StagedImageAsset,
     pub validated_title: Option<String>,
+    pub source_app_name: Option<String>,
+    pub source_app_icon: Option<StagedImageAsset>,
     pub now: OffsetDateTime,
 }
 
@@ -515,6 +564,15 @@ struct InMemoryImageImportState {
     collections: HashMap<i64, Collection>,
     next_collection_id: i64,
     by_hash: HashMap<String, i64>,
+    /// Per-provenance source-app metadata the
+    /// `peer-source-app-presentation` change writes through the
+    /// import transaction. Keyed by the composite
+    /// `(peer_id, remote_entry_id, imported_content_hash)` so
+    /// the in-memory adapter mirrors the production SQLite
+    /// projection: every peer keeps its own source-app name /
+    /// icon ref even when multiple peers point at the same
+    /// local entry.
+    provenance_source_app: HashMap<(String, String, String), (Option<String>, Option<String>)>,
     /// Per-staged-asset kind the rollback path consults. A
     /// `Reused` value MUST survive a rolled-back transaction
     /// even when no entry references the asset.
@@ -541,6 +599,7 @@ impl Default for InMemoryImageImportPersistence {
                 collections: HashMap::new(),
                 next_collection_id: 1,
                 by_hash: HashMap::new(),
+                provenance_source_app: HashMap::new(),
                 staged_kinds: HashMap::new(),
                 asset_bytes: HashMap::new(),
                 staged_leases: HashMap::new(),
@@ -562,6 +621,28 @@ impl InMemoryImageImportPersistence {
             state.next_entry_id = state.next_entry_id.max(entry.id + 1);
             state.entries.insert(entry.id, entry);
         }
+    }
+
+    /// Look up the source-app name + icon ref a previous
+    /// `commit_import_transaction` call persisted for the
+    /// `(peer_id, remote_entry_id, imported_content_hash)` triple.
+    /// Returns `None` when no provenance row exists, mirroring
+    /// the production `find_import` helper.
+    pub fn source_app_for(
+        &self,
+        peer_id: &str,
+        remote_entry_id: &str,
+        imported_content_hash: &str,
+    ) -> Option<(Option<String>, Option<String>)> {
+        self.state
+            .lock()
+            .provenance_source_app
+            .get(&(
+                peer_id.to_string(),
+                remote_entry_id.to_string(),
+                imported_content_hash.to_string(),
+            ))
+            .cloned()
     }
 }
 
@@ -827,6 +908,56 @@ impl PeerImageImportPersistence for InMemoryImageImportPersistence {
         })
     }
 
+    fn stage_source_app_icon(
+        &self,
+        bytes: Option<&[u8]>,
+    ) -> Result<Option<StagedImageAsset>, PeerImageImportPersistenceError> {
+        // The helper collapses to `None` when the host did not
+        // ship an icon so the caller never has to opt into the
+        // icon path; the import transaction treats the absence
+        // as a typed no-op and the persisted provenance row
+        // keeps its `source_app_icon_ref` column at `NULL`.
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        let image = crate::clipboard_assets::decode_png(bytes).map_err(|error| {
+            PeerImageImportPersistenceError::Asset(format!("icon decode: {error:?}"))
+        })?;
+        let normalized = crate::clipboard_assets::normalize_image(&image).map_err(|error| {
+            PeerImageImportPersistenceError::Asset(format!("icon normalize: {error:?}"))
+        })?;
+        let hash = crate::clipboard_assets::sha256_hex(bytes);
+        let asset_ref = format!(
+            "{}/{hash}.png",
+            crate::application_icons::APPLICATION_ICONS_ASSET_DIR
+        );
+        let width = image.width();
+        let height = image.height();
+        let mut state = self.state.lock();
+        // The in-memory adapter mirrors the production
+        // `application-icons/` writer: an icon the adapter
+        // already serves is treated as `Reused` (the rollback
+        // path MUST keep it), a brand-new icon is treated as
+        // `Written` (safe to delete when the surrounding
+        // transaction rolls back).
+        let kind = if state.asset_bytes.contains_key(&asset_ref) {
+            StageKind::Reused
+        } else {
+            StageKind::Written
+        };
+        state.asset_bytes.insert(asset_ref.clone(), bytes.to_vec());
+        state.staged_kinds.insert(asset_ref.clone(), kind);
+        *state.staged_leases.entry(asset_ref.clone()).or_insert(0) += 1;
+        Ok(Some(StagedImageAsset {
+            asset_ref,
+            canonical_hash: hash,
+            width,
+            height,
+            content_size: normalized.png().len() as i64,
+            kind,
+        }))
+    }
+
     fn release_staged_asset(
         &self,
         staged: &StagedImageAsset,
@@ -920,14 +1051,21 @@ impl PeerImageImportPersistence for InMemoryImageImportPersistence {
         // proper SQLite transaction instead.
         let mut state = self.state.lock();
         let hash = spec.staged.canonical_hash.clone();
-        // The commit succeeded: release the staged lease the
-        // helper acquired during [`stage_image_asset`] so the
-        // rollback path's per-asset counter reflects the
-        // import has moved past the staging step. The entry
-        // the commit inserts below takes ownership of the
-        // asset reference, so the file itself stays in the
-        // in-memory store regardless of the lease counter.
+        // Release the staged leases the helpers acquired
+        // during staging so the rollback path's per-asset
+        // counters reflect the import has moved past the
+        // staging step. The entries the commit inserts below
+        // take ownership of the asset references, so the
+        // bytes themselves stay in the in-memory store
+        // regardless of the lease counter.
         decrement_staged_lease(&mut state, &spec.staged.asset_ref);
+        let source_app_icon_ref = spec
+            .source_app_icon
+            .as_ref()
+            .map(|staged| staged.asset_ref.clone());
+        if let Some(icon) = spec.source_app_icon.as_ref() {
+            decrement_staged_lease(&mut state, &icon.asset_ref);
+        }
         let existing_entry_id = state.by_hash.get(&hash).copied();
         let entry_id = match existing_entry_id {
             Some(id) => {
@@ -1047,11 +1185,27 @@ impl PeerImageImportPersistence for InMemoryImageImportPersistence {
         // provenance row uses
         // `(peer_id, remote_entry_id, imported_content_hash)`
         // and the insert collapses to a no-op on a duplicate.
+        // The provenance_source_app map carries the
+        // per-provenance source-app name + icon ref the
+        // `peer-source-app-presentation` change writes
+        // atomically with the rest of the transaction. The
+        // existing-entry path deliberately keeps the entry's
+        // `source_app_name` / `source_app_icon_ref` columns
+        // untouched — the per-provenance metadata lives in
+        // its own map keyed by the composite provenance.
         state.imports.insert((
             spec.peer_id.clone(),
             spec.remote_entry_id.clone(),
             hash.clone(),
         ));
+        state.provenance_source_app.insert(
+            (
+                spec.peer_id.clone(),
+                spec.remote_entry_id.clone(),
+                hash.clone(),
+            ),
+            (spec.source_app_name.clone(), source_app_icon_ref.clone()),
+        );
 
         Ok(ImageImportTransactionOutcome {
             entry_id,
@@ -1252,24 +1406,50 @@ impl PeerImageImportService {
             }
         };
 
+        // Stage the source-app icon (when present) through the
+        // dedicated `application-icons/` writer. The helper
+        // validates the bytes independently of the image, so a
+        // peer that ships a valid image + an invalid icon
+        // collapses to a no-op icon and the import still
+        // succeeds. The staged icon MUST be released if the
+        // surrounding transaction rolls back.
+        let staged_icon = match self
+            .persistence
+            .stage_source_app_icon(response.source_app_icon_bytes.as_deref())
+        {
+            Ok(staged_icon) => staged_icon,
+            Err(error) => {
+                let _ = self.persistence.release_staged_asset(&staged);
+                return PeerImageImportOutcome::PersistenceError {
+                    reason: persistence_reason(&error),
+                };
+            }
+        };
+
         let result = self.commit_after_staging(
             peer_id,
             display_name,
             &response,
             &staged,
+            staged_icon.as_ref(),
+            response.source_app_name.as_deref(),
             validated_title,
             now,
         );
 
-        // Rollback: only the freshly staged asset is removed.
+        // Rollback: only the freshly staged assets are removed.
         // A pre-existing asset that happens to share the hash
         // was already on disk before this import began and the
         // staging helper would have returned a `Reused` outcome
         // (no temporary created). The persistence helper only
         // removes the file when no entry references it, so a
-        // shared asset stays put even when this call rolled back.
+        // shared asset stays put even when this call rolled
+        // back.
         if !matches!(result, PeerImageImportOutcome::Imported { .. }) {
             let _ = self.persistence.release_staged_asset(&staged);
+            if let Some(icon) = staged_icon.as_ref() {
+                let _ = self.persistence.release_staged_asset(icon);
+            }
         }
 
         result
@@ -1281,23 +1461,27 @@ impl PeerImageImportService {
         display_name: &str,
         response: &PeerFetchImageResponse,
         staged: &StagedImageAsset,
+        staged_icon: Option<&StagedImageAsset>,
+        source_app_name: Option<&str>,
         validated_title: Option<String>,
         now: OffsetDateTime,
     ) -> PeerImageImportOutcome {
         // The whole sequence (binding lookup / creation, entry
-        // insert or reuse, membership attach, provenance record)
-        // runs through a single SQLite transaction so a failure
-        // anywhere rolls the import back atomically. The
-        // persistence helper is responsible for opening the
-        // transaction and committing it; the importer only
-        // supplies the validated inputs and consumes the typed
-        // outcome.
+        // insert or reuse, membership attach, provenance record,
+        // source-app name + icon ref) runs through a single
+        // SQLite transaction so a failure anywhere rolls the
+        // import back atomically. The persistence helper is
+        // responsible for opening the transaction and committing
+        // it; the importer only supplies the validated inputs
+        // and consumes the typed outcome.
         let spec = ImageImportTransactionSpec {
             peer_id: peer_id.to_string(),
             remote_entry_id: response.remote_entry_id.clone(),
             display_name: display_name.to_string(),
             staged: staged.clone(),
             validated_title,
+            source_app_name: source_app_name.map(str::to_string),
+            source_app_icon: staged_icon.cloned(),
             now,
         };
         match self.persistence.commit_import_transaction(spec) {
@@ -1369,6 +1553,8 @@ impl PeerFetchImageTransport for PeerPairingFetchImageTransportAdapter {
                     remote_entry_id: snapshot.remote_entry_id,
                     title: snapshot.title,
                     bytes: snapshot.bytes,
+                    source_app_name: snapshot.source_app_name,
+                    source_app_icon_bytes: snapshot.source_app_icon_bytes,
                 })
             }
             Err(error) => Err(map_pairing_image_fetch_transport_error(error)),
@@ -1613,6 +1799,8 @@ mod tests {
             remote_entry_id: remote_entry_id.to_string(),
             title: None,
             bytes,
+            source_app_name: None,
+            source_app_icon_bytes: None,
         }
     }
 
@@ -1881,6 +2069,8 @@ mod tests {
                 display_name: "Equipo A".to_string(),
                 staged: first.clone(),
                 validated_title: None,
+                source_app_name: None,
+                source_app_icon: None,
                 now: OffsetDateTime::now_utc(),
             })
             .expect("commit pre-existing");
@@ -2010,6 +2200,8 @@ mod tests {
                     display_name: "Equipo B".to_string(),
                     staged,
                     validated_title: None,
+                    source_app_name: None,
+                    source_app_icon: None,
                     now,
                 })
                 .expect("commit b");
@@ -2052,6 +2244,8 @@ mod tests {
                 remote_entry_id: "entry-1".to_string(),
                 title: None,
                 bytes: vec![0u8; 16],
+                source_app_name: None,
+                source_app_icon_bytes: None,
             },
         )));
         let service = PeerImageImportService::new(
@@ -2251,6 +2445,8 @@ mod tests {
                 remote_entry_id: "entry-1".to_string(),
                 title: Some("x".repeat(crate::history::MAX_TITLE_LENGTH + 1)),
                 bytes,
+                source_app_name: None,
+                source_app_icon_bytes: None,
             },
         )));
         let service = PeerImageImportService::new(
@@ -2278,6 +2474,8 @@ mod tests {
                 remote_entry_id: "entry-1".to_string(),
                 title: None,
                 bytes: vec![],
+                source_app_name: None,
+                source_app_icon_bytes: None,
             },
         )));
         let service = PeerImageImportService::new(
@@ -2314,6 +2512,8 @@ mod tests {
                 remote_entry_id: "entry-1".to_string(),
                 title: None,
                 bytes,
+                source_app_name: None,
+                source_app_icon_bytes: None,
             },
         )));
         let service = PeerImageImportService::new(

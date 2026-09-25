@@ -105,6 +105,15 @@ pub struct KnownPeer {
     /// additive surface through the helper
     /// [`crate::peer_discovery::decode_capabilities`].
     pub caps_extra: String,
+    /// Second-tier additive capability tokens the host advertises
+    /// through the dedicated `caps_extra_v2` TXT field the
+    /// `peer-source-app-presentation` change ships. The column
+    /// carries a comma-separated list (empty for legacy rows) so
+    /// a strict legacy resolver that only knows `caps_extra`
+    /// ignores the new column without losing any additive
+    /// token. New clients combine recognised tokens from both
+    /// additive fields when they gate the productive routes.
+    pub caps_extra_v2: String,
 }
 
 /// Trust state the pairing runtime persists alongside every
@@ -232,6 +241,16 @@ pub struct PeerObservation {
     /// bootstrap resolver can split it with the same helper the
     /// TXT validator uses.
     pub caps_extra: String,
+    /// Second-tier additive capability tokens the host publishes
+    /// through the dedicated `caps_extra_v2` TXT field the
+    /// `peer-source-app-presentation` change ships. The value is a
+    /// comma-separated list (empty for legacy rows) so the
+    /// repository persists the second-tier surface verbatim and
+    /// a strict legacy resolver that only knows `caps_extra`
+    /// ignores the new column without losing the additive
+    /// tokens. New clients combine recognised tokens from both
+    /// additive fields.
+    pub caps_extra_v2: String,
     /// Instant the runtime observed the peer. The repository
     /// stamps it into `last_discovered_at` (and `first_seen_at`
     /// when the row is new); tests pass a deterministic
@@ -274,7 +293,7 @@ impl<'a> KnownPeerRepository<'a> {
             let mut stmt = tx.prepare(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra, caps_extra_v2 \
                  FROM known_peers WHERE peer_id = ?1",
             )?;
             stmt.query_row(params![observation.peer_id], |row| Ok(read_row(row)?))
@@ -285,8 +304,8 @@ impl<'a> KnownPeerRepository<'a> {
                 tx.execute(
                     "INSERT INTO known_peers \
                         (peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
-                         capability, first_seen_at, last_discovered_at, updated_at, caps_extra) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?7, ?8)",
+                         capability, first_seen_at, last_discovered_at, updated_at, caps_extra, caps_extra_v2) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?7, ?8, ?9)",
                     params![
                         observation.peer_id,
                         observation.public_key_fingerprint,
@@ -299,13 +318,14 @@ impl<'a> KnownPeerRepository<'a> {
                         observation.capability,
                         now,
                         observation.caps_extra,
+                        observation.caps_extra_v2,
                     ],
                 )?;
                 let row = tx
                     .query_row(
                         "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                                 capability, first_seen_at, last_discovered_at, updated_at, \
-                                trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra \
+                                trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra, caps_extra_v2 \
                          FROM known_peers WHERE peer_id = ?1",
                         params![observation.peer_id],
                         |row| read_row(row),
@@ -350,13 +370,14 @@ impl<'a> KnownPeerRepository<'a> {
                         .unwrap_or_else(|| previous.full_public_key_fingerprint.clone());
                     tx.execute(
                         "UPDATE known_peers \
-                         SET full_public_key_fingerprint = ?1, capability = ?2, caps_extra = ?3, \
-                             last_discovered_at = ?4, updated_at = ?4 \
-                         WHERE peer_id = ?5",
+                         SET full_public_key_fingerprint = ?1, capability = ?2, caps_extra = ?3, caps_extra_v2 = ?4, \
+                             last_discovered_at = ?5, updated_at = ?5 \
+                         WHERE peer_id = ?6",
                         params![
                             merged_full,
                             observation.capability,
                             observation.caps_extra,
+                            observation.caps_extra_v2,
                             now,
                             observation.peer_id
                         ],
@@ -365,7 +386,7 @@ impl<'a> KnownPeerRepository<'a> {
                         .query_row(
                             "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                                     capability, first_seen_at, last_discovered_at, updated_at, \
-                                    trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra \
+                                    trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra, caps_extra_v2 \
                              FROM known_peers WHERE peer_id = ?1",
                             params![observation.peer_id],
                             |row| read_row(row),
@@ -386,7 +407,7 @@ impl<'a> KnownPeerRepository<'a> {
             .query_row(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra, caps_extra_v2 \
                  FROM known_peers WHERE peer_id = ?1",
                 params![peer_id],
                 |row| read_row(row),
@@ -402,7 +423,7 @@ impl<'a> KnownPeerRepository<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                     capability, first_seen_at, last_discovered_at, updated_at, \
-                    trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra \
+                    trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra, caps_extra_v2 \
              FROM known_peers ORDER BY last_discovered_at DESC",
         )?;
         let rows = stmt
@@ -449,7 +470,7 @@ impl<'a> KnownPeerRepository<'a> {
             let mut stmt = tx.prepare(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra, caps_extra_v2 \
                  FROM known_peers WHERE peer_id = ?1",
             )?;
             stmt.query_row(params![peer_id], |row| read_row(row))
@@ -480,7 +501,7 @@ impl<'a> KnownPeerRepository<'a> {
             .query_row(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra, caps_extra_v2 \
                  FROM known_peers WHERE peer_id = ?1",
                 params![peer_id],
                 |row| read_row(row),
@@ -506,7 +527,7 @@ impl<'a> KnownPeerRepository<'a> {
             let mut stmt = tx.prepare(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra, caps_extra_v2 \
                  FROM known_peers WHERE peer_id = ?1",
             )?;
             stmt.query_row(params![peer_id], |row| read_row(row))
@@ -531,7 +552,7 @@ impl<'a> KnownPeerRepository<'a> {
             .query_row(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra, caps_extra_v2 \
                  FROM known_peers WHERE peer_id = ?1",
                 params![peer_id],
                 |row| read_row(row),
@@ -557,7 +578,7 @@ impl<'a> KnownPeerRepository<'a> {
             let mut stmt = tx.prepare(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra, caps_extra_v2 \
                  FROM known_peers WHERE peer_id = ?1",
             )?;
             stmt.query_row(params![peer_id], |row| read_row(row))
@@ -582,7 +603,7 @@ impl<'a> KnownPeerRepository<'a> {
             .query_row(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra, caps_extra_v2 \
                  FROM known_peers WHERE peer_id = ?1",
                 params![peer_id],
                 |row| read_row(row),
@@ -603,7 +624,7 @@ impl<'a> KnownPeerRepository<'a> {
             let mut stmt = tx.prepare(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra, caps_extra_v2 \
                  FROM known_peers WHERE peer_id = ?1",
             )?;
             stmt.query_row(params![peer_id], |row| read_row(row))
@@ -631,7 +652,7 @@ impl<'a> KnownPeerRepository<'a> {
             .query_row(
                 "SELECT peer_id, public_key_fingerprint, full_public_key_fingerprint, display_name, protocol_major, \
                         capability, first_seen_at, last_discovered_at, updated_at, \
-                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra \
+                        trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major, cursor_secret, caps_extra, caps_extra_v2 \
                  FROM known_peers WHERE peer_id = ?1",
                 params![peer_id],
                 |row| read_row(row),
@@ -725,6 +746,7 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnownPeer> {
         paired_protocol_major: row.get(12)?,
         cursor_secret: row.get(13)?,
         caps_extra: row.get(14)?,
+        caps_extra_v2: row.get(15)?,
     })
 }
 
@@ -763,6 +785,7 @@ mod tests {
             protocol_major,
             capability: capability.to_string(),
             caps_extra: String::new(),
+            caps_extra_v2: String::new(),
             observed_at,
         }
     }
@@ -817,6 +840,7 @@ mod tests {
                 protocol_major: 1,
                 capability: "pairing".to_string(),
                 caps_extra: String::new(),
+                caps_extra_v2: String::new(),
                 observed_at: when,
             })
             .expect("insert pairing");
@@ -837,6 +861,7 @@ mod tests {
                 protocol_major: 1,
                 capability: "pairing".to_string(),
                 caps_extra: String::new(),
+                caps_extra_v2: String::new(),
                 observed_at: datetime!(2026-01-02 04:04:05 UTC),
             })
             .expect("merge pairing");
@@ -858,6 +883,7 @@ mod tests {
                 protocol_major: 1,
                 capability: "pairing".to_string(),
                 caps_extra: String::new(),
+                caps_extra_v2: String::new(),
                 observed_at: datetime!(2026-01-02 05:04:05 UTC),
             })
             .expect("merge pairing with empty fingerprint");
@@ -1075,6 +1101,7 @@ mod tests {
                 protocol_major: 1,
                 capability: "pairing".to_string(),
                 caps_extra: String::new(),
+                caps_extra_v2: String::new(),
                 observed_at: when + time::Duration::hours(1),
             })
             .expect("pairing upgrade");

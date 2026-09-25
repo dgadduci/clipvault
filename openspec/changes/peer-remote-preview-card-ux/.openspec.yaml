@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-09-25
+goal: Make remote peer previews visually and keyboard consistent with local
+  cards, and render truthful source attribution plus a static imported marker
+  after explicit import.

@@ -55,6 +55,33 @@
    */
   export let rowTestId: string | null = null;
   /**
+   * Whether the card is the rail-owned selected entry. The
+   * `peer-remote-preview-card-ux` change ships the value so the
+   * card can render the blue selection accent and accept
+   * keyboard focus from the rail's keyboard handler. The card
+   * never inspects the rail-owned `selectedEntryId` directly
+   * — the parent forwards a single boolean so the component
+   * keeps its read-only contract.
+   */
+  export let selected: boolean = false;
+  /**
+   * Callback the rail fires when the user activates the card's
+   * non-interactive surface (click or `Enter`/`Space`). The
+   * card never owns a click handler that selects a different
+   * card; the parent routes the activation through its own
+   * selection state so two cards racing the same event can
+   * never produce a divergent selection.
+   */
+  export let onSelect: (remoteEntryId: string) => void = () => undefined;
+  /**
+   * Reference callback the rail fires when the article element
+   * mounts or unmounts. The rail keeps a `cardEls` registry
+   * keyed by `remote_entry_id` so the keyboard-navigation
+   * handler can scroll the freshly selected card into view
+   * without a `querySelector` round-trip.
+   */
+  export let onCardRef: (el: HTMLElement | null) => void = () => undefined;
+  /**
    * `peer_id` the parent passes through so the import bridge
    * can dial the productive mTLS transport. The component
    * never inspects the value beyond forwarding it verbatim.
@@ -263,6 +290,59 @@
   })();
   function toggleMenu(): void {
     menuOpen = !menuOpen;
+  }
+  /**
+   * Surface-click handler the `peer-remote-preview-card-ux`
+   * change ships. The handler routes through the parent's
+   * selection callback so the rail is the single source of
+   * truth for `selectedEntryId`; the card never picks a peer
+   * id, never starts a fetch and never opens the import menu
+   * from the surface click. The handler refuses to fire when
+   * the user clicked an interactive control inside the card
+   * (the menu button or the import button) so a menu click
+   * never accidentally re-selects a card.
+   */
+  function handleCardSurfaceClick(event: MouseEvent): void {
+    const target = event.target as HTMLElement | null;
+    if (target !== null) {
+      if (target.closest("[data-testid='remote-preview-card-menu']")) {
+        return;
+      }
+      if (target.closest("[data-testid='remote-preview-card-menu-button']")) {
+        return;
+      }
+      if (target.closest("[data-testid='remote-preview-card-import']")) {
+        return;
+      }
+    }
+    onSelect(row.remote_entry_id);
+  }
+  /**
+   * Surface-keydown handler the
+   * `peer-remote-preview-card-ux` change ships. The handler
+   * forwards `Enter` / `Space` to the parent's selection
+   * callback so a keyboard-only user can activate the card.
+   * The handler does not intercept horizontal arrows: the
+   * `RemoteHistoryRail` owns the rail-wide keyboard handler
+   * and that handler refuses to fire when the focus sits in
+   * an interactive control inside a card.
+   */
+  function handleCardSurfaceKeydown(event: KeyboardEvent): void {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const target = event.target as HTMLElement | null;
+    if (target !== null) {
+      if (target.closest("[data-testid='remote-preview-card-menu']")) {
+        return;
+      }
+      if (target.closest("[data-testid='remote-preview-card-menu-button']")) {
+        return;
+      }
+      if (target.closest("[data-testid='remote-preview-card-import']")) {
+        return;
+      }
+    }
+    event.preventDefault();
+    onSelect(row.remote_entry_id);
   }
   function describeOutcome(outcome: PeerImportResponse): string {
     switch (outcome.kind) {
@@ -539,6 +619,13 @@
   onMount(() => {
     refreshNowAnchor();
     metadataTimer = setInterval(refreshNowAnchor, METADATA_REFRESH_MS);
+    // Register the article element with the rail so the
+    // keyboard-navigation handler can scroll the freshly
+    // selected card into view. The callback is invoked with
+    // `null` on unmount so the rail can drop the registry
+    // entry — the rail never has to inspect the DOM
+    // directly.
+    onCardRef(cardElement);
   });
   onDestroy(() => {
     if (metadataTimer !== null) {
@@ -546,9 +633,13 @@
       metadataTimer = null;
     }
     releaseThumbnail();
+    onCardRef(null);
   });
 </script>
 
+<!-- The card is a focusable option in RemoteHistoryRail's horizontal listbox.
+     Svelte's analyzer treats the retained article landmark as non-interactive. -->
+<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
 <article
   class="remote-preview-card"
   data-testid="remote-preview-card"
@@ -557,6 +648,12 @@
   draggable="false"
   bind:this={cardElement}
   aria-label={row.title ?? "Vista previa remota"}
+  aria-selected={selected ? "true" : "false"}
+  data-selected={selected ? "true" : "false"}
+  on:click={handleCardSurfaceClick}
+  on:keydown={handleCardSurfaceKeydown}
+  role="option"
+  tabindex={selected ? 0 : -1}
 >
   <header class="remote-preview-card-header">
     {#if row.title}
@@ -692,8 +789,17 @@
     display: flex;
     flex-direction: column;
     gap: 0.45rem;
-    width: 18rem;
-    flex: 0 0 auto;
+    /* Fixed square footprint the `peer-remote-preview-card-ux`
+     * change pins so the remote rail reads as the same
+     * geometry the local `HistoryCard` exposes (240 × 240 px
+     * in the desktop layout). The preview content, the
+     * source-app presentation block and the import status must
+     * stay inside the fixed box; the footer stays anchored to
+     * the bottom regardless of preview height. */
+    width: var(--cv-card-size, 240px);
+    flex: 0 0 var(--cv-card-size, 240px);
+    height: var(--cv-card-size, 240px);
+    box-sizing: border-box;
     padding: 0.65rem 0.8rem;
     border-radius: 8px;
     border: 1px solid var(--cv-border, #30363d);
@@ -701,6 +807,28 @@
     color: inherit;
     user-select: none;
     pointer-events: auto;
+  }
+
+  /*
+   * Selection cue the `peer-remote-preview-card-ux` change
+   * ships. The rail drives the `data-selected` attribute when
+   * the card's opaque `remote_entry_id` matches the rail-owned
+   * selection id; the blue accent mirrors the local
+   * `HistoryCard` cue so the two rails read as the same
+   * affordance. The cursor remains a pointer to invite the
+   * non-interactive surface click handler.
+   */
+  .remote-preview-card[data-selected="true"] {
+    border-color: rgba(96, 165, 250, 0.85);
+    background: rgba(96, 165, 250, 0.08);
+    box-shadow:
+      0 0 0 1px rgba(96, 165, 250, 0.45),
+      0 6px 18px rgba(15, 23, 42, 0.55);
+  }
+
+  .remote-preview-card[data-selected="true"]:focus-visible {
+    outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.85));
+    outline-offset: 1px;
   }
   .remote-preview-card-header {
     display: flex;
@@ -739,6 +867,11 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
     word-break: break-word;
+    /* Keep the preview inside the fixed card footprint so the
+     * footer never collides with overflowing text. The previous
+     * baseline let the preview grow beyond the card height and
+     * pushed the footer out of the visible area. */
+    max-height: 4.2em;
   }
   .remote-preview-card-image-placeholder {
     margin: 0;
@@ -771,6 +904,15 @@
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
+    /* Pin the elapsed-time label and menu trigger to the
+     * bottom edge of the fixed card so the footer alignment
+     * stays the same when the card contains text, a thumbnail,
+     * a placeholder or an import status. The `margin-top: auto`
+     * rule pushes the footer down inside the flex column; the
+     * previous baseline let the footer drift up whenever the
+     * preview content shrank, so two cards in the same rail
+     * showed the metadata at different heights. */
+    margin-top: auto;
   }
   .remote-preview-card-date {
     font-size: 0.7rem;

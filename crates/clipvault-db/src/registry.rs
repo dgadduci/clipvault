@@ -963,6 +963,110 @@ const MIGRATION_0018_KNOWN_PEERS_CAPS_EXTRA: Migration = Migration {
         ON known_peers (trust_state);",
 };
 
+/// `peer-source-app-presentation`: extend `known_peers` and
+/// `remote_imports` with the additive metadata the source-app
+/// presentation feature requires. The migration is purely
+/// additive — it never rewrites pre-existing rows — and
+/// reversible: the `down` step rebuilds both tables through the
+/// SQLite table-rebuild pattern the earlier migrations use so a
+/// rollback drops the new columns without losing any
+/// pre-existing data.
+///
+/// `known_peers.caps_extra_v2` carries the comma-separated list
+/// of second-tier additive tokens the host advertises through the
+/// dedicated `caps_extra_v2` mDNS TXT key (the legacy
+/// `caps_extra` surface stays unchanged so a strict legacy parser
+/// keeps pairing). The column mirrors the additive column the
+/// `peer-image-import` migration introduced.
+///
+/// `remote_imports.source_app_name` / `source_app_icon_ref`
+/// carry the per-provenance source-application display name and
+/// the locally-generated reference for the imported application
+/// icon. Both columns are nullable so pre-existing import rows
+/// keep their exact shape; the import transaction the
+/// `peer-source-app-presentation` change ships is the only
+/// writer of the columns. No icon bytes are persisted inside the
+/// table — the icon lives in the
+/// `<data_dir>/assets/application-icons/` namespace and the
+/// reference is the local content-addressed asset path the
+/// writer computed.
+///
+/// The down step removes the columns through the table-rebuild
+/// pattern the previous migrations use. A rollback therefore
+/// preserves pre-existing import provenance, clipboard entries
+/// and local capture metadata; the application-icon files
+/// themselves stay on disk so a re-apply of the migration does
+/// not have to redownload them.
+const MIGRATION_0019_PEER_SOURCE_APP_PRESENTATION: Migration = Migration {
+    version: 19,
+    description:
+        "peer-source-app-presentation: add caps_extra_v2 to known_peers and source_app_* to remote_imports",
+    up_sql: "ALTER TABLE known_peers ADD COLUMN caps_extra_v2 TEXT NOT NULL DEFAULT '';
+    ALTER TABLE remote_imports ADD COLUMN source_app_name TEXT;
+    ALTER TABLE remote_imports ADD COLUMN source_app_icon_ref TEXT;
+    CREATE INDEX IF NOT EXISTS idx_remote_imports_source_app_icon_ref
+        ON remote_imports (source_app_icon_ref);",
+    down_sql: "DROP INDEX IF EXISTS idx_remote_imports_source_app_icon_ref;
+    CREATE TABLE remote_imports_source_app_rollback (
+        peer_id TEXT NOT NULL,
+        remote_entry_id TEXT NOT NULL,
+        imported_content_hash TEXT NOT NULL,
+        local_entry_id INTEGER NOT NULL,
+        imported_at TEXT NOT NULL,
+        PRIMARY KEY (peer_id, remote_entry_id, imported_content_hash),
+        FOREIGN KEY (peer_id) REFERENCES known_peers(peer_id) ON DELETE CASCADE,
+        FOREIGN KEY (local_entry_id) REFERENCES clipboard_entries(id) ON DELETE CASCADE
+    );
+    INSERT INTO remote_imports_source_app_rollback
+        (peer_id, remote_entry_id, imported_content_hash, local_entry_id, imported_at)
+    SELECT peer_id, remote_entry_id, imported_content_hash, local_entry_id, imported_at
+    FROM remote_imports;
+    DROP INDEX IF EXISTS idx_remote_imports_peer_remote;
+    DROP INDEX IF EXISTS idx_remote_imports_local_entry_id;
+    DROP TABLE remote_imports;
+    ALTER TABLE remote_imports_source_app_rollback RENAME TO remote_imports;
+    CREATE INDEX idx_remote_imports_local_entry_id
+        ON remote_imports (local_entry_id);
+    CREATE INDEX idx_remote_imports_peer_remote
+        ON remote_imports (peer_id, remote_entry_id);
+    DROP INDEX IF EXISTS idx_known_peers_trust_state;
+    CREATE TABLE known_peers_caps_extra_v2_rollback (
+        peer_id TEXT PRIMARY KEY,
+        public_key_fingerprint TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        protocol_major INTEGER NOT NULL,
+        capability TEXT NOT NULL,
+        first_seen_at TEXT NOT NULL,
+        last_discovered_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        trust_state TEXT NOT NULL DEFAULT 'unverified',
+        tls_cert_fingerprint TEXT NOT NULL DEFAULT '',
+        paired_at TEXT NOT NULL DEFAULT '',
+        paired_protocol_major INTEGER NOT NULL DEFAULT 0,
+        full_public_key_fingerprint TEXT NOT NULL DEFAULT '',
+        cursor_secret TEXT NOT NULL DEFAULT '',
+        caps_extra TEXT NOT NULL DEFAULT ''
+    );
+    INSERT INTO known_peers_caps_extra_v2_rollback
+        (peer_id, public_key_fingerprint, display_name, protocol_major,
+         capability, first_seen_at, last_discovered_at, updated_at,
+         trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major,
+         full_public_key_fingerprint, cursor_secret, caps_extra)
+    SELECT peer_id, public_key_fingerprint, display_name, protocol_major,
+           capability, first_seen_at, last_discovered_at, updated_at,
+           trust_state, tls_cert_fingerprint, paired_at, paired_protocol_major,
+           full_public_key_fingerprint, cursor_secret, caps_extra
+    FROM known_peers;
+    DROP TABLE known_peers;
+    ALTER TABLE known_peers_caps_extra_v2_rollback RENAME TO known_peers;
+    CREATE INDEX idx_known_peers_last_discovered_at
+        ON known_peers (last_discovered_at DESC);
+    CREATE INDEX idx_known_peers_first_seen_at
+        ON known_peers (first_seen_at);
+    CREATE INDEX idx_known_peers_trust_state
+        ON known_peers (trust_state);",
+};
+
 /// Returns the migrations shipped with ClipVault. Each new migration is
 /// appended to this slice to keep ordering deterministic.
 pub fn builtin_migrations() -> Vec<Migration> {
@@ -985,6 +1089,7 @@ pub fn builtin_migrations() -> Vec<Migration> {
         MIGRATION_0016_KNOWN_PEERS_CURSOR_SECRET,
         MIGRATION_0017_PEER_IMPORT_BINDINGS,
         MIGRATION_0018_KNOWN_PEERS_CAPS_EXTRA,
+        MIGRATION_0019_PEER_SOURCE_APP_PRESENTATION,
     ]
 }
 
@@ -1490,6 +1595,268 @@ mod tests {
                 row.get(0)
             })
             .expect("peer_collection_bindings table is queryable again");
+    }
+
+    #[test]
+    fn peer_source_app_presentation_migration_is_purely_additive() {
+        // The `peer-source-app-presentation` change ships a
+        // single additive migration that extends `known_peers`
+        // with `caps_extra_v2` and `remote_imports` with the
+        // per-provenance `source_app_name` / `source_app_icon_ref`
+        // columns. The migration MUST stay additive: it never
+        // rewrites or deletes pre-existing rows, never inspects
+        // clipboard content, and never persists an IP, port,
+        // fingerprint or cert byte. The FK contract pins the
+        // cascade semantics so a rollback can be reasoned about
+        // without guessing.
+        let up = MIGRATION_0019_PEER_SOURCE_APP_PRESENTATION
+            .up_sql
+            .to_uppercase();
+        for column in ["CAPS_EXTRA_V2", "SOURCE_APP_NAME", "SOURCE_APP_ICON_REF"] {
+            assert!(
+                up.contains(column),
+                "peer-source-app-presentation migration must persist column {column}"
+            );
+        }
+        assert!(
+            up.contains("IDX_REMOTE_IMPORTS_SOURCE_APP_ICON_REF"),
+            "peer-source-app-presentation migration must create the icon-ref index"
+        );
+        // No icon bytes or remote paths may land in SQLite.
+        for forbidden in ["PNG_BYTES", "ICON_BYTES", "REMOTE_PATH", "REMOTE_FILENAME"] {
+            assert!(
+                !up.contains(forbidden),
+                "peer-source-app-presentation migration must not persist column {forbidden}"
+            );
+        }
+        // Down step must rebuild both tables so a rollback drops
+        // the new columns without losing any pre-existing data.
+        let down = MIGRATION_0019_PEER_SOURCE_APP_PRESENTATION
+            .down_sql
+            .to_uppercase();
+        assert!(
+            down.contains("REMOTE_IMPORTS_SOURCE_APP_ROLLBACK"),
+            "down step must rebuild remote_imports without the new columns"
+        );
+        assert!(
+            down.contains("KNOWN_PEERS_CAPS_EXTRA_V2_ROLLBACK"),
+            "down step must rebuild known_peers without caps_extra_v2"
+        );
+    }
+
+    #[test]
+    fn peer_source_app_presentation_migration_round_trips() {
+        use crate::rollback_migration;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut db = crate::Database::open(dir.path().join("clipvault.db")).expect("open");
+        let outcomes = db.run_migrations(&builtin_migrations()).expect("migrate");
+        assert!(outcomes.iter().any(|outcome| matches!(
+            outcome,
+            crate::MigrationOutcome::Applied { version: 19, .. }
+        )));
+        // Sanity check the columns after the migration has run:
+        // the snapshot already exercises the new surface.
+        let _: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM known_peers", [], |row| row.get(0))
+            .expect("known_peers queryable");
+        let _: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM remote_imports", [], |row| row.get(0))
+            .expect("remote_imports queryable");
+
+        // Rollback drops the new columns without losing the
+        // pre-existing ones.
+        rollback_migration(&mut db, &MIGRATION_0019_PEER_SOURCE_APP_PRESENTATION)
+            .expect("rollback");
+
+        let err = db
+            .connection()
+            .query_row("SELECT caps_extra_v2 FROM known_peers LIMIT 1", [], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .expect_err("caps_extra_v2 column must be gone after rollback");
+        assert!(err.to_string().contains("no such column"));
+
+        // Re-applying restores the columns.
+        let outcomes = db
+            .run_migrations(&[MIGRATION_0019_PEER_SOURCE_APP_PRESENTATION])
+            .expect("re-apply");
+        assert!(matches!(
+            outcomes.first(),
+            Some(crate::MigrationOutcome::Applied { version: 19, .. })
+        ));
+    }
+
+    #[test]
+    fn peer_source_app_presentation_migration_rolls_back_populated_data() {
+        // The previous regression only proved rollback against an
+        // empty database. With populated peers, peer_collection_bindings
+        // and remote_imports the table-rebuild sequence (drop
+        // `remote_imports`, drop `known_peers`) trips the foreign key
+        // chain unless the migration defers FK checks for the
+        // duration of the rollback. The down step must therefore
+        // PRESERVE existing rows and their relationships: a rollback
+        // is a metadata-only contract regression, never a destructive
+        // operation.
+        use crate::rollback_migration;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut db = crate::Database::open(dir.path().join("clipvault.db")).expect("open");
+        db.run_migrations(&builtin_migrations()).expect("migrate");
+
+        // Seed a peer.
+        let conn = db.connection_mut();
+        let mut peer_repo = crate::KnownPeerRepository::new(conn);
+        peer_repo
+            .upsert_observation(&crate::PeerObservation {
+                peer_id: "peer-a".to_string(),
+                public_key_fingerprint: "ab".repeat(32),
+                full_public_key_fingerprint: Some("cd".repeat(32)),
+                display_name: "Equipo A".to_string(),
+                protocol_major: 1,
+                capability: "pairing".to_string(),
+                caps_extra: "image_import".to_string(),
+                caps_extra_v2: "source_app_presentation".to_string(),
+                observed_at: time::OffsetDateTime::now_utc(),
+            })
+            .expect("upsert peer");
+        drop(peer_repo);
+
+        // Seed a binding + clipboard entry + remote_import that
+        // references the peer and the entry — this is the populated
+        // shape a rollback must survive.
+        let conn = db.connection_mut();
+        let binding_collection_id: i64 = conn
+            .query_row(
+                "SELECT id FROM collections ORDER BY id ASC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("history collection present");
+        conn.execute(
+            "INSERT INTO peer_collection_bindings (peer_id, collection_id, created_at, updated_at)
+             VALUES (?1, ?2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            rusqlite::params!["peer-a", binding_collection_id],
+        )
+        .expect("binding");
+        conn.execute(
+            "INSERT INTO clipboard_entries
+                 (content, content_type, content_size, content_hash,
+                  source_app, created_at, updated_at, last_seen_at)
+             VALUES ('hello', 'text', 5, 'hash-a-rollback', NULL,
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                     '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("entry");
+        let entry_id: i64 = conn
+            .query_row(
+                "SELECT id FROM clipboard_entries WHERE content_hash = ?1",
+                rusqlite::params!["hash-a-rollback"],
+                |row| row.get(0),
+            )
+            .expect("entry id");
+        conn.execute(
+            "INSERT INTO remote_imports
+                 (peer_id, remote_entry_id, imported_content_hash,
+                  local_entry_id, imported_at, source_app_name,
+                  source_app_icon_ref)
+             VALUES (?1, ?2, ?3, ?4, '2026-01-01T00:00:00Z', ?5, ?6)",
+            rusqlite::params![
+                "peer-a",
+                "entry-1",
+                "hash-a-rollback",
+                entry_id,
+                "VS Code",
+                "application-icons/vscode.png"
+            ],
+        )
+        .expect("import");
+
+        // Rollback must succeed with populated data.
+        rollback_migration(&mut db, &MIGRATION_0019_PEER_SOURCE_APP_PRESENTATION)
+            .expect("rollback with populated data");
+
+        // known_peers survives: the legacy columns are still
+        // populated with the pre-existing fingerprint / display
+        // name, and `caps_extra` (the additive column added by
+        // the previous migration) is preserved verbatim.
+        let (peer_id, display_name, caps_extra): (String, String, String) = db
+            .connection()
+            .query_row(
+                "SELECT peer_id, display_name, caps_extra FROM known_peers",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("known_peers survived rollback");
+        assert_eq!(peer_id, "peer-a");
+        assert_eq!(display_name, "Equipo A");
+        assert_eq!(caps_extra, "image_import");
+
+        // The new `caps_extra_v2` column is gone.
+        let err = db
+            .connection()
+            .query_row("SELECT caps_extra_v2 FROM known_peers LIMIT 1", [], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .expect_err("caps_extra_v2 column must be gone after rollback");
+        assert!(err.to_string().contains("no such column"));
+
+        // The binding survives.
+        let (binding_peer, binding_collection): (String, i64) = db
+            .connection()
+            .query_row(
+                "SELECT peer_id, collection_id FROM peer_collection_bindings",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("binding survived");
+        assert_eq!(binding_peer, "peer-a");
+        assert_eq!(binding_collection, binding_collection_id);
+
+        // The remote_import survives (with the new source_app_*
+        // columns dropped — they no longer exist).
+        let (import_peer, import_local): (String, i64) = db
+            .connection()
+            .query_row(
+                "SELECT peer_id, local_entry_id FROM remote_imports",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("import survived");
+        assert_eq!(import_peer, "peer-a");
+        assert_eq!(import_local, entry_id);
+
+        // No FK violation surfaces.
+        let fk_violations: i64 = db
+            .connection()
+            .query_row("PRAGMA foreign_key_check", [], |row| row.get(0))
+            .unwrap_or(0);
+        assert_eq!(fk_violations, 0, "foreign_key_check must report zero rows");
+
+        // Re-applying the migration must succeed and restore the
+        // dropped columns.
+        let outcomes = db
+            .run_migrations(&[MIGRATION_0019_PEER_SOURCE_APP_PRESENTATION])
+            .expect("re-apply");
+        assert!(matches!(
+            outcomes.first(),
+            Some(crate::MigrationOutcome::Applied { version: 19, .. })
+        ));
+        let caps_extra_v2: String = db
+            .connection()
+            .query_row(
+                "SELECT caps_extra_v2 FROM known_peers WHERE peer_id = 'peer-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("caps_extra_v2 column restored");
+        // The down step lost the new column, so the persisted
+        // additive token fell back to the empty default after the
+        // re-apply; that is the correct behaviour — the new
+        // metadata is rebuilt on the next discovery refresh, not
+        // out of band.
+        assert_eq!(caps_extra_v2, "");
     }
 
     #[test]

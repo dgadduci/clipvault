@@ -16,7 +16,7 @@ use clipvault_db::{
 use time::OffsetDateTime;
 
 use crate::peer_text_import::{
-    PeerImportPersistence, PeerImportPersistenceError, IMPORT_MAX_BODY_BYTES,
+    PeerImportPersistence, PeerImportPersistenceError, StagedSourceAppIcon, IMPORT_MAX_BODY_BYTES,
 };
 
 /// Adapter the bootstrap installs against the shared SQLite
@@ -25,6 +25,7 @@ use crate::peer_text_import::{
 /// the production app context without re-opening the database.
 pub struct SqliteImportPersistence {
     database: Arc<parking_lot::Mutex<clipvault_db::Database>>,
+    application_icons: crate::ApplicationIconStore,
 }
 
 impl SqliteImportPersistence {
@@ -33,7 +34,16 @@ impl SqliteImportPersistence {
     /// app context; the adapter is `Send + Sync` and cheap to
     /// clone through the inner `Arc`.
     pub fn new(database: Arc<parking_lot::Mutex<clipvault_db::Database>>) -> Self {
-        Self { database }
+        let data_dir = database
+            .lock()
+            .path()
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        Self {
+            database,
+            application_icons: crate::ApplicationIconStore::new(data_dir),
+        }
     }
 }
 
@@ -164,19 +174,57 @@ impl PeerImportPersistence for SqliteImportPersistence {
         imported_content_hash: &str,
         local_entry_id: i64,
         now: OffsetDateTime,
+        source_app_name: Option<&str>,
+        source_app_icon_ref: Option<&str>,
     ) -> Result<(), PeerImportPersistenceError> {
         let mut db = self.database.lock();
         let mut repo = PeerImportRepository::new(db.connection_mut());
-        repo.record_import(
+        repo.record_import_with_source_app(
             peer_id,
             remote_entry_id,
             imported_content_hash,
             local_entry_id,
             now,
+            source_app_name,
+            source_app_icon_ref,
         )
         .map_err(map_peer_import_repo_error)?;
         let _ = IMPORT_MAX_BODY_BYTES;
         Ok(())
+    }
+
+    fn stage_source_app_icon(
+        &self,
+        bytes: Option<&[u8]>,
+    ) -> Result<Option<StagedSourceAppIcon>, PeerImportPersistenceError> {
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        let outcome = self.application_icons.stage(bytes).map_err(|error| {
+            PeerImportPersistenceError::Sqlite(format!("source-app icon: {}", error.kind_str()))
+        })?;
+        Ok(Some(StagedSourceAppIcon {
+            asset_ref: outcome.asset_ref().to_string(),
+            outcome,
+        }))
+    }
+
+    fn finish_source_app_icon_stage(&self, staged: &StagedSourceAppIcon, committed: bool) {
+        if committed {
+            self.application_icons.commit_staged(&staged.asset_ref);
+            return;
+        }
+        let _ = self.application_icons.rollback_staged(
+            &staged.asset_ref,
+            &staged.outcome,
+            |asset_ref| {
+                let mut db = self.database.lock();
+                let repo = PeerImportRepository::new(db.connection_mut());
+                repo.count_source_app_icon_references(asset_ref)
+                    .map(|count| count > 0)
+                    .map_err(|_| ())
+            },
+        );
     }
 
     fn collection_name_exists(&self, name: &str) -> Result<bool, PeerImportPersistenceError> {
@@ -234,5 +282,62 @@ fn map_peer_import_repo_error(error: PeerImportRepositoryError) -> PeerImportPer
             // the user must never see the raw SQLite message.
             PeerImportPersistenceError::Sqlite(format!("{error}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, 16, 16);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("header");
+        writer
+            .write_image_data(&vec![0x80; 16 * 16 * 4])
+            .expect("image data");
+        writer.finish().expect("finish");
+        bytes
+    }
+
+    #[test]
+    fn sqlite_text_import_icon_stage_rolls_back_only_new_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("clipvault.db");
+        let mut db = clipvault_db::Database::open(&db_path).expect("open db");
+        db.run_migrations(&clipvault_db::builtin_migrations())
+            .expect("migrate");
+        let persistence = SqliteImportPersistence::new(Arc::new(parking_lot::Mutex::new(db)));
+        let bytes = png();
+
+        let written = persistence
+            .stage_source_app_icon(Some(&bytes))
+            .expect("stage icon")
+            .expect("icon staged");
+        assert!(written.asset_ref.starts_with("application-icons/"));
+        let path = persistence
+            .application_icons
+            .root()
+            .join(written.asset_ref.trim_start_matches("application-icons/"));
+        assert!(path.is_file());
+        persistence.finish_source_app_icon_stage(&written, false);
+        assert!(!path.exists(), "unreferenced new icon is rolled back");
+
+        let first = persistence
+            .stage_source_app_icon(Some(&bytes))
+            .expect("stage first lease")
+            .expect("first staged");
+        let reused = persistence
+            .stage_source_app_icon(Some(&bytes))
+            .expect("stage reused lease")
+            .expect("reused staged");
+        assert_eq!(first.outcome.kind(), "written");
+        assert_eq!(reused.outcome.kind(), "reused");
+        persistence.finish_source_app_icon_stage(&first, false);
+        assert!(path.is_file(), "another live lease prevents deletion");
+        persistence.finish_source_app_icon_stage(&reused, false);
+        assert!(path.is_file(), "a reused icon is always preserved");
     }
 }

@@ -11,13 +11,18 @@ image entry and its local PNG asset pass the host's existing asset, dimension
 and size validation. The row SHALL contain only an opaque remote reference,
 validated optional title, type, date, byte size and dimensions. It SHALL NOT
 contain image bytes, thumbnails, asset references, filesystem paths, hashes,
-tags, collections, favorites or source-application metadata.
+tags, collections, favorites or source-application metadata. A separately
+requested, bounded derived thumbnail MAY be returned only under the
+`peer-image-preview-thumbnails` requirements; it is not part of the row or the
+image-import response.
 
 #### Scenario: Valid image is listed
 
 - **WHEN** a trusted active peer has a persisted image whose asset is valid
-- **THEN** the remote page may include one metadata-only image row and the
-  client renders the common static image placeholder
+- **THEN** the remote page includes at most one metadata-only image row
+- **AND** the client initially renders the common static placeholder and may
+  request a separate thumbnail only when the card is visible and the peer
+  supports that capability
 
 #### Scenario: Image asset is missing or invalid
 

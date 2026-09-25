@@ -31,7 +31,7 @@ test("remote peer selection synchronizes the import eligibility cache", () => {
   );
 
   const refresh = rail.match(
-    /async function refreshPeerState\([\s\S]*?(?=\n\s*async function loadInitialPage\()/,
+    /(?:async\s+)?function refreshPeerState\([\s\S]*?(?=\n\s*(?:async\s+)?function loadInitialPage\()/,
   );
   assert.ok(refresh, "RemoteHistoryRail must retain refreshPeerState");
   assert.match(

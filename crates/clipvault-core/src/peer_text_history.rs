@@ -2539,6 +2539,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("install host");
 
@@ -2784,6 +2785,7 @@ mod tests {
             "bare-host".to_string(),
             bare_advertisement,
             bare_sink,
+            None,
             None,
             None,
             None,

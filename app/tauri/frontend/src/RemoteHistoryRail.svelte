@@ -48,6 +48,13 @@
     type PageState,
     type RemoteRailRow,
   } from "./lib/remoteHistoryMerge";
+  import {
+    horizontalRailNextSelectionIdGeneric,
+  } from "./lib/horizontalRailNavigation.ts";
+  import {
+    mapHorizontalArrowKey,
+    shouldConsumeHorizontalRailKey,
+  } from "./lib/remoteHistoryRailNavigation.ts";
 
   /**
    * Snapshot the parent supplies so the rail can keep the
@@ -103,6 +110,16 @@
   // already-selected peer exactly like a later selection. Initialising this
   // from `peerId` skipped the only branch that loads the first remote page.
   let activePeerId: string | null = null;
+  /**
+   * Rail-owned selection id the `peer-remote-preview-card-ux`
+   * change ships. The selection is the opaque
+   * `remote_entry_id` of the visible card the user picked by
+   * clicking or by navigating with the arrow keys; the rail
+   * drops the value silently when the user switches peer,
+   * closes the rail or the selection falls out of the visible
+   * scope (page change, row filter, etc.).
+   */
+  let selectedRemoteEntryId: string | null = null;
 
   /**
    * Per-peer sequence number the rail uses to discard responses
@@ -113,6 +130,40 @@
    * switched peer / closed the rail is silently dropped.
    */
   let loadGeneration = 0;
+
+  /**
+   * Card registry the keyboard-navigation handler walks to
+   * scroll the freshly selected card into view. Mirrors the
+   * keyed `{#each}` the template already iterates so the
+   * handler never needs a `querySelector` round-trip; the
+   * callback the rail hands to each `RemotePreviewCard`
+   * inserts / removes entries as cards mount / unmount.
+   */
+  const cardEls: Map<string, HTMLElement> = new Map();
+  /**
+   * Drop registry entries whose remote entry id no longer maps
+   * to a rendered card. The reactive dep on `rows` keeps the
+   * cleanup in sync with the visible scope so a stale id never
+   * tries to scroll an unmounted element.
+   */
+  $: {
+    const visibleIds = new Set(rows.map((item) => item.row.remote_entry_id));
+    for (const id of Array.from(cardEls.keys())) {
+      if (!visibleIds.has(id)) {
+        cardEls.delete(id);
+      }
+    }
+  }
+  function registerCardRef(
+    remoteEntryId: string,
+    el: HTMLElement | null,
+  ): void {
+    if (el === null) {
+      cardEls.delete(remoteEntryId);
+      return;
+    }
+    cardEls.set(remoteEntryId, el);
+  }
 
   /**
    * Whether the active peer is currently `Active` per the
@@ -475,11 +526,122 @@
     error = null;
     exhausted = false;
     activePeerId = null;
+    selectedRemoteEntryId = null;
     onClose();
   }
 
+  /**
+   * Visible-id set the keyboard-navigation handler walks. The
+   * set is rebuilt on every `rows` mutation so the handler
+   * never tries to navigate to a stale row that the rail has
+   * already dropped.
+   */
+  $: visibleRemoteIds = rows.map((item) => item.row.remote_entry_id);
+  /**
+   * Drop the rail-owned selection when it falls out of the
+   * visible scope (peer switch, page change, filter). The
+   * selection is never persisted and never crosses the wire,
+   * so silently dropping it is the safe fallback.
+   */
+  $: if (
+    selectedRemoteEntryId !== null &&
+    !visibleRemoteIds.includes(selectedRemoteEntryId)
+  ) {
+    selectedRemoteEntryId = null;
+  }
+
+  /**
+   * Selection callback the rail-owned cards fire when the
+   * user activates a non-interactive surface (click or
+   * `Enter` / `Space`). The card forwards the opaque
+   * `remote_entry_id` so the rail never has to look the row
+   * up.
+   */
+  function selectRemoteEntry(remoteEntryId: string): void {
+    selectedRemoteEntryId = remoteEntryId;
+  }
+
+  /**
+   * Scroll the freshly selected card into view inside the rail
+   * surface. The helper only forwards to the DOM when the
+   * registry already mounted the element so a navigation to a
+   * row the rail has not yet rendered stays silent.
+   */
+  function scrollSelectedCardIntoView(remoteEntryId: string): void {
+    const card = cardEls.get(remoteEntryId);
+    if (!card) return;
+    if (typeof card.scrollIntoView !== "function") return;
+    card.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+
+  /**
+   * Horizontal keyboard navigation handler the
+   * `peer-remote-preview-card-ux` change ships. Mirrors the
+   * `HistoryCardRail` helper but consumes opaque string ids
+   * instead of numeric `EntryRecord.id` values; the pure
+   * `horizontalRailNextSelectionId` helper handles both
+   * projections transparently.
+   *
+   * The handler delegates the consume / fall-through decision
+   * to the pure `shouldConsumeHorizontalRailKey` helper so the
+   * keyboard contract stays testable in isolation. The helper
+   * refuses to fire when the focus sits on any interactive
+   * control the rail exposes (the menu button, the import
+   * button, anchors, selects, contentEditable text surfaces,
+   * native text inputs, …) and refuses to fire when the focus
+   * sits outside the rail surface so the document-level
+   * listener never steals a key from a sidebar button, search
+   * field or any other control that lives in a different
+   * panel.
+   */
+  function onRailHorizontalKeydown(event: KeyboardEvent): void {
+    if (
+      !shouldConsumeHorizontalRailKey(
+        event.key,
+        event.target instanceof Element ? event.target : null,
+      )
+    ) {
+      return;
+    }
+    const direction = mapHorizontalArrowKey(event.key);
+    if (direction === null) return;
+    if (visibleRemoteIds.length === 0) return;
+    const navigation = horizontalRailNextSelectionIdGeneric(
+      visibleRemoteIds,
+      selectedRemoteEntryId,
+      direction,
+    );
+    if (navigation.nextId === null) return;
+    event.preventDefault();
+    selectedRemoteEntryId = navigation.nextId;
+    scrollSelectedCardIntoView(navigation.nextId);
+  }
+
+  let detachWindow: (() => void) | null = null;
+
+  /**
+   * Document-level listener that lets the rail respond to
+   * `ArrowLeft` / `ArrowRight` even when the focus sits on a
+   * non-focusable surface (a non-selected card, the rail
+   * background, …). The card itself refuses to consume the
+   * key when the focus sits in an interactive control, so the
+   * menu button and the import button keep their native
+   * behaviour. The `keydown` listener is attached in capture
+   * mode so the rail intercepts the key before the rail
+   * background performs its native horizontal scroll.
+   */
+  function attachWindowListeners(): void {
+    document.addEventListener("keydown", onRailHorizontalKeydown, true);
+    detachWindow = () => {
+      document.removeEventListener("keydown", onRailHorizontalKeydown, true);
+    };
+  }
+  attachWindowListeners();
+
   onDestroy(() => {
     loadGeneration += 1;
+    detachWindow?.();
+    detachWindow = null;
   });
 
   /**
@@ -597,11 +759,13 @@
     <div
       class="remote-history-rail-cards"
       data-testid="remote-history-rail-cards"
-      role="list"
+      role="listbox"
+      aria-label="Capturas del equipo remoto"
+      aria-orientation="horizontal"
     >
       {#each rows as item, index (remoteImageThumbnailCardKey(peerId, item.row.remote_entry_id))}
         <div
-          role="listitem"
+          role="presentation"
           class="remote-history-rail-card-slot"
           data-testid="remote-history-rail-card-slot"
           data-remote-entry-id={item.row.remote_entry_id}
@@ -614,6 +778,9 @@
               peerId={peerId}
               displayName={activeEntry?.display_name ?? null}
               peerCapability={activePeerCapability}
+              selected={selectedRemoteEntryId === item.row.remote_entry_id}
+              onSelect={selectRemoteEntry}
+              onCardRef={(el) => registerCardRef(item.row.remote_entry_id, el)}
             />
           {:else}
             <RemotePreviewCard
@@ -630,6 +797,9 @@
               isImageRow={true}
               peerCapability={activePeerCapability}
               peerStateReady={thumbnailPeerStateReady}
+              selected={selectedRemoteEntryId === item.row.remote_entry_id}
+              onSelect={selectRemoteEntry}
+              onCardRef={(el) => registerCardRef(item.row.remote_entry_id, el)}
             />
           {/if}
         </div>

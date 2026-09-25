@@ -34,10 +34,17 @@ import * as assert from "node:assert/strict";
 
 import {
   horizontalRailNextSelectionId,
+  horizontalRailNextSelectionIdGeneric,
   type HorizontalRailDirection,
 } from "../src/lib/horizontalRailNavigation.ts";
 
 const VISIBLE: readonly number[] = [101, 102, 103, 104];
+const REMOTE_VISIBLE: readonly string[] = [
+  "entry-aaaa",
+  "entry-bbbb",
+  "entry-cccc",
+  "entry-dddd",
+];
 
 test("horizontalRailNextSelectionId picks the first id when currentId is null and direction is right", () => {
   const result = horizontalRailNextSelectionId(VISIBLE, null, "right");
@@ -176,4 +183,53 @@ test("horizontalRailNextSelectionId respects the visible order for both directio
       );
     }
   }
+});
+
+/**
+ * The `peer-remote-preview-card-ux` change consumes the same
+ * helper through the rail that owns opaque remote string ids.
+ * The suite below pins the math against the string projection
+ * so a regression that re-implements the helper with strict
+ * numeric equality surfaces in CI.
+ */
+
+test("horizontalRailNextSelectionId picks the first opaque remote id when currentId is null and direction is right", () => {
+  const result = horizontalRailNextSelectionId(REMOTE_VISIBLE, null, "right");
+  assert.equal(result.nextId, "entry-aaaa");
+  assert.equal(result.moved, true);
+});
+
+test("horizontalRailNextSelectionId clamps opaque remote ids without wrapping", () => {
+  const result = horizontalRailNextSelectionId(
+    REMOTE_VISIBLE,
+    "entry-aaaa",
+    "left",
+  );
+  assert.equal(result.nextId, "entry-aaaa");
+  assert.equal(result.moved, false);
+});
+
+test("horizontalRailNextSelectionId advances opaque remote ids by one", () => {
+  const result = horizontalRailNextSelectionId(
+    REMOTE_VISIBLE,
+    "entry-bbbb",
+    "right",
+  );
+  assert.equal(result.nextId, "entry-cccc");
+  assert.equal(result.moved, true);
+});
+
+test("horizontalRailNextSelectionIdGeneric preserves the narrow string projection", () => {
+  // The generic variant must keep the narrow `string` type at
+  // the call site so the remote rail's `selectedRemoteEntryId`
+  // is never widened to `number | string`. The helper returns
+  // the same id byte-for-byte; the test pins the type contract
+  // through the function signature rather than a runtime cast.
+  const result = horizontalRailNextSelectionIdGeneric(
+    REMOTE_VISIBLE,
+    "entry-cccc",
+    "right",
+  );
+  assert.equal(result.nextId, "entry-dddd");
+  assert.equal(result.moved, true);
 });

@@ -179,19 +179,47 @@ pub enum RollbackError {
 
 pub fn rollback_migration(db: &mut Database, migration: &Migration) -> DbResult<()> {
     let conn = db.connection_mut();
-    let tx = conn.transaction()?;
-    tx.execute_batch(migration.down_sql)
+    // Some migrations rebuild a parent table (`known_peers`,
+    // `clipboard_entries`, …) while a child table
+    // (`peer_collection_bindings`, `remote_imports`, …) holds
+    // a foreign key with `ON DELETE CASCADE`. SQLite cannot
+    // defer that cascade when the parent table is dropped
+    // inside the same transaction — `PRAGMA defer_foreign_keys`
+    // only applies to DML statements, not DDL — so a rollback
+    // would silently lose every dependent row. Disabling
+    // foreign-key enforcement for the duration of the rollback
+    // transaction preserves the dependent rows; the FK check is
+    // re-enabled on the very next connection use. The pragma is
+    // a schema-level change that must be issued outside the
+    // transaction (SQLite rejects it inside `BEGIN` … `COMMIT`),
+    // hence the ordering below.
+    conn.execute_batch("PRAGMA foreign_keys = OFF")
         .map_err(|source| DbError::MigrationFailed {
             version: migration.version,
             source: Box::new(source),
         })?;
-    tx.execute(
-        "DELETE FROM schema_migrations WHERE version = ?1",
-        [migration.version],
-    )?;
-    tx.commit().map_err(|source| DbError::MigrationFailed {
-        version: migration.version,
-        source: Box::new(source),
-    })?;
-    Ok(())
+    let result = (|| -> DbResult<()> {
+        let tx = conn.transaction()?;
+        tx.execute_batch(migration.down_sql)
+            .map_err(|source| DbError::MigrationFailed {
+                version: migration.version,
+                source: Box::new(source),
+            })?;
+        tx.execute(
+            "DELETE FROM schema_migrations WHERE version = ?1",
+            [migration.version],
+        )?;
+        tx.commit().map_err(|source| DbError::MigrationFailed {
+            version: migration.version,
+            source: Box::new(source),
+        })?;
+        Ok(())
+    })();
+    // Restore FK enforcement unconditionally so the next
+    // caller sees the connection in its expected shape. The
+    // rollback's own transaction may have aborted; resetting
+    // the pragma outside the rollback transaction keeps the
+    // invariant honest.
+    let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
+    result
 }

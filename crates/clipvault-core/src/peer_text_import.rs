@@ -161,6 +161,19 @@ pub struct PeerFetchRequest {
 /// transport forwards the body verbatim to the importer so the
 /// local validator re-checks the [`IMPORT_MAX_BODY_BYTES`] cap
 /// and the UTF-8 shape before any SQLite mutation.
+///
+/// `source_app_name` and `source_app_icon_bytes` carry the
+/// validated optional source-application metadata the
+/// `peer-source-app-presentation` change attaches to the
+/// explicit import. The importer stages the icon through the
+/// local `application-icons/` writer, computes a content-
+/// addressed reference and forwards the name + ref to the
+/// persistence trait so the import transaction commits both
+/// fields atomically with the body / binding / provenance
+/// rows. Both fields stay `None` for legacy peers that did not
+/// opt into the additive contract; the importer collapses
+/// their absence to a typed no-op so the legacy flow keeps
+/// working unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerFetchResponse {
     pub peer_id: String,
@@ -168,6 +181,16 @@ pub struct PeerFetchResponse {
     pub title: Option<String>,
     pub content_type: String,
     pub body: String,
+    pub source_app_name: Option<String>,
+    pub source_app_icon_bytes: Option<Vec<u8>>,
+}
+
+/// A locally staged icon and the writer outcome needed to release it
+/// safely if recording the matching provenance fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedSourceAppIcon {
+    pub asset_ref: String,
+    pub outcome: crate::application_icons::ApplicationIconStageOutcome,
 }
 
 /// Metadata-only transport façade the import facade uses. The
@@ -305,7 +328,15 @@ pub trait PeerImportPersistence: Send + Sync {
         imported_content_hash: &str,
     ) -> Result<Option<i64>, PeerImportPersistenceError>;
     /// Persist a fresh provenance row keyed by `(peer_id,
-    /// remote_entry_id, hash)`.
+    /// remote_entry_id, hash)`. The optional `source_app_name`
+    /// and `source_app_icon_ref` carry the per-provenance
+    /// metadata the `peer-source-app-presentation` change
+    /// attaches; both stay `None` for legacy imports that
+    /// did not opt into the additive contract. The persistence
+    /// helper writes both fields atomically with the
+    /// provenance row so a half-committed import never
+    /// surfaces an icon ref without the matching row, and
+    /// vice-versa.
     fn record_import(
         &self,
         peer_id: &str,
@@ -313,7 +344,22 @@ pub trait PeerImportPersistence: Send + Sync {
         imported_content_hash: &str,
         local_entry_id: i64,
         now: OffsetDateTime,
+        source_app_name: Option<&str>,
+        source_app_icon_ref: Option<&str>,
     ) -> Result<(), PeerImportPersistenceError>;
+    /// Stage optional icon bytes in the local application-icon
+    /// namespace. Implementations without persistent icon storage may
+    /// omit the icon; the source name and import remain valid.
+    fn stage_source_app_icon(
+        &self,
+        _bytes: Option<&[u8]>,
+    ) -> Result<Option<StagedSourceAppIcon>, PeerImportPersistenceError> {
+        Ok(None)
+    }
+    /// Release the stage after the provenance transaction. Rollback
+    /// implementations must preserve reused/shared icons and remove a
+    /// newly written icon only when it has no committed references.
+    fn finish_source_app_icon_stage(&self, _staged: &StagedSourceAppIcon, _committed: bool) {}
     /// Look up the canonical user-collection name the importer
     /// must avoid colliding with.
     fn collection_name_exists(&self, name: &str) -> Result<bool, PeerImportPersistenceError>;
@@ -383,6 +429,13 @@ struct InMemoryImportState {
     collections: HashMap<i64, Collection>,
     next_collection_id: i64,
     by_hash: HashMap<String, i64>,
+    /// Per-provenance source-app metadata the
+    /// `peer-source-app-presentation` change writes atomically
+    /// with the provenance insert. Keyed by the composite
+    /// `(peer_id, remote_entry_id, imported_content_hash)` so
+    /// two peers sharing one canonical entry keep their own
+    /// metadata.
+    provenance_source_app: HashMap<(String, String, String), (Option<String>, Option<String>)>,
 }
 
 impl Default for InMemoryImportPersistence {
@@ -396,6 +449,7 @@ impl Default for InMemoryImportPersistence {
                 collections: HashMap::new(),
                 next_collection_id: 1,
                 by_hash: HashMap::new(),
+                provenance_source_app: HashMap::new(),
             })),
         }
     }
@@ -563,6 +617,8 @@ impl PeerImportPersistence for InMemoryImportPersistence {
         imported_content_hash: &str,
         _local_entry_id: i64,
         _now: OffsetDateTime,
+        source_app_name: Option<&str>,
+        source_app_icon_ref: Option<&str>,
     ) -> Result<(), PeerImportPersistenceError> {
         let mut state = self.state.lock();
         state.imports.insert((
@@ -570,6 +626,25 @@ impl PeerImportPersistence for InMemoryImportPersistence {
             remote_entry_id.to_string(),
             imported_content_hash.to_string(),
         ));
+        // Track the source-app metadata per provenance so the
+        // peer-bound collection projection can resolve the
+        // local icon ref and bounded display name without
+        // touching the local capture's metadata. Two peers that
+        // share a canonical entry keep their own provenance
+        // metadata here.
+        if source_app_name.is_some() || source_app_icon_ref.is_some() {
+            state.provenance_source_app.insert(
+                (
+                    peer_id.to_string(),
+                    remote_entry_id.to_string(),
+                    imported_content_hash.to_string(),
+                ),
+                (
+                    source_app_name.map(str::to_string),
+                    source_app_icon_ref.map(str::to_string),
+                ),
+            );
+        }
         Ok(())
     }
 
@@ -869,11 +944,46 @@ impl PeerImportService {
         // key `(peer_id, remote_entry_id, hash)` makes the
         // record idempotent across re-imports and snapshots
         // edits; the helper collapses a re-import to a `Ok(())`
-        // no-op without creating a duplicate row.
-        if let Err(_) =
+        // no-op without creating a duplicate row. The source-app
+        // metadata travels through the SAME persistence call so
+        // a half-committed import can never leave a row
+        // without its attribution metadata, and the importer
+        // never has to fall back to a separate UPDATE — the
+        // `peer-source-app-presentation` change rejects the
+        // separate-transaction pattern the previous baseline
+        // shipped.
+        let source_app_name = response.source_app_name.as_deref().and_then(|name| {
+            crate::peer_source_app_presentation::validate_source_app_name(name).ok()
+        });
+        let staged_source_app_icon = response
+            .source_app_icon_bytes
+            .as_deref()
+            .filter(|bytes| {
+                crate::peer_source_app_presentation::validate_source_app_icon(bytes).is_ok()
+            })
+            .and_then(|bytes| {
+                self.persistence
+                    .stage_source_app_icon(Some(bytes))
+                    .ok()
+                    .flatten()
+            });
+        let source_app_icon_ref = staged_source_app_icon
+            .as_ref()
+            .map(|staged| staged.asset_ref.as_str());
+        let record_result = self.persistence.record_import(
+            peer_id,
+            &response.remote_entry_id,
+            &hash,
+            entry_id,
+            now,
+            source_app_name.as_deref(),
+            source_app_icon_ref,
+        );
+        if let Some(staged) = staged_source_app_icon.as_ref() {
             self.persistence
-                .record_import(peer_id, &response.remote_entry_id, &hash, entry_id, now)
-        {
+                .finish_source_app_icon_stage(staged, record_result.is_ok());
+        }
+        if record_result.is_err() {
             return PeerImportOutcome::PersistenceError { reason: "sqlite" };
         }
         PeerImportOutcome::Imported {
@@ -1008,6 +1118,8 @@ impl PeerFetchTransport for PeerPairingFetchTransportAdapter {
                     title: snapshot.title,
                     content_type: snapshot.content_type,
                     body: snapshot.body,
+                    source_app_name: snapshot.source_app_name,
+                    source_app_icon_bytes: snapshot.source_app_icon_bytes,
                 })
             }
             Err(error) => Err(map_pairing_transport_error(error)),
@@ -1238,6 +1350,8 @@ mod tests {
             title: None,
             content_type: "text".to_string(),
             body: body.to_string(),
+            source_app_name: None,
+            source_app_icon_bytes: None,
         }
     }
 

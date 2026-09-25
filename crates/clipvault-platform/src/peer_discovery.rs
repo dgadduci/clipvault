@@ -75,6 +75,16 @@ pub struct DiscoveryAdvertisement {
     /// about `pairing` keeps pairing while a newer build
     /// additionally opts into image import and image thumbnails.
     pub caps_extra: Vec<String>,
+    /// Second-tier additive capability tokens the host
+    /// advertises through a separate `caps_extra_v2` TXT field
+    /// the `peer-source-app-presentation` change ships. The
+    /// legacy `capability` field and the existing `caps_extra`
+    /// field stay unchanged so a strict legacy parser that
+    /// rejects unknown tokens keeps pairing without seeing the
+    /// new surface. Old clients ignore the previously unknown
+    /// TXT key and continue to use the capabilities they already
+    /// know.
+    pub caps_extra_v2: Vec<String>,
 }
 
 impl DiscoveryAdvertisement {
@@ -98,6 +108,7 @@ impl DiscoveryAdvertisement {
             protocol_major,
             capability: capability.into(),
             caps_extra: Vec::new(),
+            caps_extra_v2: Vec::new(),
         }
     }
 
@@ -133,6 +144,7 @@ impl DiscoveryAdvertisement {
                 IMAGE_IMPORT_CAPABILITY.to_string(),
                 IMAGE_PREVIEW_THUMBNAIL_CAPABILITY.to_string(),
             ],
+            caps_extra_v2: vec![SOURCE_APP_PRESENTATION_CAPABILITY.to_string()],
         }
     }
 }
@@ -155,6 +167,15 @@ pub const IMAGE_IMPORT_CAPABILITY: &str = "image_import";
 /// publishes through `caps_extra`, keeping the legacy
 /// `capability=pairing` value unchanged.
 pub const IMAGE_PREVIEW_THUMBNAIL_CAPABILITY: &str = "image_preview_thumbnail";
+
+/// Additive capability the `peer-source-app-presentation`
+/// change ships. Published through the dedicated
+/// `caps_extra_v2` TXT field so a strict legacy parser that
+/// only understands the canonical `capability` and the existing
+/// `caps_extra` surface keeps pairing without seeing the new
+/// token. Mirrored from
+/// [`clipvault_core::peer_discovery::SOURCE_APP_PRESENTATION_CAPABILITY`].
+pub const SOURCE_APP_PRESENTATION_CAPABILITY: &str = "source_app_presentation";
 
 /// Platform-neutral callback the production adapter uses to
 /// surface browse / removal events to the runtime.
@@ -237,6 +258,16 @@ pub struct TxtRecord {
     /// [`Self::capability`] when it decides which routes the
     /// peer supports.
     pub caps_extra: Vec<String>,
+    /// Second-tier additive capability tokens the host publishes
+    /// through the `caps_extra_v2` TXT field the
+    /// `peer-source-app-presentation` change ships. The legacy
+    /// `capability` field and the existing `caps_extra` field
+    /// stay unchanged so a strict legacy parser that rejects
+    /// unknown tokens keeps pairing without seeing the new
+    /// surface. Old clients ignore the previously unknown TXT
+    /// key and continue to use the capabilities they already
+    /// know.
+    pub caps_extra_v2: Vec<String>,
     pub observed_at: time::OffsetDateTime,
 }
 
@@ -263,6 +294,7 @@ impl TxtRecord {
             protocol_major,
             capability: capability.into(),
             caps_extra: Vec::new(),
+            caps_extra_v2: Vec::new(),
             observed_at,
         }
     }
@@ -567,6 +599,15 @@ mod tests {
                 IMAGE_PREVIEW_THUMBNAIL_CAPABILITY.to_string(),
             ]
         );
+        // The `peer-source-app-presentation` change ships the
+        // additive `source_app_presentation` capability through
+        // the dedicated `caps_extra_v2` field so a strict
+        // legacy parser that only knows the canonical surface
+        // keeps pairing without seeing the new token.
+        assert_eq!(
+            ad.caps_extra_v2,
+            vec![SOURCE_APP_PRESENTATION_CAPABILITY.to_string()]
+        );
     }
 
     #[test]
@@ -582,6 +623,7 @@ mod tests {
             "discovery_only",
         );
         assert!(ad.caps_extra.is_empty());
+        assert!(ad.caps_extra_v2.is_empty());
     }
 
     #[test]

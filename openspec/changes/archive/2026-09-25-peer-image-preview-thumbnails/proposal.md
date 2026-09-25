@@ -1,6 +1,6 @@
 # Proposal: peer-image-preview-thumbnails
 
-## Contexto
+## Why
 
 El cambio `peer-image-import` permite navegar capturas de imagen remotas, pero
 por decisión explícita muestra el mismo placeholder estático para todas ellas.
@@ -9,7 +9,7 @@ Ahora que la importación y su matriz manual están verificadas, el siguiente
 paso útil es reconocer visualmente cada captura antes de importarla sin
 convertir la navegación en una descarga de imágenes completas.
 
-## Objetivos
+## What Changes
 
 - Mostrar una miniatura PNG derivada de la imagen remota cuando su card entra
   en el viewport del rail.

@@ -215,6 +215,48 @@ pub const FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES: usize = 384 * 1024;
 /// caller (which never trusts the listener's word alone).
 pub const FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES: usize = 544 * 1024;
 
+/// Maximum serialized size of one authenticated
+/// `FetchSourceAppPresentationAck` envelope. The wire contract
+/// pins a 720 KiB cap so the bounded base64 PNG icon (≤ 512 KiB)
+/// plus the validated display name never exceeds the documented
+/// threshold. The listener enforces the cap before serializing
+/// the response; the dialer decodes the value locally and
+/// re-validates the PNG signature / dimensions before turning
+/// the bytes into an Object URL.
+pub const FETCH_SOURCE_APP_PRESENTATION_MAX_RESPONSE_BYTES: usize = 720 * 1024;
+
+/// Best-effort byte estimate for the serialized source-app
+/// presentation envelope. The helper sums the JSON-overhead
+/// of the validated display name + base64 icon so the
+/// listener can refuse an oversized response before
+/// serializing it. The estimate is intentionally conservative
+/// (over-estimates) so the listener never ships a payload that
+/// blows past [`FETCH_SOURCE_APP_PRESENTATION_MAX_RESPONSE_BYTES`].
+#[cfg(feature = "local-peer-pairing-tls")]
+#[derive(Debug, Clone, Copy)]
+pub struct PendingSourceAppPresentationSize<'a> {
+    pub source_app_name: Option<&'a str>,
+    pub source_app_icon_b64: Option<&'a str>,
+}
+
+#[cfg(feature = "local-peer-pairing-tls")]
+impl<'a> PendingSourceAppPresentationSize<'a> {
+    pub fn estimated_bytes(&self) -> usize {
+        // Length-prefixed envelope overhead + serde tag.
+        let mut total: usize = 64;
+        if let Some(name) = self.source_app_name {
+            total = total.saturating_add(name.len());
+        }
+        if let Some(b64) = self.source_app_icon_b64 {
+            // Base64 grows 4/3 over the raw bytes; the listener
+            // double-checks the actual serialised size after
+            // building the JSON body.
+            total = total.saturating_add(b64.len());
+        }
+        total
+    }
+}
+
 /// Maximum number of in-flight pairing sessions the listener keeps
 /// open concurrently. The transport surfaces a typed rejection when a
 /// remote peer tries to start a session above the cap so a single
@@ -629,6 +671,77 @@ pub enum HostImageThumbnailResponse {
     /// transport never ships an oversized body and the
     /// caller keeps the static placeholder.
     BodyTooLarge,
+    /// The persistence layer refused the lookup (SQLite
+    /// error, missing handle, asset store failure, …).
+    PersistenceUnavailable,
+}
+
+/// Host-side source-app presentation handler the
+/// `peer-source-app-presentation` change ships. The transport
+/// authenticates the `peer_id` against the pinned cert
+/// fingerprint and re-validates the
+/// `source_app_presentation` capability before invoking the
+/// handler; the implementation MUST still re-validate the
+/// entry eligibility, the trusted / active state and the
+/// local icon namespace before resolving the attribution.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub trait FetchSourceAppPresentationHostHandler: Send + Sync {
+    /// Resolve the validated source-app display name + bounded
+    /// PNG icon for `remote_entry_id` and `peer_id`. The
+    /// transport authenticated `peer_id` against the pinned
+    /// cert fingerprint before invoking the handler. The
+    /// implementation MUST re-validate the capability gate, the
+    /// entry eligibility and the asset namespace before
+    /// reading bytes; the runtime never trusts client-supplied
+    /// identifiers beyond the opaque `remote_entry_id`.
+    fn fetch_source_app_presentation(
+        &self,
+        peer_id: &str,
+        remote_entry_id: &str,
+    ) -> HostSourceAppPresentationResponse;
+}
+
+/// Outcome the source-app presentation handler returns to the
+/// listener. The transport forwards the variant through the
+/// wire envelope the spec pins:
+/// `FetchSourceAppPresentationAck` for [`Self::Ok`], every
+/// other variant collapses into
+/// `FetchSourceAppPresentationUnavailable`. Every typed failure
+/// collapses into a stable reason string the caller branches
+/// on; the icon bytes never cross the wire on a failure path.
+#[cfg(feature = "local-peer-pairing-tls")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostSourceAppPresentationResponse {
+    /// The host re-validated the entry and the source-app
+    /// metadata fits the documented contract. The transport
+    /// base64-encodes the icon bytes before serialising the
+    /// envelope; the caller decodes the value locally and
+    /// re-validates the PNG signature + dimensions before
+    /// turning the bytes into an Object URL. The icon never
+    /// carries a remote path / filename / reference; the
+    /// caller resolves the icon through the local
+    /// `application-icons/` writer.
+    Ok {
+        /// Trimmed, validated source-app display name.
+        /// `None` when the host has no metadata for this entry.
+        source_app_name: Option<String>,
+        /// Bounded PNG bytes the host validated against the
+        /// 512 KiB / 256 × 256 px envelope. The transport
+        /// rejects any payload larger than
+        /// [`crate::peer_source_app_presentation::MAX_SOURCE_APP_ICON_BYTES`].
+        /// `None` when no icon is available.
+        source_app_icon_bytes: Option<Vec<u8>>,
+    },
+    /// The peer did not advertise the
+    /// `source_app_presentation` capability.
+    NotAvailable,
+    /// The entry disappeared between the listing and the
+    /// source-app request, or it has been edited into a
+    /// non-transferable shape.
+    NotFound,
+    /// The peer revoked / blocked the request before the host
+    /// could resolve the metadata.
+    NotTrusted,
     /// The persistence layer refused the lookup (SQLite
     /// error, missing handle, asset store failure, …).
     PersistenceUnavailable,
@@ -1105,6 +1218,17 @@ pub trait PeerTransport: Send + Sync {
         handler: Arc<dyn FetchImageThumbnailHostHandler>,
     ) -> Result<(), TransportError>;
 
+    /// Install (or replace) the source-app presentation handler the
+    /// listener invokes for authenticated, visible-row requests.
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_source_app_presentation_handler(
+        &self,
+        handler: Arc<dyn FetchSourceAppPresentationHostHandler>,
+    ) -> Result<(), TransportError> {
+        let _ = handler;
+        Err(TransportError::Unavailable)
+    }
+
     /// Open an authenticated `fetch_image_thumbnail` request
     /// against the pinned peer. The transport dials the remote
     /// listener over mTLS, exchanges the bounded
@@ -1129,6 +1253,29 @@ pub trait PeerTransport: Send + Sync {
         cert_fingerprint: &str,
         remote_entry_id: &str,
     ) -> Result<PeerImageThumbnailSnapshot, TransportError> {
+        let _ = (peer_id, cert_fingerprint, remote_entry_id);
+        Err(TransportError::Unavailable)
+    }
+
+    /// Fetch the validated source-app display name + bounded
+    /// PNG icon for one visible remote entry. The transport
+    /// authenticates `peer_id` against the pinned cert
+    /// fingerprint and re-validates the
+    /// `source_app_presentation` capability before dialling
+    /// the listener. The runtime MUST only call this entry
+    /// point when a remote rail row becomes visible; legacy
+    /// peers that did not advertise the capability collapse
+    /// to the typed `NotAvailable` rejection without exposing
+    /// the icon path. Production shells wire this entry
+    /// point against the productive pairing transport; the
+    /// noop stub returns [`TransportError::Unavailable`].
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn fetch_source_app_presentation(
+        &self,
+        peer_id: &str,
+        cert_fingerprint: &str,
+        remote_entry_id: &str,
+    ) -> Result<PeerSourceAppPresentationSnapshot, TransportError> {
         let _ = (peer_id, cert_fingerprint, remote_entry_id);
         Err(TransportError::Unavailable)
     }
@@ -1179,6 +1326,17 @@ pub struct PeerFetchSnapshot {
     pub title: Option<String>,
     pub content_type: String,
     pub body: String,
+    /// Optional validated source-app display name the
+    /// `peer-source-app-presentation` change attaches to the
+    /// explicit fetch response. `None` for legacy peers that did
+    /// not opt into the additive contract.
+    pub source_app_name: Option<String>,
+    /// Optional validated source-app icon bytes the
+    /// `peer-source-app-presentation` change attaches. The bytes
+    /// are held in memory only between the fetch and the import
+    /// commit; the caller MUST stage them through the local
+    /// application-icons writer before persisting any reference.
+    pub source_app_icon_bytes: Option<Vec<u8>>,
 }
 
 /// Metadata-only response the transport returns from
@@ -1216,6 +1374,17 @@ pub struct PeerImageFetchSnapshot {
     pub remote_entry_id: String,
     pub title: Option<String>,
     pub bytes: Vec<u8>,
+    /// Optional validated source-app display name the
+    /// `peer-source-app-presentation` change attaches to the
+    /// explicit image-fetch response. `None` for legacy peers that
+    /// did not opt into the additive contract.
+    pub source_app_name: Option<String>,
+    /// Optional validated source-app icon bytes the
+    /// `peer-source-app-presentation` change attaches. The bytes
+    /// are held in memory only between the fetch and the import
+    /// commit; the caller MUST stage them through the local
+    /// application-icons writer before persisting any reference.
+    pub source_app_icon_bytes: Option<Vec<u8>>,
 }
 
 /// Bounded response the transport returns from
@@ -1237,6 +1406,31 @@ pub struct PeerImageThumbnailSnapshot {
     pub bytes: Vec<u8>,
     pub width: u32,
     pub height: u32,
+}
+
+/// Metadata-only response the transport returns from
+/// [`PeerTransport::fetch_source_app_presentation`]. The struct
+/// carries the validated source-app display name + bounded
+/// PNG icon the `peer-source-app-presentation` change
+/// exchanges: the optional display name (trimmed, ≤ 128
+/// Unicode scalar values, no control characters) and the
+/// optional bounded PNG icon (≤ 512 KiB, ≤ 256 × 256 px).
+/// The transport re-validates the envelope before returning
+/// the snapshot so a drifted host cannot accidentally bypass
+/// the documented caps. The bytes are held in memory only
+/// between the fetch and the renderer; the caller never
+/// persists the PNG or substitutes the snapshot for the
+/// original image fetch the explicit `Importar` flow uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerSourceAppPresentationSnapshot {
+    pub peer_id: String,
+    pub remote_entry_id: String,
+    pub source_app_name: Option<String>,
+    /// Bounded PNG bytes the host validated against the
+    /// 512 KiB / 256 × 256 px envelope the spec pins. The
+    /// transport rejects any payload larger than
+    /// [`crate::peer_source_app_presentation::MAX_SOURCE_APP_ICON_BYTES`].
+    pub source_app_icon_b64: Option<String>,
 }
 
 /// Platform-neutral handle the platform layer exposes to the
@@ -1747,6 +1941,13 @@ pub(crate) struct TransportState {
     /// rely on the same SQLite handle + asset store the
     /// runtime already holds.
     pub image_thumbnail_handler: Option<Arc<dyn FetchImageThumbnailHostHandler>>,
+    /// Hot-swappable host-side source-app presentation handler.
+    /// The accept loop holds this shared cell and reads it for
+    /// each inbound connection, so installing the productive
+    /// adapter after listener startup affects the very next
+    /// request rather than only changing a disconnected cache.
+    pub source_app_presentation_handler:
+        Arc<parking_lot::RwLock<Option<Arc<dyn FetchSourceAppPresentationHostHandler>>>>,
 }
 
 #[cfg(feature = "local-peer-pairing-tls")]
@@ -1774,6 +1975,7 @@ impl Default for TransportState {
             image_history_handler: None,
             image_fetch_handler: None,
             image_thumbnail_handler: None,
+            source_app_presentation_handler: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 }
@@ -1984,6 +2186,14 @@ impl PeerTransport for TlsPeerTransport {
     }
 
     #[cfg(feature = "local-peer-pairing-tls")]
+    fn install_source_app_presentation_handler(
+        &self,
+        handler: Arc<dyn FetchSourceAppPresentationHostHandler>,
+    ) -> Result<(), TransportError> {
+        super::peer_transport::tls::install_source_app_presentation_handler(self, handler)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
     fn list_recent_images(
         &self,
         peer_id: &str,
@@ -2026,6 +2236,21 @@ impl PeerTransport for TlsPeerTransport {
     }
 
     #[cfg(feature = "local-peer-pairing-tls")]
+    fn fetch_source_app_presentation(
+        &self,
+        peer_id: &str,
+        cert_fingerprint: &str,
+        remote_entry_id: &str,
+    ) -> Result<PeerSourceAppPresentationSnapshot, TransportError> {
+        super::peer_transport::tls::fetch_source_app_presentation(
+            self,
+            peer_id,
+            cert_fingerprint,
+            remote_entry_id,
+        )
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
     fn start_with_material_resolver_and_history(
         &self,
         material: LocalIdentityMaterial,
@@ -2053,6 +2278,7 @@ impl PeerTransport for TlsPeerTransport {
             image_history_handler,
             image_fetch_handler,
             image_thumbnail_handler,
+            None,
         )
     }
 
@@ -2551,6 +2777,54 @@ pub mod wire {
             remote_entry_id: String,
             reason: String,
         },
+        /// Metadata-only request the local peer opens over the
+        /// pinned mTLS session to fetch the source-application
+        /// presentation (validated display name + bounded PNG
+        /// icon) for one visible remote entry. The
+        /// `peer-source-app-presentation` change ships the
+        /// envelope; the auth + pin path mirrors
+        /// [`PairingMessage::FetchText`]. The host revalidates
+        /// the `peer_id` against the SPKI the cert pins, the
+        /// trusted / active state, the advertised
+        /// `source_app_presentation` capability (peers that did
+        /// not opt in collapse to a typed `not_available`
+        /// rejection), and the local icon namespace before
+        /// returning the response. The listener refuses the
+        /// request when the row is no longer eligible so a
+        /// stale or revoked peer can never surface its icon.
+        FetchSourceAppPresentation {
+            version: u32,
+            peer_id: String,
+            remote_entry_id: String,
+        },
+        /// Successful response the listener pushes back with the
+        /// validated source-application display name and the
+        /// optional bounded PNG icon the host attached to the
+        /// listed entry. The icon is base64-encoded so the wire
+        /// envelope stays metadata-only by construction; the
+        /// runtime validates the bytes against the
+        /// 512 KiB / 256 × 256 px envelope the spec pins before
+        /// surfacing the icon to the renderer. The full response
+        /// MUST stay within the 720 KiB envelope cap.
+        FetchSourceAppPresentationAck {
+            version: u32,
+            peer_id: String,
+            remote_entry_id: String,
+            source_app_name: Option<String>,
+            source_app_icon_b64: Option<String>,
+        },
+        /// Typed rejection the listener pushes back when the
+        /// caller asked for a row the host cannot serve
+        /// (`not_available`, `not_trusted`, `not_active`,
+        /// `unknown_peer`, …). The `reason` field is a stable
+        /// snake_case identifier the renderer branches on; the
+        /// transport never echoes the rejected icon back.
+        FetchSourceAppPresentationUnavailable {
+            version: u32,
+            peer_id: String,
+            remote_entry_id: String,
+            reason: String,
+        },
     }
 
     /// Metadata-only row the host returns in
@@ -2633,7 +2907,10 @@ pub mod wire {
                 | PairingMessage::FetchImageUnavailable { version, .. }
                 | PairingMessage::FetchImageThumbnail { version, .. }
                 | PairingMessage::FetchImageThumbnailAck { version, .. }
-                | PairingMessage::FetchImageThumbnailUnavailable { version, .. } => *version,
+                | PairingMessage::FetchImageThumbnailUnavailable { version, .. }
+                | PairingMessage::FetchSourceAppPresentation { version, .. }
+                | PairingMessage::FetchSourceAppPresentationAck { version, .. }
+                | PairingMessage::FetchSourceAppPresentationUnavailable { version, .. } => *version,
             }
         }
 
@@ -2660,7 +2937,10 @@ pub mod wire {
                 | PairingMessage::FetchImageUnavailable { peer_id, .. }
                 | PairingMessage::FetchImageThumbnail { peer_id, .. }
                 | PairingMessage::FetchImageThumbnailAck { peer_id, .. }
-                | PairingMessage::FetchImageThumbnailUnavailable { peer_id, .. } => peer_id,
+                | PairingMessage::FetchImageThumbnailUnavailable { peer_id, .. }
+                | PairingMessage::FetchSourceAppPresentation { peer_id, .. }
+                | PairingMessage::FetchSourceAppPresentationAck { peer_id, .. }
+                | PairingMessage::FetchSourceAppPresentationUnavailable { peer_id, .. } => peer_id,
             }
         }
 
@@ -2693,7 +2973,10 @@ pub mod wire {
                 | PairingMessage::FetchImageUnavailable { .. }
                 | PairingMessage::FetchImageThumbnail { .. }
                 | PairingMessage::FetchImageThumbnailAck { .. }
-                | PairingMessage::FetchImageThumbnailUnavailable { .. } => "",
+                | PairingMessage::FetchImageThumbnailUnavailable { .. }
+                | PairingMessage::FetchSourceAppPresentation { .. }
+                | PairingMessage::FetchSourceAppPresentationAck { .. }
+                | PairingMessage::FetchSourceAppPresentationUnavailable { .. } => "",
             }
         }
     }

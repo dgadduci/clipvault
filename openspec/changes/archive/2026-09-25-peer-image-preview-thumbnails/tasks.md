@@ -83,9 +83,9 @@
 
 ## 7. Manual verification
 
-- [ ] 7.1 On macOS, Linux X11 and Linux Wayland builds, verify lazy thumbnail
+- [x] 7.1 On macOS, Linux X11 and Linux Wayland builds, verify lazy thumbnail
   appearance, scroll behavior, and static placeholder fallback for an older
   peer or an unavailable/invalid thumbnail.
-- [ ] 7.2 Confirm a viewed thumbnail does not alter clipboard, paste, drag
+- [x] 7.2 Confirm a viewed thumbnail does not alter clipboard, paste, drag
   payload, local history or pre-existing assets, and that Importar still
   obtains the original image.

@@ -128,6 +128,29 @@ pub const IMAGE_IMPORT_CAPABILITY: &str = "image_import";
 /// both tokens are present.
 pub const IMAGE_PREVIEW_THUMBNAIL_CAPABILITY: &str = "image_preview_thumbnail";
 
+/// Additive capability the `peer-source-app-presentation`
+/// change ships. A peer that advertises
+/// `source_app_presentation` accepts the dedicated
+/// `fetch_source_app_presentation` envelope the client uses to
+/// fetch the validated source-application display name and
+/// optional bounded PNG icon for a single visible remote entry.
+/// Hosts that do not advertise the capability keep the generic
+/// local fallbacks the `peer-text-history-browser` change
+/// ships and the client never opens the source-presentation
+/// route, so legacy peers do not need to know the token exists.
+///
+/// The capability is published through the additive
+/// `caps_extra_v2` TXT field the `peer-source-app-presentation`
+/// change ships; the legacy `capability` field stays at the
+/// canonical `pairing` value and the existing `caps_extra`
+/// field stays unchanged so a strict legacy parser that
+/// rejects unknown tokens in either surface keeps recognising
+/// the record. New clients combine the recognised tokens from
+/// both additive fields; old clients ignore the previously
+/// unknown `caps_extra_v2` TXT key and continue to use the
+/// capabilities they already know.
+pub const SOURCE_APP_PRESENTATION_CAPABILITY: &str = "source_app_presentation";
+
 /// Decode the comma-separated `capability` field into a
 /// normalised `Vec<String>`. Empty / whitespace-only tokens
 /// are dropped so a TXT record with `pairing,` decodes the
@@ -244,6 +267,17 @@ pub struct PeerObservationRecord {
     /// publish them in a single TXT key without breaking the
     /// legacy contract.
     pub caps_extra: Vec<String>,
+    /// Second-tier additive capability tokens the host advertises
+    /// through the `caps_extra_v2` TXT field the
+    /// `peer-source-app-presentation` change ships. The legacy
+    /// `capability` field and the existing `caps_extra` field
+    /// stay unchanged so a strict legacy parser that only
+    /// accepts the canonical value and the recognised
+    /// `caps_extra` tokens keeps pairing without seeing the new
+    /// surface. New clients combine the recognised tokens from
+    /// both additive fields; old clients ignore the previously
+    /// unknown TXT key.
+    pub caps_extra_v2: Vec<String>,
     pub observed_at: OffsetDateTime,
 }
 
@@ -341,7 +375,13 @@ impl PeerObservationRecord {
         // accepted; unknown tokens surface as
         // `UnsupportedCapability` so a future capability
         // addition cannot silently bypass the capability gate
-        // when the host upgrades before the runtime does.
+        // when the host upgrades before the runtime does. The
+        // strict-rejection policy stays in place for fields the
+        // parser already understands; the new
+        // `peer-source-app-presentation` capability travels
+        // through the separate `caps_extra_v2` field so a strict
+        // parser that only knows the existing surface keeps
+        // pairing without seeing the new token.
         for token in &raw.caps_extra {
             if !matches!(
                 token.as_str(),
@@ -349,6 +389,18 @@ impl PeerObservationRecord {
             ) {
                 return Err(PeerRecordValidationError::UnsupportedCapability {
                     capability: format!("caps_extra:{}", token),
+                });
+            }
+        }
+        // Validate the additive `caps_extra_v2` surface. The
+        // runtime only accepts the `source_app_presentation`
+        // token for now; an unrecognised token in this field
+        // also collapses to `UnsupportedCapability` so a future
+        // additive addition cannot silently bypass the gate.
+        for token in &raw.caps_extra_v2 {
+            if token != SOURCE_APP_PRESENTATION_CAPABILITY {
+                return Err(PeerRecordValidationError::UnsupportedCapability {
+                    capability: format!("caps_extra_v2:{}", token),
                 });
             }
         }
@@ -365,6 +417,7 @@ impl PeerObservationRecord {
             protocol_major: raw.protocol_major,
             capability: raw.capability.clone(),
             caps_extra: raw.caps_extra.clone(),
+            caps_extra_v2: raw.caps_extra_v2.clone(),
             observed_at: raw.observed_at,
         })
     }
@@ -400,13 +453,31 @@ impl PeerObservationRecord {
             .any(|token| token == IMAGE_PREVIEW_THUMBNAIL_CAPABILITY)
     }
 
+    /// `true` when the record advertises the
+    /// `peer-source-app-presentation` capability. The helper
+    /// reads the additive `caps_extra_v2` surface the
+    /// `peer-source-app-presentation` change ships; the
+    /// legacy `capability` field and the existing
+    /// `caps_extra` field stay unchanged so a strict legacy
+    /// parser keeps pairing without seeing the new token.
+    /// The on-demand source-presentation route additionally
+    /// requires [`Self::has_image_import_capability`] (or the
+    /// text-history pairing surface) so the host / client
+    /// re-validate the trusted active path before opening the
+    /// route.
+    pub fn has_source_app_presentation_capability(&self) -> bool {
+        self.caps_extra_v2
+            .iter()
+            .any(|token| token == SOURCE_APP_PRESENTATION_CAPABILITY)
+    }
+
     /// Convert into the database-shaped [`PeerObservation`]. The
     /// runtime calls this immediately before persistence so the
     /// repository never sees unvalidated bytes. The additive
-    /// `caps_extra` surface travels through verbatim so the
-    /// bootstrap resolver can combine it with the canonical
-    /// `capability` value when it gates the productive image
-    /// routes.
+    /// `caps_extra` and `caps_extra_v2` surfaces travel through
+    /// verbatim so the bootstrap resolver can combine them
+    /// with the canonical `capability` value when it gates the
+    /// productive routes.
     pub fn into_persistence(self) -> PeerObservation {
         PeerObservation {
             peer_id: self.peer_id,
@@ -416,6 +487,7 @@ impl PeerObservationRecord {
             protocol_major: self.protocol_major,
             capability: self.capability,
             caps_extra: self.caps_extra.join(","),
+            caps_extra_v2: self.caps_extra_v2.join(","),
             observed_at: self.observed_at,
         }
     }
@@ -500,6 +572,15 @@ pub struct PeerSnapshotEntry {
     /// field. The renderer needs these independently of the legacy
     /// `capability` token to gate image import correctly.
     pub caps_extra: String,
+    /// Second-tier additive capability tokens observed in the
+    /// dedicated `caps_extra_v2` TXT field the
+    /// `peer-source-app-presentation` change ships. The renderer
+    /// needs these independently of the legacy `capability`
+    /// token and the existing `caps_extra` surface to gate the
+    /// on-demand source-app presentation route. The field stays
+    /// empty for legacy peers so a strict legacy resolver that
+    /// only knows the canonical surface keeps pairing.
+    pub caps_extra_v2: String,
     /// Persisted trust state, projected as its stable wire string.
     /// Discovery owns presence; pairing owns this independent
     /// relationship state. Including it in the same metadata-only
@@ -539,6 +620,7 @@ impl PeerSnapshotEntry {
             protocol_major: row.protocol_major,
             capability: row.capability,
             caps_extra: row.caps_extra,
+            caps_extra_v2: row.caps_extra_v2,
             trust_state: row.trust_state.as_str().to_string(),
             paired_at: (!row.paired_at.is_empty()).then_some(row.paired_at),
             first_seen_at: row.first_seen_at,
@@ -955,6 +1037,7 @@ impl PeerDiscoveryRuntime {
             protocol_major: observation.protocol_major,
             capability: observation.capability.clone(),
             caps_extra: observation.caps_extra.join(","),
+            caps_extra_v2: observation.caps_extra_v2.join(","),
             observed_at: observation.observed_at,
         });
         self.presence.write().record(&observation.peer_id, now);
@@ -1066,6 +1149,7 @@ fn apply_event(handles: &WorkerHandles, event: DiscoveryEvent) {
                             protocol_major: observation.protocol_major,
                             capability: observation.capability.clone(),
                             caps_extra: observation.caps_extra.join(","),
+                            caps_extra_v2: observation.caps_extra_v2.join(","),
                             observed_at: observation.observed_at,
                         });
                         handles.presence.write().record(&observation.peer_id, now);
@@ -1241,6 +1325,7 @@ mod tests {
                             paired_protocol_major: existing.paired_protocol_major,
                             cursor_secret: existing.cursor_secret.clone(),
                             caps_extra: observation.caps_extra.clone(),
+                            caps_extra_v2: observation.caps_extra_v2.clone(),
                         };
                         guard.push(refreshed.clone());
                         UpsertObservationOutcome::Stored(refreshed)
@@ -1269,6 +1354,7 @@ mod tests {
                         paired_protocol_major: 0,
                         cursor_secret: String::new(),
                         caps_extra: observation.caps_extra.clone(),
+                        caps_extra_v2: observation.caps_extra_v2.clone(),
                     };
                     guard.push(row.clone());
                     UpsertObservationOutcome::Stored(row)
@@ -1519,6 +1605,78 @@ mod tests {
             err,
             PeerRecordValidationError::UnsupportedCapability { .. }
         ));
+    }
+
+    #[test]
+    fn validation_accepts_source_app_presentation_capability() {
+        // The `peer-source-app-presentation` change ships the
+        // additive `source_app_presentation` capability through
+        // the dedicated `caps_extra_v2` TXT field. A peer that
+        // advertises the capability accepts the dedicated
+        // `fetch_source_app_presentation` envelope; the validator
+        // must accept the new additive surface while keeping the
+        // legacy `capability` and `caps_extra` fields unchanged.
+        let raw = TxtRecord {
+            capability: PAIRING_CAPABILITY.to_string(),
+            caps_extra: vec![IMAGE_IMPORT_CAPABILITY.to_string()],
+            caps_extra_v2: vec![SOURCE_APP_PRESENTATION_CAPABILITY.to_string()],
+            pairing_fingerprint: Some("f".repeat(64)),
+            ..txt(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+                "Studio",
+            )
+        };
+        let validated = PeerObservationRecord::from_txt_record(&raw)
+            .expect("source_app_presentation must validate");
+        assert!(validated.has_source_app_presentation_capability());
+        assert!(validated.has_image_import_capability());
+    }
+
+    #[test]
+    fn validation_rejects_unknown_caps_extra_v2_token() {
+        // The new `caps_extra_v2` surface mirrors the strict
+        // `caps_extra` policy: an unrecognised token collapses to
+        // `UnsupportedCapability` so a future capability addition
+        // cannot silently bypass the gate when the host upgrades
+        // before the runtime does.
+        let raw = TxtRecord {
+            capability: PAIRING_CAPABILITY.to_string(),
+            caps_extra_v2: vec!["future_capability".to_string()],
+            pairing_fingerprint: Some("f".repeat(64)),
+            ..txt(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+                "Studio",
+            )
+        };
+        let err = PeerObservationRecord::from_txt_record(&raw)
+            .expect_err("unknown caps_extra_v2 token must fail");
+        assert!(matches!(
+            err,
+            PeerRecordValidationError::UnsupportedCapability { .. }
+        ));
+    }
+
+    #[test]
+    fn pair_only_record_lacks_source_app_presentation_capability() {
+        // A `pairing` record that does not advertise the
+        // `source_app_presentation` capability in `caps_extra_v2`
+        // must keep returning `false` from the helper so the
+        // client never opens the source-presentation route for a
+        // legacy peer.
+        let raw = TxtRecord {
+            capability: PAIRING_CAPABILITY.into(),
+            pairing_fingerprint: Some("f".repeat(64)),
+            ..txt(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+                "Studio",
+            )
+        };
+        let validated =
+            PeerObservationRecord::from_txt_record(&raw).expect("pairing must validate");
+        assert!(!validated.has_source_app_presentation_capability());
     }
 
     #[test]
@@ -1792,6 +1950,7 @@ mod tests {
                 paired_protocol_major: 0,
                 cursor_secret: String::new(),
                 caps_extra: String::new(),
+                caps_extra_v2: String::new(),
             },
         );
         runtime.start().expect("start");
@@ -1804,6 +1963,7 @@ mod tests {
             protocol_major: PROTOCOL_MAJOR,
             capability: DISCOVERY_ONLY_CAPABILITY.to_string(),
             caps_extra: Vec::new(),
+            caps_extra_v2: Vec::new(),
             observed_at: datetime!(2026-01-02 03:04:05 UTC),
         }));
         wait_for_drain(&runtime, 2_000);
@@ -1833,6 +1993,7 @@ mod tests {
             protocol_major: PROTOCOL_MAJOR,
             capability: DISCOVERY_ONLY_CAPABILITY.to_string(),
             caps_extra: Vec::new(),
+            caps_extra_v2: Vec::new(),
             observed_at: datetime!(2026-01-02 03:04:05 UTC),
         }));
         wait_for_drain(&runtime, 2_000);

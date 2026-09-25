@@ -24,7 +24,7 @@
   import type { Collection, EntryRecord, Tag } from "./types";
   import HistoryCard from "./HistoryCard.svelte";
   import {
-    horizontalRailNextSelectionId,
+    horizontalRailNextSelectionIdGeneric,
     type HorizontalRailDirection,
   } from "./lib/horizontalRailNavigation.ts";
 
@@ -359,7 +359,7 @@
     }
     if (entries.length === 0) return;
     const visibleIds = entries.map((entry) => entry.id);
-    const navigation = horizontalRailNextSelectionId(
+    const navigation = horizontalRailNextSelectionIdGeneric(
       visibleIds,
       selectedEntryId,
       direction,

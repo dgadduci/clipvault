@@ -7,6 +7,7 @@
 //! [`bootstrap::AppBootstrap`].
 
 pub mod active_app_diagnostics;
+pub mod application_icons;
 pub mod bootstrap;
 pub mod capture_diagnostic;
 pub mod clipboard;
@@ -36,6 +37,8 @@ mod peer_image_sqlite;
 pub mod peer_image_thumbnail;
 mod peer_import_sqlite;
 pub mod peer_pairing;
+pub mod peer_source_app_presentation;
+pub mod peer_source_app_presentation_service;
 pub mod peer_text_history;
 pub mod peer_text_import;
 pub mod platform;
@@ -52,6 +55,10 @@ pub mod watcher;
 
 pub use active_app_diagnostics::{
     ActiveAppDiagnostics, ActiveAppDiagnosticsState, ActiveAppFailureKind, ActiveAppRefreshOutcome,
+};
+pub use application_icons::{
+    is_safe_icon_ref, ApplicationIconError, ApplicationIconStageOutcome, ApplicationIconStore,
+    APPLICATION_ICONS_ASSET_DIR, APPLICATION_ICONS_ASSET_EXTENSION,
 };
 pub use bootstrap::{
     active_app_backend_kind, AppBootstrap, AppContext, BootstrapError, BootstrapOptions,
@@ -196,6 +203,17 @@ pub use peer_pairing::{
     PairingSessionSnapshot, TrustOperationOutcome, PAIRING_CAPABILITY,
     PAIRING_MAX_IN_FLIGHT_SESSIONS, PAIRING_MAX_PAYLOAD_BYTES, PAIRING_PROTOCOL_MAJOR,
     PAIRING_RATE_LIMIT_PER_MINUTE, PAIRING_SESSION_TIMEOUT, PAIRING_WIRE_VERSION,
+};
+pub use peer_source_app_presentation::{
+    validate_source_app_icon, validate_source_app_name, SourceAppPresentationError,
+    MAX_SOURCE_APP_ICON_BYTES, MAX_SOURCE_APP_ICON_LONGEST_SIDE, MAX_SOURCE_APP_NAME_CHARS,
+};
+#[cfg(feature = "local-peer-pairing-tls")]
+pub use peer_source_app_presentation_service::PairingFetchSourceAppPresentationAdapter;
+pub use peer_source_app_presentation_service::{
+    HostSourceAppPresentationWire, PeerSourceAppPresentation, PeerSourceAppPresentationError,
+    PeerSourceAppPresentationService, PeerSourceAppPresentationTransport,
+    PeerSourceAppPresentationTransportError, SOURCE_APP_PRESENTATION_MAX_INFLIGHT_PER_PEER,
 };
 pub use peer_text_history::{
     build_preview, compute_page_fingerprint, entry_is_transferable, project_row,

@@ -82,6 +82,7 @@ impl StagingLeaseState {
 pub struct SqliteImageImportPersistence {
     database: Arc<parking_lot::Mutex<clipvault_db::Database>>,
     asset_store: ClipboardAssetStore,
+    application_icons: crate::ApplicationIconStore,
     /// Per-asset staging lease shared across all concurrent imports
     /// the adapter serves. The mutex serialises lease updates and
     /// cleanup reservations.
@@ -102,9 +103,11 @@ impl SqliteImageImportPersistence {
         database: Arc<parking_lot::Mutex<clipvault_db::Database>>,
         asset_store: ClipboardAssetStore,
     ) -> Self {
+        let application_icons = crate::ApplicationIconStore::new(asset_store.data_dir());
         Self {
             database,
             asset_store,
+            application_icons,
             staging_leases: Arc::new(Mutex::new(StagingLeaseState::default())),
             staging_lease_changed: Condvar::new(),
         }
@@ -414,6 +417,34 @@ impl PeerImageImportPersistence for SqliteImageImportPersistence {
         &self,
         staged: &StagedImageAsset,
     ) -> Result<(), PeerImageImportPersistenceError> {
+        if staged.asset_ref.starts_with(&format!(
+            "{}/",
+            crate::application_icons::APPLICATION_ICONS_ASSET_DIR
+        )) {
+            let outcome = match staged.kind {
+                StageKind::Written => crate::ApplicationIconStageOutcome::Written {
+                    asset_ref: staged.asset_ref.clone(),
+                },
+                StageKind::Reused => crate::ApplicationIconStageOutcome::Reused {
+                    asset_ref: staged.asset_ref.clone(),
+                },
+            };
+            self.application_icons
+                .rollback_staged(&staged.asset_ref, &outcome, |asset_ref| {
+                    let mut db = self.database.lock();
+                    let repo = PeerImportRepository::new(db.connection_mut());
+                    repo.count_source_app_icon_references(asset_ref)
+                        .map(|count| count > 0)
+                        .map_err(|_| ())
+                })
+                .map_err(|error| {
+                    PeerImageImportPersistenceError::Asset(format!(
+                        "icon release: {}",
+                        error.kind_str()
+                    ))
+                })?;
+            return Ok(());
+        }
         // The rollback contract the `peer-image-import` change
         // pins: a staged asset that was [`StageKind::Reused`]
         // is a pre-existing file the asset store found on disk.
@@ -561,6 +592,8 @@ impl PeerImageImportPersistence for SqliteImageImportPersistence {
             display_name,
             staged,
             validated_title,
+            source_app_name,
+            source_app_icon,
             now,
         } = spec;
 
@@ -568,8 +601,10 @@ impl PeerImageImportPersistence for SqliteImageImportPersistence {
         // repository opens the single SQLite transaction that
         // wraps every mutation (entry insert / reuse,
         // collection creation, binding upsert, membership
-        // attach, provenance record); the adapter only projects
-        // the typed inputs and converts the typed outcome.
+        // attach, provenance record, source-app name + icon
+        // ref); the adapter only projects the typed inputs
+        // and converts the typed outcome.
+        let icon_asset_ref = source_app_icon.as_ref().map(|icon| icon.asset_ref.clone());
         let commit_result = {
             let mut db = self.database.lock();
             let mut repo = PeerImportRepository::new(db.connection_mut());
@@ -584,25 +619,74 @@ impl PeerImageImportPersistence for SqliteImageImportPersistence {
                 height: staged.height,
                 content_size: staged.content_size,
                 validated_title,
+                source_app_name,
+                source_app_icon_ref: icon_asset_ref,
                 now,
             };
             repo.commit_image_import_transaction(repo_spec)
                 .map_err(map_peer_import_repo_error)
         };
         let outcome = commit_result?;
-        // The commit succeeded: release the staging lease the
-        // helper acquired during [`stage_image_asset`] so the
-        // rollback path's per-asset counter reflects the
-        // import has moved past the staging step. The entry
-        // the commit inserted (or refreshed) takes ownership
-        // of the `asset_ref` from this point on, so the file
-        // itself stays on disk regardless of the lease counter.
+        // The commit succeeded: release the staging leases the
+        // helpers acquired during staging so the rollback
+        // path's per-asset counters reflect the import has
+        // moved past the staging step. The entry the commit
+        // inserted (or refreshed) takes ownership of the
+        // asset references from this point on, so the files
+        // themselves stay on disk regardless of the lease
+        // counter.
         self.staging_leases.lock().decrement(&staged.asset_ref);
+        if let Some(icon) = source_app_icon.as_ref() {
+            self.application_icons.commit_staged(&icon.asset_ref);
+        }
         Ok(ImageImportTransactionOutcome {
             entry_id: outcome.entry_id,
             collection_id: outcome.collection_id,
             deduplicated: outcome.deduplicated,
         })
+    }
+
+    fn stage_source_app_icon(
+        &self,
+        bytes: Option<&[u8]>,
+    ) -> Result<Option<crate::peer_image_import::StagedImageAsset>, PeerImageImportPersistenceError>
+    {
+        use crate::peer_image_import::{StageKind, StagedImageAsset};
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        let image = crate::clipboard_assets::decode_png(bytes).map_err(|error| {
+            PeerImageImportPersistenceError::Asset(format!("icon decode: {error:?}"))
+        })?;
+        let normalized = crate::clipboard_assets::normalize_image(&image).map_err(|error| {
+            PeerImageImportPersistenceError::Asset(format!("icon normalize: {error:?}"))
+        })?;
+        let hash = crate::clipboard_assets::sha256_hex(bytes);
+        // Stage the icon through the dedicated
+        // `application-icons/` writer. The helper validates the
+        // bytes independently of the image asset, computes a
+        // content-addressed file name and writes atomically; a
+        // pre-existing icon collapses to `Reused` and MUST
+        // survive any rolled-back transaction.
+        let outcome = self.application_icons.stage(bytes).map_err(|error| {
+            PeerImageImportPersistenceError::Asset(format!("icon stage: {}", error.kind_str()))
+        })?;
+        let (asset_ref, stage_kind) = match outcome {
+            crate::ApplicationIconStageOutcome::Written { asset_ref } => {
+                (asset_ref, StageKind::Written)
+            }
+            crate::ApplicationIconStageOutcome::Reused { asset_ref } => {
+                (asset_ref, StageKind::Reused)
+            }
+        };
+        Ok(Some(StagedImageAsset {
+            asset_ref,
+            canonical_hash: hash,
+            width: image.width(),
+            height: image.height(),
+            content_size: normalized.png().len() as i64,
+            kind: stage_kind,
+        }))
     }
 }
 
@@ -783,6 +867,7 @@ mod tests {
                 protocol_major: 1,
                 capability: "pairing".to_string(),
                 caps_extra: String::new(),
+                caps_extra_v2: String::new(),
                 observed_at: OffsetDateTime::now_utc(),
             })
             .expect("seed peer");
@@ -873,6 +958,8 @@ mod tests {
                     display_name: "Equipo B".to_string(),
                     staged,
                     validated_title: None,
+                    source_app_name: None,
+                    source_app_icon: None,
                     now,
                 })
                 .expect("commit b");
@@ -935,6 +1022,7 @@ mod tests {
                 protocol_major: 1,
                 capability: "pairing".to_string(),
                 caps_extra: String::new(),
+                caps_extra_v2: String::new(),
                 observed_at: OffsetDateTime::now_utc(),
             })
             .expect("seed peer");
@@ -989,6 +1077,8 @@ mod tests {
                     display_name: "Equipo cleanup".to_string(),
                     staged: staged_b,
                     validated_title: None,
+                    source_app_name: None,
+                    source_app_icon: None,
                     now: OffsetDateTime::now_utc(),
                 })
                 .expect("commit B")

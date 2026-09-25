@@ -41,7 +41,15 @@
  * a stale index or a non-strict equality surfaces in CI.
  */
 
-export type HorizontalRailEntryId = number;
+/**
+ * Generic id the helper accepts. The rail consumes either a
+ * numeric `EntryRecord.id` (the local history rail) or an opaque
+ * string `remote_entry_id` (the remote-history rail); the
+ * helper stays project-neutral by accepting both projections
+ * through a single generic parameter so the call site keeps its
+ * narrow type without an explicit cast.
+ */
+export type HorizontalRailEntryId = number | string;
 
 export type HorizontalRailDirection = "left" | "right";
 
@@ -54,8 +62,8 @@ export type HorizontalRailDirection = "left" | "right";
  * the boundary, and to skip the assignment when the rail is
  * empty.
  */
-export interface HorizontalRailNavigation {
-  nextId: HorizontalRailEntryId | null;
+export interface HorizontalRailNavigation<T extends HorizontalRailEntryId = HorizontalRailEntryId> {
+  nextId: T | null;
   /**
    * Whether the navigation produced a different id than the
    * input. The flag is `false` for boundary presses (the rail is
@@ -96,11 +104,20 @@ export interface HorizontalRailNavigation {
  * The function is total and pure: any combination of arguments
  * produces a deterministic answer and never mutates its inputs.
  */
-export function horizontalRailNextSelectionId(
-  entries: readonly HorizontalRailEntryId[],
-  currentId: HorizontalRailEntryId | null,
+/**
+ * Generic variant of [`horizontalRailNextSelectionId`]. The
+ * generic preserves the narrow id type at the call site so the
+ * local rail can keep its `number | null` projection and the
+ * remote rail can keep its `string | null` projection without
+ * an explicit cast. The implementation is the same as the
+ * concrete helper; the generic only exists so TypeScript keeps
+ * the call-site type narrow.
+ */
+export function horizontalRailNextSelectionIdGeneric<T extends HorizontalRailEntryId>(
+  entries: readonly T[],
+  currentId: T | null,
   direction: HorizontalRailDirection,
-): HorizontalRailNavigation {
+): HorizontalRailNavigation<T> {
   if (entries.length === 0) {
     return { nextId: null, moved: false };
   }
@@ -132,4 +149,12 @@ export function horizontalRailNextSelectionId(
     return { nextId: currentId, moved: false };
   }
   return { nextId, moved: true };
+}
+
+export function horizontalRailNextSelectionId(
+  entries: readonly HorizontalRailEntryId[],
+  currentId: HorizontalRailEntryId | null,
+  direction: HorizontalRailDirection,
+): HorizontalRailNavigation {
+  return horizontalRailNextSelectionIdGeneric(entries, currentId, direction);
 }

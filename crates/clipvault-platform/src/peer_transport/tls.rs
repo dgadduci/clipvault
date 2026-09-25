@@ -57,9 +57,10 @@ use super::{
     derive_cert_fingerprint, PairingAdvertisementSink, PeerTransportObservation, TransportError,
     TransportSink, FETCH_IMAGE_MAX_BODY_BYTES, FETCH_IMAGE_MAX_RESPONSE_BYTES,
     FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES, FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES,
-    FETCH_TEXT_MAX_BODY_BYTES, FETCH_TEXT_MAX_RESPONSE_BYTES, HISTORY_MAX_RESPONSE_BYTES,
-    HISTORY_WIRE_VERSION, IMAGE_HISTORY_MAX_RESPONSE_BYTES, IMAGE_WIRE_VERSION,
-    PAIRING_MAX_IN_FLIGHT_SESSIONS, PAIRING_WIRE_VERSION,
+    FETCH_SOURCE_APP_PRESENTATION_MAX_RESPONSE_BYTES, FETCH_TEXT_MAX_BODY_BYTES,
+    FETCH_TEXT_MAX_RESPONSE_BYTES, HISTORY_MAX_RESPONSE_BYTES, HISTORY_WIRE_VERSION,
+    IMAGE_HISTORY_MAX_RESPONSE_BYTES, IMAGE_WIRE_VERSION, PAIRING_MAX_IN_FLIGHT_SESSIONS,
+    PAIRING_WIRE_VERSION,
 };
 #[cfg(feature = "local-peer-pairing-tls")]
 use base64::Engine as _;
@@ -642,6 +643,8 @@ pub fn install_with_material_and_resolver(
     let preserved_image_history_handler = state_guard.image_history_handler.clone();
     let preserved_image_fetch_handler = state_guard.image_fetch_handler.clone();
     let preserved_image_thumbnail_handler = state_guard.image_thumbnail_handler.clone();
+    let preserved_source_app_presentation_handler =
+        state_guard.source_app_presentation_handler.read().clone();
     drop(state_guard);
     install_with_material_resolver_and_history(
         transport,
@@ -655,6 +658,7 @@ pub fn install_with_material_and_resolver(
         preserved_image_history_handler,
         preserved_image_fetch_handler,
         preserved_image_thumbnail_handler,
+        preserved_source_app_presentation_handler,
     )
 }
 
@@ -678,6 +682,7 @@ pub fn install_with_material_resolver_and_history(
     image_history_handler: Option<Arc<dyn super::ImageHistoryHostHandler>>,
     image_fetch_handler: Option<Arc<dyn super::FetchImageHostHandler>>,
     image_thumbnail_handler: Option<Arc<dyn super::FetchImageThumbnailHostHandler>>,
+    source_app_presentation_handler: Option<Arc<dyn super::FetchSourceAppPresentationHostHandler>>,
 ) -> Result<u16, TransportError> {
     if transport
         .running
@@ -698,6 +703,7 @@ pub fn install_with_material_resolver_and_history(
         state.image_history_handler = image_history_handler.clone();
         state.image_fetch_handler = image_fetch_handler.clone();
         state.image_thumbnail_handler = image_thumbnail_handler.clone();
+        *state.source_app_presentation_handler.write() = source_app_presentation_handler.clone();
     }
 
     let identity = material.identity().clone();
@@ -777,6 +783,10 @@ pub fn install_with_material_resolver_and_history(
         let image_history_handler_for_task = image_history_handler.as_ref().map(Arc::clone);
         let image_fetch_handler_for_task = image_fetch_handler.as_ref().map(Arc::clone);
         let image_thumbnail_handler_for_task = image_thumbnail_handler.as_ref().map(Arc::clone);
+        let source_app_presentation_handler_for_task = {
+            let state = transport.state.lock().expect("state lock");
+            Arc::clone(&state.source_app_presentation_handler)
+        };
         let accept_handle = runtime.spawn(async move {
             run_accept_loop(
                 listener,
@@ -797,6 +807,7 @@ pub fn install_with_material_resolver_and_history(
                 image_history_handler_for_task,
                 image_fetch_handler_for_task,
                 image_thumbnail_handler_for_task,
+                source_app_presentation_handler_for_task,
             )
             .await;
         });
@@ -823,6 +834,7 @@ pub fn install_with_material_resolver_and_history(
         state.image_history_handler = image_history_handler;
         state.image_fetch_handler = image_fetch_handler;
         state.image_thumbnail_handler = image_thumbnail_handler;
+        *state.source_app_presentation_handler.write() = source_app_presentation_handler;
         // The handshake pin lookup is the single source of
         // truth shared between the verifier, the inbound health
         // handler and `arm_pin` / `disarm_pin`. The install path
@@ -1301,6 +1313,12 @@ async fn run_accept_loop(
     // handler so the remote rail can render a bounded
     // thumbnail without shipping the original PNG.
     image_thumbnail_handler: Option<Arc<dyn super::FetchImageThumbnailHostHandler>>,
+    // Shared handler slot the installer can update while the
+    // listener is running. The accept loop snapshots it for each
+    // connection so bootstrap's post-start installation is live.
+    source_app_presentation_handler: Arc<
+        parking_lot::RwLock<Option<Arc<dyn super::FetchSourceAppPresentationHostHandler>>>,
+    >,
 ) {
     loop {
         if cancel.load(Ordering::Acquire) {
@@ -1336,6 +1354,8 @@ async fn run_accept_loop(
         let image_history_handler_for_session = image_history_handler.as_ref().map(Arc::clone);
         let image_fetch_handler_for_session = image_fetch_handler.as_ref().map(Arc::clone);
         let image_thumbnail_handler_for_session = image_thumbnail_handler.as_ref().map(Arc::clone);
+        let source_app_presentation_handler_for_session =
+            source_app_presentation_handler.read().clone();
         tokio::spawn(async move {
             let outcome = handle_connection(
                 stream,
@@ -1357,6 +1377,7 @@ async fn run_accept_loop(
                 image_history_handler_for_session,
                 image_fetch_handler_for_session,
                 image_thumbnail_handler_for_session,
+                source_app_presentation_handler_for_session,
             )
             .await;
             if !matches!(outcome, ConnectionOutcome::Completed) {
@@ -1409,6 +1430,7 @@ async fn handle_connection(
     image_history_handler: Option<Arc<dyn super::ImageHistoryHostHandler>>,
     image_fetch_handler: Option<Arc<dyn super::FetchImageHostHandler>>,
     image_thumbnail_handler: Option<Arc<dyn super::FetchImageThumbnailHostHandler>>,
+    source_app_presentation_handler: Option<Arc<dyn super::FetchSourceAppPresentationHostHandler>>,
 ) -> ConnectionOutcome {
     let _ = peer_addr;
     let tls_stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
@@ -1459,6 +1481,7 @@ async fn handle_connection(
             image_history_handler,
             image_fetch_handler,
             image_thumbnail_handler,
+            source_app_presentation_handler,
         ),
     )
     .await;
@@ -1521,6 +1544,7 @@ async fn run_pairing_session<IO>(
     image_history_handler: Option<Arc<dyn super::ImageHistoryHostHandler>>,
     image_fetch_handler: Option<Arc<dyn super::FetchImageHostHandler>>,
     image_thumbnail_handler: Option<Arc<dyn super::FetchImageThumbnailHostHandler>>,
+    source_app_presentation_handler: Option<Arc<dyn super::FetchSourceAppPresentationHostHandler>>,
 ) -> Result<(), String>
 where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1637,6 +1661,23 @@ where
                 &peer_cert_slot,
                 handshake_pins,
                 image_thumbnail_handler,
+            )
+            .await;
+        }
+        PairingMessage::FetchSourceAppPresentation {
+            version,
+            peer_id,
+            remote_entry_id,
+        } => {
+            return handle_fetch_source_app_presentation_session(
+                &mut stream,
+                version,
+                peer_id,
+                remote_entry_id,
+                &local_peer_id,
+                &peer_cert_slot,
+                handshake_pins,
+                source_app_presentation_handler,
             )
             .await;
         }
@@ -2527,6 +2568,137 @@ where
     Ok(())
 }
 
+/// Handle an authenticated `FetchSourceAppPresentation` request
+/// the `peer-source-app-presentation` change ships. The
+/// listener re-validates the mTLS pin, the trusted / active
+/// state, the `source_app_presentation` capability and the
+/// entry eligibility before invoking the handler; the handler
+/// resolves the validated display name + bounded PNG icon.
+/// The 720 KiB envelope cap (`FETCH_SOURCE_APP_PRESENTATION_MAX_RESPONSE_BYTES`)
+/// is enforced before serialising the response so a hostile
+/// peer can never ship an oversized icon even when the
+/// in-process validator misbehaves.
+async fn handle_fetch_source_app_presentation_session<IO>(
+    stream: &mut TlsStream<IO>,
+    version: u32,
+    peer_id: String,
+    remote_entry_id: String,
+    local_peer_id: &str,
+    peer_cert_slot: &Arc<PeerCertSlot>,
+    handshake_pins: Arc<HandshakePinLookup>,
+    source_app_presentation_handler: Option<Arc<dyn super::FetchSourceAppPresentationHostHandler>>,
+) -> Result<(), String>
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if version != IMAGE_WIRE_VERSION {
+        return Err("incompatible image wire version".to_string());
+    }
+    let remote_cert_der = peer_cert_slot
+        .take()
+        .ok_or_else(|| "remote peer cert not delivered".to_string())?;
+    let remote_public_key = extract_ed25519_public_key_from_cert(&remote_cert_der)
+        .ok_or_else(|| "remote peer cert does not embed an Ed25519 SPKI".to_string())?;
+    let remote_peer_id = super::peer_id_from_public_key(&{
+        let mut key = [0u8; 32];
+        if remote_public_key.len() != 32 {
+            return Err("remote public key has invalid length".to_string());
+        }
+        key.copy_from_slice(&remote_public_key);
+        key
+    });
+    if peer_id != remote_peer_id {
+        return Err("fetch_source_app_presentation peer_id does not match SPKI".to_string());
+    }
+    let presented = derive_cert_fingerprint(&remote_cert_der);
+    let pin = handshake_pins.lookup(&remote_peer_id);
+    match pin {
+        Some(expected) if expected == presented => {}
+        Some(_) => return Err("key mismatch".to_string()),
+        None => return Err("unknown peer".to_string()),
+    }
+
+    let reply = match source_app_presentation_handler {
+        Some(handler) => {
+            match handler.fetch_source_app_presentation(&remote_peer_id, &remote_entry_id) {
+                super::HostSourceAppPresentationResponse::Ok {
+                    source_app_name,
+                    source_app_icon_bytes,
+                } => {
+                    let icon_b64 = match source_app_icon_bytes.as_ref() {
+                        Some(bytes) => {
+                            Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+                        }
+                        None => None,
+                    };
+                    let candidate_size = super::PendingSourceAppPresentationSize {
+                        source_app_name: source_app_name.as_deref(),
+                        source_app_icon_b64: icon_b64.as_deref(),
+                    };
+                    if candidate_size.estimated_bytes()
+                        > super::FETCH_SOURCE_APP_PRESENTATION_MAX_RESPONSE_BYTES
+                    {
+                        PairingMessage::FetchSourceAppPresentationUnavailable {
+                            version: IMAGE_WIRE_VERSION,
+                            peer_id: local_peer_id.to_string(),
+                            remote_entry_id,
+                            reason: "body_too_large".to_string(),
+                        }
+                    } else {
+                        PairingMessage::FetchSourceAppPresentationAck {
+                            version: IMAGE_WIRE_VERSION,
+                            peer_id: local_peer_id.to_string(),
+                            remote_entry_id,
+                            source_app_name,
+                            source_app_icon_b64: icon_b64,
+                        }
+                    }
+                }
+                super::HostSourceAppPresentationResponse::NotAvailable => {
+                    PairingMessage::FetchSourceAppPresentationUnavailable {
+                        version: IMAGE_WIRE_VERSION,
+                        peer_id: local_peer_id.to_string(),
+                        remote_entry_id,
+                        reason: "not_available".to_string(),
+                    }
+                }
+                super::HostSourceAppPresentationResponse::NotFound => {
+                    PairingMessage::FetchSourceAppPresentationUnavailable {
+                        version: IMAGE_WIRE_VERSION,
+                        peer_id: local_peer_id.to_string(),
+                        remote_entry_id,
+                        reason: "not_found".to_string(),
+                    }
+                }
+                super::HostSourceAppPresentationResponse::NotTrusted => {
+                    PairingMessage::FetchSourceAppPresentationUnavailable {
+                        version: IMAGE_WIRE_VERSION,
+                        peer_id: local_peer_id.to_string(),
+                        remote_entry_id,
+                        reason: "not_trusted".to_string(),
+                    }
+                }
+                super::HostSourceAppPresentationResponse::PersistenceUnavailable => {
+                    PairingMessage::FetchSourceAppPresentationUnavailable {
+                        version: IMAGE_WIRE_VERSION,
+                        peer_id: local_peer_id.to_string(),
+                        remote_entry_id,
+                        reason: "persistence_unavailable".to_string(),
+                    }
+                }
+            }
+        }
+        None => PairingMessage::FetchSourceAppPresentationUnavailable {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: local_peer_id.to_string(),
+            remote_entry_id,
+            reason: "not_available".to_string(),
+        },
+    };
+    write_envelope(stream, &reply).await?;
+    Ok(())
+}
+
 /// Read a single length-prefixed envelope using the pairing request budget.
 async fn read_envelope<IO>(stream: &mut TlsStream<IO>) -> Result<PairingMessage, String>
 where
@@ -2567,6 +2739,9 @@ fn envelope_payload_limit(message: &PairingMessage) -> usize {
         PairingMessage::ListRecentImagesAck { .. } => IMAGE_HISTORY_MAX_RESPONSE_BYTES,
         PairingMessage::FetchImageAck { .. } => FETCH_IMAGE_MAX_RESPONSE_BYTES,
         PairingMessage::FetchImageThumbnailAck { .. } => FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES,
+        PairingMessage::FetchSourceAppPresentationAck { .. } => {
+            FETCH_SOURCE_APP_PRESENTATION_MAX_RESPONSE_BYTES
+        }
         _ => MAX_INBOUND_PAYLOAD,
     }
 }
@@ -3005,6 +3180,21 @@ pub fn install_image_thumbnail_handler(
     Ok(())
 }
 
+/// Install the host-side source-app presentation handler the
+/// `peer-source-app-presentation` change ships. The handler is
+/// read on every inbound connection so the bootstrap can install
+/// it at any point without restarting the listener. Idempotent:
+/// a second call replaces the previous handler.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub fn install_source_app_presentation_handler(
+    transport: &super::TlsPeerTransport,
+    handler: Arc<dyn super::FetchSourceAppPresentationHostHandler>,
+) -> Result<(), super::TransportError> {
+    let state = transport.state.lock().expect("state lock");
+    *state.source_app_presentation_handler.write() = Some(handler);
+    Ok(())
+}
+
 /// Authenticated `list_recent_images` dial driver the
 /// `peer-image-import` change exposes through the productive
 /// transport. The transport dials the remote listener over
@@ -3273,6 +3463,91 @@ pub fn fetch_image_thumbnail(
             }
             Ok(snapshot)
         }
+        Err(error) => Err(error),
+    }
+}
+
+/// Fetch source-app metadata for one explicitly visible row. The
+/// caller's pinned certificate fingerprint is checked before the
+/// mTLS dial, and the returned envelope is bounded independently of
+/// the listener's response check.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub fn fetch_source_app_presentation(
+    transport: &super::TlsPeerTransport,
+    peer_id: &str,
+    cert_fingerprint: &str,
+    remote_entry_id: &str,
+) -> Result<super::PeerSourceAppPresentationSnapshot, super::TransportError> {
+    use super::PeerTransport;
+    health_check(transport, peer_id, cert_fingerprint)?;
+    if !transport.is_running() {
+        return Err(super::TransportError::Unavailable);
+    }
+    let (material, resolver, runtime, pins) = {
+        let state = transport.state.lock().expect("state lock");
+        let material = state
+            .local_material
+            .clone()
+            .ok_or(super::TransportError::Crypto)?;
+        let resolver = state.resolver.clone();
+        let runtime = state
+            .runtime
+            .clone()
+            .ok_or(super::TransportError::Unavailable)?;
+        (
+            material,
+            resolver,
+            runtime,
+            Arc::clone(&state.handshake_pins),
+        )
+    };
+    let resolver = resolver.ok_or(super::TransportError::Unavailable)?;
+    let connector = build_dial_connector(&material, Arc::clone(&pins));
+    let expected_remote_entry_id = remote_entry_id.to_string();
+    let request_remote_entry_id = expected_remote_entry_id.clone();
+    let result = runtime.block_on(async move {
+        let mut last_error = super::TransportError::PeerUnresolved;
+        for attempt in 0..HISTORY_DIAL_ATTEMPTS {
+            let Some(addr) = resolver.resolve(peer_id) else {
+                last_error = super::TransportError::PeerUnresolved;
+                if attempt + 1 < HISTORY_DIAL_ATTEMPTS {
+                    tokio::time::sleep(HISTORY_DIAL_RETRY_DELAY).await;
+                    continue;
+                }
+                break;
+            };
+            match dial_fetch_source_app_presentation_async(
+                connector.clone(),
+                addr,
+                material.clone(),
+                peer_id,
+                &request_remote_entry_id,
+            )
+            .await
+            {
+                Ok(snapshot) => return Ok(snapshot),
+                Err(super::TransportError::Unavailable) if attempt + 1 < HISTORY_DIAL_ATTEMPTS => {
+                    last_error = super::TransportError::Unavailable;
+                    tokio::time::sleep(HISTORY_DIAL_RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error)
+    });
+    match result {
+        Ok(snapshot)
+            if snapshot.peer_id == peer_id
+                && snapshot.remote_entry_id == expected_remote_entry_id =>
+        {
+            if snapshot.source_app_icon_b64.as_ref().is_some_and(|bytes| {
+                bytes.len() > (super::FETCH_SOURCE_APP_PRESENTATION_MAX_RESPONSE_BYTES * 4 / 3)
+            }) {
+                return Err(super::TransportError::BodyTooLarge);
+            }
+            Ok(snapshot)
+        }
+        Ok(_) => Err(super::TransportError::UnknownPeer),
         Err(error) => Err(error),
     }
 }
@@ -4706,6 +4981,8 @@ async fn dial_fetch_text_async(
                 title,
                 content_type,
                 body,
+                source_app_name: None,
+                source_app_icon_bytes: None,
             })
         }
         PairingMessage::FetchTextUnavailable { reason, .. } => {
@@ -4874,6 +5151,8 @@ async fn dial_fetch_image_async(
                 remote_entry_id: ack_remote_entry_id,
                 title,
                 bytes,
+                source_app_name: None,
+                source_app_icon_bytes: None,
             })
         }
         PairingMessage::FetchImageUnavailable { reason, .. } => match reason.as_str() {
@@ -4982,6 +5261,81 @@ async fn dial_fetch_image_thumbnail_async(
             "not_available" => Err(super::TransportError::Unavailable),
             _ => Err(super::TransportError::Unavailable),
         },
+        _ => Err(super::TransportError::IncompatibleProtocol),
+    }
+}
+
+#[cfg(feature = "local-peer-pairing-tls")]
+async fn dial_fetch_source_app_presentation_async(
+    connector: tokio_rustls::TlsConnector,
+    remote_addr: SocketAddr,
+    material: LocalIdentityMaterial,
+    peer_id: &str,
+    remote_entry_id: &str,
+) -> Result<super::PeerSourceAppPresentationSnapshot, super::TransportError> {
+    use rustls::pki_types::ServerName;
+    let stream = tokio::net::TcpStream::connect(remote_addr)
+        .await
+        .map_err(|_| super::TransportError::Unavailable)?;
+    let server_name = ServerName::try_from("clipvault.local")
+        .map_err(|_| super::TransportError::Unavailable)?
+        .to_owned();
+    let mut tls_stream: TlsStream<tokio::net::TcpStream> = TlsStream::Client(
+        connector
+            .connect(server_name, stream)
+            .await
+            .map_err(|_| super::TransportError::KeyMismatch)?,
+    );
+    let request = PairingMessage::FetchSourceAppPresentation {
+        version: IMAGE_WIRE_VERSION,
+        peer_id: material.identity().peer_id.to_string(),
+        remote_entry_id: remote_entry_id.to_string(),
+    };
+    write_envelope(&mut tls_stream, &request)
+        .await
+        .map_err(|_| super::TransportError::Unavailable)?;
+    let reply = read_envelope_with_limit(
+        &mut tls_stream,
+        FETCH_SOURCE_APP_PRESENTATION_MAX_RESPONSE_BYTES,
+    )
+    .await
+    .map_err(|_| super::TransportError::Unavailable)?;
+    match reply {
+        PairingMessage::FetchSourceAppPresentationAck {
+            version: _,
+            peer_id: ack_peer_id,
+            remote_entry_id: ack_entry_id,
+            source_app_name,
+            source_app_icon_b64,
+        } => {
+            if ack_peer_id != peer_id || ack_entry_id != remote_entry_id {
+                return Err(super::TransportError::UnknownPeer);
+            }
+            if source_app_icon_b64
+                .as_ref()
+                .is_some_and(|value| value.len() > 699_052)
+            {
+                return Err(super::TransportError::BodyTooLarge);
+            }
+            Ok(super::PeerSourceAppPresentationSnapshot {
+                peer_id: ack_peer_id,
+                remote_entry_id: ack_entry_id,
+                source_app_name,
+                source_app_icon_b64,
+            })
+        }
+        PairingMessage::FetchSourceAppPresentationUnavailable { reason, .. } => {
+            match reason.as_str() {
+                "not_trusted" => Err(super::TransportError::Revoked),
+                "not_found" | "not_transferable" => Err(super::TransportError::Malformed),
+                "body_too_large" => Err(super::TransportError::BodyTooLarge),
+                "pin_invalid" => Err(super::TransportError::KeyMismatch),
+                "not_available" | "capability_missing" | "busy" | "persistence_unavailable" => {
+                    Err(super::TransportError::Unavailable)
+                }
+                _ => Err(super::TransportError::Unavailable),
+            }
+        }
         _ => Err(super::TransportError::IncompatibleProtocol),
     }
 }
@@ -5941,7 +6295,8 @@ mod tests {
     #[test]
     fn tls_routing_for_history_envelope_round_trip() {
         use super::super::{
-            HistoryHostHandler, HistoryHostResponse, PeerHistorySnapshot, PeerTransport as _,
+            FetchSourceAppPresentationHostHandler, HistoryHostHandler, HistoryHostResponse,
+            HostSourceAppPresentationResponse, PeerHistorySnapshot, PeerTransport as _,
             TlsPeerTransport,
         };
         use std::sync::Mutex as StdMutex;
@@ -6060,8 +6415,32 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("install host");
+
+        struct FixedSourceAppHandler {
+            expected_peer_id: String,
+        }
+        impl FetchSourceAppPresentationHostHandler for FixedSourceAppHandler {
+            fn fetch_source_app_presentation(
+                &self,
+                peer_id: &str,
+                remote_entry_id: &str,
+            ) -> HostSourceAppPresentationResponse {
+                assert_eq!(peer_id, self.expected_peer_id);
+                assert_eq!(remote_entry_id, "entry-7");
+                HostSourceAppPresentationResponse::Ok {
+                    source_app_name: Some("Terminal".to_string()),
+                    source_app_icon_bytes: Some(vec![0x89, b'P', b'N', b'G']),
+                }
+            }
+        }
+        host_transport
+            .install_source_app_presentation_handler(Arc::new(FixedSourceAppHandler {
+                expected_peer_id: client_peer_id.clone(),
+            }))
+            .expect("install source-app handler");
 
         // Client listener: install with a resolver that maps
         // the host peer_id to the host's bound port so the
@@ -6120,6 +6499,17 @@ mod tests {
         // Yield so the host accept loop polls at least once
         // before the dialer fires its first request.
         std::thread::sleep(std::time::Duration::from_millis(150));
+
+        let presentation = client_transport
+            .fetch_source_app_presentation(&host_peer_id, &host_cert_fingerprint, "entry-7")
+            .expect("source-app presentation dials over mTLS");
+        assert_eq!(presentation.peer_id, host_peer_id);
+        assert_eq!(presentation.remote_entry_id, "entry-7");
+        assert_eq!(presentation.source_app_name.as_deref(), Some("Terminal"));
+        assert_eq!(
+            presentation.source_app_icon_b64.as_deref(),
+            Some("iVBORw==")
+        );
 
         // 1. First page over mTLS. The host seeds `MAX_TEST_ROWS` rows
         //    so the page fills the cap and emits a `next_cursor`
@@ -6231,6 +6621,7 @@ mod tests {
             "bare-host".to_string(),
             bare_advertisement,
             bare_sink,
+            None,
             None,
             None,
             None,

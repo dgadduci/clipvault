@@ -1558,6 +1558,15 @@ impl ClipboardAssetStore {
             .join(CLIPBOARD_ASSETS_DIR)
     }
 
+    /// Resolved `data_dir` the store writes under. The helper
+    /// exists so adjacent stores (the
+    /// `peer-source-app-presentation` `application-icons/`
+    /// writer) can mirror the same namespace without having to
+    /// re-resolve the platform path on their own.
+    pub fn data_dir(&self) -> PathBuf {
+        self.data_dir.clone()
+    }
+
     /// Persist `image` and return the relative reference.
     ///
     /// The write is atomic (temp file + `rename` inside the same

@@ -293,6 +293,12 @@ pub struct AppContext {
     /// so the renderer can keep the static placeholder without
     /// surfacing a global rail error.
     peer_image_thumbnail: crate::peer_image_thumbnail::PeerImageThumbnailService,
+    /// Bounded, on-demand source-app presentation facade. Its
+    /// client requests require the selected peer's trusted/active
+    /// cache; the host handler is installed on the authenticated TLS
+    /// listener and revalidates peer capability and row metadata.
+    peer_source_app_presentation:
+        crate::peer_source_app_presentation_service::PeerSourceAppPresentationService,
     /// Concrete mDNS adapter the bootstrap installed for
     /// discovery. The toggle command wires this handle into the
     /// `PairingAdvertisement` the productive pairing transport
@@ -621,6 +627,12 @@ impl AppContext {
     /// the snapshot for the original `Importar` payload.
     pub fn peer_image_thumbnail(&self) -> &crate::peer_image_thumbnail::PeerImageThumbnailService {
         &self.peer_image_thumbnail
+    }
+
+    pub fn peer_source_app_presentation(
+        &self,
+    ) -> &crate::peer_source_app_presentation_service::PeerSourceAppPresentationService {
+        &self.peer_source_app_presentation
     }
 
     /// Best-effort wire of the local peer identity the runtime
@@ -1208,6 +1220,7 @@ impl AppBootstrap {
                             protocol_major: observation.protocol_major,
                             capability: observation.capability.clone(),
                             caps_extra: observation.caps_extra.clone(),
+                            caps_extra_v2: observation.caps_extra_v2.clone(),
                             first_seen_at: String::new(),
                             last_discovered_at: String::new(),
                             updated_at: String::new(),
@@ -1636,6 +1649,58 @@ impl AppBootstrap {
                     "productive image thumbnail handler install failed; bootstrap continues with no host image thumbnails"
                 );
             }
+
+            let source_app_presentation_authorization:
+                crate::peer_source_app_presentation_service::PeerSourceAppPresentationHostAuthorizationResolver =
+                Arc::new({
+                    let database_for_resolver = Arc::clone(&database_handle);
+                    move |peer_id: &str| {
+                        let mut db = database_for_resolver.lock();
+                        let repo = clipvault_db::KnownPeerRepository::new(db.connection_mut());
+                        match repo.get(peer_id) {
+                            Ok(Some(row))
+                                if row.trust_state == clipvault_db::TrustState::Trusted =>
+                            {
+                                if crate::peer_discovery::decode_capabilities(&row.caps_extra_v2)
+                                    .iter()
+                                    .any(|token| {
+                                        token
+                                            == crate::peer_discovery::SOURCE_APP_PRESENTATION_CAPABILITY
+                                    })
+                                {
+                                    crate::peer_source_app_presentation_service::PeerSourceAppPresentationHostAuthorization::Authorized
+                                } else {
+                                    crate::peer_source_app_presentation_service::PeerSourceAppPresentationHostAuthorization::CapabilityMissing
+                                }
+                            }
+                            _ => crate::peer_source_app_presentation_service::PeerSourceAppPresentationHostAuthorization::NotTrusted,
+                        }
+                    }
+                });
+            let source_app_presentation_persistence: Arc<
+                dyn crate::peer_source_app_presentation_service::PeerSourceAppPresentationHostPersistence,
+            > = Arc::new(
+                crate::peer_source_app_presentation_service::SqlitePeerSourceAppPresentationHostPersistence::new(
+                    Arc::clone(&database_handle),
+                    peer_image_import_asset_store.clone(),
+                ),
+            );
+            let source_app_presentation_handler: Arc<
+                dyn clipvault_platform::peer_transport::FetchSourceAppPresentationHostHandler,
+            > = Arc::new(
+                crate::peer_source_app_presentation_service::PeerSourceAppPresentationHostHandlerAdapter::new(
+                    source_app_presentation_persistence,
+                    source_app_presentation_authorization,
+                ),
+            );
+            if let Err(error) = pairing_transport
+                .install_source_app_presentation_handler(source_app_presentation_handler)
+            {
+                tracing::warn!(
+                    ?error,
+                    "productive source-app presentation handler install failed; bootstrap continues with no host source-app presentation"
+                );
+            }
         }
         #[cfg(feature = "local-peer-pairing-tls")]
         let _pairing_transport_arc = Arc::clone(&pairing_transport);
@@ -1700,6 +1765,49 @@ impl AppBootstrap {
         .with_capability_resolver(Arc::clone(
             &peer_image_thumbnail_capability_resolver_for_context,
         ));
+        let peer_source_app_presentation_transport: Arc<
+            dyn crate::peer_source_app_presentation_service::PeerSourceAppPresentationTransport,
+        > = {
+            #[cfg(feature = "local-peer-pairing-tls")]
+            {
+                Arc::new(
+                    crate::peer_source_app_presentation_service::PairingFetchSourceAppPresentationAdapter::new(
+                        Arc::clone(&_pairing_transport_arc),
+                    ),
+                )
+            }
+            #[cfg(not(feature = "local-peer-pairing-tls"))]
+            {
+                Arc::new(
+                    crate::peer_source_app_presentation_service::NoopPeerSourceAppPresentationTransport,
+                )
+            }
+        };
+        let source_app_presentation_capability_resolver:
+            crate::peer_source_app_presentation_service::PeerSourceAppPresentationCapabilityResolver =
+            Arc::new({
+                let database_for_resolver = Arc::clone(&database_handle);
+                move |peer_id: &str| {
+                    let mut db = database_for_resolver.lock();
+                    let repo = clipvault_db::KnownPeerRepository::new(db.connection_mut());
+                    repo.get(peer_id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|row| {
+                            crate::peer_discovery::decode_capabilities(&row.caps_extra_v2)
+                                .iter()
+                                .any(|token| {
+                                    token
+                                        == crate::peer_discovery::SOURCE_APP_PRESENTATION_CAPABILITY
+                                })
+                        })
+                }
+            });
+        let peer_source_app_presentation =
+            crate::peer_source_app_presentation_service::PeerSourceAppPresentationService::new(
+                peer_source_app_presentation_transport,
+            )
+            .with_capability_resolver(source_app_presentation_capability_resolver);
         // Pre-populate both per-peer HMAC secret caches from the
         // persisted `known_peers.cursor_secret` rows. The services
         // mirror this persisted secret so a restart never invalidates
@@ -1818,6 +1926,7 @@ impl AppBootstrap {
             peer_image_history,
             peer_image_import,
             peer_image_thumbnail,
+            peer_source_app_presentation,
             // The capture-debug sink is either the caller-supplied
             // handle (tests) or the production wiring that consults
             // `CLIPVAULT_DEBUG_CAPTURE` exactly once at startup. When
@@ -2404,6 +2513,7 @@ mod tests {
                         protocol_major: 1,
                         capability: "pairing".to_string(),
                         caps_extra: String::new(),
+                        caps_extra_v2: String::new(),
                         observed_at: time::OffsetDateTime::UNIX_EPOCH,
                     })
                     .expect("seed observation");
@@ -2564,6 +2674,7 @@ mod tests {
                 protocol_major: 1,
                 capability: "pairing".to_string(),
                 caps_extra: String::new(),
+                caps_extra_v2: String::new(),
                 observed_at: time::OffsetDateTime::UNIX_EPOCH,
             })
             .expect("seed observation");
@@ -2638,6 +2749,7 @@ mod tests {
                     protocol_major: 1,
                     capability: "pairing".to_string(),
                     caps_extra: String::new(),
+                    caps_extra_v2: String::new(),
                     observed_at: time::OffsetDateTime::UNIX_EPOCH,
                 })
                 .expect("seed observation");
