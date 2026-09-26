@@ -71,37 +71,63 @@ thumbnail, a static image placeholder, or an import status.
   bottom-aligned footer row
 - **AND** the preview content remains within the fixed card dimensions
 
-### Requirement: Visible remote cards show source-app name and icon on demand
+### Requirement: Remote browse rows carry only the bounded source-app name
 
-For a selected peer that advertises `source_app_presentation`, each visible
-text or image preview card SHALL request the source application's validated
-display name and optional PNG icon through the separate
-`peer-source-app-presentation` route. The request SHALL not add source metadata
-to browse rows or image-thumbnail responses. The card SHALL show the returned
-name and icon when available, with generic/unknown fallbacks, while preserving
-its fixed geometry and stale-response isolation.
+Text and image history browse rows SHALL include an optional normalized
+source-app display name from that entry's own metadata. They SHALL NOT include
+icon bytes, icon references/paths, bundle IDs, raw source identifiers, content
+hashes or clipboard content. New clients SHALL display the name only when the
+selected peer advertises `source_app_presentation`; peers predating the field
+remain compatible. Image-thumbnail responses SHALL remain free of source-app
+metadata. Preview loading SHALL NOT issue a separate per-card source-app
+request or transfer a source-app icon.
 
-#### Scenario: Visible card resolves source-app presentation
+#### Scenario: Name is available with the initial browse page
 
-- **WHEN** a text or image card becomes visible for the active peer and that
-  peer advertises `source_app_presentation`
-- **THEN** the rail requests the presentation separately from its browse and
-  thumbnail calls
-- **AND** the card shows the original application's name and icon when valid
-  values are returned
+- **WHEN** a peer advertising `source_app_presentation` returns text or image
+  history rows whose entries have valid source-app names
+- **THEN** each browse row carries its validated, bounded source-app name
+- **AND** the corresponding preview displays that name without an additional
+  network request
+- **AND** no source-app icon bytes are fetched or displayed
 
-#### Scenario: Browse and thumbnail stay metadata-safe
+#### Scenario: Legacy or invalid source name
 
-- **WHEN** the peer history page or image thumbnail is requested
-- **THEN** neither payload contains the source-app name, icon bytes, icon
-  reference, path or application identifier
-- **AND** the source name/icon is returned only by the visible-card route or
-  an explicit import response
+- **WHEN** the host is an older peer, or an entry has no valid source-app name
+- **THEN** the new client receives `null`/no name and displays the honest
+  unknown-name fallback without delaying the card
+- **AND** a client without the capability does not display an unsolicited
+  source-app name
 
-#### Scenario: Peer does not support presentation or metadata is absent
+#### Scenario: Browse and thumbnail payload boundaries
 
-- **WHEN** the peer lacks the additive capability, the source app is unknown,
-  or its icon/name is absent or invalid
-- **THEN** the client does not treat this as a global history error
-- **AND** the card shows a generic icon and an honest unknown-name fallback
-  for missing values without changing size
+- **WHEN** history rows or image thumbnails are requested
+- **THEN** browse rows may contain only the bounded display name in addition
+  to their existing fields, and thumbnails contain no source-app metadata
+- **AND** neither response includes icon bytes/references/paths, application
+  identifiers, content hashes or clipboard content
+
+### Requirement: Remote browse paints the first successful stream promptly
+
+The remote-history rail SHALL keep text and image browse requests parallel,
+but SHALL render rows from the first successful non-empty stream response
+without waiting for the other stream. The provisional rows SHALL NOT commit or
+advance either stream's cursor or buffer state. Once both requests settle, the
+rail SHALL replace the provisional view with the normal newest-first,
+deduplicated combined page. Pagination controls SHALL remain disabled during
+this merge. A stale response SHALL NOT paint into a different peer/page, and
+rows from a successful stream SHALL remain visible if the other stream fails.
+
+#### Scenario: One stream responds before the other
+
+- **WHEN** the text or image endpoint returns a non-empty successful first
+  page while the other endpoint is still pending
+- **THEN** the returned rows appear immediately with their source-app names
+- **AND** the pending stream can later contribute rows to the authoritative
+  combined page without duplicates or crossed cursors
+
+#### Scenario: One stream fails after the other succeeds
+
+- **WHEN** one browse endpoint succeeds with rows and the other endpoint fails
+- **THEN** the successful rows remain visible with the retryable error
+- **AND** the failed stream's cursor is not advanced

@@ -6424,6 +6424,7 @@ mod tests {
                     // exceed the pairing frame. The history-specific limit
                     // must carry it end-to-end without weakening pairing.
                     preview: format!("row-{id} {}", "x".repeat(300)),
+                    source_app_name: None,
                 });
             }
             Arc::new(FixedHandler(StdMutex::new(FixedHostSource {

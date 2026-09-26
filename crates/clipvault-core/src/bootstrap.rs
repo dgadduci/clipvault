@@ -1280,6 +1280,24 @@ impl AppBootstrap {
             pairing_transport.clone(),
             pairing_persistence,
         );
+        #[cfg(feature = "local-peer-pairing-tls")]
+        let source_app_name_capability_resolver: Arc<dyn Fn(&str) -> bool + Send + Sync> =
+            Arc::new({
+                let database_for_resolver = Arc::clone(&database_handle);
+                move |peer_id: &str| {
+                    let mut db = database_for_resolver.lock();
+                    let repo = clipvault_db::KnownPeerRepository::new(db.connection_mut());
+                    repo.get(peer_id).ok().flatten().is_some_and(|row| {
+                        row.trust_state == clipvault_db::TrustState::Trusted
+                            && crate::peer_discovery::decode_capabilities(&row.caps_extra_v2)
+                                .iter()
+                                .any(|token| {
+                                    token
+                                        == crate::peer_discovery::SOURCE_APP_PRESENTATION_CAPABILITY
+                                })
+                    })
+                }
+            });
         // Build the productive host-side history handler the
         // listener drives when an authenticated peer asks for
         // `list_recent_text`. The bootstrap installs the adapter
@@ -1301,7 +1319,10 @@ impl AppBootstrap {
             let handler = crate::peer_pairing::PeerTextHistoryHostHandlerAdapter::new(
                 peer_text_history.clone(),
                 Arc::clone(&host_source),
-            );
+            )
+            .with_source_app_name_capability_resolver(Arc::clone(
+                &source_app_name_capability_resolver,
+            ));
             // The productive install path persists the handler so a
             // follow-up `start_with_material_and_resolver` already
             // has the wiring in place. The `install_history_handler`
@@ -1533,7 +1554,10 @@ impl AppBootstrap {
                 crate::peer_pairing::PeerImageHistoryHostHandlerAdapter::new(
                     peer_image_history.clone(),
                     Arc::clone(&image_host_source),
-                ),
+                )
+                .with_source_app_name_capability_resolver(Arc::clone(
+                    &source_app_name_capability_resolver,
+                )),
             );
             if let Err(error) =
                 peer_pairing.install_image_history_handler_inner(image_history_handler)

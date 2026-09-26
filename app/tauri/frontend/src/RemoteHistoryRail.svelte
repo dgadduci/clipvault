@@ -34,7 +34,6 @@
     peerImageRecordStateCommand,
     peerImageImportRecordStateCommand,
     peerImageThumbnailRecordStateCommand,
-    peerSourceAppPresentationRecordStateCommand,
   } from "./lib/tauri";
   import type {
     PeerSnapshot,
@@ -46,8 +45,11 @@
     applyResponses as mergeResponses,
     pickNextCursors,
     promoteBuffers,
+    rowsForPartialOutcome,
+    type ImageOutcome,
     type PageState,
     type RemoteRailRow,
+    type TextOutcome,
   } from "./lib/remoteHistoryMerge";
   import {
     horizontalRailNextSelectionIdGeneric,
@@ -288,7 +290,6 @@
       peerImageRecordStateCommand(peerState),
       peerImageImportRecordStateCommand(peerState),
       peerImageThumbnailRecordStateCommand(peerState),
-      peerSourceAppPresentationRecordStateCommand(peerState),
     ])
       .then(() => {
         if (generation === peerStateSyncGeneration && peerId === targetPeerId) {
@@ -395,7 +396,7 @@
     persistCache();
     const textCursorPayload = cursors.text;
     const imageCursorPayload = cursors.image;
-    const textPromise =
+    const textPromise: Promise<TextOutcome> =
       textCursorPayload === null
         ? Promise.resolve({ kind: "text-skip" as const })
         : peerHistoryBrowseCommand({
@@ -405,7 +406,7 @@
             (response) => ({ kind: "text" as const, response }),
             (err) => ({ kind: "text-error" as const, err }),
           );
-    const imagePromise =
+    const imagePromise: Promise<ImageOutcome> =
       imageCursorPayload === null
         ? Promise.resolve({ kind: "image-skip" as const })
         : peerImageBrowseCommand({
@@ -415,7 +416,23 @@
             (response) => ({ kind: "image" as const, response }),
             (err) => ({ kind: "image-error" as const, err }),
           );
-    const [textOutcome, imageOutcome] = await Promise.all([textPromise, imagePromise]);
+    let partialFirstPaintPublished = false;
+    const publishFirstPageRows = <T extends TextOutcome | ImageOutcome>(
+      promise: Promise<T>,
+    ): Promise<T> => promise.then((outcome) => {
+      if (!options.append && !partialFirstPaintPublished && generation === loadGeneration) {
+        const partialRows = rowsForPartialOutcome(outcome);
+        if (partialRows !== null && partialRows.length > 0) {
+          rows = partialRows;
+          partialFirstPaintPublished = true;
+        }
+      }
+      return outcome;
+    });
+    const [textOutcome, imageOutcome] = await Promise.all([
+      publishFirstPageRows(textPromise),
+      publishFirstPageRows(imagePromise),
+    ]);
     if (generation !== loadGeneration) return;
     consumeMergeResult(
       mergeResponses(textOutcome, imageOutcome, snapshotState(), options),
@@ -467,7 +484,7 @@
   }
 
   function requestNextPage(): void {
-    if (peerId === null) return;
+    if (peerId === null || loading) return;
     if (exhausted) return;
     // The text + image streams are paginated independently.
     // "Siguiente" first drains the per-stream buffers the previous
@@ -498,6 +515,7 @@
   }
 
   function requestPreviousPage(): void {
+    if (loading) return;
     // The bridge exposes a newest-first cursor — there is no
     // "previous" direction in the metadata-only contract, so
     // the rail always re-issues the first-page request and the
@@ -743,7 +761,7 @@
         class="remote-history-rail-pager"
         data-testid="remote-history-rail-prev"
         on:click={requestPreviousPage}
-        disabled={rows.length === 0}
+        disabled={rows.length === 0 || loading}
       >
         Anterior
       </button>
@@ -752,7 +770,7 @@
         class="remote-history-rail-pager"
         data-testid="remote-history-rail-next"
         on:click={requestNextPage}
-        disabled={exhausted}
+        disabled={exhausted || loading}
       >
         Siguiente
       </button>
@@ -808,6 +826,7 @@
                 content_type: item.row.content_type,
                 created_at: item.row.created_at,
                 preview: `${item.row.width}×${item.row.height} · ${Math.round(item.row.byte_size / 1024)} KB`,
+                source_app_name: item.row.source_app_name,
               }}
               rowTestId={`remote-history-rail-card-${index}`}
               peerId={peerId}

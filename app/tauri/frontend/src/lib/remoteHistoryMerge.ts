@@ -79,6 +79,30 @@ export type ImageOutcome =
   | { kind: "image-error"; err: unknown }
   | { kind: "image-skip" };
 
+/**
+ * Rows safe to paint from the first successful stream response
+ * while the other endpoint is still pending. This is only a
+ * temporary first-paint projection: the rail does not commit
+ * cursors/buffers until both endpoints settle, then
+ * `applyResponses` recomputes the authoritative merged page.
+ */
+export function rowsForPartialOutcome(
+  outcome: TextOutcome | ImageOutcome,
+): RemoteRailRow[] | null {
+  let rows: RemoteRailRow[];
+  if (outcome.kind === "text" && outcome.response.kind === "ok") {
+    rows = outcome.response.rows.map((row) => ({ kind: "text", row }));
+  } else if (outcome.kind === "image" && outcome.response.kind === "ok") {
+    rows = outcome.response.rows.map((row) => ({ kind: "image", row }));
+  } else {
+    return null;
+  }
+  return sortNewestFirst(dedupeByRemoteEntryId(rows)).slice(
+    0,
+    MAX_COMBINED_PAGE_ROWS,
+  );
+}
+
 export interface PageState {
   rows: RemoteRailRow[];
   cursor: string;

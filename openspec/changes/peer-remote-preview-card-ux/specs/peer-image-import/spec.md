@@ -23,12 +23,13 @@ SHALL NOT overwrite source metadata on an existing deduplicated local entry.
 - **AND** the original image continues to be validated and persisted through
   the existing image-import transaction
 
-#### Scenario: Image browsing and thumbnail preview do not expose source metadata
+#### Scenario: Image browse carries only the bounded name; thumbnail does not
 
 - **WHEN** the client lists remote images or requests a thumbnail without
   activating Importar
-- **THEN** those responses contain no source-application name, identifier,
-  icon reference or icon bytes
+- **THEN** an image browse row may contain its validated bounded source-app
+  display name, but no icon bytes/reference/path or app identifier
+- **AND** the thumbnail response contains no source-application metadata
 
 #### Scenario: Existing local entry is deduplicated
 

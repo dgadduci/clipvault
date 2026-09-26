@@ -2113,6 +2113,7 @@ fn generate_nonce() -> String {
 pub struct PeerTextHistoryHostHandlerAdapter {
     service: crate::peer_text_history::PeerTextHistoryService,
     source: Arc<dyn crate::peer_text_history::HostHistorySource>,
+    source_app_name_capability: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
 }
 
 #[cfg(feature = "local-peer-pairing-tls")]
@@ -2126,7 +2127,21 @@ impl PeerTextHistoryHostHandlerAdapter {
         service: crate::peer_text_history::PeerTextHistoryService,
         source: Arc<dyn crate::peer_text_history::HostHistorySource>,
     ) -> Self {
-        Self { service, source }
+        Self {
+            service,
+            source,
+            source_app_name_capability: None,
+        }
+    }
+
+    /// Include source-app display names only when the requesting
+    /// trusted peer advertised the additive presentation capability.
+    pub fn with_source_app_name_capability_resolver(
+        mut self,
+        resolver: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    ) -> Self {
+        self.source_app_name_capability = Some(resolver);
+        self
     }
 }
 
@@ -2162,6 +2177,10 @@ impl clipvault_platform::peer_transport::HistoryHostHandler for PeerTextHistoryH
             clamped_limit,
             self.source.as_ref(),
         );
+        let include_source_app_name = self
+            .source_app_name_capability
+            .as_ref()
+            .is_some_and(|resolver| resolver(peer_id));
         match response {
             crate::peer_text_history::HostHistoryResponse::Ok(page, snapshot_id) => {
                 // The host honored the clamped limit and the
@@ -2184,6 +2203,9 @@ impl clipvault_platform::peer_transport::HistoryHostHandler for PeerTextHistoryH
                             content_type: row.content_type,
                             created_at: row.created_at,
                             preview: row.preview,
+                            source_app_name: include_source_app_name
+                                .then_some(row.source_app_name)
+                                .flatten(),
                         },
                     )
                     .collect();
@@ -2220,6 +2242,7 @@ impl clipvault_platform::peer_transport::HistoryHostHandler for PeerTextHistoryH
 pub struct PeerImageHistoryHostHandlerAdapter {
     service: crate::peer_image_history::PeerImageHistoryService,
     source: Arc<dyn crate::peer_image_history::HostImageHistorySource>,
+    source_app_name_capability: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
 }
 
 #[cfg(feature = "local-peer-pairing-tls")]
@@ -2228,7 +2251,21 @@ impl PeerImageHistoryHostHandlerAdapter {
         service: crate::peer_image_history::PeerImageHistoryService,
         source: Arc<dyn crate::peer_image_history::HostImageHistorySource>,
     ) -> Self {
-        Self { service, source }
+        Self {
+            service,
+            source,
+            source_app_name_capability: None,
+        }
+    }
+
+    /// Include source-app display names only when the requesting
+    /// trusted peer advertised the additive presentation capability.
+    pub fn with_source_app_name_capability_resolver(
+        mut self,
+        resolver: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    ) -> Self {
+        self.source_app_name_capability = Some(resolver);
+        self
     }
 }
 
@@ -2259,6 +2296,10 @@ impl clipvault_platform::peer_transport::ImageHistoryHostHandler
             clamped_limit,
             self.source.as_ref(),
         );
+        let include_source_app_name = self
+            .source_app_name_capability
+            .as_ref()
+            .is_some_and(|resolver| resolver(peer_id));
         match response {
             crate::peer_image_history::HostImageHistoryResponse::Ok(page, snapshot_id) => {
                 let rows: Vec<clipvault_platform::peer_transport::wire::ListRecentImageRow> = page
@@ -2274,6 +2315,9 @@ impl clipvault_platform::peer_transport::ImageHistoryHostHandler
                             byte_size: row.byte_size,
                             width: row.width,
                             height: row.height,
+                            source_app_name: include_source_app_name
+                                .then_some(row.source_app_name)
+                                .flatten(),
                         },
                     )
                     .collect();

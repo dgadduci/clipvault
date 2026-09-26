@@ -2860,9 +2860,9 @@ pub mod wire {
     /// only the fields the spec and the design authorise: an
     /// opaque remote entry id, the optional validated title, the
     /// content type, the RFC 3339 timestamp and an escaped
-    /// bounded preview. The row never carries the entry body,
-    /// the row hash, the source-app metadata, the favourite flag,
-    /// tags, collections or asset references.
+    /// bounded preview and optional bounded source-app name. The row never
+    /// carries the entry body, row hash, source-app icon bytes/references,
+    /// favourite flag, tags, collections or asset references.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
     pub struct ListRecentTextRow {
@@ -2886,6 +2886,10 @@ pub mod wire {
         /// Bounded, escaped preview. Always trimmed and never
         /// longer than 300 Unicode scalar values / two lines.
         pub preview: String,
+        /// Optional validated source-app display name. Missing on
+        /// legacy peers; never includes icon bytes or an icon reference.
+        #[serde(default)]
+        pub source_app_name: Option<String>,
     }
 
     /// Metadata-only row the host returns in
@@ -2895,8 +2899,9 @@ pub mod wire {
     /// content type (`image`), the RFC 3339 timestamp, the byte
     /// size and the pixel dimensions. The row NEVER carries image
     /// bytes, a thumbnail, an `asset_ref`, a filesystem path, a
-    /// content hash, tags, collections, favourites or
-    /// source-application metadata. The renderer renders the
+    /// content hash, tags, collections, favourites, icon bytes or
+    /// source-application identifiers. A bounded display name may be present.
+    /// The renderer renders the
     /// common static image placeholder on top of the metadata
     /// the bridge surfaces.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2909,6 +2914,10 @@ pub mod wire {
         pub byte_size: u64,
         pub width: u32,
         pub height: u32,
+        /// Optional validated display name from this image's own capture.
+        /// Missing on legacy peers; carries no icon bytes or reference.
+        #[serde(default)]
+        pub source_app_name: Option<String>,
     }
 
     impl PairingMessage {
@@ -3253,6 +3262,7 @@ mod tests {
                 content_type: "text".to_string(),
                 created_at: "2026-01-02T03:04:05Z".to_string(),
                 preview: "&lt;b&gt;safe&lt;/b&gt;".to_string(),
+                source_app_name: Some("Terminal".to_string()),
             }],
             next_cursor: "next".to_string(),
             snapshot_id: "snapshot".to_string(),
@@ -3260,6 +3270,38 @@ mod tests {
         let serialised = serde_json::to_string(&response).expect("serialise");
         let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
         assert_eq!(parsed, response);
+    }
+
+    #[test]
+    fn legacy_text_browse_row_decodes_without_source_app_name() {
+        let row: wire::ListRecentTextRow = serde_json::from_str(
+            r#"{"remote_entry_id":"entry-1","title":null,"content_type":"text","created_at":"2026-01-02T03:04:05Z","preview":"hello"}"#,
+        )
+        .expect("legacy row decodes");
+        assert_eq!(row.source_app_name, None);
+    }
+
+    #[test]
+    fn max_source_names_fit_the_bounded_text_history_envelope() {
+        let rows = (0..HISTORY_MAX_PAGE_ROWS)
+            .map(|index| wire::ListRecentTextRow {
+                remote_entry_id: format!("entry-{index}"),
+                title: Some("🙂".repeat(80)),
+                content_type: "text".to_string(),
+                created_at: "2026-01-02T03:04:05Z".to_string(),
+                preview: "🙂".repeat(300),
+                source_app_name: Some("🙂".repeat(128)),
+            })
+            .collect();
+        let response = PairingMessage::ListRecentTextAck {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            rows,
+            next_cursor: String::new(),
+            snapshot_id: "a".repeat(64),
+        };
+        let serialized = serde_json::to_vec(&response).expect("serialize");
+        assert!(serialized.len() <= HISTORY_MAX_RESPONSE_BYTES);
     }
 
     /// The `ListRecentTextInvalid` and `ListRecentTextUnavailable`
@@ -3475,6 +3517,7 @@ mod tests {
                 byte_size: 4096,
                 width: 320,
                 height: 240,
+                source_app_name: Some("Editor".to_string()),
             }],
             next_cursor: "next".to_string(),
             snapshot_id: "snapshot".to_string(),
@@ -3482,6 +3525,40 @@ mod tests {
         let serialised = serde_json::to_string(&response).expect("serialise");
         let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
         assert_eq!(parsed, response);
+    }
+
+    #[test]
+    fn legacy_image_browse_row_decodes_without_source_app_name() {
+        let row: wire::ListRecentImageRow = serde_json::from_str(
+            r#"{"remote_entry_id":"entry-1","title":null,"content_type":"image","created_at":"2026-01-02T03:04:05Z","byte_size":4096,"width":320,"height":240}"#,
+        )
+        .expect("legacy row decodes");
+        assert_eq!(row.source_app_name, None);
+    }
+
+    #[test]
+    fn max_source_names_fit_the_bounded_image_history_envelope() {
+        let rows = (0..IMAGE_HISTORY_MAX_PAGE_ROWS)
+            .map(|index| wire::ListRecentImageRow {
+                remote_entry_id: format!("entry-{index}"),
+                title: None,
+                content_type: "image".to_string(),
+                created_at: "2026-01-02T03:04:05Z".to_string(),
+                byte_size: 1024,
+                width: 640,
+                height: 480,
+                source_app_name: Some("🙂".repeat(128)),
+            })
+            .collect();
+        let response = PairingMessage::ListRecentImagesAck {
+            version: IMAGE_WIRE_VERSION,
+            peer_id: "peer-aaaa".to_string(),
+            rows,
+            next_cursor: String::new(),
+            snapshot_id: "a".repeat(64),
+        };
+        let serialized = serde_json::to_vec(&response).expect("serialize");
+        assert!(serialized.len() <= IMAGE_HISTORY_MAX_RESPONSE_BYTES);
     }
 
     #[test]

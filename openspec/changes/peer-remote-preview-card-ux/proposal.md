@@ -15,25 +15,25 @@ la colección del peer muestra un origen desconocido.
   navegación está activa.
 - Fijar la fila de tiempo transcurrido y menú en el borde inferior de todas
   las cards remotas, tanto de texto como de imagen.
-- Mostrar en las cards remotas visibles el nombre y el icono de la aplicación
-  fuente mediante una consulta autenticada, independiente y bajo demanda; las
-  páginas de historial y thumbnails seguirán sin incluir esa metadata.
+- Mostrar el nombre validado de la aplicación fuente directamente en cada
+  fila de browse de texto/imagen. No transferir ni mostrar iconos en previews,
+  ni hacer una consulta de red adicional por tarjeta; los thumbnails siguen
+  sin incluir metadata de aplicación.
 - Incluir el nombre y, cuando exista, el PNG validado del icono de aplicación
   también en la transferencia explícita de importación. Guardar el icono en el
   almacén local de `application-icons/` y asociar su referencia y nombre a la
   procedencia del peer, sin sobrescribir metadata de una captura local
   deduplicada.
-- Mantener fallbacks honestos para peers antiguos, nombres ausentes e iconos
-  ausentes o inválidos, sin bloquear el preview ni la importación del
-  contenido principal.
+- Mantener fallbacks honestos para peers antiguos y nombres ausentes, sin
+  bloquear el preview ni la importación del contenido principal.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `peer-source-app-presentation`: capability advertisement, authenticated
-  on-demand presentation for visible remote cards and safe local persistence
-  of imported application icons.
+- `peer-source-app-presentation`: capability advertisement, bounded source
+  names in authenticated browse rows, and safe local persistence of imported
+  application icons.
 
 ### Modified Capabilities
 
@@ -54,9 +54,10 @@ la colección del peer muestra un origen desconocido.
 - Frontend Svelte: `RemotePreviewCard`, `RemoteHistoryRail`, el modelo de
   selección de rail y la presentación de `HistoryCard` para procedencia de
   importación.
-- Core/transporte: capability aditiva y endpoint separado para consulta de
-  presentación de la aplicación; respuestas de fetch explícito de texto e
-  imagen; browse y thumbnail metadata-only permanecen intactos.
+- Core/transporte: capability aditiva y nombre validado en las respuestas de
+  browse de texto e imagen, sin endpoint/icono adicional para previews;
+  respuestas de fetch explícito conservan el transporte del icono para
+  importación.
 - SQLite/proyección de organización: nombre y referencia de icono locales,
   opcionales y ligados a cada fila de procedencia `remote_imports`, sin
   sobrescribir metadata local de entradas deduplicadas.

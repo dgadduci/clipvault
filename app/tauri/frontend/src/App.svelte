@@ -44,7 +44,6 @@
     platformCapabilitiesCommand,
     peerHistoryForgetCommand,
     peerImageThumbnailForgetCommand,
-    peerSourceAppPresentationForgetCommand,
     peerImportSourceAppPresentationsCommand,
     peerSnapshotCommand,
     recentEntriesFilteredCommand,
@@ -442,7 +441,6 @@
     if (previous !== null) {
       void peerHistoryForgetCommand({ peer_id: previous });
       void peerImageThumbnailForgetCommand({ peer_id: previous });
-      void peerSourceAppPresentationForgetCommand({ peer_id: previous });
     }
   }
 
@@ -578,10 +576,7 @@
   ): Promise<void> {
     const token = ++peerImportedSourceAppsToken;
     const collectionId = selectedCollectionId;
-    const collection = organization?.collections.find(
-      (candidate) => candidate.id === collectionId,
-    );
-    if (!collection?.is_peer_bound) {
+    if (collectionId === null) {
       peerImportedSourceApps = new Map();
       return;
     }
@@ -592,7 +587,7 @@
     if (entryIds.length === 0) return;
     try {
       const rows = await peerImportSourceAppPresentationsCommand({
-        collection_id: collection.id,
+        collection_id: collectionId,
         entry_ids: entryIds,
       });
       if (

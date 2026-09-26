@@ -235,9 +235,10 @@ pub enum PeerImageHistoryOutcome {
 /// content type (`image`), the RFC 3339 timestamp, the byte size
 /// and the pixel dimensions. The row never carries the entry
 /// body, a thumbnail, an `asset_ref`, a filesystem path, a
-/// content hash, tags, collections or source-application
-/// metadata. The frontend renders the common static image
-/// placeholder on top of the metadata the bridge surfaces.
+/// content hash, tags, collections, icon bytes/references or
+/// source-application identifiers. It may include the validated
+/// display name from this entry's own capture metadata. The frontend
+/// renders the common static image placeholder on top of the metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RemoteImagePreview {
@@ -266,6 +267,11 @@ pub struct RemoteImagePreview {
     /// Original pixel height of the captured image. `None` is
     /// not a valid wire value.
     pub height: u32,
+    /// Optional validated name from this image's own capture metadata.
+    /// It is included only for peers advertising source-app presentation
+    /// and never causes an icon transfer.
+    #[serde(default)]
+    pub source_app_name: Option<String>,
 }
 
 /// Page the host returns from a single `list_recent_images` call.
@@ -1271,6 +1277,9 @@ pub fn project_image_row(entry: &EntryRecord) -> RemoteImagePreview {
         byte_size: entry.content_size.max(0) as u64,
         width: entry.payload_width.unwrap_or(0),
         height: entry.payload_height.unwrap_or(0),
+        source_app_name: entry.source_app_name.as_deref().and_then(|name| {
+            crate::peer_source_app_presentation::validate_source_app_name(name).ok()
+        }),
     }
 }
 
@@ -1328,6 +1337,7 @@ impl PeerImageHistoryTransport for PeerPairingImageHistoryTransportAdapter {
                             byte_size: row.byte_size,
                             width: row.width,
                             height: row.height,
+                            source_app_name: row.source_app_name,
                         })
                         .collect(),
                     next_cursor: if snapshot.next_cursor.is_empty() {
@@ -1396,6 +1406,48 @@ mod tests {
             rich_html_size: None,
             rich_rtf_size: None,
             code_language: None,
+        }
+    }
+
+    #[test]
+    fn image_projection_includes_only_a_validated_source_app_name() {
+        let mut entry = record(1, "2026-01-01T00:00:00Z");
+        entry.source_app_name = Some("  Screenshot App  ".to_string());
+        assert_eq!(
+            project_image_row(&entry).source_app_name.as_deref(),
+            Some("Screenshot App")
+        );
+
+        entry.source_app_name = Some("Screenshot\nApp".to_string());
+        assert_eq!(project_image_row(&entry).source_app_name, None);
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn image_host_includes_source_app_name_only_for_capable_peer() {
+        use crate::peer_pairing::PeerImageHistoryHostHandlerAdapter;
+        use clipvault_platform::peer_transport::{
+            ImageHistoryHostHandler as _, ImageHistoryHostResponse,
+        };
+
+        let mut entry = record(1, "2026-01-01T00:00:00Z");
+        entry.source_app_name = Some("Screenshot App".to_string());
+        let source = InMemoryHostImageHistorySource::new();
+        source.seed(vec![entry]);
+        let service = PeerImageHistoryService::new(Arc::new(NoopPeerImageHistoryTransport))
+            .with_capability_resolver(Arc::new(|_| true));
+        service.set_cursor_secret("capable", PeerImageCursorSecret::generate());
+        service.set_cursor_secret("legacy", PeerImageCursorSecret::generate());
+        let adapter = PeerImageHistoryHostHandlerAdapter::new(service, Arc::new(source))
+            .with_source_app_name_capability_resolver(Arc::new(|peer_id| peer_id == "capable"));
+
+        for (peer_id, expected) in [("capable", Some("Screenshot App")), ("legacy", None)] {
+            let ImageHistoryHostResponse::Ok { rows, .. } =
+                adapter.list_recent_images(peer_id, "", MAX_IMAGE_PAGE_ROWS as u32)
+            else {
+                panic!("expected image browse page");
+            };
+            assert_eq!(rows[0].source_app_name.as_deref(), expected);
         }
     }
 
@@ -2228,6 +2280,7 @@ mod tests {
                 byte_size: 1024,
                 width: 16,
                 height: 16,
+                source_app_name: None,
             }],
             next_cursor: Some(RemoteImageHistoryCursor::from_string("opaque".to_string())),
         });

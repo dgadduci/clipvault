@@ -38,6 +38,7 @@ import {
   applyResponses,
   pickNextCursors,
   promoteBuffers,
+  rowsForPartialOutcome,
   type PageState,
   type RemoteRailRow,
 } from "../src/lib/remoteHistoryMerge.ts";
@@ -326,6 +327,7 @@ function buildTextRow(id: string, createdAt: string, preview = "preview"): PeerH
     content_type: "text",
     created_at: createdAt,
     preview,
+    source_app_name: null,
   };
 }
 
@@ -338,6 +340,7 @@ function buildImageRow(id: string, createdAt: string): PeerImageBrowseRow {
     byte_size: 1024,
     width: 16,
     height: 16,
+    source_app_name: null,
   };
 }
 
@@ -378,6 +381,55 @@ test("behaviour: initial load uses empty cursors so both endpoints are dialled",
   // contract pins: empty text + empty image cursor strings.
   assert.equal(INITIAL_CURSORS.text, "");
   assert.equal(INITIAL_CURSORS.image, "");
+});
+
+test("behaviour: first successful browse stream paints before the other stream settles", () => {
+  const textRow = { ...buildTextRow("text-fast", "2026-01-03T00:00:00Z"), source_app_name: "Terminal" };
+  const imageRow = { ...buildImageRow("image-fast", "2026-01-02T00:00:00Z"), source_app_name: "Screenshot" };
+
+  const textFirstPaint = rowsForPartialOutcome({
+    kind: "text",
+    response: textOk([textRow], "text-next"),
+  });
+  assert.deepEqual(textFirstPaint?.map((item) => item.row.remote_entry_id), ["text-fast"]);
+  assert.equal(textFirstPaint?.[0].row.source_app_name, "Terminal");
+
+  const imageFirstPaint = rowsForPartialOutcome({
+    kind: "image",
+    response: imageOk([imageRow], "image-next"),
+  });
+  assert.deepEqual(imageFirstPaint?.map((item) => item.row.remote_entry_id), ["image-fast"]);
+  assert.equal(imageFirstPaint?.[0].row.source_app_name, "Screenshot");
+
+  assert.equal(
+    rowsForPartialOutcome({ kind: "text", response: { kind: "invalid_cursor" } }),
+    null,
+    "partial paint must not apply typed failures or advance pagination state",
+  );
+  const partialState: PageState = {
+    ...emptyPage(),
+    rows: textFirstPaint ?? [],
+    loading: true,
+  };
+  const afterOtherStreamFails = applyResponses(
+    { kind: "text", response: textOk([textRow], "text-next") },
+    { kind: "image-error", err: new Error("offline") },
+    partialState,
+    { append: false },
+  );
+  assert.deepEqual(
+    afterOtherStreamFails.rows.map((item) => item.row.remote_entry_id),
+    ["text-fast"],
+    "a successful stream stays visible when its parallel endpoint fails",
+  );
+  assert.match(afterOtherStreamFails.error ?? "", /^image:/);
+  assert.equal(afterOtherStreamFails.cursor, "");
+  assert.equal(afterOtherStreamFails.loading, false);
+  assert.match(railSource, /publishFirstPageRows\(textPromise\)/);
+  assert.match(railSource, /publishFirstPageRows\(imagePromise\)/);
+  assert.match(railSource, /generation === loadGeneration/);
+  assert.match(railSource, /const \[textOutcome, imageOutcome\] = await Promise\.all/);
+  assert.match(railSource, /disabled=\{exhausted \|\| loading\}/);
 });
 
 test("behaviour: initial load merges text + image rows newest-first", () => {

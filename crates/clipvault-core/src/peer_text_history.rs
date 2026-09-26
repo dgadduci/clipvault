@@ -67,8 +67,9 @@
 //! escaped (HTML entity substitution), whitespace-collapsed and
 //! trimmed before the projection. The service never interpolates
 //! HTML and never includes the original content hash, body bytes,
-//! tags, collections, source-app metadata or favourite flags in the
-//! row.
+//! tags, collections, source-app icon/identifier data or favourite flags in
+//! the row. A validated bounded display name may be included for peers that
+//! advertise the additive source-app presentation capability.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -297,8 +298,9 @@ pub enum PeerHistoryOutcome {
 /// textual entry. The struct carries only the fields the spec and
 /// the design authorise: an opaque remote entry id, the optional
 /// validated title, the content type, the RFC 3339 timestamp and an
-/// escaped bounded preview. The row never carries the entry body,
-/// the row hash, the source-app metadata, the favourite flag, tags,
+/// escaped bounded preview and an optional bounded source-app
+/// display name. The row never carries the entry body, the row hash,
+/// source-app icon bytes/references, the favourite flag, tags,
 /// collections or asset references.
 ///
 /// `content_type` is serialised as the canonical snake_case string
@@ -325,6 +327,11 @@ pub struct RemoteTextPreview {
     /// Bounded, escaped preview. Always trimmed and never longer
     /// than [`PREVIEW_MAX_CHARS`] Unicode scalar values.
     pub preview: String,
+    /// Optional, validated display name from this source entry's
+    /// own capture metadata. It is included only for peers that
+    /// advertise source-app presentation support and carries no icon.
+    #[serde(default)]
+    pub source_app_name: Option<String>,
 }
 
 impl RemoteTextPreview {
@@ -1231,6 +1238,9 @@ pub fn project_row(entry: &EntryRecord) -> RemoteTextPreview {
         content_type: entry.content_type.as_str().to_string(),
         created_at: entry.created_at.clone(),
         preview,
+        source_app_name: entry.source_app_name.as_deref().and_then(|name| {
+            crate::peer_source_app_presentation::validate_source_app_name(name).ok()
+        }),
     }
 }
 
@@ -1313,6 +1323,45 @@ mod tests {
         record.payload_width = Some(1);
         record.payload_height = Some(1);
         record
+    }
+
+    #[test]
+    fn text_projection_includes_only_a_validated_source_app_name() {
+        let mut entry = record(1, ContentType::Text, "hello", "2026-01-01T00:00:00Z");
+        entry.source_app_name = Some("  Terminal  ".to_string());
+        assert_eq!(
+            project_row(&entry).source_app_name.as_deref(),
+            Some("Terminal")
+        );
+
+        entry.source_app_name = Some("Terminal\nInjected".to_string());
+        assert_eq!(project_row(&entry).source_app_name, None);
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn text_host_includes_source_app_name_only_for_capable_peer() {
+        use crate::peer_pairing::PeerTextHistoryHostHandlerAdapter;
+        use clipvault_platform::peer_transport::{HistoryHostHandler as _, HistoryHostResponse};
+
+        let mut entry = record(1, ContentType::Text, "hello", "2026-01-01T00:00:00Z");
+        entry.source_app_name = Some("Terminal".to_string());
+        let source = InMemoryHostHistorySource::new();
+        source.seed(vec![entry]);
+        let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
+        service.set_cursor_secret("capable", PeerCursorSecret::generate());
+        service.set_cursor_secret("legacy", PeerCursorSecret::generate());
+        let adapter = PeerTextHistoryHostHandlerAdapter::new(service, Arc::new(source))
+            .with_source_app_name_capability_resolver(Arc::new(|peer_id| peer_id == "capable"));
+
+        for (peer_id, expected) in [("capable", Some("Terminal")), ("legacy", None)] {
+            let HistoryHostResponse::Ok { rows, .. } =
+                adapter.list_recent_text(peer_id, "", MAX_PAGE_ROWS as u32)
+            else {
+                panic!("expected browse page");
+            };
+            assert_eq!(rows[0].source_app_name.as_deref(), expected);
+        }
     }
 
     #[test]
@@ -1738,6 +1787,7 @@ mod tests {
                 content_type: "text".to_string(),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 preview: "hello".to_string(),
+                source_app_name: None,
             }],
             None,
         ))));
@@ -2142,6 +2192,7 @@ mod tests {
                         content_type: "text".to_string(),
                         created_at: "2026-01-01T00:00:00Z".to_string(),
                         preview: "hello".to_string(),
+                        source_app_name: None,
                     }],
                     next_cursor: None,
                 },
@@ -3021,6 +3072,7 @@ impl PeerHistoryTransport for PeerPairingHistoryTransportAdapter {
                             content_type: row.content_type,
                             created_at: row.created_at,
                             preview: row.preview,
+                            source_app_name: row.source_app_name,
                         })
                         .collect(),
                     next_cursor: if snapshot.next_cursor.is_empty() {

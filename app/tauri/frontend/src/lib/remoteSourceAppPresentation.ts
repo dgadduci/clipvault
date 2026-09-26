@@ -1,18 +1,5 @@
-/** Bounded, on-demand source-app presentation rules for remote cards. */
-
-export const MAX_REMOTE_SOURCE_APP_ICON_BYTES = 512 * 1024;
+/** Validation and capability rules for source-app names on remote rows. */
 export const MAX_REMOTE_SOURCE_APP_NAME_CHARS = 128;
-
-export type RemoteSourceAppPhase = "idle" | "loading" | "ready" | "unavailable";
-
-export interface RemoteSourceAppRequestState {
-  peerId: string | null;
-  peerStateReady: boolean;
-  capability: string | null;
-  isVisible: boolean;
-  requestInFlight: boolean;
-  phase: RemoteSourceAppPhase;
-}
 
 export function supportsRemoteSourceAppPresentation(
   capability: string | null,
@@ -21,20 +8,6 @@ export function supportsRemoteSourceAppPresentation(
     capability
       ?.split(",")
       .some((token) => token.trim() === "source_app_presentation") ?? false
-  );
-}
-
-/** Fetch only for a visible row in the active, trusted peer rail. */
-export function shouldRequestRemoteSourceAppPresentation(
-  state: RemoteSourceAppRequestState,
-): boolean {
-  return (
-    state.peerId !== null &&
-    state.peerStateReady &&
-    state.isVisible &&
-    supportsRemoteSourceAppPresentation(state.capability) &&
-    !state.requestInFlight &&
-    state.phase === "idle"
   );
 }
 
@@ -52,11 +25,4 @@ export function validatedRemoteSourceAppName(
     return null;
   }
   return name;
-}
-
-export function isCurrentRemoteSourceAppRequest(
-  requestToken: number,
-  currentToken: number,
-): boolean {
-  return requestToken === currentToken;
 }

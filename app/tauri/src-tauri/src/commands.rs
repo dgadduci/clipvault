@@ -3409,6 +3409,7 @@ pub struct PeerHistoryRow {
     pub content_type: String,
     pub created_at: String,
     pub preview: String,
+    pub source_app_name: Option<String>,
 }
 
 impl PeerHistoryBrowseResponse {
@@ -3425,6 +3426,7 @@ impl PeerHistoryBrowseResponse {
                             content_type: row.content_type,
                             created_at: row.created_at,
                             preview: row.preview,
+                            source_app_name: row.source_app_name,
                         })
                         .collect(),
                     next_cursor: page
@@ -3770,6 +3772,7 @@ pub struct PeerImageBrowseRow {
     pub byte_size: u64,
     pub width: u32,
     pub height: u32,
+    pub source_app_name: Option<String>,
 }
 
 impl PeerImageBrowseResponse {
@@ -3788,6 +3791,7 @@ impl PeerImageBrowseResponse {
                         byte_size: row.byte_size,
                         width: row.width,
                         height: row.height,
+                        source_app_name: row.source_app_name,
                     })
                     .collect(),
                 next_cursor: page

@@ -702,10 +702,10 @@ export type PeerHistoryBrowseResponse =
  * paired, active peer. The struct carries only the fields the
  * spec and the design authorise: an opaque remote entry id,
  * the optional validated title, the content type, the RFC 3339
- * timestamp and an escaped bounded preview. The row never
- * carries the entry body, the row hash, the source-app
- * metadata, the favourite flag, tags, collections or asset
- * references.
+ * timestamp, an escaped bounded preview and an optional bounded
+ * source-app display name. The row never carries the entry body,
+ * row hash, source-app icon bytes/references, favourite flag, tags,
+ * collections or asset references.
  */
 export interface PeerHistoryRow {
   /** Opaque remote entry id the host minted. */
@@ -722,6 +722,8 @@ export interface PeerHistoryRow {
   created_at: string;
   /** Bounded, escaped preview. Always trimmed and never longer than 300 chars. */
   preview: string;
+  /** Optional validated source-app display name; legacy peers return null. */
+  source_app_name: string | null;
 }
 
 /**
@@ -782,8 +784,8 @@ export type PeerImageBrowseResponse =
  * optional validated title, the content type (`image`), the RFC
  * 3339 timestamp, the byte size and the pixel dimensions. The
  * row never carries image bytes, a thumbnail, an `asset_ref`, a
- * filesystem path, a content hash, tags, collections or
- * source-application metadata.
+ * filesystem path, a content hash, tags, collections or source-app
+ * icon data. A validated display name may be present when supported.
  */
 export interface PeerImageBrowseRow {
   remote_entry_id: string;
@@ -793,6 +795,7 @@ export interface PeerImageBrowseRow {
   byte_size: number;
   width: number;
   height: number;
+  source_app_name: string | null;
 }
 
 /**

@@ -24,6 +24,10 @@
   scrolling when handled, and preserve no-wrap boundary and interactive
   control behavior; keep existing numeric rail tests passing if the shared
   helper is generalized.
+- [x] 2.5 Paint the first successful non-empty text/image browse response
+  before the other stream settles; keep cursor/buffer state uncommitted and
+  pagination disabled until the authoritative merged page is ready. Preserve
+  successful rows if the other endpoint fails and reject stale generations.
 
 ## 3. Capability and bounded source-app presentation for previews
 
@@ -31,10 +35,10 @@
   `caps_extra_v2` TXT field while preserving `capability=pairing` and existing
   `caps_extra` tokens; test new-client union/refresh, legacy-client tolerance
   of the unknown TXT key, and unknown-token rejection by new parsers.
-- [x] 3.2 Add versioned `FetchSourceAppPresentation` success/unavailable wire
-  messages with opaque remote-entry ID, optional bounded name and optional
-  base64 PNG; test round trips and the full 512 KiB icon envelope within the
-  720 KiB response cap.
+- [x] 3.2 Retain versioned `FetchSourceAppPresentation` success/unavailable
+  wire messages for compatibility with already-shipped clients; the current
+  preview UI no longer calls this route. Test round trips and the full 512 KiB
+  icon envelope within the 720 KiB response cap.
 - [x] 3.3 Implement client and host core adapters with a maximum of two
   concurrent requests per peer on each side; revalidate mTLS pin, trusted and
   active state, capability, entry eligibility and local icon availability on
@@ -43,17 +47,15 @@
   control characters) and validate PNG signature/decode, maximum 512 KiB and
   maximum 256 × 256 px; invalid/missing icon must degrade to a generic icon
   without failing an otherwise valid name response.
-- [x] 3.5 Expose a typed Tauri bridge and request source presentation only
-  while a text or image card is visible in the selected peer rail and the
-  peer advertises the capability; never include the data in browse or
-  thumbnail responses.
-- [x] 3.6 Keep preview-only bytes in bounded in-memory state; isolate by peer
-  and remote entry, ignore stale responses, and release replaced/unmounted
-  object URLs. Show the source-app icon and bounded name, with truthful
-  generic/unknown fallbacks for older peers or absent metadata.
-- [x] 3.7 Test capability absence, offscreen cards, request errors, stale peer
-  switches, bad names/PNGs, concurrency limits, source metadata redaction from
-  list/thumbnail payloads and the generic fallback.
+- [x] 3.5 Expose the bounded optional source-app name in typed text/image
+  browse rows; display it only when the peer advertises the capability.
+  Previews do not make a second per-card request and never receive icon bytes.
+- [x] 3.6 Keep preview name state scoped to its row; do not allocate object
+  URLs or fetch icons. Preserve the fixed layout and an honest unknown-name
+  fallback for legacy peers or missing metadata.
+- [x] 3.7 Test capability absence, missing/invalid names, legacy-row decoding,
+  no preview icon request/bytes, source-name presence in browse rows and
+  source metadata redaction from image-thumbnail payloads.
 
 ## 4. Explicit import and peer-scoped local icon persistence
 
@@ -88,8 +90,9 @@
   authentication and trust gates, PNG/name validation, local icon storage,
   provenance transactions and rollback.
 - [x] 5.2 Add frontend tests for card geometry/selection/navigation/footer,
-  visible-only source presentation requests, icon/name rendering, stale
-  response cleanup, capability fallback and imported-card attribution.
+  inline browse-row names, absence of preview icon requests/rendering,
+  capability fallback, imported-card attribution and first-successful-stream
+  initial paint.
 - [x] 5.3 Run existing remote history, image thumbnail, text/image import,
   source-app icon and migration regressions; report baseline failures
   separately and do not weaken existing contracts.
@@ -106,8 +109,10 @@
   remote paths, hashes or application identifiers are persisted or logged.
 - [ ] 6.4 Manually compare local and remote card size, selection, keyboard
   navigation and footer placement on macOS, Linux X11 and Linux Wayland; check
-  source-app names/icons on visible text and image previews and the fallback
-  with a peer lacking the capability.
+  source-app names (without icons or extra loading delay) on text and image
+  previews and the fallback with a peer lacking the capability. The user has
+  approved the left/right navigation portion; recheck source-name rendering
+  after this implementation change before closing the full matrix.
 - [ ] 6.5 Manually import text and images from two peers and confirm each
   peer-bound collection shows only its provenance's source-app name/icon;
   confirm general history, existing local metadata, clipboard, paste and
