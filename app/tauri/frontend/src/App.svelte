@@ -575,11 +575,8 @@
     records: EntryRecord[],
   ): Promise<void> {
     const token = ++peerImportedSourceAppsToken;
-    const collectionId = selectedCollectionId;
-    if (collectionId === null) {
-      peerImportedSourceApps = new Map();
-      return;
-    }
+    const selectedCollectionIdAtRequest = selectedCollectionId;
+    const collectionId = activeCollectionIsHistory ? null : selectedCollectionId;
     const entryIds = Array.from(new Set(records.map((entry) => entry.id)))
       .filter((id) => Number.isInteger(id) && id > 0)
       .slice(0, 100);
@@ -592,7 +589,7 @@
       });
       if (
         token !== peerImportedSourceAppsToken ||
-        selectedCollectionId !== collectionId
+        selectedCollectionId !== selectedCollectionIdAtRequest
       ) {
         return;
       }

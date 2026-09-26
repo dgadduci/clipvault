@@ -91,24 +91,32 @@ test("text and image browse contracts carry only an optional source-app name", (
   );
 });
 
-test("imported source name loads by selected collection and occupies a visible row", () => {
+test("imported source metadata loads in history and stays a tooltip tag beside the icon", () => {
   const refresh = SOURCE.app.match(
     /async function refreshPeerImportedSourceApps\([\s\S]*?\n  \}/,
   )?.[0] ?? "";
-  assert.match(refresh, /if \(collectionId === null\)/);
+  assert.match(refresh, /collectionId = activeCollectionIsHistory \? null : selectedCollectionId/);
   assert.doesNotMatch(refresh, /is_peer_bound/);
   assert.match(refresh, /collection_id: collectionId/);
+  assert.match(refresh, /selectedCollectionId !== selectedCollectionIdAtRequest/);
   assert.match(SOURCE.app, /void refreshPeerImportedSourceApps\(entries\)/);
-  assert.match(SOURCE.historyCard, /history-card-imported-source-app-name/);
-  assert.match(SOURCE.historyCard, /source_app_name\?\.trim\(\) \|\| "Aplicación desconocida"/);
-  assert.match(SOURCE.historyCard, /class:source-app-imported=\{peerImportedSourceApp !== null\}/);
-  assert.match(SOURCE.historyCard, /\.source-app\.source-app-imported\s*\{[\s\S]*?grid-column: 1 \/ -1/);
+  assert.match(
+    SOURCE.historyCard,
+    /iconRef = peerImportedSourceApp !== null\s*\?\s*peerImportedSourceApp\.source_app_icon_ref/,
+  );
+  assert.match(SOURCE.historyCard, /createIconResolver\(tauriSourceAppIconLoader\)/);
+  assert.match(SOURCE.historyCard, /sourceAppLabel = peerImportedSourceApp !== null/);
+  assert.match(SOURCE.historyCard, /title=\{sourceAppLabel\}/);
+  assert.match(SOURCE.historyCard, /aria-label=\{sourceAppLabel\}/);
+  assert.doesNotMatch(SOURCE.historyCard, /history-card-imported-source-app-name/);
+  assert.match(SOURCE.historyCard, /data-imported-source-app=\{peerImportedSourceApp !== null \? "true" : "false"\}/);
   assert.match(
     SOURCE.historyRail,
     /peerImportedSourceApp=\{peerImportedSourceApps\.get\(entry\.id\) \?\? null\}/,
   );
   assert.match(SOURCE.repository, /JOIN remote_imports ri ON ri\.peer_id = pcb\.peer_id/);
-  assert.match(SOURCE.repository, /WHERE pcb\.collection_id = \?1/);
+  assert.match(SOURCE.repository, /source_app_presentations_for_scope/);
+  assert.match(SOURCE.app, /activeCollectionIsHistory \? null : selectedCollectionId/);
 });
 
 test("peer-bound attribution bridge stays scoped to opaque local entry IDs", () => {

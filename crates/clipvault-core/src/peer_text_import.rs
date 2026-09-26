@@ -397,13 +397,14 @@ pub trait PeerImportPersistence: Send + Sync {
         &self,
         collection_id: i64,
     ) -> Result<Option<Collection>, PeerImportPersistenceError>;
-    /// Project optional source-app fields for entries in the given
-    /// peer-bound collection. Implementations must scope the lookup
-    /// through the persisted peer/collection binding; the default keeps
-    /// in-memory adapters that do not model provenance safely empty.
-    fn source_app_presentations_for_collection(
+    /// Project optional source-app fields for visible entries. A peer-bound
+    /// collection is scoped to its bound peer; `None` selects the latest
+    /// provenance in general history without returning peer identifiers.
+    /// The default keeps in-memory adapters that do not model provenance
+    /// safely empty.
+    fn source_app_presentations_for_scope(
         &self,
-        _collection_id: i64,
+        _collection_id: Option<i64>,
         _local_entry_ids: &[i64],
     ) -> Result<Vec<PeerImportedSourceAppPresentation>, PeerImportPersistenceError> {
         Ok(Vec::new())
@@ -790,20 +791,23 @@ impl PeerImportService {
         self.trust_state.lock().get(peer_id).copied()
     }
 
-    /// Resolve peer-specific attribution for the visible local entry
-    /// IDs in a collection. The persistence adapter rejects unrelated
-    /// scopes by returning no matches; input is bounded so a frontend
-    /// cannot turn this metadata-only bridge into an unbounded query.
-    pub fn source_app_presentations_for_collection(
+    /// Resolve imported source attribution for visible local entry IDs.
+    /// A peer-bound collection is restricted to that peer; general history
+    /// selects the most recently imported provenance. Input is bounded so
+    /// the bridge cannot trigger an unbounded query.
+    pub fn source_app_presentations_for_scope(
         &self,
-        collection_id: i64,
+        collection_id: Option<i64>,
         local_entry_ids: &[i64],
     ) -> Result<Vec<PeerImportedSourceAppPresentation>, PeerImportPersistenceError> {
-        if collection_id <= 0 || local_entry_ids.is_empty() || local_entry_ids.len() > 100 {
+        if collection_id.is_some_and(|id| id <= 0)
+            || local_entry_ids.is_empty()
+            || local_entry_ids.len() > 100
+        {
             return Ok(Vec::new());
         }
         self.persistence
-            .source_app_presentations_for_collection(collection_id, local_entry_ids)
+            .source_app_presentations_for_scope(collection_id, local_entry_ids)
     }
 
     /// Import a single row of a trusted, active peer. The

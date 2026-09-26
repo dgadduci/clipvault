@@ -4210,20 +4210,20 @@ pub fn clipvault_peer_source_app_presentation_forget(
         .forget_peer(&peer_id);
 }
 
-/// Return peer-specific import attribution for a bounded set of local
-/// rows, only when `collection_id` is bound to the provenance peer. The
-/// repository returns no matches for general history or unrelated
-/// collections; this DTO never contains clipboard bodies or peer IDs.
+/// Return import attribution for a bounded set of local rows. A peer-bound
+/// `collection_id` selects only that peer's provenance; `None` selects the
+/// latest provenance per entry for general history. The DTO never contains
+/// clipboard bodies or peer IDs.
 #[tauri::command]
 pub fn clipvault_peer_import_source_app_presentations(
     state: State<'_, SharedState>,
-    collection_id: i64,
+    collection_id: Option<i64>,
     entry_ids: Vec<i64>,
 ) -> Result<Vec<clipvault_core::PeerImportedSourceAppPresentation>, CommandError> {
     state
         .context()
         .peer_text_import()
-        .source_app_presentations_for_collection(collection_id, &entry_ids)
+        .source_app_presentations_for_scope(collection_id, &entry_ids)
         .map_err(|_| {
             CommandError::new(
                 "peer_import_projection_unavailable",

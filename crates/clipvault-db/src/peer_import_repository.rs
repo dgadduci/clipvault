@@ -114,10 +114,9 @@ pub struct RemoteImportRecord {
     pub source_app_icon_ref: Option<String>,
 }
 
-/// Peer-scoped source-app fields projected for one imported entry.
-/// The repository returns this only when the requested collection is
-/// currently bound to the provenance peer; general-history queries do
-/// not call this projection and never receive these fields.
+/// Source-app fields projected for one imported entry. A peer-bound
+/// collection receives only its bound peer's provenance; general history
+/// receives the most recently imported provenance without its peer ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerImportedSourceAppPresentation {
     pub local_entry_id: i64,
@@ -277,16 +276,19 @@ impl<'a> PeerImportRepository<'a> {
         Ok(record)
     }
 
-    /// Return source-app provenance only for entries associated with
-    /// `collection_id` and imports belonging to the peer bound to that
-    /// exact collection. If several snapshots from that peer deduped to
-    /// one local entry, the most recently imported provenance wins.
-    /// Empty / unrelated / non-peer-bound scopes return no rows.
-    pub fn source_app_presentations_for_collection(
+    /// Return source-app provenance for visible entries. A supplied
+    /// collection is strictly scoped to its bound peer; `None` is the
+    /// general-history view and selects the latest provenance across peers.
+    /// Results never contain a peer identifier, and both paths require the
+    /// imported entry to remain attached to its peer-bound collection.
+    pub fn source_app_presentations_for_scope(
         &self,
-        collection_id: i64,
+        collection_id: Option<i64>,
         local_entry_ids: &[i64],
     ) -> Result<Vec<PeerImportedSourceAppPresentation>, PeerImportRepositoryError> {
+        if collection_id.is_some_and(|id| id <= 0) {
+            return Ok(Vec::new());
+        }
         let ids: Vec<i64> = local_entry_ids
             .iter()
             .copied()
@@ -294,14 +296,20 @@ impl<'a> PeerImportRepository<'a> {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        if collection_id <= 0 || ids.is_empty() || ids.len() > 100 {
+        if ids.is_empty() || ids.len() > 100 {
             return Ok(Vec::new());
         }
 
+        let first_entry_parameter = if collection_id.is_some() { 2 } else { 1 };
         let placeholders = (0..ids.len())
-            .map(|index| format!("?{}", index + 2))
+            .map(|index| format!("?{}", index + first_entry_parameter))
             .collect::<Vec<_>>()
             .join(", ");
+        let collection_filter = if collection_id.is_some() {
+            "AND pcb.collection_id = ?1"
+        } else {
+            ""
+        };
         let sql = format!(
             "SELECT ri.local_entry_id, ri.source_app_name, ri.source_app_icon_ref
              FROM peer_collection_bindings pcb
@@ -309,12 +317,14 @@ impl<'a> PeerImportRepository<'a> {
              JOIN entry_collections ec
                ON ec.entry_id = ri.local_entry_id
               AND ec.collection_id = pcb.collection_id
-             WHERE pcb.collection_id = ?1
-               AND ri.local_entry_id IN ({placeholders})
-             ORDER BY ri.imported_at DESC, ri.remote_entry_id ASC"
+             WHERE ri.local_entry_id IN ({placeholders})
+               {collection_filter}
+             ORDER BY ri.imported_at DESC, ri.remote_entry_id ASC, ri.peer_id ASC"
         );
-        let mut values = Vec::with_capacity(ids.len() + 1);
-        values.push(rusqlite::types::Value::Integer(collection_id));
+        let mut values = Vec::with_capacity(ids.len() + usize::from(collection_id.is_some()));
+        if let Some(collection_id) = collection_id {
+            values.push(rusqlite::types::Value::Integer(collection_id));
+        }
         values.extend(ids.into_iter().map(rusqlite::types::Value::Integer));
 
         let mut statement = self.conn.prepare(&sql)?;
@@ -335,6 +345,16 @@ impl<'a> PeerImportRepository<'a> {
             }
         }
         Ok(result)
+    }
+
+    /// Collection-scoped compatibility wrapper for callers that need the
+    /// provenance belonging to exactly one peer-bound collection.
+    pub fn source_app_presentations_for_collection(
+        &self,
+        collection_id: i64,
+        local_entry_ids: &[i64],
+    ) -> Result<Vec<PeerImportedSourceAppPresentation>, PeerImportRepositoryError> {
+        self.source_app_presentations_for_scope(Some(collection_id), local_entry_ids)
     }
 
     /// Record a fresh provenance row. The composite primary key
@@ -1056,16 +1076,8 @@ mod tests {
         let entry_id = seed_entry(&mut db, "shared content");
         let collection_a = seed_user_collection(&mut db, "Peer A imports");
         let collection_b = seed_user_collection(&mut db, "Peer B imports");
-        let history_id: i64 = db
-            .connection()
-            .query_row(
-                "SELECT id FROM collections WHERE stable_key = ?1",
-                params![HISTORY_STABLE_KEY],
-                |row| row.get(0),
-            )
-            .expect("history collection");
-
         let mut repo = PeerImportRepository::new(db.connection_mut());
+        let first_imported_at = OffsetDateTime::now_utc();
         repo.upsert_binding("peer-a", collection_a, OffsetDateTime::now_utc())
             .expect("bind peer A");
         repo.upsert_binding("peer-b", collection_b, OffsetDateTime::now_utc())
@@ -1079,7 +1091,7 @@ mod tests {
             "remote-a",
             "hash-a",
             entry_id,
-            OffsetDateTime::now_utc(),
+            first_imported_at,
             Some("Editor A"),
             Some("application-icons/editor-a.png"),
         )
@@ -1089,7 +1101,7 @@ mod tests {
             "remote-b",
             "hash-b",
             entry_id,
-            OffsetDateTime::now_utc(),
+            first_imported_at + time::Duration::seconds(1),
             Some("Editor B"),
             Some("application-icons/editor-b.png"),
         )
@@ -1114,15 +1126,20 @@ mod tests {
             Some("application-icons/editor-b.png")
         );
 
-        // General history is not peer-bound, so its request cannot
-        // project either peer's provenance even though the same
-        // deduplicated local entry is present there.
+        // General history receives only the newest imported source
+        // presentation, without the peer id, even when a deduplicated
+        // entry has provenance from multiple peers.
+        let history = repo
+            .source_app_presentations_for_scope(None, &[entry_id])
+            .expect("general-history projection");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].source_app_name.as_deref(), Some("Editor B"));
+        assert_eq!(
+            history[0].source_app_icon_ref.as_deref(),
+            Some("application-icons/editor-b.png")
+        );
         assert!(repo
-            .source_app_presentations_for_collection(history_id, &[entry_id])
-            .expect("general-history projection")
-            .is_empty());
-        assert!(repo
-            .source_app_presentations_for_collection(collection_a, &[entry_id + 100])
+            .source_app_presentations_for_scope(Some(collection_a), &[entry_id + 100])
             .expect("unrelated entry projection")
             .is_empty());
     }

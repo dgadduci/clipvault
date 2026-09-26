@@ -18,9 +18,11 @@ fetch paths and `remote_imports` provenance are separate from browsing.
   never in browse or thumbnail responses.
 - Keep source attribution tied to the `(peer, imported snapshot)` provenance
   so deduplication cannot overwrite local metadata or misattribute another
-  peer's import.
+  peer's import. In general history, choose the most recently imported
+  provenance deterministically while never exposing which peer supplied it.
 - Display the original application's name (not its icon) in remote previews,
-  and the imported name plus its locally stored icon in the matching
+  and expose imported names as the icon's accessible label/tooltip while
+  rendering the locally stored icon in general history and the matching
   peer-bound collection, without exposing the host's icon reference or
   filesystem layout.
 
@@ -28,8 +30,9 @@ fetch paths and `remote_imports` provenance are separate from browsing.
 
 - Returning source-app icon bytes/references in browse rows or any source-app
   metadata in image-thumbnail responses.
-- Showing peer-specific application attribution in general history or in a
-  different peer's collection.
+- Showing a peer identifier or arbitrary peer provenance in general history;
+  that view may show only the deterministic latest imported app presentation.
+- Showing an imported app name as visible text beside its icon in cards.
 - Changing clipboard contents, paste behavior, import deduplication, thumbnail
   behavior, or drag payloads.
 
@@ -121,9 +124,12 @@ remote path or reference. Do not write either field into
 captured entry, and one entry can have different provenance from multiple
 peers. Re-importing the same provenance may fill source-app fields that are
 still `NULL` on an older row, but must not overwrite fields already recorded
-for that provenance. A collection-aware projection resolves the name and
-local icon reference only for the peer bound to the collection currently
-being viewed.
+for that provenance. A scope-aware projection resolves the name and local icon
+reference for the exact peer when a peer-bound collection is viewed. For
+general history, it selects the most recently imported provenance for each
+visible entry, using `imported_at DESC` and a stable tie-breaker, without
+returning a peer ID. A different peer-bound collection never borrows another
+peer's attribution.
 
 ### Application presentation in remote and imported cards
 
@@ -132,13 +138,15 @@ when available. Do not show or fetch a source-app icon; retain the generic
 static application/import marker. Keep the name within fixed card geometry
 and use an honest unknown-application label when it is absent.
 
-In the peer-bound imported collection only, render the locally persisted
-source-app icon and bounded name from that peer's provenance. Reuse the
-existing safe local application-icon resolver with the locally generated
+In a peer-bound imported collection, resolve the icon/name from that
+collection's peer provenance. In general history, resolve the most recent
+import provenance for each entry, without revealing the peer. In either view,
+render the locally persisted source-app icon and expose the bounded name only
+as the icon's accessible label/tooltip, matching ordinary history cards. Reuse
+the existing safe local application-icon resolver with the locally generated
 reference. If no valid icon was imported, use a deterministic local static
-import marker; if no valid name exists, use an unknown-application label.
-Other history views keep their existing source-app icon/accessible-label
-behavior and never use peer-specific provenance.
+import marker; if no valid name exists, use an unknown-application label. A
+different peer-bound collection never borrows the attribution.
 
 ## Risks / Trade-offs
 
@@ -155,9 +163,9 @@ behavior and never use peer-specific provenance.
   Legacy clients ignore the optional field; new clients display it only when
   the additive capability is present.
 - **A deduplicated entry has provenance from several peers** → Store name and
-  icon reference per provenance row and project them with the active
-  peer-bound collection, never by choosing arbitrary metadata from the shared
-  entry.
+  icon reference per provenance row. Peer-bound collections select their own
+  row; general history selects the latest row deterministically without
+  exposing its peer ID.
 - **Older peers do not support the new optional data** → Keep browse fields
   optional/defaulted and explicit-import fields optional; render generic
   app/import markers plus honest unknown-source fallbacks.

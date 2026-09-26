@@ -113,7 +113,8 @@ release only newly written, unreferenced icons on rollback.
   canonical clipboard entry
 - **THEN** each peer-bound collection uses only its own provenance name and
   icon reference
-- **AND** general history does not display either peer's attribution
+- **AND** general history uses the most recently imported provenance for the
+  entry without displaying a peer identifier
 
 #### Scenario: Import fails while a new icon is staged
 

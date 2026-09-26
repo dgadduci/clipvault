@@ -77,12 +77,13 @@
   provenance in text and image import transactions; do not modify
   `clipboard_entries.source_app*`. Test idempotence, deduplicated local entry
   preservation and distinct attribution for two peers sharing one entry.
-- [x] 4.6 Extend the peer-bound collection projection to return only that
-  peer's name and local icon reference; render via the existing safe local
-  application-icon resolver with the static import marker as fallback.
-- [x] 4.7 Test two-peer isolation, general-history non-leakage, missing/invalid
-  icon and name fallbacks, legacy-peer imports, and that clipboard, paste,
-  drag payload and existing local source metadata remain unchanged.
+- [x] 4.6 Extend the attribution projection so a peer-bound collection uses
+  only that peer's provenance while general history uses the latest provenance
+  without exposing peer identity; render icons through the safe local resolver
+  and names as accessible labels/tooltips rather than visible card text.
+- [x] 4.7 Test two-peer isolation, latest-provenance selection in general
+  history, name/icon label behavior, missing/invalid fallbacks, legacy-peer
+  imports, and unchanged clipboard, paste, drag payload and local metadata.
 
 ## 5. Cross-layer regression coverage
 
@@ -113,7 +114,8 @@
   previews and the fallback with a peer lacking the capability. The user has
   approved the left/right navigation portion; recheck source-name rendering
   after this implementation change before closing the full matrix.
-- [ ] 6.5 Manually import text and images from two peers and confirm each
-  peer-bound collection shows only its provenance's source-app name/icon;
-  confirm general history, existing local metadata, clipboard, paste and
-  drag payload remain unchanged.
+- [ ] 6.5 Manually import text and images from two peers; confirm each
+  peer-bound collection shows its own icon with the name only as tooltip/tag,
+  while general history shows the latest imported app presentation without a
+  peer identifier. Confirm local metadata, clipboard, paste and drag payload
+  remain unchanged.

@@ -1811,7 +1811,6 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     </div>
     <span
       class="source-app"
-      class:source-app-imported={peerImportedSourceApp !== null}
       data-testid="history-card-source-app"
       title={sourceAppLabel}
       aria-label={sourceAppLabel}
@@ -1847,14 +1846,6 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       <span class="visually-hidden" data-testid="history-card-source-app-accessible">
         {sourceAppLabel}
       </span>
-      {#if peerImportedSourceApp !== null}
-        <span
-          class="source-app-name"
-          data-testid="history-card-imported-source-app-name"
-        >
-          {peerImportedSourceApp.source_app_name?.trim() || "Aplicación desconocida"}
-        </span>
-      {/if}
     </span>
   </header>
 
@@ -2710,14 +2701,6 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     color: #94a3b8;
   }
 
-  .source-app.source-app-imported {
-    grid-column: 1 / -1;
-    justify-content: flex-start;
-    width: 100%;
-    min-width: 0;
-    gap: 0.4rem;
-  }
-
   .source-app-icon,
   .source-app-fallback {
     /*
@@ -2746,19 +2729,6 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   :global(.source-app-fallback svg) {
     width: 100%;
     height: 100%;
-  }
-
-  .source-app-name {
-    max-width: 6.5rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 0.68rem;
-    color: var(--cv-fg-muted, #94a3b8);
-  }
-
-  .source-app-imported .source-app-name {
-    max-width: 100%;
   }
 
   .metadata {

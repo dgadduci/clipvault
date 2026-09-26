@@ -747,13 +747,13 @@ export const peerSourceAppPresentationForgetCommand: ClipvaultCommandArg<
   });
 
 /**
- * Resolve attribution for at most 100 visible entries in one peer-bound
- * collection. The backend validates the persisted collection/peer binding;
- * callers never request this projection for general history.
+ * Resolve attribution for at most 100 visible entries. A peer-bound
+ * collection ID scopes to that peer; null requests general history, where
+ * the latest provenance is selected without exposing its peer ID.
  */
 export const peerImportSourceAppPresentationsCommand: ClipvaultCommandArg<
   PeerImportedSourceAppPresentation[],
-  { collection_id: number; entry_ids: number[] }
+  { collection_id: number | null; entry_ids: number[] }
 > = (args) =>
   invoke<PeerImportedSourceAppPresentation[]>(
     "clipvault_peer_import_source_app_presentations",

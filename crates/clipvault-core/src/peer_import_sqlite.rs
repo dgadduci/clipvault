@@ -274,9 +274,9 @@ impl PeerImportPersistence for SqliteImportPersistence {
             .map_err(|error| PeerImportPersistenceError::Organization(format!("{error}")))
     }
 
-    fn source_app_presentations_for_collection(
+    fn source_app_presentations_for_scope(
         &self,
-        collection_id: i64,
+        collection_id: Option<i64>,
         local_entry_ids: &[i64],
     ) -> Result<
         Vec<crate::peer_text_import::PeerImportedSourceAppPresentation>,
@@ -284,7 +284,7 @@ impl PeerImportPersistence for SqliteImportPersistence {
     > {
         let mut db = self.database.lock();
         let repo = PeerImportRepository::new(db.connection_mut());
-        repo.source_app_presentations_for_collection(collection_id, local_entry_ids)
+        repo.source_app_presentations_for_scope(collection_id, local_entry_ids)
             .map(|rows| {
                 rows.into_iter()
                     .map(

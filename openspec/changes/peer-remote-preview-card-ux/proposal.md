@@ -26,6 +26,10 @@ la colección del peer muestra un origen desconocido.
   deduplicada.
 - Mantener fallbacks honestos para peers antiguos y nombres ausentes, sin
   bloquear el preview ni la importación del contenido principal.
+- Mostrar la atribución de una captura importada también en `Historial`,
+  usando la procedencia más reciente y sin revelar el identificador del peer.
+- En tarjetas importadas, mantener el nombre de la aplicación como etiqueta
+  accesible/tooltip del icono, no como texto visible dentro de la tarjeta.
 
 ## Capabilities
 
