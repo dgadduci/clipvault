@@ -553,6 +553,16 @@ impl PeerImageImportPersistence for SqliteImageImportPersistence {
         Ok(bytes)
     }
 
+    fn read_source_app_icon(
+        &self,
+        asset_ref: &str,
+    ) -> Result<Option<Vec<u8>>, PeerImageImportPersistenceError> {
+        if !crate::application_icons::is_safe_icon_ref(asset_ref) {
+            return Ok(None);
+        }
+        Ok(self.application_icons.read_bytes(asset_ref).ok())
+    }
+
     fn validate_image_metadata(
         &self,
         width: u32,

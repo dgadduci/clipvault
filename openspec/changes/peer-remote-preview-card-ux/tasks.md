@@ -43,15 +43,15 @@
   control characters) and validate PNG signature/decode, maximum 512 KiB and
   maximum 256 × 256 px; invalid/missing icon must degrade to a generic icon
   without failing an otherwise valid name response.
-- [ ] 3.5 Expose a typed Tauri bridge and request source presentation only
+- [x] 3.5 Expose a typed Tauri bridge and request source presentation only
   while a text or image card is visible in the selected peer rail and the
   peer advertises the capability; never include the data in browse or
   thumbnail responses.
-- [ ] 3.6 Keep preview-only bytes in bounded in-memory state; isolate by peer
+- [x] 3.6 Keep preview-only bytes in bounded in-memory state; isolate by peer
   and remote entry, ignore stale responses, and release replaced/unmounted
   object URLs. Show the source-app icon and bounded name, with truthful
   generic/unknown fallbacks for older peers or absent metadata.
-- [ ] 3.7 Test capability absence, offscreen cards, request errors, stale peer
+- [x] 3.7 Test capability absence, offscreen cards, request errors, stale peer
   switches, bad names/PNGs, concurrency limits, source metadata redaction from
   list/thumbnail payloads and the generic fallback.
 
@@ -75,10 +75,10 @@
   provenance in text and image import transactions; do not modify
   `clipboard_entries.source_app*`. Test idempotence, deduplicated local entry
   preservation and distinct attribution for two peers sharing one entry.
-- [ ] 4.6 Extend the peer-bound collection projection to return only that
+- [x] 4.6 Extend the peer-bound collection projection to return only that
   peer's name and local icon reference; render via the existing safe local
   application-icon resolver with the static import marker as fallback.
-- [ ] 4.7 Test two-peer isolation, general-history non-leakage, missing/invalid
+- [x] 4.7 Test two-peer isolation, general-history non-leakage, missing/invalid
   icon and name fallbacks, legacy-peer imports, and that clipboard, paste,
   drag payload and existing local source metadata remain unchanged.
 
@@ -87,7 +87,7 @@
 - [x] 5.1 Add focused Rust tests for discovery, wire limits/round trips,
   authentication and trust gates, PNG/name validation, local icon storage,
   provenance transactions and rollback.
-- [ ] 5.2 Add frontend tests for card geometry/selection/navigation/footer,
+- [x] 5.2 Add frontend tests for card geometry/selection/navigation/footer,
   visible-only source presentation requests, icon/name rendering, stale
   response cleanup, capability fallback and imported-card attribution.
 - [x] 5.3 Run existing remote history, image thumbnail, text/image import,
@@ -96,7 +96,7 @@
 
 ## 6. Verification and manual review
 
-- [ ] 6.1 Run `cargo fmt --all -- --check`, `git diff --check`, relevant Rust
+- [x] 6.1 Run `cargo fmt --all -- --check`, `git diff --check`, relevant Rust
   tests for core, database, platform and app crates, plus frontend check/build
   and focused remote/imported-card tests.
 - [x] 6.2 Run protected drag-and-drop regressions; confirm remote cards remain

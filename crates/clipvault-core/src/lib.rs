@@ -228,7 +228,8 @@ pub use peer_text_import::{
     ImportClock, InMemoryImportPersistence, NoopPeerFetchTransport, PeerFetchRequest,
     PeerFetchResponse, PeerFetchTransport, PeerFetchTransportError, PeerImportError,
     PeerImportOutcome, PeerImportPersistence, PeerImportPersistenceError, PeerImportService,
-    PeerImportTrustState, SystemImportClock, IMPORT_MAX_BODY_BYTES,
+    PeerImportTrustState, PeerImportedSourceAppPresentation, SystemImportClock,
+    IMPORT_MAX_BODY_BYTES,
 };
 #[cfg(feature = "local-peer-pairing-tls")]
 pub use peer_text_import::{PeerPairingFetchTransportAdapter, PeerTextImportHostHandlerAdapter};

@@ -18,7 +18,8 @@
 //! runtime can branch on the failure reason without inspecting
 //! SQLite-specific strings.
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transaction};
+use std::collections::HashSet;
 use thiserror::Error;
 
 use time::format_description::well_known::Rfc3339;
@@ -110,6 +111,17 @@ pub struct RemoteImportRecord {
     /// projection renders it through the existing safe
     /// local application-icon resolver with the static
     /// imported-origin icon as a deterministic fallback.
+    pub source_app_icon_ref: Option<String>,
+}
+
+/// Peer-scoped source-app fields projected for one imported entry.
+/// The repository returns this only when the requested collection is
+/// currently bound to the provenance peer; general-history queries do
+/// not call this projection and never receive these fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerImportedSourceAppPresentation {
+    pub local_entry_id: i64,
+    pub source_app_name: Option<String>,
     pub source_app_icon_ref: Option<String>,
 }
 
@@ -265,6 +277,66 @@ impl<'a> PeerImportRepository<'a> {
         Ok(record)
     }
 
+    /// Return source-app provenance only for entries associated with
+    /// `collection_id` and imports belonging to the peer bound to that
+    /// exact collection. If several snapshots from that peer deduped to
+    /// one local entry, the most recently imported provenance wins.
+    /// Empty / unrelated / non-peer-bound scopes return no rows.
+    pub fn source_app_presentations_for_collection(
+        &self,
+        collection_id: i64,
+        local_entry_ids: &[i64],
+    ) -> Result<Vec<PeerImportedSourceAppPresentation>, PeerImportRepositoryError> {
+        let ids: Vec<i64> = local_entry_ids
+            .iter()
+            .copied()
+            .filter(|id| *id > 0)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if collection_id <= 0 || ids.is_empty() || ids.len() > 100 {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = (0..ids.len())
+            .map(|index| format!("?{}", index + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT ri.local_entry_id, ri.source_app_name, ri.source_app_icon_ref
+             FROM peer_collection_bindings pcb
+             JOIN remote_imports ri ON ri.peer_id = pcb.peer_id
+             JOIN entry_collections ec
+               ON ec.entry_id = ri.local_entry_id
+              AND ec.collection_id = pcb.collection_id
+             WHERE pcb.collection_id = ?1
+               AND ri.local_entry_id IN ({placeholders})
+             ORDER BY ri.imported_at DESC, ri.remote_entry_id ASC"
+        );
+        let mut values = Vec::with_capacity(ids.len() + 1);
+        values.push(rusqlite::types::Value::Integer(collection_id));
+        values.extend(ids.into_iter().map(rusqlite::types::Value::Integer));
+
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(values), |row| {
+            Ok(PeerImportedSourceAppPresentation {
+                local_entry_id: row.get(0)?,
+                source_app_name: row.get(1)?,
+                source_app_icon_ref: row.get(2)?,
+            })
+        })?;
+
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+        for row in rows {
+            let row = row?;
+            if seen.insert(row.local_entry_id) {
+                result.push(row);
+            }
+        }
+        Ok(result)
+    }
+
     /// Record a fresh provenance row. The composite primary key
     /// guarantees that re-importing the same `(peer, remote entry,
     /// content)` triple is a no-op — the helper refuses to insert
@@ -316,11 +388,15 @@ impl<'a> PeerImportRepository<'a> {
         let ts = format_timestamp(now);
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT OR IGNORE INTO remote_imports
+            "INSERT INTO remote_imports
                  (peer_id, remote_entry_id, imported_content_hash,
                   local_entry_id, imported_at,
                   source_app_name, source_app_icon_ref)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(peer_id, remote_entry_id, imported_content_hash)
+             DO UPDATE SET
+                 source_app_name = COALESCE(remote_imports.source_app_name, excluded.source_app_name),
+                 source_app_icon_ref = COALESCE(remote_imports.source_app_icon_ref, excluded.source_app_icon_ref)",
             params![
                 peer_id,
                 remote_entry_id,
@@ -553,13 +629,19 @@ impl<'a> PeerImportRepository<'a> {
         )?;
 
         // Provenance: idempotent (composite PK) so a repeated
-        // import never produces a second row.
+        // import never produces a second row. Older rows with no
+        // source-app attribution are enriched, while populated fields
+        // remain stable for that provenance.
         tx.execute(
-            "INSERT OR IGNORE INTO remote_imports
+            "INSERT INTO remote_imports
                  (peer_id, remote_entry_id, imported_content_hash,
                   local_entry_id, imported_at,
                   source_app_name, source_app_icon_ref)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(peer_id, remote_entry_id, imported_content_hash)
+             DO UPDATE SET
+                 source_app_name = COALESCE(remote_imports.source_app_name, excluded.source_app_name),
+                 source_app_icon_ref = COALESCE(remote_imports.source_app_icon_ref, excluded.source_app_icon_ref)",
             params![
                 spec.peer_id,
                 spec.remote_entry_id,
@@ -967,6 +1049,85 @@ mod tests {
     }
 
     #[test]
+    fn source_app_projection_isolated_by_peer_bound_collection() {
+        let (_dir, mut db) = isolated_db();
+        seed_peer(&mut db, "peer-a");
+        seed_peer(&mut db, "peer-b");
+        let entry_id = seed_entry(&mut db, "shared content");
+        let collection_a = seed_user_collection(&mut db, "Peer A imports");
+        let collection_b = seed_user_collection(&mut db, "Peer B imports");
+        let history_id: i64 = db
+            .connection()
+            .query_row(
+                "SELECT id FROM collections WHERE stable_key = ?1",
+                params![HISTORY_STABLE_KEY],
+                |row| row.get(0),
+            )
+            .expect("history collection");
+
+        let mut repo = PeerImportRepository::new(db.connection_mut());
+        repo.upsert_binding("peer-a", collection_a, OffsetDateTime::now_utc())
+            .expect("bind peer A");
+        repo.upsert_binding("peer-b", collection_b, OffsetDateTime::now_utc())
+            .expect("bind peer B");
+        repo.attach_entry_to_binding(entry_id, collection_a, OffsetDateTime::now_utc())
+            .expect("attach to peer A collection");
+        repo.attach_entry_to_binding(entry_id, collection_b, OffsetDateTime::now_utc())
+            .expect("attach to peer B collection");
+        repo.record_import_with_source_app(
+            "peer-a",
+            "remote-a",
+            "hash-a",
+            entry_id,
+            OffsetDateTime::now_utc(),
+            Some("Editor A"),
+            Some("application-icons/editor-a.png"),
+        )
+        .expect("peer A provenance");
+        repo.record_import_with_source_app(
+            "peer-b",
+            "remote-b",
+            "hash-b",
+            entry_id,
+            OffsetDateTime::now_utc(),
+            Some("Editor B"),
+            Some("application-icons/editor-b.png"),
+        )
+        .expect("peer B provenance");
+
+        let a = repo
+            .source_app_presentations_for_collection(collection_a, &[entry_id])
+            .expect("peer A projection");
+        let b = repo
+            .source_app_presentations_for_collection(collection_b, &[entry_id])
+            .expect("peer B projection");
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].source_app_name.as_deref(), Some("Editor A"));
+        assert_eq!(
+            a[0].source_app_icon_ref.as_deref(),
+            Some("application-icons/editor-a.png")
+        );
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].source_app_name.as_deref(), Some("Editor B"));
+        assert_eq!(
+            b[0].source_app_icon_ref.as_deref(),
+            Some("application-icons/editor-b.png")
+        );
+
+        // General history is not peer-bound, so its request cannot
+        // project either peer's provenance even though the same
+        // deduplicated local entry is present there.
+        assert!(repo
+            .source_app_presentations_for_collection(history_id, &[entry_id])
+            .expect("general-history projection")
+            .is_empty());
+        assert!(repo
+            .source_app_presentations_for_collection(collection_a, &[entry_id + 100])
+            .expect("unrelated entry projection")
+            .is_empty());
+    }
+
+    #[test]
     fn record_import_with_source_app_is_idempotent_for_reimport() {
         // The `peer-source-app-presentation` change pins a
         // single-write contract: re-importing the same canonical
@@ -1008,6 +1169,44 @@ mod tests {
         assert_eq!(
             fetched.source_app_icon_ref.as_deref(),
             Some("application-icons/first.png")
+        );
+    }
+
+    #[test]
+    fn reimport_enriches_legacy_provenance_without_overwriting_existing_values() {
+        let (_dir, mut db) = isolated_db();
+        seed_peer(&mut db, "peer-a");
+        let entry_id = seed_entry(&mut db, "hello");
+        let conn = db.connection_mut();
+        let mut repo = PeerImportRepository::new(conn);
+        repo.record_import(
+            "peer-a",
+            "entry-legacy",
+            "hash-legacy",
+            entry_id,
+            OffsetDateTime::now_utc(),
+        )
+        .expect("legacy provenance");
+
+        repo.record_import_with_source_app(
+            "peer-a",
+            "entry-legacy",
+            "hash-legacy",
+            entry_id,
+            OffsetDateTime::now_utc(),
+            Some("Terminal"),
+            Some("application-icons/terminal.png"),
+        )
+        .expect("enriched reimport");
+
+        let fetched = repo
+            .find_import("peer-a", "entry-legacy", "hash-legacy")
+            .expect("find")
+            .expect("present");
+        assert_eq!(fetched.source_app_name.as_deref(), Some("Terminal"));
+        assert_eq!(
+            fetched.source_app_icon_ref.as_deref(),
+            Some("application-icons/terminal.png")
         );
     }
 
@@ -1289,8 +1488,8 @@ mod tests {
                     content_size: 8,
                     validated_title: None,
                     now: OffsetDateTime::now_utc(),
-                    source_app_name: None,
-                    source_app_icon_ref: None,
+                    source_app_name: Some("Terminal".to_string()),
+                    source_app_icon_ref: Some("application-icons/terminal.png".to_string()),
                 })
                 .expect("commit");
             (first, second)
@@ -1309,6 +1508,15 @@ mod tests {
             )
             .expect("count");
         assert_eq!(count, 1);
+        let provenance = PeerImportRepository::new(db.connection_mut())
+            .find_import("peer-a", "entry-3", "hash-idem")
+            .expect("find provenance")
+            .expect("one provenance row");
+        assert_eq!(provenance.source_app_name.as_deref(), Some("Terminal"));
+        assert_eq!(
+            provenance.source_app_icon_ref.as_deref(),
+            Some("application-icons/terminal.png")
+        );
     }
 
     #[test]

@@ -370,6 +370,15 @@ pub trait PeerImageImportPersistence: Send + Sync {
     /// than [`IMPORT_MAX_IMAGE_BYTES`].
     fn read_image_bytes(&self, asset_ref: &str)
         -> Result<Vec<u8>, PeerImageImportPersistenceError>;
+    /// Best-effort read of an existing source-app icon by its local
+    /// application-icons reference. Missing/invalid icon metadata must not
+    /// make the actual image import fail.
+    fn read_source_app_icon(
+        &self,
+        _asset_ref: &str,
+    ) -> Result<Option<Vec<u8>>, PeerImageImportPersistenceError> {
+        Ok(None)
+    }
     /// Stage the source-application PNG icon the host returned
     /// through the local application-icon store. The helper
     /// validates the bytes (signature, decode, dimensions, byte
@@ -1014,6 +1023,16 @@ impl PeerImageImportPersistence for InMemoryImageImportPersistence {
             )))
     }
 
+    fn read_source_app_icon(
+        &self,
+        asset_ref: &str,
+    ) -> Result<Option<Vec<u8>>, PeerImageImportPersistenceError> {
+        if !crate::application_icons::is_safe_icon_ref(asset_ref) {
+            return Ok(None);
+        }
+        Ok(self.state.lock().asset_bytes.get(asset_ref).cloned())
+    }
+
     fn validate_image_metadata(
         &self,
         width: u32,
@@ -1413,18 +1432,20 @@ impl PeerImageImportService {
         // collapses to a no-op icon and the import still
         // succeeds. The staged icon MUST be released if the
         // surrounding transaction rolls back.
-        let staged_icon = match self
-            .persistence
-            .stage_source_app_icon(response.source_app_icon_bytes.as_deref())
-        {
-            Ok(staged_icon) => staged_icon,
-            Err(error) => {
-                let _ = self.persistence.release_staged_asset(&staged);
-                return PeerImageImportOutcome::PersistenceError {
-                    reason: persistence_reason(&error),
-                };
-            }
-        };
+        let source_app_name = response.source_app_name.as_deref().and_then(|name| {
+            crate::peer_source_app_presentation::validate_source_app_name(name).ok()
+        });
+        let valid_source_app_icon = response.source_app_icon_bytes.as_deref().filter(|bytes| {
+            crate::peer_source_app_presentation::validate_source_app_icon(bytes).is_ok()
+        });
+        // Presentation metadata is optional. Invalid bytes or an icon-store
+        // failure must not roll back a valid user-requested image import.
+        let staged_icon = valid_source_app_icon.and_then(|bytes| {
+            self.persistence
+                .stage_source_app_icon(Some(bytes))
+                .ok()
+                .flatten()
+        });
 
         let result = self.commit_after_staging(
             peer_id,
@@ -1432,7 +1453,7 @@ impl PeerImageImportService {
             &response,
             &staged,
             staged_icon.as_ref(),
-            response.source_app_name.as_deref(),
+            source_app_name.as_deref(),
             validated_title,
             now,
         );
@@ -1696,9 +1717,27 @@ impl clipvault_platform::peer_transport::FetchImageHostHandler
                 if bytes.len() > clipvault_platform::peer_transport::FETCH_IMAGE_MAX_BODY_BYTES {
                     return clipvault_platform::peer_transport::HostImageFetchResponse::BodyTooLarge;
                 }
+                let source_app_name = entry.source_app_name.as_deref().and_then(|name| {
+                    crate::peer_source_app_presentation::validate_source_app_name(name).ok()
+                });
+                let source_app_icon_bytes = entry
+                    .source_app_icon_ref
+                    .as_deref()
+                    .filter(|icon_ref| crate::application_icons::is_safe_icon_ref(icon_ref))
+                    .and_then(|icon_ref| {
+                        self.persistence
+                            .read_source_app_icon(icon_ref)
+                            .ok()
+                            .flatten()
+                    })
+                    .filter(|icon| {
+                        crate::peer_source_app_presentation::validate_source_app_icon(icon).is_ok()
+                    });
                 clipvault_platform::peer_transport::HostImageFetchResponse::Ok {
                     title: entry.title,
                     bytes,
+                    source_app_name,
+                    source_app_icon_bytes,
                 }
             }
             Err(_) => clipvault_platform::peer_transport::HostImageFetchResponse::NotTransferable,
@@ -1849,9 +1888,10 @@ mod tests {
     fn import_commits_first_image() {
         let persistence = StdArc::new(InMemoryImageImportPersistence::new());
         let bytes = build_png(16, 16);
-        let transport = StdArc::new(ScriptedFetchImageTransport::new(Ok(ok_response(
-            bytes, "entry-1",
-        ))));
+        let mut response = ok_response(bytes, "entry-1");
+        response.source_app_name = Some("  Screenshot App  ".to_string());
+        response.source_app_icon_bytes = Some(build_png(24, 24));
+        let transport = StdArc::new(ScriptedFetchImageTransport::new(Ok(response)));
         let service = PeerImageImportService::new(
             transport,
             persistence.clone(),
@@ -1885,6 +1925,49 @@ mod tests {
         assert_eq!(
             record.asset_ref.as_deref(),
             Some(format!("clipboard/{}.png", record.content_hash).as_str())
+        );
+        let provenance = persistence
+            .source_app_for("peer-a", "entry-1", &record.content_hash)
+            .expect("source-app provenance recorded");
+        assert_eq!(provenance.0.as_deref(), Some("Screenshot App"));
+        assert!(provenance
+            .1
+            .as_deref()
+            .is_some_and(|icon_ref| icon_ref.starts_with("application-icons/")));
+    }
+
+    #[test]
+    fn invalid_source_app_metadata_does_not_fail_image_import() {
+        let persistence = StdArc::new(InMemoryImageImportPersistence::new());
+        let mut response = ok_response(build_png(16, 16), "entry-1");
+        response.source_app_name = Some("Bad\nName".to_string());
+        response.source_app_icon_bytes = Some(vec![1, 2, 3, 4]);
+        let transport = StdArc::new(ScriptedFetchImageTransport::new(Ok(response)));
+        let service = PeerImageImportService::new(
+            transport,
+            persistence.clone(),
+            fixed_clock(OffsetDateTime::now_utc()),
+        );
+        service.record_peer_state(
+            "peer-a",
+            PeerImageImportTrustState {
+                trusted: true,
+                active: true,
+            },
+        );
+
+        let outcome = service.import("peer-a", "fingerprint", "entry-1", "Equipo A");
+        let PeerImageImportOutcome::Imported { entry_id, .. } = outcome else {
+            panic!("invalid optional app metadata must not fail a valid image import");
+        };
+        let entry = service
+            .persistence
+            .fetch_entry(entry_id)
+            .expect("entry lookup")
+            .expect("imported image exists");
+        assert_eq!(
+            persistence.source_app_for("peer-a", "entry-1", &entry.content_hash),
+            Some((None, None))
         );
     }
 

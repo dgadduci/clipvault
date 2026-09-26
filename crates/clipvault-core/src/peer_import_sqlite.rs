@@ -118,6 +118,16 @@ impl PeerImportPersistence for SqliteImportPersistence {
             .map_err(|error| PeerImportPersistenceError::Sqlite(format!("{error}")))
     }
 
+    fn read_source_app_icon(
+        &self,
+        asset_ref: &str,
+    ) -> Result<Option<Vec<u8>>, PeerImportPersistenceError> {
+        if !crate::application_icons::is_safe_icon_ref(asset_ref) {
+            return Ok(None);
+        }
+        Ok(self.application_icons.read_bytes(asset_ref).ok())
+    }
+
     fn find_binding(&self, peer_id: &str) -> Result<Option<i64>, PeerImportPersistenceError> {
         let mut db = self.database.lock();
         let repo = PeerImportRepository::new(db.connection_mut());
@@ -262,6 +272,31 @@ impl PeerImportPersistence for SqliteImportPersistence {
         let repo = OrganizationRepository::new(db.connection_mut());
         repo.find_collection(collection_id)
             .map_err(|error| PeerImportPersistenceError::Organization(format!("{error}")))
+    }
+
+    fn source_app_presentations_for_collection(
+        &self,
+        collection_id: i64,
+        local_entry_ids: &[i64],
+    ) -> Result<
+        Vec<crate::peer_text_import::PeerImportedSourceAppPresentation>,
+        PeerImportPersistenceError,
+    > {
+        let mut db = self.database.lock();
+        let repo = PeerImportRepository::new(db.connection_mut());
+        repo.source_app_presentations_for_collection(collection_id, local_entry_ids)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(
+                        |row| crate::peer_text_import::PeerImportedSourceAppPresentation {
+                            local_entry_id: row.local_entry_id,
+                            source_app_name: row.source_app_name,
+                            source_app_icon_ref: row.source_app_icon_ref,
+                        },
+                    )
+                    .collect()
+            })
+            .map_err(map_peer_import_repo_error)
     }
 }
 

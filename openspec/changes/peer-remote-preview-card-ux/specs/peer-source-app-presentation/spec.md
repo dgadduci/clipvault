@@ -217,3 +217,12 @@ release only newly written, unreferenced icons on rollback.
 - **THEN** the content import still succeeds when its content is valid
 - **AND** the peer collection uses a generic import icon and an honest
   unknown-name fallback when no valid name is available
+
+#### Scenario: Re-import enriches legacy provenance without replacing attribution
+
+- **WHEN** a peer re-sends a successful import for an existing provenance row
+  whose source-app name or icon reference is `NULL`
+- **THEN** the import fills only those missing fields from the validated
+  response
+- **AND** any source-app value already recorded for that provenance remains
+  unchanged

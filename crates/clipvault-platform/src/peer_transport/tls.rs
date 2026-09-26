@@ -57,10 +57,10 @@ use super::{
     derive_cert_fingerprint, PairingAdvertisementSink, PeerTransportObservation, TransportError,
     TransportSink, FETCH_IMAGE_MAX_BODY_BYTES, FETCH_IMAGE_MAX_RESPONSE_BYTES,
     FETCH_IMAGE_THUMBNAIL_MAX_BODY_BYTES, FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES,
-    FETCH_SOURCE_APP_PRESENTATION_MAX_RESPONSE_BYTES, FETCH_TEXT_MAX_BODY_BYTES,
-    FETCH_TEXT_MAX_RESPONSE_BYTES, HISTORY_MAX_RESPONSE_BYTES, HISTORY_WIRE_VERSION,
-    IMAGE_HISTORY_MAX_RESPONSE_BYTES, IMAGE_WIRE_VERSION, PAIRING_MAX_IN_FLIGHT_SESSIONS,
-    PAIRING_WIRE_VERSION,
+    FETCH_SOURCE_APP_ICON_MAX_BYTES, FETCH_SOURCE_APP_PRESENTATION_MAX_RESPONSE_BYTES,
+    FETCH_TEXT_MAX_BODY_BYTES, FETCH_TEXT_MAX_RESPONSE_BYTES, HISTORY_MAX_RESPONSE_BYTES,
+    HISTORY_WIRE_VERSION, IMAGE_HISTORY_MAX_RESPONSE_BYTES, IMAGE_WIRE_VERSION,
+    PAIRING_MAX_IN_FLIGHT_SESSIONS, PAIRING_WIRE_VERSION,
 };
 #[cfg(feature = "local-peer-pairing-tls")]
 use base64::Engine as _;
@@ -2147,6 +2147,8 @@ where
                     title,
                     content_type,
                     body,
+                    source_app_name,
+                    source_app_icon_bytes,
                 } => {
                     if body.len() > FETCH_TEXT_MAX_BODY_BYTES {
                         // Defence in depth: the handler contract
@@ -2166,6 +2168,12 @@ where
                             title,
                             content_type,
                             body,
+                            source_app_name,
+                            source_app_icon_b64: source_app_icon_bytes
+                                .filter(|bytes| bytes.len() <= FETCH_SOURCE_APP_ICON_MAX_BYTES)
+                                .map(|bytes| {
+                                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                                }),
                         }
                     }
                 }
@@ -2354,7 +2362,12 @@ where
 
     let reply = match image_fetch_handler {
         Some(handler) => match handler.fetch_image(&remote_peer_id, &remote_entry_id) {
-            super::HostImageFetchResponse::Ok { title, bytes } => {
+            super::HostImageFetchResponse::Ok {
+                title,
+                bytes,
+                source_app_name,
+                source_app_icon_bytes,
+            } => {
                 if bytes.len() > FETCH_IMAGE_MAX_BODY_BYTES {
                     // Defence in depth: the handler contract
                     // pins the cap, but the listener refuses
@@ -2381,6 +2394,10 @@ where
                         remote_entry_id,
                         title,
                         bytes_b64,
+                        source_app_name,
+                        source_app_icon_b64: source_app_icon_bytes
+                            .filter(|icon| icon.len() <= FETCH_SOURCE_APP_ICON_MAX_BYTES)
+                            .map(|icon| base64::engine::general_purpose::STANDARD.encode(icon)),
                     }
                 }
             }
@@ -2744,6 +2761,25 @@ fn envelope_payload_limit(message: &PairingMessage) -> usize {
         }
         _ => MAX_INBOUND_PAYLOAD,
     }
+}
+
+/// Decode optional import-attribution icon bytes without letting a malformed
+/// field fail an otherwise valid text/image import. Bound the encoded string
+/// before allocating the decoded PNG; core performs the authoritative PNG
+/// signature/decode/dimension validation before persistence.
+fn decode_optional_source_app_icon(value: Option<String>) -> Option<Vec<u8>> {
+    let encoded = value?;
+    let max_encoded = FETCH_SOURCE_APP_ICON_MAX_BYTES
+        .saturating_add(2)
+        .checked_div(3)?
+        .saturating_mul(4);
+    if encoded.len() > max_encoded {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded.as_bytes())
+        .ok()
+        .filter(|bytes| bytes.len() <= FETCH_SOURCE_APP_ICON_MAX_BYTES)
 }
 
 async fn write_envelope<IO>(
@@ -4965,6 +5001,8 @@ async fn dial_fetch_text_async(
             title,
             content_type,
             body,
+            source_app_name,
+            source_app_icon_b64,
         } => {
             if ack_peer_id != peer_id {
                 return Err(super::TransportError::UnknownPeer);
@@ -4981,8 +5019,8 @@ async fn dial_fetch_text_async(
                 title,
                 content_type,
                 body,
-                source_app_name: None,
-                source_app_icon_bytes: None,
+                source_app_name,
+                source_app_icon_bytes: decode_optional_source_app_icon(source_app_icon_b64),
             })
         }
         PairingMessage::FetchTextUnavailable { reason, .. } => {
@@ -5128,6 +5166,8 @@ async fn dial_fetch_image_async(
             remote_entry_id: ack_remote_entry_id,
             title,
             bytes_b64,
+            source_app_name,
+            source_app_icon_b64,
         } => {
             if ack_peer_id != peer_id {
                 return Err(super::TransportError::UnknownPeer);
@@ -5151,8 +5191,8 @@ async fn dial_fetch_image_async(
                 remote_entry_id: ack_remote_entry_id,
                 title,
                 bytes,
-                source_app_name: None,
-                source_app_icon_bytes: None,
+                source_app_name,
+                source_app_icon_bytes: decode_optional_source_app_icon(source_app_icon_b64),
             })
         }
         PairingMessage::FetchImageUnavailable { reason, .. } => match reason.as_str() {

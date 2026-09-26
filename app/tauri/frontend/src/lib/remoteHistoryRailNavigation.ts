@@ -18,10 +18,9 @@
  *   - `mapHorizontalArrowKey` rejects every key that is not
  *     `ArrowLeft` / `ArrowRight`;
  *   - `isInteractiveControl` rejects HTML controls, anchors,
- *     buttons, selects, contentEditable surfaces and the
- *     custom `role="button"` / `role="menuitem"` /
- *     `role="menu"` / `role="listbox"` / `role="option"`
- *     markers the rail exposes;
+ *     buttons, selects, contentEditable surfaces and custom
+ *     button/menu roles. The rail's own `listbox` and `option`
+ *     roles are allowed because arrow keys navigate its cards;
  *   - `isInsideRailSurface` walks the parent chain and
  *     accepts only the focused element whose nearest
  *     `data-testid="remote-history-rail"` ancestor exists.
@@ -53,7 +52,7 @@ export function mapHorizontalArrowKey(
  * The interactive set is the union of the native HTML
  * controls the browser already routes (text inputs, text
  * areas, selects, buttons, anchors) plus the ARIA roles the
- * rail uses for its custom menu / listbox surface. The helper
+ * rail uses for its custom menu surface. The helper
  * recognises the HTML controls by `tagName` (uppercased) so
  * the test polyfill — where every HTML element shares the
  * same `DomElement` constructor — can still exercise the
@@ -85,9 +84,7 @@ export function isInteractiveControl(target: Element | null): boolean {
     target.hasAttribute("role") &&
     (target.getAttribute("role") === "button" ||
       target.getAttribute("role") === "menuitem" ||
-      target.getAttribute("role") === "menu" ||
-      target.getAttribute("role") === "listbox" ||
-      target.getAttribute("role") === "option")
+      target.getAttribute("role") === "menu")
   ) {
     return true;
   }

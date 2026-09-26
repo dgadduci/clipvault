@@ -263,6 +263,10 @@ fn main() {
             commands::clipvault_peer_image_thumbnail_fetch,
             commands::clipvault_peer_image_thumbnail_record_state,
             commands::clipvault_peer_image_thumbnail_forget,
+            commands::clipvault_peer_source_app_presentation_fetch,
+            commands::clipvault_peer_source_app_presentation_record_state,
+            commands::clipvault_peer_source_app_presentation_forget,
+            commands::clipvault_peer_import_source_app_presentations,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ClipVault")

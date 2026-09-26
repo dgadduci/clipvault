@@ -20,6 +20,8 @@
 
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import {
   mapHorizontalArrowKey,
@@ -36,6 +38,22 @@ import {
 function fixture(): RailSurfaceFixture {
   return createRemoteRailSurface();
 }
+
+const REMOTE_RAIL_SOURCE = readFileSync(
+  resolve(process.cwd(), "src/RemoteHistoryRail.svelte"),
+  "utf8",
+);
+
+test("mouse selection focuses the roving card and handled arrows focus the next card", () => {
+  assert.match(
+    REMOTE_RAIL_SOURCE,
+    /function selectRemoteEntry\(remoteEntryId: string\): void \{[\s\S]*?selectedRemoteEntryId = remoteEntryId;[\s\S]*?cardEls\.get\(remoteEntryId\)\?\.focus\(\{ preventScroll: true \}\)/,
+  );
+  assert.match(
+    REMOTE_RAIL_SOURCE,
+    /event\.preventDefault\(\);[\s\S]*?selectedRemoteEntryId = navigation\.nextId;[\s\S]*?cardEls\.get\(navigation\.nextId\)\?\.focus\(\{ preventScroll: true \}\)/,
+  );
+});
 
 test("mapHorizontalArrowKey translates the two horizontal arrows and rejects every other key", () => {
   assert.equal(mapHorizontalArrowKey("ArrowRight"), "right");
@@ -71,7 +89,7 @@ test("isInteractiveControl rejects native HTML controls", () => {
   }
 });
 
-test("isInteractiveControl rejects contentEditable surfaces and ARIA menu markers", () => {
+test("isInteractiveControl rejects contentEditable and menu roles but allows rail navigation roles", () => {
   const surface = fixture();
   try {
     const editable = surface.railSurface.ownerDocument.createElement("div");
@@ -90,8 +108,10 @@ test("isInteractiveControl rejects contentEditable surfaces and ARIA menu marker
     assert.equal(isInteractiveControl(menuItem), true);
 
     const cardSurface = surface.railSurface.ownerDocument.createElement("article");
+    cardSurface.setAttribute("role", "option");
     surface.railSurface.appendChild(cardSurface);
     assert.equal(isInteractiveControl(cardSurface), false);
+    assert.equal(isInteractiveControl(surface.railSurface), false);
   } finally {
     surface.dispose();
   }
@@ -112,11 +132,20 @@ test("isInsideRailSurface returns true for descendants of the rail root and fals
   }
 });
 
-test("shouldConsumeHorizontalRailKey consumes the key when the focus sits on the rail surface", () => {
+test("shouldConsumeHorizontalRailKey consumes arrows on listbox and option surfaces", () => {
   const surface = fixture();
   try {
     const cardSurface = surface.railSurface.ownerDocument.createElement("article");
+    cardSurface.setAttribute("role", "option");
     surface.railSurface.appendChild(cardSurface);
+    assert.equal(
+      shouldConsumeHorizontalRailKey("ArrowRight", surface.railSurface),
+      true,
+    );
+    assert.equal(
+      shouldConsumeHorizontalRailKey("ArrowLeft", surface.railSurface),
+      true,
+    );
     assert.equal(
       shouldConsumeHorizontalRailKey("ArrowRight", cardSurface),
       true,

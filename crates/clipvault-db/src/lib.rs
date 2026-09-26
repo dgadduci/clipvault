@@ -43,7 +43,9 @@ pub use organization::{
 };
 pub use peer_import_repository::{
     find_binding_in_tx, ImageImportOutcome, ImageImportSpec, PeerCollectionBinding,
-    PeerImportRepository, PeerImportRepositoryError, RemoteImportRecord,
+    PeerImportRepository, PeerImportRepositoryError,
+    PeerImportedSourceAppPresentation as PeerImportedSourceAppPresentationRecord,
+    RemoteImportRecord,
 };
 pub use registry::builtin_migrations;
 pub use source_app::SourceAppFilter;

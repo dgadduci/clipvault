@@ -21,7 +21,12 @@
    * parent component stays free of layout markup.
    */
   import { onDestroy, onMount } from "svelte";
-  import type { Collection, EntryRecord, Tag } from "./types";
+  import type {
+    Collection,
+    EntryRecord,
+    PeerImportedSourceAppPresentation,
+    Tag,
+  } from "./types";
   import HistoryCard from "./HistoryCard.svelte";
   import {
     horizontalRailNextSelectionIdGeneric,
@@ -32,6 +37,10 @@
   export let allTags: Tag[] = [];
   export let allCollections: Collection[] = [];
   export let activeCollectionId: number | null = null;
+  export let peerImportedSourceApps: Map<
+    number,
+    PeerImportedSourceAppPresentation
+  > = new Map();
   /**
    * Whether the rail currently renders a search-filtered subset. The
    * flag drives the empty-state copy so a search that yields no
@@ -496,6 +505,7 @@
     {#each entries as entry (entry.id)}
       <HistoryCard
         {entry}
+        peerImportedSourceApp={peerImportedSourceApps.get(entry.id) ?? null}
         assignedTags={lookupTags(entry.id)}
         assignedCollections={lookupCollections(entry.id)}
         entryOrganizationLoaded={lookupHydration(entry.id) === "loaded"}

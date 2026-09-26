@@ -117,8 +117,11 @@ on failure. Never derive a local path from a remote name; never accept a
 remote path or reference. Do not write either field into
 `clipboard_entries.source_app*`: hash deduplication can reuse a locally
 captured entry, and one entry can have different provenance from multiple
-peers. A collection-aware projection resolves the name and local icon
-reference only for the peer bound to the collection currently being viewed.
+peers. Re-importing the same provenance may fill source-app fields that are
+still `NULL` on an older row, but must not overwrite fields already recorded
+for that provenance. A collection-aware projection resolves the name and
+local icon reference only for the peer bound to the collection currently
+being viewed.
 
 ### Application presentation in remote and imported cards
 

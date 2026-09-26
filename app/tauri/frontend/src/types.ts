@@ -495,6 +495,8 @@ export interface PeerSnapshotEntry {
   capability: string;
   /** Additive peer features advertised in the separate TXT field. */
   caps_extra: string;
+  /** New additive capability field; legacy caps_extra remains unchanged. */
+  caps_extra_v2?: string;
   /** Persisted local trust relationship, independent from mDNS presence. */
   trust_state: PeerTrustState;
   /** Time of reciprocal approval; absent until the peer is trusted. */
@@ -916,6 +918,27 @@ export type PeerImageThumbnailResponse =
   | { kind: "body_too_large" }
   | { kind: "invalid_png" }
   | { kind: "not_transferable" };
+
+/** One-entry, on-demand source-app response for a visible remote card. */
+export type PeerSourceAppPresentationResponse =
+  | {
+      kind: "ok";
+      source_app_name: string | null;
+      /** Validated PNG bytes from Rust; held only in this card's memory. */
+      source_app_icon_bytes: number[] | null;
+    }
+  | { kind: "peer_unavailable" }
+  | { kind: "not_trusted" }
+  | { kind: "capability_missing" }
+  | { kind: "transport_unavailable" }
+  | { kind: "invalid_icon" };
+
+/** Peer-scoped provenance fields projected only in that peer's bound collection. */
+export interface PeerImportedSourceAppPresentation {
+  local_entry_id: number;
+  source_app_name: string | null;
+  source_app_icon_ref: string | null;
+}
 
 /**
  * Discriminated union the `peer-text-import` change returns when

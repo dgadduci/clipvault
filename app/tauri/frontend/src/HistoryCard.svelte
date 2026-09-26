@@ -33,7 +33,12 @@
    * HTML/RTF bytes can still be re-published on demand.
    */
   import { createEventDispatcher, onDestroy, onMount } from "svelte";
-  import type { Collection, EntryRecord, Tag } from "./types";
+  import type {
+    Collection,
+    EntryRecord,
+    PeerImportedSourceAppPresentation,
+    Tag,
+  } from "./types";
   import {
     defaultCardTitle,
     validateTitle,
@@ -112,7 +117,12 @@
   import EntryTextEditorModal from "./EntryTextEditorModal.svelte";
   import { isEditableTextEntry } from "./types";
 
+  const IMPORTED_SOURCE_APP_FALLBACK_ICON_SVG =
+    '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
   export let entry: EntryRecord;
+  /** Present only while rendering the matching peer-bound import collection. */
+  export let peerImportedSourceApp: PeerImportedSourceAppPresentation | null = null;
   export let onTogglePin: (entry: EntryRecord) => void = () => {};
   export let onRequestDelete: (entry: EntryRecord) => void = () => {};
   export let onAfterMutation: (entry: EntryRecord) => void = () => {};
@@ -297,7 +307,12 @@
   let titleBusy = false;
   let titleInputEl: HTMLInputElement | null = null;
 
-  $: iconRef = entry.source_app_icon_ref ?? null;
+  $: iconRef = peerImportedSourceApp !== null
+    ? peerImportedSourceApp.source_app_icon_ref
+    : entry.source_app_icon_ref ?? null;
+  $: sourceAppLabel = peerImportedSourceApp !== null
+    ? `Aplicación fuente: ${peerImportedSourceApp.source_app_name?.trim() || "desconocida"}`
+    : sourceAppAccessibleLabel(entry);
   /** Mirror of `iconRef` we update synchronously so the
    * `onDestroy` cleanup can release the cached blob URL of the
    * current entry even when the component is rebuilt before
@@ -349,6 +364,7 @@
 
   function syncIconRef(ref: string | null): void {
     if (ref === lastIconRef) return;
+    if (lastIconRef !== null) iconResolver.releaseFor(lastIconRef);
     lastIconRef = ref;
     void refreshAppIcon(ref);
   }
@@ -1796,8 +1812,9 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     <span
       class="source-app"
       data-testid="history-card-source-app"
-      title={sourceAppAccessibleLabel(entry)}
-      aria-label={sourceAppAccessibleLabel(entry)}
+      title={sourceAppLabel}
+      aria-label={sourceAppLabel}
+      data-imported-source-app={peerImportedSourceApp !== null ? "true" : "false"}
     >
       {#if appIconUrl}
         <img
@@ -1808,8 +1825,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           data-testid="history-card-source-app-icon"
           on:error={() => {
             appIconUrl = null;
-            if (entry.source_app_icon_ref) {
-              iconResolver.releaseFor(entry.source_app_icon_ref);
+            if (iconRef) {
+              iconResolver.releaseFor(iconRef);
             }
           }}
         />
@@ -1819,12 +1836,24 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           aria-hidden="true"
           data-testid="history-card-source-app-fallback"
         >
-          {@html APP_FALLBACK_ICON_SVG}
+          {#if peerImportedSourceApp !== null}
+            {@html IMPORTED_SOURCE_APP_FALLBACK_ICON_SVG}
+          {:else}
+            {@html APP_FALLBACK_ICON_SVG}
+          {/if}
         </span>
       {/if}
       <span class="visually-hidden" data-testid="history-card-source-app-accessible">
-        {sourceAppAccessibleLabel(entry)}
+        {sourceAppLabel}
       </span>
+      {#if peerImportedSourceApp !== null}
+        <span
+          class="source-app-name"
+          data-testid="history-card-imported-source-app-name"
+        >
+          {peerImportedSourceApp.source_app_name?.trim() || "Aplicación desconocida"}
+        </span>
+      {/if}
     </span>
   </header>
 
@@ -2703,6 +2732,20 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     align-items: center;
     justify-content: center;
     color: #94a3b8;
+  }
+
+  :global(.source-app-fallback svg) {
+    width: 100%;
+    height: 100%;
+  }
+
+  .source-app-name {
+    max-width: 6.5rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.68rem;
+    color: var(--cv-fg-muted, #94a3b8);
   }
 
   .metadata {

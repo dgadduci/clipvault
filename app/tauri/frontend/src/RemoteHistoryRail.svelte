@@ -25,7 +25,7 @@
    * sólo para limpiar caches cuando el peer activo deja de
    * estar disponible y el padre desmonta el rail.
    */
-  import { onDestroy } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import {
     peerHistoryBrowseCommand,
     peerHistoryRecordStateCommand,
@@ -34,6 +34,7 @@
     peerImageRecordStateCommand,
     peerImageImportRecordStateCommand,
     peerImageThumbnailRecordStateCommand,
+    peerSourceAppPresentationRecordStateCommand,
   } from "./lib/tauri";
   import type {
     PeerSnapshot,
@@ -183,7 +184,11 @@
   // legacy parsers require that field to remain exactly `pairing`.
   // The host / client core still revalidates the gate.
   $: activePeerCapability = activeEntry
-    ? [activeEntry.capability, activeEntry.caps_extra]
+    ? [
+        activeEntry.capability,
+        activeEntry.caps_extra,
+        activeEntry.caps_extra_v2 ?? "",
+      ]
         .filter((token) => token.length > 0)
         .join(",")
     : null;
@@ -283,6 +288,7 @@
       peerImageRecordStateCommand(peerState),
       peerImageImportRecordStateCommand(peerState),
       peerImageThumbnailRecordStateCommand(peerState),
+      peerSourceAppPresentationRecordStateCommand(peerState),
     ])
       .then(() => {
         if (generation === peerStateSyncGeneration && peerId === targetPeerId) {
@@ -559,6 +565,11 @@
    */
   function selectRemoteEntry(remoteEntryId: string): void {
     selectedRemoteEntryId = remoteEntryId;
+    // Pointer activation does not focus a card whose roving tabindex was
+    // -1 before the click. Move focus to the selected option so the next
+    // ArrowLeft/ArrowRight is handled by this rail instead of scrolling
+    // whichever control previously held focus.
+    cardEls.get(remoteEntryId)?.focus({ preventScroll: true });
   }
 
   /**
@@ -614,6 +625,7 @@
     if (navigation.nextId === null) return;
     event.preventDefault();
     selectedRemoteEntryId = navigation.nextId;
+    cardEls.get(navigation.nextId)?.focus({ preventScroll: true });
     scrollSelectedCardIntoView(navigation.nextId);
   }
 
@@ -630,18 +642,23 @@
    * mode so the rail intercepts the key before the rail
    * background performs its native horizontal scroll.
    */
-  function attachWindowListeners(): void {
+  function attachWindowListeners(): () => void {
     document.addEventListener("keydown", onRailHorizontalKeydown, true);
-    detachWindow = () => {
+    return () => {
       document.removeEventListener("keydown", onRailHorizontalKeydown, true);
     };
   }
-  attachWindowListeners();
+
+  onMount(() => {
+    detachWindow = attachWindowListeners();
+    return () => {
+      detachWindow?.();
+      detachWindow = null;
+    };
+  });
 
   onDestroy(() => {
     loadGeneration += 1;
-    detachWindow?.();
-    detachWindow = null;
   });
 
   /**
@@ -778,6 +795,7 @@
               peerId={peerId}
               displayName={activeEntry?.display_name ?? null}
               peerCapability={activePeerCapability}
+              peerStateReady={thumbnailPeerStateReady}
               selected={selectedRemoteEntryId === item.row.remote_entry_id}
               onSelect={selectRemoteEntry}
               onCardRef={(el) => registerCardRef(item.row.remote_entry_id, el)}

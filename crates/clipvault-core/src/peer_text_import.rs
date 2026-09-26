@@ -193,6 +193,17 @@ pub struct StagedSourceAppIcon {
     pub outcome: crate::application_icons::ApplicationIconStageOutcome,
 }
 
+/// Peer-scoped local provenance displayed on cards inside that peer's
+/// bound collection. The projection contains no peer identifier and is
+/// never attached to `EntryRecord`, so normal history/search snapshots
+/// cannot accidentally expose another peer's attribution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerImportedSourceAppPresentation {
+    pub local_entry_id: i64,
+    pub source_app_name: Option<String>,
+    pub source_app_icon_ref: Option<String>,
+}
+
 /// Metadata-only transport façade the import facade uses. The
 /// trait is the seam between the core runtime and the platform
 /// mTLS stack: the transport owns the dial loop, the pin lookup
@@ -300,6 +311,15 @@ pub trait PeerImportPersistence: Send + Sync {
     /// Fetch a single entry by id.
     fn fetch_entry(&self, entry_id: i64)
         -> Result<Option<EntryRecord>, PeerImportPersistenceError>;
+    /// Best-effort read of an existing source-app icon by its locally
+    /// validated application-icons reference. Missing/invalid icons must
+    /// degrade to the generic icon, never fail a text import.
+    fn read_source_app_icon(
+        &self,
+        _asset_ref: &str,
+    ) -> Result<Option<Vec<u8>>, PeerImportPersistenceError> {
+        Ok(None)
+    }
     /// Look up the binding row the importer needs to attach the
     /// imported entry to the peer collection. `None` when the
     /// user previously deleted the binding (or when this is the
@@ -377,6 +397,17 @@ pub trait PeerImportPersistence: Send + Sync {
         &self,
         collection_id: i64,
     ) -> Result<Option<Collection>, PeerImportPersistenceError>;
+    /// Project optional source-app fields for entries in the given
+    /// peer-bound collection. Implementations must scope the lookup
+    /// through the persisted peer/collection binding; the default keeps
+    /// in-memory adapters that do not model provenance safely empty.
+    fn source_app_presentations_for_collection(
+        &self,
+        _collection_id: i64,
+        _local_entry_ids: &[i64],
+    ) -> Result<Vec<PeerImportedSourceAppPresentation>, PeerImportPersistenceError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Typed persistence error the runtime surfaces for every
@@ -757,6 +788,22 @@ impl PeerImportService {
     /// for `peer_id`.
     pub fn peer_state(&self, peer_id: &str) -> Option<PeerImportTrustState> {
         self.trust_state.lock().get(peer_id).copied()
+    }
+
+    /// Resolve peer-specific attribution for the visible local entry
+    /// IDs in a collection. The persistence adapter rejects unrelated
+    /// scopes by returning no matches; input is bounded so a frontend
+    /// cannot turn this metadata-only bridge into an unbounded query.
+    pub fn source_app_presentations_for_collection(
+        &self,
+        collection_id: i64,
+        local_entry_ids: &[i64],
+    ) -> Result<Vec<PeerImportedSourceAppPresentation>, PeerImportPersistenceError> {
+        if collection_id <= 0 || local_entry_ids.is_empty() || local_entry_ids.len() > 100 {
+            return Ok(Vec::new());
+        }
+        self.persistence
+            .source_app_presentations_for_collection(collection_id, local_entry_ids)
     }
 
     /// Import a single row of a trusted, active peer. The
@@ -1227,10 +1274,28 @@ impl clipvault_platform::peer_transport::FetchTextHostHandler for PeerTextImport
             crate::peer_text_history::sanitize_remote_title(entry.title.as_deref().unwrap_or(""));
         let content_type = entry.content_type.as_str().to_string();
         let body = entry.content;
+        let source_app_name = entry.source_app_name.as_deref().and_then(|name| {
+            crate::peer_source_app_presentation::validate_source_app_name(name).ok()
+        });
+        let source_app_icon_bytes = entry
+            .source_app_icon_ref
+            .as_deref()
+            .filter(|asset_ref| crate::application_icons::is_safe_icon_ref(asset_ref))
+            .and_then(|asset_ref| {
+                self.persistence
+                    .read_source_app_icon(asset_ref)
+                    .ok()
+                    .flatten()
+            })
+            .filter(|bytes| {
+                crate::peer_source_app_presentation::validate_source_app_icon(bytes).is_ok()
+            });
         clipvault_platform::peer_transport::HostFetchResponse::Ok {
             title,
             content_type,
             body,
+            source_app_name,
+            source_app_icon_bytes,
         }
     }
 }
@@ -1426,7 +1491,9 @@ mod tests {
     #[test]
     fn import_commits_first_import() {
         let persistence = StdArc::new(InMemoryImportPersistence::new());
-        let transport = StdArc::new(ScriptedFetchTransport::new(Ok(ok_response("hello"))));
+        let mut response = ok_response("hello");
+        response.source_app_name = Some("  Terminal  ".to_string());
+        let transport = StdArc::new(ScriptedFetchTransport::new(Ok(response)));
         let service = PeerImportService::new(
             transport,
             persistence.clone(),
@@ -1451,6 +1518,16 @@ mod tests {
         assert!(entry_id > 0);
         assert!(collection_id > 0);
         assert!(!deduplicated);
+        let hash = crate::history::hash_content("hello");
+        assert_eq!(
+            persistence
+                .state
+                .lock()
+                .provenance_source_app
+                .get(&("peer-a".to_string(), "entry-1".to_string(), hash))
+                .cloned(),
+            Some((Some("Terminal".to_string()), None))
+        );
     }
 
     #[test]

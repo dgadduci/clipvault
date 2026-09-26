@@ -4114,3 +4114,116 @@ pub fn clipvault_peer_image_thumbnail_forget(state: State<'_, SharedState>, peer
     let service = context.peer_image_thumbnail();
     service.forget_peer(&peer_id);
 }
+
+/// Typed bridge result for on-demand source-app presentation. Icon
+/// bytes are returned only for a single visible remote entry after the
+/// separate authenticated request; they are never included in browse
+/// or thumbnail DTOs and are not persisted by this command.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerSourceAppPresentationResponse {
+    Ok {
+        source_app_name: Option<String>,
+        source_app_icon_bytes: Option<Vec<u8>>,
+    },
+    PeerUnavailable,
+    NotTrusted,
+    CapabilityMissing,
+    TransportUnavailable,
+    InvalidIcon,
+}
+
+impl PeerSourceAppPresentationResponse {
+    fn from_outcome(outcome: clipvault_core::PeerSourceAppPresentation) -> Self {
+        use clipvault_core::PeerSourceAppPresentation as Core;
+        match outcome {
+            Core::Ok {
+                source_app_name,
+                source_app_icon_bytes,
+            } => Self::Ok {
+                source_app_name,
+                source_app_icon_bytes,
+            },
+            Core::PeerUnavailable => Self::PeerUnavailable,
+            Core::NotTrusted => Self::NotTrusted,
+            Core::CapabilityMissing => Self::CapabilityMissing,
+            Core::TransportUnavailable => Self::TransportUnavailable,
+            Core::InvalidIcon => Self::InvalidIcon,
+        }
+    }
+}
+
+/// Fetch source-app name/icon for one visible row of the selected
+/// remote rail. Core and transport revalidate trust, mTLS identity,
+/// capability, eligibility, and payload bounds; the bridge does not
+/// accept an icon reference or filesystem path from the frontend.
+#[tauri::command]
+pub fn clipvault_peer_source_app_presentation_fetch(
+    state: State<'_, SharedState>,
+    peer_id: String,
+    remote_entry_id: String,
+) -> PeerSourceAppPresentationResponse {
+    let context = state.context();
+    let service = context.peer_source_app_presentation();
+    let cert_fingerprint = match context.peer_pairing().cert_fingerprint_for(&peer_id) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => return PeerSourceAppPresentationResponse::PeerUnavailable,
+    };
+    PeerSourceAppPresentationResponse::from_outcome(service.fetch(
+        &peer_id,
+        &cert_fingerprint,
+        &remote_entry_id,
+    ))
+}
+
+#[tauri::command]
+pub fn clipvault_peer_source_app_presentation_record_state(
+    state: State<'_, SharedState>,
+    peer_id: String,
+    trusted: bool,
+    active: bool,
+) {
+    state
+        .context()
+        .peer_source_app_presentation()
+        .record_peer_state(
+        &peer_id,
+        clipvault_core::peer_source_app_presentation_service::PeerSourceAppPresentationTrustState {
+            trusted,
+            active,
+        },
+    );
+}
+
+#[tauri::command]
+pub fn clipvault_peer_source_app_presentation_forget(
+    state: State<'_, SharedState>,
+    peer_id: String,
+) {
+    state
+        .context()
+        .peer_source_app_presentation()
+        .forget_peer(&peer_id);
+}
+
+/// Return peer-specific import attribution for a bounded set of local
+/// rows, only when `collection_id` is bound to the provenance peer. The
+/// repository returns no matches for general history or unrelated
+/// collections; this DTO never contains clipboard bodies or peer IDs.
+#[tauri::command]
+pub fn clipvault_peer_import_source_app_presentations(
+    state: State<'_, SharedState>,
+    collection_id: i64,
+    entry_ids: Vec<i64>,
+) -> Result<Vec<clipvault_core::PeerImportedSourceAppPresentation>, CommandError> {
+    state
+        .context()
+        .peer_text_import()
+        .source_app_presentations_for_collection(collection_id, &entry_ids)
+        .map_err(|_| {
+            CommandError::new(
+                "peer_import_projection_unavailable",
+                "Peer import attribution is unavailable",
+            )
+        })
+}

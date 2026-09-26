@@ -29,11 +29,13 @@
     PeerImportResponse,
     PeerImageImportResponse,
     PeerImageThumbnailResponse,
+    PeerSourceAppPresentationResponse,
   } from "./types";
   import {
     peerImportFetchCommand,
     peerImageFetchCommand,
     peerImageThumbnailFetchCommand,
+    peerSourceAppPresentationFetchCommand,
   } from "./lib/tauri";
   import { formatElapsedTime, type ElapsedTime } from "./lib/elapsedTime";
   import {
@@ -43,6 +45,14 @@
     supportsRemoteImageThumbnails,
     type RemoteImageThumbnailPhase,
   } from "./lib/remoteImageThumbnailState";
+  import {
+    isCurrentRemoteSourceAppRequest,
+    MAX_REMOTE_SOURCE_APP_ICON_BYTES,
+    shouldRequestRemoteSourceAppPresentation,
+    supportsRemoteSourceAppPresentation,
+    validatedRemoteSourceAppName,
+    type RemoteSourceAppPhase,
+  } from "./lib/remoteSourceAppPresentation";
 
   export let row: PeerHistoryRow;
   /**
@@ -146,6 +156,7 @@
   $: peerSupportsImagePreviewThumbnail = (() => {
     return isImageRow && supportsRemoteImageThumbnails(peerCapability);
   })();
+  $: peerSupportsSourceAppPresentation = supportsRemoteSourceAppPresentation(peerCapability);
 
   /**
    * Localised content-type label. The remote rows arrive with
@@ -271,6 +282,13 @@
   let cardElement: HTMLElement | null = null;
   let thumbnailObserver: IntersectionObserver | null = null;
   let thumbnailRequestInFlight = false;
+  let sourceAppName: string | null = null;
+  let sourceAppIconUrl: string | null = null;
+  let sourceAppPhase: RemoteSourceAppPhase = "idle";
+  let sourceAppRequestToken = 0;
+  let sourceAppRequestInFlight = false;
+  let sourceAppCardIdentity: string | null = null;
+  let sourceAppObserver: IntersectionObserver | null = null;
   /**
    * Live elapsed-time label the card renders in the same
    * shape every local card uses (`formatElapsedTime`). The
@@ -419,6 +437,97 @@
   }
   function refreshNowAnchor(): void {
     nowAnchor = Date.now();
+  }
+
+  function sourceAppIconObjectUrl(bytes: number[] | null): string | null {
+    if (bytes === null || bytes.length === 0 || bytes.length > MAX_REMOTE_SOURCE_APP_ICON_BYTES) {
+      return null;
+    }
+    if (
+      bytes.length < 8 ||
+      bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4e ||
+      bytes[3] !== 0x47 || bytes[4] !== 0x0d || bytes[5] !== 0x0a ||
+      bytes[6] !== 0x1a || bytes[7] !== 0x0a
+    ) {
+      return null;
+    }
+    try {
+      const blob = new Blob([new Uint8Array(bytes)], { type: "image/png" });
+      return URL.createObjectURL(blob);
+    } catch {
+      return null;
+    }
+  }
+
+  function releaseSourceAppPresentation(): void {
+    sourceAppObserver?.disconnect();
+    sourceAppObserver = null;
+    sourceAppRequestToken += 1;
+    sourceAppRequestInFlight = false;
+    sourceAppPhase = "idle";
+    sourceAppName = null;
+    if (sourceAppIconUrl !== null) {
+      URL.revokeObjectURL(sourceAppIconUrl);
+      sourceAppIconUrl = null;
+    }
+  }
+
+  function applySourceAppPresentation(
+    token: number,
+    response: PeerSourceAppPresentationResponse,
+  ): void {
+    if (!isCurrentRemoteSourceAppRequest(token, sourceAppRequestToken)) return;
+    sourceAppRequestInFlight = false;
+    if (response.kind !== "ok") {
+      sourceAppPhase = "unavailable";
+      return;
+    }
+    sourceAppName = validatedRemoteSourceAppName(response.source_app_name);
+    const nextUrl = sourceAppIconObjectUrl(response.source_app_icon_bytes);
+    if (sourceAppIconUrl !== null) URL.revokeObjectURL(sourceAppIconUrl);
+    sourceAppIconUrl = nextUrl;
+    sourceAppPhase = "ready";
+  }
+
+  async function requestSourceAppPresentation(): Promise<void> {
+    if (
+      !shouldRequestRemoteSourceAppPresentation({
+        peerId,
+        peerStateReady,
+        capability: peerCapability,
+        isVisible: true,
+        requestInFlight: sourceAppRequestInFlight,
+        phase: sourceAppPhase,
+      })
+    ) {
+      return;
+    }
+    if (peerId === null) return;
+    const requestPeerId = peerId;
+    const requestEntryId = row.remote_entry_id;
+    const requestIdentity = sourceAppCardIdentity;
+    const token = sourceAppRequestToken;
+    sourceAppRequestInFlight = true;
+    sourceAppPhase = "loading";
+    try {
+      const response = await peerSourceAppPresentationFetchCommand({
+        peer_id: requestPeerId,
+        remote_entry_id: requestEntryId,
+      });
+      if (
+        peerId !== requestPeerId ||
+        row.remote_entry_id !== requestEntryId ||
+        sourceAppCardIdentity !== requestIdentity
+      ) {
+        return;
+      }
+      applySourceAppPresentation(token, response);
+    } catch {
+      if (isCurrentRemoteSourceAppRequest(token, sourceAppRequestToken)) {
+        sourceAppRequestInFlight = false;
+        sourceAppPhase = "unavailable";
+      }
+    }
   }
 
   /**
@@ -616,6 +725,54 @@
     }
   }
 
+  $: {
+    const nextSourceAppIdentity = JSON.stringify([
+      peerId,
+      row.remote_entry_id,
+      row.created_at,
+      peerCapability,
+      peerStateReady,
+    ]);
+    if (sourceAppCardIdentity !== nextSourceAppIdentity) {
+      if (sourceAppCardIdentity !== null) releaseSourceAppPresentation();
+      sourceAppCardIdentity = nextSourceAppIdentity;
+    }
+
+    const canObserveSourceApp =
+      peerId !== null &&
+      peerStateReady &&
+      peerSupportsSourceAppPresentation &&
+      cardElement !== null &&
+      typeof IntersectionObserver !== "undefined";
+    if (canObserveSourceApp && sourceAppObserver === null) {
+      const cardsViewport = cardElement?.closest<HTMLElement>(
+        ".remote-history-rail-cards",
+      ) ?? null;
+      sourceAppObserver = new IntersectionObserver(
+        (entries) => {
+          if (
+            entries.some((entry) => entry.isIntersecting) &&
+            shouldRequestRemoteSourceAppPresentation({
+              peerId,
+              peerStateReady,
+              capability: peerCapability,
+              isVisible: true,
+              requestInFlight: sourceAppRequestInFlight,
+              phase: sourceAppPhase,
+            })
+          ) {
+            void requestSourceAppPresentation();
+          }
+        },
+        { root: cardsViewport, threshold: 0.05 },
+      );
+      sourceAppObserver.observe(cardElement as HTMLElement);
+    } else if (!canObserveSourceApp && sourceAppObserver !== null) {
+      sourceAppObserver.disconnect();
+      sourceAppObserver = null;
+    }
+  }
+
   onMount(() => {
     refreshNowAnchor();
     metadataTimer = setInterval(refreshNowAnchor, METADATA_REFRESH_MS);
@@ -633,6 +790,7 @@
       metadataTimer = null;
     }
     releaseThumbnail();
+    releaseSourceAppPresentation();
     onCardRef(null);
   });
 </script>
@@ -673,6 +831,45 @@
       {describeContentType(row.content_type)}
     </span>
   </header>
+  <div
+    class="remote-preview-card-source-app"
+    data-testid="remote-preview-card-source-app"
+    aria-label={`Aplicación fuente: ${sourceAppName ?? "desconocida"}`}
+    title={sourceAppName ?? "Aplicación fuente desconocida"}
+  >
+    {#if sourceAppIconUrl}
+      <img
+        class="remote-preview-card-source-app-icon"
+        data-testid="remote-preview-card-source-app-icon"
+        src={sourceAppIconUrl}
+        alt=""
+        aria-hidden="true"
+        on:error={() => {
+          if (sourceAppIconUrl !== null) URL.revokeObjectURL(sourceAppIconUrl);
+          sourceAppIconUrl = null;
+        }}
+      />
+    {:else}
+      <span
+        class="remote-preview-card-source-app-fallback"
+        data-testid="remote-preview-card-source-app-fallback"
+        aria-hidden="true"
+      >
+        <svg viewBox="0 0 24 24" focusable="false">
+          <rect x="3" y="4" width="18" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.6" />
+          <path d="M3 9h18M8 6.5h.01M11 6.5h.01" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+        </svg>
+      </span>
+    {/if}
+    <span
+      class="remote-preview-card-source-app-name"
+      data-testid="remote-preview-card-source-app-name"
+    >
+      {sourceAppPhase === "loading"
+        ? "Identificando aplicación…"
+        : sourceAppName ?? "Aplicación desconocida"}
+    </span>
+  </div>
   <p
     class="remote-preview-card-preview"
     data-testid="remote-preview-card-preview"
@@ -847,6 +1044,39 @@
   .remote-preview-card-title.muted {
     color: var(--cv-fg-muted, #94a3b8);
     font-weight: 500;
+  }
+  .remote-preview-card-source-app {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+    min-height: 1.5rem;
+    color: var(--cv-fg-muted, #94a3b8);
+    font-size: 0.7rem;
+  }
+  .remote-preview-card-source-app-icon,
+  .remote-preview-card-source-app-fallback {
+    width: 1.25rem;
+    height: 1.25rem;
+    flex: 0 0 auto;
+    border-radius: 4px;
+    object-fit: contain;
+    background: rgba(255, 255, 255, 0.06);
+  }
+  .remote-preview-card-source-app-fallback {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .remote-preview-card-source-app-fallback svg {
+    width: 1rem;
+    height: 1rem;
+  }
+  .remote-preview-card-source-app-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .remote-preview-card-type {
     flex: 0 0 auto;

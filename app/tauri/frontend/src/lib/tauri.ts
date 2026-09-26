@@ -36,6 +36,8 @@ import type {
   PeerImageBrowseResponse,
   PeerImageImportResponse,
   PeerImageThumbnailResponse,
+  PeerSourceAppPresentationResponse,
+  PeerImportedSourceAppPresentation,
   PeerTrustOperationResponse,
   PickAndAddResponse,
   PlatformSettingsTarget,
@@ -713,6 +715,50 @@ export const peerImageThumbnailForgetCommand: ClipvaultCommandArg<
   invoke<void>("clipvault_peer_image_thumbnail_forget", {
     peerId: args.peer_id,
   });
+
+/** Fetch validated source-app presentation for one visible remote card. */
+export const peerSourceAppPresentationFetchCommand: ClipvaultCommandArg<
+  PeerSourceAppPresentationResponse,
+  { peer_id: string; remote_entry_id: string }
+> = (args) =>
+  invoke<PeerSourceAppPresentationResponse>(
+    "clipvault_peer_source_app_presentation_fetch",
+    { peerId: args.peer_id, remoteEntryId: args.remote_entry_id },
+  );
+
+/** Synchronize the source-presentation service's in-memory trust gate. */
+export const peerSourceAppPresentationRecordStateCommand: ClipvaultCommandArg<
+  void,
+  { peer_id: string; trusted: boolean; active: boolean }
+> = (args) =>
+  invoke<void>("clipvault_peer_source_app_presentation_record_state", {
+    peerId: args.peer_id,
+    trusted: args.trusted,
+    active: args.active,
+  });
+
+/** Forget the in-memory trust projection after revoke, block or unlink. */
+export const peerSourceAppPresentationForgetCommand: ClipvaultCommandArg<
+  void,
+  { peer_id: string }
+> = (args) =>
+  invoke<void>("clipvault_peer_source_app_presentation_forget", {
+    peerId: args.peer_id,
+  });
+
+/**
+ * Resolve attribution for at most 100 visible entries in one peer-bound
+ * collection. The backend validates the persisted collection/peer binding;
+ * callers never request this projection for general history.
+ */
+export const peerImportSourceAppPresentationsCommand: ClipvaultCommandArg<
+  PeerImportedSourceAppPresentation[],
+  { collection_id: number; entry_ids: number[] }
+> = (args) =>
+  invoke<PeerImportedSourceAppPresentation[]>(
+    "clipvault_peer_import_source_app_presentations",
+    { collectionId: args.collection_id, entryIds: args.entry_ids },
+  );
 
 /**
  * Drive the platform application picker. The command returns a

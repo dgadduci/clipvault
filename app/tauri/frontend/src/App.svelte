@@ -12,6 +12,7 @@
     EntryRecord,
     GnomeIntegrationStatusResponse,
     OrganizationSnapshot,
+    PeerImportedSourceAppPresentation,
     PasteResponse,
     PeerPairingSessionSnapshot,
     PeerRow,
@@ -43,6 +44,8 @@
     platformCapabilitiesCommand,
     peerHistoryForgetCommand,
     peerImageThumbnailForgetCommand,
+    peerSourceAppPresentationForgetCommand,
+    peerImportSourceAppPresentationsCommand,
     peerSnapshotCommand,
     recentEntriesFilteredCommand,
     refreshCapabilitiesCommand,
@@ -326,6 +329,8 @@
   let entryOrganizationHydration: Map<number, EntryOrganizationHydration> =
     new Map();
   let entryOrganizationHydrationToken = 0;
+  let peerImportedSourceApps = new Map<number, PeerImportedSourceAppPresentation>();
+  let peerImportedSourceAppsToken = 0;
   let organizationError: string | null = null;
   /**
    * Set of `(entryId, collectionId)` pairs the drop flow is
@@ -437,6 +442,7 @@
     if (previous !== null) {
       void peerHistoryForgetCommand({ peer_id: previous });
       void peerImageThumbnailForgetCommand({ peer_id: previous });
+      void peerSourceAppPresentationForgetCommand({ peer_id: previous });
     }
   }
 
@@ -565,6 +571,45 @@
       tagIds: currentTagFilterIds(),
       sourceApp: sourceAppFilter,
     });
+  }
+
+  async function refreshPeerImportedSourceApps(
+    records: EntryRecord[],
+  ): Promise<void> {
+    const token = ++peerImportedSourceAppsToken;
+    const collectionId = selectedCollectionId;
+    const collection = organization?.collections.find(
+      (candidate) => candidate.id === collectionId,
+    );
+    if (!collection?.is_peer_bound) {
+      peerImportedSourceApps = new Map();
+      return;
+    }
+    const entryIds = Array.from(new Set(records.map((entry) => entry.id)))
+      .filter((id) => Number.isInteger(id) && id > 0)
+      .slice(0, 100);
+    peerImportedSourceApps = new Map();
+    if (entryIds.length === 0) return;
+    try {
+      const rows = await peerImportSourceAppPresentationsCommand({
+        collection_id: collection.id,
+        entry_ids: entryIds,
+      });
+      if (
+        token !== peerImportedSourceAppsToken ||
+        selectedCollectionId !== collectionId
+      ) {
+        return;
+      }
+      peerImportedSourceApps = new Map(
+        rows.map((row) => [row.local_entry_id, row] as const),
+      );
+    } catch {
+      // Fail closed to local metadata / generic source presentation.
+      if (token === peerImportedSourceAppsToken) {
+        peerImportedSourceApps = new Map();
+      }
+    }
   }
 
   async function hydrateEntryOrganization(
@@ -759,6 +804,7 @@
       await performSearch(searchQuery, { silent: true });
     } else {
       visibleEntries = entries;
+      await refreshPeerImportedSourceApps(entries);
       await hydrateEntryOrganization(entries);
     }
   }
@@ -912,6 +958,8 @@
     event: CustomEvent<{ collectionId: number | null }>,
   ): Promise<void> {
     selectedCollectionId = event.detail.collectionId;
+    peerImportedSourceAppsToken += 1;
+    peerImportedSourceApps = new Map();
     // Switching collection MUST reset the source-app filter to
     // `Todas` and reload the option list so the user does not
     // carry a criterion that has no meaning in the new scope
@@ -1502,6 +1550,7 @@
       searching = false;
       searchStatus = "idle";
       visibleEntries = entries;
+      void refreshPeerImportedSourceApps(entries);
       return;
     }
     if (!options.silent) {
@@ -1543,6 +1592,7 @@
         .map((hit) => hit.record)
         .filter((record) => record !== undefined);
       visibleEntries = records;
+      void refreshPeerImportedSourceApps(records);
       searchStatus = records.length === 0 ? "no_matches" : "ok";
     } catch (err) {
       if (token !== searchToken) return;
@@ -2106,6 +2156,7 @@
         {:else}
           <HistoryCardRail
             entries={visibleEntries}
+            peerImportedSourceApps={peerImportedSourceApps}
             allTags={organization?.tags ?? []}
             allCollections={organization?.collections ?? []}
             activeCollectionId={selectedCollectionId}

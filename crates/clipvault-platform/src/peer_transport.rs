@@ -133,10 +133,11 @@ pub const PAIRING_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
 /// Maximum serialized size of one authenticated `FetchTextAck`
 /// response. The contract pins a 1 MiB UTF-8 text body as the
 /// absolute cap the host honours; the JSON envelope plus the UTF-8
-/// overhead stays well below this 2 MiB ceiling so a regression
+/// escaping overhead and optional bounded source-app icon stay below
+/// this 8 MiB ceiling so a regression
 /// that forgets to enforce the limit cannot accidentally stream
 /// more bytes than the runtime expects.
-pub const FETCH_TEXT_MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+pub const FETCH_TEXT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Hard cap the `peer-text-import` change pins on the imported text
 /// body. The runtime enforces the cap on both the listener (which
@@ -192,6 +193,12 @@ pub const FETCH_IMAGE_MAX_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
 /// here; keeping them in lock-step is covered by the bridge
 /// tests.
 pub const FETCH_IMAGE_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Hard cap for an optional source-application PNG carried only by an
+/// explicit text/image import acknowledgement. Mirrors core's
+/// `MAX_SOURCE_APP_ICON_BYTES`; platform keeps the wire bound independent
+/// from the core crate.
+pub const FETCH_SOURCE_APP_ICON_MAX_BYTES: usize = 512 * 1024;
 
 /// Hard cap the `peer-image-preview-thumbnails` change pins on
 /// the encoded thumbnail body. The value mirrors the documented
@@ -585,6 +592,10 @@ pub enum HostImageFetchResponse {
         /// locally; the importer validates the PNG signature /
         /// dimensions / size before any local mutation.
         bytes: Vec<u8>,
+        /// Optional source-app attribution bundled only with an explicit
+        /// import acknowledgement.
+        source_app_name: Option<String>,
+        source_app_icon_bytes: Option<Vec<u8>>,
     },
     /// The entry disappeared between the listing and the fetch,
     /// or it has been edited into a non-transferable shape.
@@ -775,6 +786,11 @@ pub enum HostFetchResponse {
         /// refuses larger bodies with [`Self::BodyTooLarge`]
         /// before they cross the wire.
         body: String,
+        /// Optional source-app attribution bundled only with an explicit
+        /// import acknowledgement. Older peers can ignore these additive
+        /// fields without affecting the body import.
+        source_app_name: Option<String>,
+        source_app_icon_bytes: Option<Vec<u8>>,
     },
     /// The entry disappeared between the listing and the fetch,
     /// or it has been edited into a non-transferable shape. The
@@ -2558,6 +2574,12 @@ pub mod wire {
             title: Option<String>,
             content_type: String,
             body: String,
+            /// Optional additions are defaulted so clients still decode
+            /// acknowledgements sent by a legacy peer.
+            #[serde(default)]
+            source_app_name: Option<String>,
+            #[serde(default)]
+            source_app_icon_b64: Option<String>,
         },
         /// Typed rejection the listener pushes back when the
         /// caller asked for a body that no longer exists, is no
@@ -2681,6 +2703,12 @@ pub mod wire {
             remote_entry_id: String,
             title: Option<String>,
             bytes_b64: String,
+            /// Optional additions are defaulted so clients still decode
+            /// acknowledgements sent by a legacy peer.
+            #[serde(default)]
+            source_app_name: Option<String>,
+            #[serde(default)]
+            source_app_icon_b64: Option<String>,
         },
         /// Typed rejection the listener pushes back when the
         /// caller asked for an image that no longer exists, is
@@ -3318,10 +3346,44 @@ mod tests {
             title: Some("Hola · 漢字".to_string()),
             content_type: "text".to_string(),
             body: "hello".to_string(),
+            source_app_name: Some("Terminal".to_string()),
+            source_app_icon_b64: Some("iVBORw==".to_string()),
         };
         let serialised = serde_json::to_string(&ack).expect("serialise");
         let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
         assert_eq!(parsed, ack);
+    }
+
+    #[test]
+    fn legacy_fetch_text_ack_without_source_fields_still_decodes() {
+        let legacy = r#"{"kind":"fetch_text_ack","version":1,"peer_id":"peer-a","remote_entry_id":"entry-1","title":null,"content_type":"text","body":"hello"}"#;
+        let parsed: PairingMessage = serde_json::from_str(legacy).expect("legacy ack parses");
+        assert!(matches!(
+            parsed,
+            PairingMessage::FetchTextAck {
+                source_app_name: None,
+                source_app_icon_b64: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn fetch_text_ack_max_body_and_icon_fit_response_cap() {
+        let body = "\0".repeat(FETCH_TEXT_MAX_BODY_BYTES);
+        let icon_b64_len = ((FETCH_SOURCE_APP_ICON_MAX_BYTES + 2) / 3) * 4;
+        let ack = PairingMessage::FetchTextAck {
+            version: HISTORY_WIRE_VERSION,
+            peer_id: "peer-a".to_string(),
+            remote_entry_id: "entry-1".to_string(),
+            title: None,
+            content_type: "text".to_string(),
+            body,
+            source_app_name: Some("A".repeat(128)),
+            source_app_icon_b64: Some("A".repeat(icon_b64_len)),
+        };
+        let serialized = serde_json::to_vec(&ack).expect("serialize bounded ack");
+        assert!(serialized.len() <= FETCH_TEXT_MAX_RESPONSE_BYTES);
     }
 
     /// `PairingMessage::FetchTextUnavailable` rejection carries a
@@ -3365,6 +3427,8 @@ mod tests {
             title: None,
             content_type: "text".to_string(),
             body: "hello".to_string(),
+            source_app_name: None,
+            source_app_icon_b64: None,
         };
         assert_eq!(ack.public_key_fingerprint(), "");
     }
@@ -3455,10 +3519,26 @@ mod tests {
             remote_entry_id: "entry-42".to_string(),
             title: Some("Captura".to_string()),
             bytes_b64: "iVBORw==".to_string(),
+            source_app_name: Some("Editor".to_string()),
+            source_app_icon_b64: Some("iVBORw==".to_string()),
         };
         let serialised = serde_json::to_string(&ack).expect("serialise");
         let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
         assert_eq!(parsed, ack);
+    }
+
+    #[test]
+    fn legacy_fetch_image_ack_without_source_fields_still_decodes() {
+        let legacy = r#"{"kind":"fetch_image_ack","version":1,"peer_id":"peer-a","remote_entry_id":"entry-1","title":null,"bytes_b64":"iVBORw=="}"#;
+        let parsed: PairingMessage = serde_json::from_str(legacy).expect("legacy ack parses");
+        assert!(matches!(
+            parsed,
+            PairingMessage::FetchImageAck {
+                source_app_name: None,
+                source_app_icon_b64: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3483,16 +3563,23 @@ mod tests {
         // that drops the base64 framing cannot silently shrink
         // the limit. We pin the worst-case here.
         let bytes = vec![0u8; FETCH_IMAGE_MAX_BODY_BYTES];
+        let max_icon = vec![0u8; FETCH_SOURCE_APP_ICON_MAX_BYTES];
         let bytes_b64_len = {
             use base64::Engine as _;
             base64::engine::general_purpose::STANDARD
                 .encode(&bytes)
                 .len()
         };
+        let source_icon_b64_len = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .encode(&max_icon)
+                .len()
+        };
         assert!(
-            bytes_b64_len <= FETCH_IMAGE_MAX_RESPONSE_BYTES,
-            "base64 payload ({} bytes) must fit inside the response cap ({} bytes)",
-            bytes_b64_len,
+            bytes_b64_len + source_icon_b64_len + 1024 <= FETCH_IMAGE_MAX_RESPONSE_BYTES,
+            "base64 image and max source-app icon ({} + {} bytes) must fit inside the response cap ({} bytes)",
+            bytes_b64_len, source_icon_b64_len,
             FETCH_IMAGE_MAX_RESPONSE_BYTES
         );
     }
@@ -3527,6 +3614,8 @@ mod tests {
             remote_entry_id: "entry-42".to_string(),
             title: None,
             bytes_b64: String::new(),
+            source_app_name: None,
+            source_app_icon_b64: None,
         };
         assert_eq!(ack.public_key_fingerprint(), "");
     }
