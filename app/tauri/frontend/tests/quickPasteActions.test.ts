@@ -479,11 +479,12 @@ function hit(record: EntryRecord): SearchHit {
   };
 }
 
-test("quickPasteOrderedIds: recents put favourites first and order each group by created_at DESC, id DESC", () => {
-  // Recent mode orders favourites first and then sorts each group
-  // chronologically. The source-feed ordering is intentionally
-  // overridden: a newer capture must never appear after an older one
-  // within the same group.
+test("quickPasteOrderedIds: recents order chronologically across every entry", () => {
+  // Recent mode orders the recents feed strictly by `created_at DESC`
+  // with `id DESC` as the tie-breaker, regardless of whether the
+  // entry is pinned. The favourite flag is preserved as an
+  // indicator / action but never overrides capture chronology, so a
+  // newer unpinned capture must precede an older pinned one.
   const pinnedNew = textEntry({
     id: 30,
     is_pinned: true,
@@ -504,7 +505,7 @@ test("quickPasteOrderedIds: recents put favourites first and order each group by
   });
   const recents = [plainOld, pinnedNew, plainNew, pinnedOld];
   const ids = quickPasteOrderedIds("recent", recents, []);
-  assert.deepEqual(ids, [pinnedNew.id, pinnedOld.id, plainNew.id, plainOld.id]);
+  assert.deepEqual(ids, [pinnedNew.id, plainNew.id, pinnedOld.id, plainOld.id]);
 });
 
 test("quickPasteOrderedIds: search puts favourites first and keeps search ranking within each group", () => {
@@ -521,10 +522,30 @@ test("quickPasteOrderedIds: empty input yields empty output", () => {
   assert.deepEqual(quickPasteOrderedIds("idle", [], []), []);
 });
 
-test("quickPasteOrderedIds: pinned order within the favourites group follows created_at DESC", () => {
-  // Recent mode sorts each group by capture time, NOT by id. The
-  // earlier pinned entry (older `created_at`) must move to the back
-  // of the favourites group, regardless of its source position.
+test("quickPasteOrderedIds: a newer unpinned entry precedes an older pinned entry", () => {
+  // Spec scenario: "Favorites do not override capture chronology".
+  // The pinned entry has an older `created_at` than the unpinned
+  // capture; the unpinned capture must appear first, regardless of
+  // the favourite flag.
+  const olderPinned = textEntry({
+    id: 10,
+    is_pinned: true,
+    created_at: "2026-09-01T12:00:00Z",
+  });
+  const newerPlain = textEntry({
+    id: 5,
+    created_at: "2026-09-02T12:00:00Z",
+  });
+  const recents = [olderPinned, newerPlain];
+  const ids = quickPasteOrderedIds("recent", recents, []);
+  assert.deepEqual(ids, [newerPlain.id, olderPinned.id]);
+});
+
+test("quickPasteOrderedIds: pinned entries are sorted newest-first like every other row", () => {
+  // Recent mode sorts pinned entries by `created_at DESC` — the
+  // favourite flag is preserved on each row but does not group the
+  // pinned entries ahead of unpinned ones. The pinned entry with
+  // the newest timestamp must lead the recents feed.
   const firstPinned = textEntry({
     id: 50,
     is_pinned: true,
@@ -543,7 +564,8 @@ test("quickPasteOrderedIds: pinned order within the favourites group follows cre
 test("quickPasteOrderedIds: ties on created_at use id DESC", () => {
   // Two captures with identical timestamps must use the entry id as
   // the tie-breaker so the order stays deterministic across
-  // `history-updated` cycles.
+  // `history-updated` cycles. The favourite flag is honoured by the
+  // row indicator but does not influence the chronological order.
   const pinned = textEntry({
     id: 30,
     is_pinned: true,
@@ -559,7 +581,6 @@ test("quickPasteOrderedIds: ties on created_at use id DESC", () => {
   });
   const recents = [older, plain, pinned];
   const ids = quickPasteOrderedIds("recent", recents, []);
-  // Favourites first, then non-favourites sorted by created_at DESC.
   assert.deepEqual(ids, [pinned.id, plain.id, older.id]);
 });
 
@@ -575,6 +596,90 @@ test("quickPasteOrderedIds: identical timestamps use id DESC within the same gro
   const recents = [smallerId, newerId];
   const ids = quickPasteOrderedIds("recent", recents, []);
   assert.deepEqual(ids, [newerId.id, smallerId.id]);
+});
+
+test("quickPasteOrderedIds: a fresh import lands first when it has the newest created_at", () => {
+  // Spec scenario: "A successful peer import becomes the newest
+  // recent result". The freshly imported row carries the most recent
+  // `created_at` (assigned by the existing persistence path) and
+  // must lead the recents feed regardless of the source feed order
+  // or any earlier pinned row.
+  const stalePinned = textEntry({
+    id: 1,
+    is_pinned: true,
+    created_at: "2026-09-01T12:00:00Z",
+  });
+  const stalePlain = textEntry({
+    id: 2,
+    created_at: "2026-09-02T12:00:00Z",
+  });
+  const imported = textEntry({
+    id: 99,
+    created_at: "2026-09-04T12:00:00Z",
+  });
+  const recents = [stalePinned, stalePlain, imported];
+  const ids = quickPasteOrderedIds("recent", recents, []);
+  assert.deepEqual(ids, [imported.id, stalePlain.id, stalePinned.id]);
+});
+
+test("quickPasteOrderedIds: a deduplicated import keeps the original created_at order", () => {
+  // Spec scenario: "A deduplicated import preserves the original
+  // capture time". An import that resolves to an existing entry
+  // must surface that entry at its original position; the helper
+  // is fed the post-import recents feed (where `created_at`
+  // stayed immutable) and the entry must keep its chronological
+  // slot even when a newer capture exists.
+  const existing = textEntry({
+    id: 7,
+    created_at: "2026-09-01T12:00:00Z",
+  });
+  const newerCapture = textEntry({
+    id: 12,
+    created_at: "2026-09-03T12:00:00Z",
+  });
+  const recents = [newerCapture, existing];
+  const ids = quickPasteOrderedIds("recent", recents, []);
+  // The imported row (deduplicated into id=7) does NOT bubble up.
+  // `created_at` stays pinned to the original timestamp.
+  assert.deepEqual(ids, [newerCapture.id, existing.id]);
+});
+
+test("quickPasteOrderedIds: search-mode ranking is preserved across history-updated cycles", () => {
+  // Spec scenario: "Search ranking is preserved". The helper MUST
+  // never replace `SearchService` ranking with chronological
+  // ordering; the search feed carries its own scoring and the
+  // helper only groups favourites first while preserving the
+  // relative ranking the search returned.
+  const topHit = textEntry({ id: 10 });
+  const midHit = textEntry({ id: 20 });
+  const lowHit = textEntry({ id: 30, is_pinned: true });
+  const hits = [hit(topHit), hit(midHit), hit(lowHit)];
+  const ids = quickPasteOrderedIds("search", [], hits);
+  // Pinned favourite last in the input ends up first; the search
+  // ranking inside the unpinned group keeps the input order.
+  assert.deepEqual(ids, [lowHit.id, topHit.id, midHit.id]);
+});
+
+test("quickPasteOrderedIds: a hydrated recents feed stays in chronological order after the freshest capture is appended", () => {
+  // Spec scenario: "Refresh and hydration do not scramble order".
+  // After a `history-updated` refresh, the recents feed can grow
+  // by one row at the front. The helper must still produce the
+  // expected `created_at DESC, id DESC` order.
+  const olderOne = textEntry({
+    id: 10,
+    created_at: "2026-09-01T12:00:00Z",
+  });
+  const olderTwo = textEntry({
+    id: 20,
+    created_at: "2026-09-02T12:00:00Z",
+  });
+  const freshCapture = textEntry({
+    id: 30,
+    created_at: "2026-09-04T12:00:00Z",
+  });
+  const recents = [olderOne, olderTwo, freshCapture];
+  const ids = quickPasteOrderedIds("recent", recents, []);
+  assert.deepEqual(ids, [freshCapture.id, olderTwo.id, olderOne.id]);
 });
 
 test("preserveSelectionAfterReorder keeps the index inside the bounds", () => {

@@ -139,6 +139,18 @@
     PeerImportedSourceAppPresentation
   >();
   let peerImportedSourceAppsToken = 0;
+  /**
+   * Monotonically increasing request generation that guards every
+   * `recentEntriesCommand` round-trip the Quick Paste window fires.
+   * The token is bumped before every fresh fetch; a response that
+   * lands after a newer request has already started is dropped on
+   * the floor so an in-flight refresh cannot overwrite a newer one
+   * (the documented `quick-paste-live-capture-order` contract).
+   * The counter survives across `opened` / `history-updated` /
+   * initial-load triggers because every refresh path consults the
+   * same token table.
+   */
+  let recentRefreshToken = 0;
   let quickPasteDestroyed = false;
   let searching = false;
   let searchError: string | null = null;
@@ -480,8 +492,19 @@
   }
 
   async function loadRecent(): Promise<void> {
+    const token = ++recentRefreshToken;
+    // Bump the peer-imported source-apps guard so any in-flight
+    // attribution refresh that lands after this request cannot
+    // overwrite the freshly loaded recent rows. The bump happens
+    // synchronously alongside the recent refresh token bump so the
+    // two reads cannot drift apart across `history-updated` cycles.
+    peerImportedSourceAppsToken += 1;
     try {
-      recent = await recentEntriesCommand({ limit: 50 });
+      const next = await recentEntriesCommand({ limit: 50 });
+      if (token !== recentRefreshToken) {
+        return;
+      }
+      recent = next;
       if (mode === "idle" || mode === "recent") {
         mode = "recent";
         void refreshPeerImportedSourceApps(recent);
@@ -491,6 +514,9 @@
       void hydrateCodeLanguages();
       void hydrateTagsForVisibleEntries(recent);
     } catch (err) {
+      if (token !== recentRefreshToken) {
+        return;
+      }
       searchError = err instanceof Error ? err.message : String(err);
       loading = false;
     }

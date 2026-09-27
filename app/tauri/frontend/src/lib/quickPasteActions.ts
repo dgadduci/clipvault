@@ -401,14 +401,15 @@ export function hasAnyQuickPasteAction(
  *
  * Modalities documented in `quick-paste/spec.md`:
  *
- *   - Recent mode: favourites come first; the favourite group and the
- *     non-favourite group are sorted by `created_at DESC` with `id DESC`
- *     as the tie-breaker so a newer capture never appears after an
- *     older one within the same group. The source-feed ordering is
+ *   - Recent mode: every entry is sorted by `created_at DESC` with
+ *     `id DESC` as the tie-breaker. The favourite flag is rendered
+ *     as an indicator / action but never moves a row ahead of a
+ *     newer non-favourite capture — the chronology of the persisted
+ *     history is the source of truth. The source-feed ordering is
  *     intentionally overridden: the previous contract trusted the
- *     recents feed to come pre-sorted, which silently broke whenever a
- *     `history-updated` event landed while a stale response was still
- *     pending.
+ *     recents feed to come pre-sorted, which silently broke whenever
+ *     a `history-updated` event landed while a stale response was
+ *     still pending.
  *   - Search mode: favourites come first; the favourite group and the
  *     non-favourite group preserve the ranking `SearchService`
  *     returned. Relevance is never replaced by capture time — when the
@@ -465,9 +466,10 @@ function orderWithSearchRanking(searchHits: SearchHit[]): number[] {
 }
 
 /**
- * Order the recents feed chronologically. The favourite group comes
- * first; both the favourite and the non-favourite groups are sorted
- * by `created_at DESC` with `id DESC` as the tie-breaker. The helper
+ * Order the recents feed chronologically across every entry, pinned or
+ * not. The sort key is `created_at DESC` with `id DESC` as the
+ * tie-breaker; the favourite flag is intentionally ignored so an older
+ * pinned row can never precede a newer unpinned capture. The helper
  * treats `created_at` as an ISO 8601 string the backend already
  * produces; a malformed value collapses to the empty string so the
  * comparator never throws.
@@ -479,14 +481,11 @@ function orderRecentsChronologically(recents: EntryRecord[]): number[] {
     return [];
   }
   const records = new Map<number, EntryRecord>();
-  const pinned: number[] = [];
-  const unpinned: number[] = [];
   for (const record of recents) {
     records.set(record.id, record);
-    const bucket = record.is_pinned ? pinned : unpinned;
-    bucket.push(record.id);
   }
-  const compareByCreatedAtDesc = (a: number, b: number): number => {
+  const ids = recents.map((record) => record.id);
+  ids.sort((a, b) => {
     const recordA = records.get(a);
     const recordB = records.get(b);
     const timeA = recordA ? recordA.created_at : "";
@@ -495,10 +494,8 @@ function orderRecentsChronologically(recents: EntryRecord[]): number[] {
       return b - a;
     }
     return timeA < timeB ? 1 : -1;
-  };
-  pinned.sort(compareByCreatedAtDesc);
-  unpinned.sort(compareByCreatedAtDesc);
-  return [...pinned, ...unpinned];
+  });
+  return ids;
 }
 
 /**

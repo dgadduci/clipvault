@@ -3637,13 +3637,16 @@ impl PeerImportResponse {
 /// never invokes the paste path and never emits a
 /// `history-updated` event carrying the imported body.
 ///
-/// On a successful `Imported` outcome the command emits the
-/// existing `clipvault://organization-updated` event so the
-/// sidebar refreshes the projection (the peer-bound collection
-/// becomes visible and the origin marker is rendered) without a
-/// manual re-fetch. The event payload is metadata-only (`()`)
-/// so the body, the imported hash and the binding's `peer_id`
-/// never cross the bridge.
+/// On a successful `Imported` outcome the command emits both
+/// the existing `clipvault://history-updated` and
+/// `clipvault://organization-updated` events so the Quick Paste
+/// window refreshes the chronological recent list and the
+/// sidebar refreshes the peer-bound projection without a manual
+/// re-fetch. Both events are metadata-only (`()`) so the body,
+/// the imported hash and the binding's `peer_id` never cross
+/// the bridge. A failure or rolled-back import never emits the
+/// event so Quick Paste cannot surface a row the importer
+/// never produced.
 #[tauri::command]
 pub fn clipvault_peer_import_fetch(
     state: State<'_, SharedState>,
@@ -3667,6 +3670,7 @@ pub fn clipvault_peer_import_fetch(
         outcome,
         clipvault_core::peer_text_import::PeerImportOutcome::Imported { .. }
     ) {
+        emit_history_updated(&handle);
         emit_organization_updated(&handle);
     }
     PeerImportResponse::from_outcome(outcome)
