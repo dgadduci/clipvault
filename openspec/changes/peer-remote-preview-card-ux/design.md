@@ -25,6 +25,8 @@ fetch paths and `remote_imports` provenance are separate from browsing.
   rendering the locally stored icon in general history and the matching
   peer-bound collection, without exposing the host's icon reference or
   filesystem layout.
+- Apply the same latest-provenance icon and accessible-name presentation to
+  QuickVault recent and search rows, without delaying the first list paint.
 
 **Non-Goals:**
 
@@ -147,6 +149,17 @@ the existing safe local application-icon resolver with the locally generated
 reference. If no valid icon was imported, use a deterministic local static
 import marker; if no valid name exists, use an unknown-application label. A
 different peer-bound collection never borrows the attribution.
+
+QuickVault uses the existing bounded Tauri projection with `collection_id =
+null` for its current recent or search result IDs (at most 50 per request).
+The metadata lookup runs after rows are assigned and never blocks the quick
+list. The result supplies only the latest imported name and locally generated
+icon reference; the existing safe icon resolver loads the PNG. Imported names
+remain on the icon's `title` and accessible label, not visible text. A token
+guard discards stale projection responses, and the icon resolver's per-entry
+token/reference guard prevents a late local icon response from replacing the
+imported icon or vice versa. If a provenance row has no valid icon, QuickVault
+uses the same static import marker as desktop history.
 
 ## Risks / Trade-offs
 

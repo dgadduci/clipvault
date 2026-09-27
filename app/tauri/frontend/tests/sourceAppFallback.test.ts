@@ -28,9 +28,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  IMPORTED_SOURCE_APP_FALLBACK_ICON_SVG,
   sourceAppAccessibleLabel,
+  sourceAppPresentationAccessibleLabel,
+  sourceAppPresentationIconRef,
 } from "../src/lib/sourceAppFallback.ts";
-import type { EntryRecord } from "../src/types.ts";
+import type {
+  EntryRecord,
+  PeerImportedSourceAppPresentation,
+} from "../src/types.ts";
 
 function makeEntry(overrides: Partial<EntryRecord> = {}): EntryRecord {
   return {
@@ -139,4 +145,47 @@ test("sourceAppAccessibleLabel never exposes the bare identifier in the visible 
     !unknownLabel.includes("com.apple."),
     `missing entries must not echo identifier prefixes: ${unknownLabel}`,
   );
+});
+
+test("imported source presentation overrides local metadata without changing the entry", () => {
+  const entry = makeEntry({
+    source_app: "local.capture.id",
+    source_app_name: "Local App",
+    source_app_icon_ref: "application-icons/local.png",
+  });
+  const imported: PeerImportedSourceAppPresentation = {
+    local_entry_id: entry.id,
+    source_app_name: "Remote Editor",
+    source_app_icon_ref: "application-icons/remote-editor.png",
+  };
+
+  assert.equal(
+    sourceAppPresentationAccessibleLabel(entry, imported),
+    "Aplicación fuente: Remote Editor",
+  );
+  assert.equal(
+    sourceAppPresentationIconRef(entry, imported),
+    "application-icons/remote-editor.png",
+  );
+  assert.equal(entry.source_app_name, "Local App");
+  assert.equal(entry.source_app_icon_ref, "application-icons/local.png");
+});
+
+test("imported provenance with missing fields uses an unknown label and import marker", () => {
+  const entry = makeEntry({
+    source_app_name: "Local App",
+    source_app_icon_ref: "application-icons/local.png",
+  });
+  const imported: PeerImportedSourceAppPresentation = {
+    local_entry_id: entry.id,
+    source_app_name: null,
+    source_app_icon_ref: null,
+  };
+
+  assert.equal(
+    sourceAppPresentationAccessibleLabel(entry, imported),
+    "Aplicación fuente: desconocida",
+  );
+  assert.equal(sourceAppPresentationIconRef(entry, imported), null);
+  assert.match(IMPORTED_SOURCE_APP_FALLBACK_ICON_SVG, /<svg[\s\S]*<path/);
 });

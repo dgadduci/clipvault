@@ -936,7 +936,7 @@ export type PeerSourceAppPresentationResponse =
   | { kind: "transport_unavailable" }
   | { kind: "invalid_icon" };
 
-/** Peer-scoped provenance fields projected only in that peer's bound collection. */
+/** Imported source presentation projected for a peer-bound collection or latest general-history provenance. */
 export interface PeerImportedSourceAppPresentation {
   local_entry_id: number;
   source_app_name: string | null;

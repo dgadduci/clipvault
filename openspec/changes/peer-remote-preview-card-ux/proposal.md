@@ -30,6 +30,9 @@ la colección del peer muestra un origen desconocido.
   usando la procedencia más reciente y sin revelar el identificador del peer.
 - En tarjetas importadas, mantener el nombre de la aplicación como etiqueta
   accesible/tooltip del icono, no como texto visible dentro de la tarjeta.
+- Aplicar esa misma atribución importada a las filas de QuickVault, tanto en
+  recientes como en búsqueda, reutilizando el icono local y mostrando el
+  nombre solo como etiqueta accesible/tooltip.
 
 ## Capabilities
 
@@ -52,12 +55,15 @@ la colección del peer muestra un origen desconocido.
   importación explícita y persistencia asociados a la procedencia del peer.
 - `peer-image-import`: el mismo contrato para la importación explícita de
   imágenes, con transporte acotado del icono.
+- `quick-paste`: mostrar en QuickVault la atribución más reciente de las
+  importaciones mediante la proyección local existente, sin bloquear la lista
+  ni alterar el flujo de copia/pegado.
 
 ## Impact
 
 - Frontend Svelte: `RemotePreviewCard`, `RemoteHistoryRail`, el modelo de
-  selección de rail y la presentación de `HistoryCard` para procedencia de
-  importación.
+  selección de rail y la presentación de `HistoryCard` y QuickVault para
+  procedencia de importación.
 - Core/transporte: capability aditiva y nombre validado en las respuestas de
   browse de texto e imagen, sin endpoint/icono adicional para previews;
   respuestas de fetch explícito conservan el transporte del icono para

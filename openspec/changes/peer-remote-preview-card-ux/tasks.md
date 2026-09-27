@@ -84,6 +84,10 @@
 - [x] 4.7 Test two-peer isolation, latest-provenance selection in general
   history, name/icon label behavior, missing/invalid fallbacks, legacy-peer
   imports, and unchanged clipboard, paste, drag payload and local metadata.
+- [x] 4.8 Reuse the bounded latest-provenance projection in QuickVault recent
+  and search results; resolve the locally stored icon through the existing
+  safe resolver and expose the imported name only as `title`/accessible label.
+  Keep the list responsive and preserve its copy/paste behavior.
 
 ## 5. Cross-layer regression coverage
 
@@ -97,6 +101,9 @@
 - [x] 5.3 Run existing remote history, image thumbnail, text/image import,
   source-app icon and migration regressions; report baseline failures
   separately and do not weaken existing contracts.
+- [x] 5.4 Test QuickVault recent/search projection, imported icon selection,
+  accessible-name fallback, stale metadata/icon responses and Object URL
+  cleanup without changing clipboard or copy-only behavior.
 
 ## 6. Verification and manual review
 
@@ -111,11 +118,15 @@
 - [ ] 6.4 Manually compare local and remote card size, selection, keyboard
   navigation and footer placement on macOS, Linux X11 and Linux Wayland; check
   source-app names (without icons or extra loading delay) on text and image
-  previews and the fallback with a peer lacking the capability. The user has
-  approved the left/right navigation portion; recheck source-name rendering
-  after this implementation change before closing the full matrix.
-- [ ] 6.5 Manually import text and images from two peers; confirm each
+  previews and the fallback with a peer lacking the capability. User approved
+  the desktop preview/card checks on macOS and Linux; the X11/Wayland session
+  variants have not been separately confirmed.
+- [x] 6.5 Manually import text and images from two peers; confirm each
   peer-bound collection shows its own icon with the name only as tooltip/tag,
   while general history shows the latest imported app presentation without a
   peer identifier. Confirm local metadata, clipboard, paste and drag payload
-  remain unchanged.
+  remain unchanged. User manually approved imported attribution in desktop
+  history/collections on macOS and Linux.
+- [ ] 6.6 Manually verify in QuickVault on macOS and Linux that imported text
+  and image rows show their local source-app icon and name as tooltip/tag in
+  recent and search results, with no list delay or clipboard/copy regression.

@@ -4,6 +4,7 @@
     CopyResponse,
     EntryRecord,
     PlatformGuidance,
+    PeerImportedSourceAppPresentation,
     SearchHit,
     SearchResponse,
   } from "./types";
@@ -11,6 +12,7 @@
   import { visualTokenCss } from "./lib/visualTokens";
   import {
     copyEntryCommand,
+    peerImportSourceAppPresentationsCommand,
     recentEntriesCommand,
     searchEntriesCommand,
     setFavoriteCommand,
@@ -43,7 +45,11 @@
     contentTypeIconId,
     contentTypeIconLabel,
   } from "./lib/contentTypeIcons";
-  import { sourceAppAccessibleLabel } from "./lib/sourceAppFallback";
+  import {
+    IMPORTED_SOURCE_APP_FALLBACK_ICON_SVG,
+    sourceAppPresentationAccessibleLabel,
+    sourceAppPresentationIconRef,
+  } from "./lib/sourceAppFallback";
   import { formatElapsedTime } from "./lib/elapsedTime";
   import {
     createClipboardAssetResolver,
@@ -128,6 +134,12 @@
   let mode: Mode = "idle";
   let recent: EntryRecord[] = [];
   let hits: SearchHit[] = [];
+  let peerImportedSourceApps = new Map<
+    number,
+    PeerImportedSourceAppPresentation
+  >();
+  let peerImportedSourceAppsToken = 0;
+  let quickPasteDestroyed = false;
   let searching = false;
   let searchError: string | null = null;
   let selectedIndex = 0;
@@ -432,11 +444,47 @@
     return "";
   }
 
+  /**
+   * Resolve imported source-app presentation for the current local rows in
+   * one bounded SQLite-backed Tauri call. This is intentionally started only
+   * after recent/search rows have rendered; it never asks a peer or blocks the
+   * QuickVault list.
+   */
+  async function refreshPeerImportedSourceApps(
+    entries: EntryRecord[],
+  ): Promise<void> {
+    const token = ++peerImportedSourceAppsToken;
+    const entryIds = Array.from(new Set(entries.map((entry) => entry.id)))
+      .filter((id) => Number.isInteger(id) && id > 0)
+      .slice(0, 100);
+    if (entryIds.length === 0) {
+      peerImportedSourceApps = new Map();
+      return;
+    }
+    try {
+      const rows = await peerImportSourceAppPresentationsCommand({
+        collection_id: null,
+        entry_ids: entryIds,
+      });
+      if (token !== peerImportedSourceAppsToken) return;
+      peerImportedSourceApps = new Map(
+        rows.map((row) => [row.local_entry_id, row] as const),
+      );
+    } catch {
+      // Keep QuickVault available and fall back to its ordinary local source
+      // metadata if the optional imported-attribution projection fails.
+      if (token === peerImportedSourceAppsToken) {
+        peerImportedSourceApps = new Map();
+      }
+    }
+  }
+
   async function loadRecent(): Promise<void> {
     try {
       recent = await recentEntriesCommand({ limit: 50 });
       if (mode === "idle" || mode === "recent") {
         mode = "recent";
+        void refreshPeerImportedSourceApps(recent);
       }
       loading = false;
       clampSelection();
@@ -734,9 +782,13 @@
       searchError = null;
       hits = [];
       mode = "recent";
+      void refreshPeerImportedSourceApps(recent);
       clampSelection();
       return;
     }
+    // Prevent a late projection for a previous query/recent view from
+    // replacing metadata after this newer search has started.
+    peerImportedSourceAppsToken += 1;
     mode = "search";
     if (quickPasteController) {
       quickPasteController.cancel();
@@ -762,6 +814,9 @@
         return;
       }
       hits = response.hits;
+      void refreshPeerImportedSourceApps(
+        response.hits.map((hit) => hit.record),
+      );
       clampSelection();
       void hydrateTagsForVisibleEntries(
         response.hits.map((hit) => hit.record),
@@ -943,6 +998,7 @@
    */
   type AppIconState = "loading" | "loaded" | "error";
   let appIconStates: Record<number, AppIconState> = {};
+  const appIconRefs = new Map<number, string | null>();
   /**
    * Per-entry token used to discard stale icon round-trips. Mirrors
    * the `thumbnailToken` invariant above: a response that lands
@@ -952,17 +1008,38 @@
   let appIconToken = 0;
   const appIconTokens = new Map<number, number>();
 
-  async function loadAppIcon(entry: EntryRecord): Promise<void> {
-    const ref = entry.source_app_icon_ref;
-    if (!ref) return;
-    if (appIconUrls[entry.id]) return;
+  async function loadAppIcon(
+    entry: EntryRecord,
+    imported: PeerImportedSourceAppPresentation | null,
+  ): Promise<void> {
+    const ref = sourceAppPresentationIconRef(entry, imported);
+    if (appIconRefs.has(entry.id) && appIconRefs.get(entry.id) === ref) {
+      return;
+    }
+    appIconRefs.set(entry.id, ref);
+    // Invalidate any prior lookup and remove its row URL before switching
+    // between the local-capture and imported-provenance icon references.
+    appIconTokens.delete(entry.id);
+    if (appIconUrls[entry.id]) {
+      const { [entry.id]: _removed, ...rest } = appIconUrls;
+      appIconUrls = rest;
+    }
+    if (!ref) {
+      appIconStates = { ...appIconStates, [entry.id]: "error" };
+      return;
+    }
     if (appIconStates[entry.id] !== "loading") {
       appIconStates = { ...appIconStates, [entry.id]: "loading" };
     }
     const token = ++appIconToken;
     appIconTokens.set(entry.id, token);
     const resolution = await appIconResolver.resolve(ref);
-    if (appIconTokens.get(entry.id) !== token) {
+    if (
+      quickPasteDestroyed ||
+      appIconTokens.get(entry.id) !== token ||
+      appIconRefs.get(entry.id) !== ref
+    ) {
+      if (quickPasteDestroyed) appIconResolver.releaseFor(ref);
       return;
     }
     if (resolution.ok && resolution.url) {
@@ -977,20 +1054,23 @@
     currentMode: Mode,
     recents: EntryRecord[],
     searchHits: SearchHit[],
+    importedSourceApps: Map<number, PeerImportedSourceAppPresentation>,
   ): void {
     const entries =
       currentMode === "search" ? searchHits.map((hit) => hit.record) : recents;
     for (const entry of entries) {
-      void loadAppIcon(entry);
+      void loadAppIcon(entry, importedSourceApps.get(entry.id) ?? null);
     }
   }
 
-  $: syncAppIcons(mode, recent, hits);
+  $: syncAppIcons(mode, recent, hits, peerImportedSourceApps);
 
   function dropAppIcon(id: number, ref?: string | null): void {
+    const currentRef = appIconRefs.get(id);
+    if (ref !== undefined && currentRef !== ref) return;
     appIconTokens.delete(id);
-    if (ref) {
-      appIconResolver.releaseFor(ref);
+    if (currentRef) {
+      appIconResolver.releaseFor(currentRef);
     }
     if (appIconUrls[id]) {
       const { [id]: _removed, ...rest } = appIconUrls;
@@ -2588,6 +2668,10 @@
   });
 
   onDestroy(() => {
+    quickPasteDestroyed = true;
+    peerImportedSourceAppsToken += 1;
+    appIconToken += 1;
+    appIconTokens.clear();
     if (quickPasteController) {
       quickPasteController.cancel();
       quickPasteController = null;
@@ -2699,8 +2783,12 @@
           {@const preview = renderPreview(mode, recent, hits, id)}
           {@const isImage = entry ? isImageEntry(entry) : false}
           {@const thumbState = thumbnailStates[id] ?? (isImage ? "loading" : "error")}
+          {@const importedSourceApp = peerImportedSourceApps.get(id) ?? null}
+          {@const sourceAppIconRef = entry
+            ? sourceAppPresentationIconRef(entry, importedSourceApp)
+            : null}
           {@const sourceAppLabel = entry
-            ? sourceAppAccessibleLabel(entry)
+            ? sourceAppPresentationAccessibleLabel(entry, importedSourceApp)
             : "Aplicación fuente desconocida"}
           {@const typeIconId = contentTypeIconId(contentType)}
           {@const typeLabel = contentTypeIconLabel(contentType)}
@@ -2839,7 +2927,7 @@
               <span
                 class="qp-source-app"
                 data-testid="quick-paste-source-app"
-                data-app-icon-state={entry && entry.source_app_icon_ref
+                data-app-icon-state={sourceAppIconRef
                   ? (appIconStates[id] ?? "loading")
                   : "absent"}
                 title={sourceAppLabel}
@@ -2853,9 +2941,9 @@
                     aria-hidden="true"
                     data-testid="quick-paste-source-app-icon"
                     on:error={() =>
-                      dropAppIcon(id, entry?.source_app_icon_ref ?? null)}
+                      dropAppIcon(id, sourceAppIconRef)}
                   />
-                {:else if entry && entry.source_app_icon_ref && (appIconStates[id] ?? "loading") === "loading"}
+                {:else if sourceAppIconRef && (appIconStates[id] ?? "loading") === "loading"}
                   <span
                     class="qp-source-app-placeholder"
                     data-testid="quick-paste-source-app-loading"
@@ -2883,7 +2971,11 @@
                     data-testid="quick-paste-source-app-fallback"
                     aria-hidden="true"
                   >
-                    {@html APP_FALLBACK_ICON_SVG}
+                    {#if importedSourceApp !== null}
+                      {@html IMPORTED_SOURCE_APP_FALLBACK_ICON_SVG}
+                    {:else}
+                      {@html APP_FALLBACK_ICON_SVG}
+                    {/if}
                   </span>
                 {/if}
                 <span class="qp-visually-hidden">{sourceAppLabel}</span>

@@ -94,7 +94,9 @@
     pasteMenuActionsFor,
   } from "./lib/clipboardAsset";
   import {
-    sourceAppAccessibleLabel,
+    IMPORTED_SOURCE_APP_FALLBACK_ICON_SVG,
+    sourceAppPresentationAccessibleLabel,
+    sourceAppPresentationIconRef,
   } from "./lib/sourceAppFallback";
   import { formatElapsedTime, type ElapsedTime } from "./lib/elapsedTime";
   import { unicodeCount } from "./lib/unicodeCount";
@@ -116,9 +118,6 @@
   import CollectionMembershipModal from "./CollectionMembershipModal.svelte";
   import EntryTextEditorModal from "./EntryTextEditorModal.svelte";
   import { isEditableTextEntry } from "./types";
-
-  const IMPORTED_SOURCE_APP_FALLBACK_ICON_SVG =
-    '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
   export let entry: EntryRecord;
   /** Present only while rendering the matching peer-bound import collection. */
@@ -307,12 +306,11 @@
   let titleBusy = false;
   let titleInputEl: HTMLInputElement | null = null;
 
-  $: iconRef = peerImportedSourceApp !== null
-    ? peerImportedSourceApp.source_app_icon_ref
-    : entry.source_app_icon_ref ?? null;
-  $: sourceAppLabel = peerImportedSourceApp !== null
-    ? `Aplicación fuente: ${peerImportedSourceApp.source_app_name?.trim() || "desconocida"}`
-    : sourceAppAccessibleLabel(entry);
+  $: iconRef = sourceAppPresentationIconRef(entry, peerImportedSourceApp);
+  $: sourceAppLabel = sourceAppPresentationAccessibleLabel(
+    entry,
+    peerImportedSourceApp,
+  );
   /** Mirror of `iconRef` we update synchronously so the
    * `onDestroy` cleanup can release the cached blob URL of the
    * current entry even when the component is rebuilt before

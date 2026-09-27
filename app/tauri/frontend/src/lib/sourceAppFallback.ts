@@ -19,7 +19,14 @@
 // component imports it and binds the value to the `aria-label`
 // and `title` attributes only.
 
-import type { EntryRecord } from "../types.ts";
+import type {
+  EntryRecord,
+  PeerImportedSourceAppPresentation,
+} from "../types.ts";
+
+/** Shared local-only fallback for an imported source app with no valid PNG. */
+export const IMPORTED_SOURCE_APP_FALLBACK_ICON_SVG =
+  '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 /**
  * Resolve the accessible label the card rail must announce for the
@@ -49,4 +56,24 @@ export function sourceAppAccessibleLabel(entry: EntryRecord): string {
   const id = entry.source_app?.trim();
   if (id) return `Aplicación fuente: ${id}`;
   return "Aplicación fuente desconocida";
+}
+
+/** Use imported provenance as a separate presentation, never as local entry metadata. */
+export function sourceAppPresentationIconRef(
+  entry: EntryRecord,
+  imported: PeerImportedSourceAppPresentation | null,
+): string | null {
+  return imported !== null
+    ? imported.source_app_icon_ref
+    : entry.source_app_icon_ref ?? null;
+}
+
+/** Imported source names are tooltip/accessibility text only; peer IDs never enter the label. */
+export function sourceAppPresentationAccessibleLabel(
+  entry: EntryRecord,
+  imported: PeerImportedSourceAppPresentation | null,
+): string {
+  if (imported === null) return sourceAppAccessibleLabel(entry);
+  const name = imported.source_app_name?.trim();
+  return `Aplicación fuente: ${name || "desconocida"}`;
 }

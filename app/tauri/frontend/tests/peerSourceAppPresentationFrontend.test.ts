@@ -100,12 +100,12 @@ test("imported source metadata loads in history and stays a tooltip tag beside t
   assert.match(refresh, /collection_id: collectionId/);
   assert.match(refresh, /selectedCollectionId !== selectedCollectionIdAtRequest/);
   assert.match(SOURCE.app, /void refreshPeerImportedSourceApps\(entries\)/);
+  assert.match(SOURCE.historyCard, /sourceAppPresentationIconRef\(entry, peerImportedSourceApp\)/);
+  assert.match(SOURCE.historyCard, /createIconResolver\(tauriSourceAppIconLoader\)/);
   assert.match(
     SOURCE.historyCard,
-    /iconRef = peerImportedSourceApp !== null\s*\?\s*peerImportedSourceApp\.source_app_icon_ref/,
+    /sourceAppPresentationAccessibleLabel\([\s\S]*?peerImportedSourceApp/,
   );
-  assert.match(SOURCE.historyCard, /createIconResolver\(tauriSourceAppIconLoader\)/);
-  assert.match(SOURCE.historyCard, /sourceAppLabel = peerImportedSourceApp !== null/);
   assert.match(SOURCE.historyCard, /title=\{sourceAppLabel\}/);
   assert.match(SOURCE.historyCard, /aria-label=\{sourceAppLabel\}/);
   assert.doesNotMatch(SOURCE.historyCard, /history-card-imported-source-app-name/);
