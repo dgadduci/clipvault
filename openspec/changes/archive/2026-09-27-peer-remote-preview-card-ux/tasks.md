@@ -115,18 +115,19 @@
 - [x] 6.3 Validate `peer-remote-preview-card-ux` with strict OpenSpec change
   validation and review the complete diff; verify no generated assets,
   remote paths, hashes or application identifiers are persisted or logged.
-- [ ] 6.4 Manually compare local and remote card size, selection, keyboard
+- [x] 6.4 Manually compare local and remote card size, selection, keyboard
   navigation and footer placement on macOS, Linux X11 and Linux Wayland; check
   source-app names (without icons or extra loading delay) on text and image
   previews and the fallback with a peer lacking the capability. User approved
-  the desktop preview/card checks on macOS and Linux; the X11/Wayland session
-  variants have not been separately confirmed.
+  the complete manual matrix on macOS, Linux X11 and Linux Wayland.
 - [x] 6.5 Manually import text and images from two peers; confirm each
   peer-bound collection shows its own icon with the name only as tooltip/tag,
   while general history shows the latest imported app presentation without a
   peer identifier. Confirm local metadata, clipboard, paste and drag payload
   remain unchanged. User manually approved imported attribution in desktop
   history/collections on macOS and Linux.
-- [ ] 6.6 Manually verify in QuickVault on macOS and Linux that imported text
+- [x] 6.6 Manually verify in QuickVault on macOS and Linux that imported text
   and image rows show their local source-app icon and name as tooltip/tag in
   recent and search results, with no list delay or clipboard/copy regression.
+  User approved the manual QuickVault check on macOS and Linux: imported
+  source-app icons and name tags are visible.

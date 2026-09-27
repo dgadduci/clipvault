@@ -784,37 +784,83 @@ global hotkey or clipboard listener.
 
 ### Requirement: Order recent Quick Paste results chronologically
 
-Quick Paste SHALL render its recent-mode result list in deterministic
-chronological order. The existing favorites-first behavior SHALL remain: the
-favorite group comes first, and both the favorite and non-favorite groups SHALL
-be ordered by capture time descending (`created_at DESC`) with `id DESC` as the
-tie-breaker. Search-mode hits SHALL retain the ranking returned by
-`SearchService` instead of being reordered by date.
+Quick Paste SHALL render its recent-mode result list in strict deterministic
+chronological order across all entries: `created_at DESC`, then `id DESC` as
+the tie-breaker. Favorite status SHALL NOT move an older entry ahead of a
+newer entry. After a newly persisted local capture or successful text/image
+peer import, an open Quick Paste window SHALL refresh from persisted rows and
+show the newest entry in its chronological position without requiring the
+window to be reopened. When refresh requests overlap, a stale response SHALL
+NOT replace the result from the latest applicable refresh. Search-mode hits
+SHALL retain the ranking returned by `SearchService` instead of being reordered
+by date.
+
+#### Scenario: A new local capture becomes the newest recent result
+
+- **WHEN** Quick Paste is open in recent mode and a new local capture commits
+- **THEN** the metadata-only history update causes Quick Paste to reload its
+  persisted recent rows
+- **AND** the new entry appears first when it has the newest `created_at`
+- **AND** the remaining entries continue in `created_at DESC, id DESC` order
+
+#### Scenario: A successful peer import becomes the newest recent result
+
+- **WHEN** a text or image peer import commits a new local entry while Quick
+  Paste is open in recent mode
+- **THEN** Quick Paste refreshes its persisted recent rows after the commit
+- **AND** the imported entry appears first when its local `created_at` is the
+  newest
+- **AND** a failed or rolled-back import does not appear as a new result
+
+#### Scenario: An older refresh resolves after a newer refresh
+
+- **WHEN** two recent-list requests overlap and the earlier request resolves
+  after a later request
+- **THEN** the earlier response is discarded and cannot move the newest entry
+  away from its correct position
+
+#### Scenario: Favorites do not override capture chronology
+
+- **WHEN** an older entry is pinned and a newer entry is not pinned
+- **THEN** the newer entry appears before the older pinned entry in recent mode
+- **AND** the pin indicator and pin action remain available
 
 #### Scenario: Recent favorites are newest first
 
 - **WHEN** recent Quick Paste results contain multiple favorite entries
-- **THEN** the favorite entries appear from the most recently captured to the
-  oldest, using the entry id only when capture timestamps tie
+- **THEN** favorite entries appear from the most recently captured to the
+  oldest, using descending entry ID only when capture timestamps tie
 
 #### Scenario: Recent non-favorites are newest first
 
 - **WHEN** recent Quick Paste results contain multiple non-favorite entries
-- **THEN** the non-favorite entries appear from the most recently captured to
-  the oldest, using the entry id only when capture timestamps tie
+- **THEN** non-favorite entries appear from the most recently captured to the
+  oldest, using descending entry ID only when capture timestamps tie
+
+#### Scenario: Equal timestamps have a deterministic order
+
+- **WHEN** multiple recent entries have the same `created_at`
+- **THEN** Quick Paste orders those entries by descending entry ID
+
+#### Scenario: A deduplicated import preserves the original capture time
+
+- **WHEN** a peer import resolves to an entry that already exists locally
+- **THEN** the existing entry's `created_at` is not changed merely to promote
+  it in Quick Paste
+- **AND** recent mode continues to order it by that original timestamp
 
 #### Scenario: Search ranking is preserved
 
-- **WHEN** the user has an active Quick Paste search query
-- **THEN** the list preserves the ranking and tie-breaks returned by
-  `SearchService` rather than replacing relevance with chronological order
+- **WHEN** the user has an active Quick Paste search query and history changes
+- **THEN** Quick Paste refreshes the search results without replacing
+  `SearchService` ranking with chronological ordering
 
 #### Scenario: Refresh and hydration do not scramble order
 
 - **WHEN** Quick Paste refreshes after `history-updated`, completes metadata
-  hydration, toggles a favorite or clears the search query
-- **THEN** the visible list remains deterministic and follows the applicable
-  recent or search ordering contract
+  hydration, toggles a favorite, or clears the search query
+- **THEN** recent mode remains in strict `created_at DESC, id DESC` order and
+  search mode preserves `SearchService` ranking
 
 #### Scenario: Copy does not change capture chronology
 
@@ -881,3 +927,44 @@ conservarán la secuencia vigente de captura de target, show, focus y apertura.
 - **WHEN** el grab pasivo del manager X11 entrega `Ctrl+Shift+V` sin grab ajeno
 - **THEN** SHALL abrir el mismo flujo Quick Paste
 - **AND** SHALL no abrir una segunda instancia por el observador raw
+
+### Requirement: QuickVault shows imported source-app attribution
+
+QuickVault recent and search rows SHALL show the locally stored source-app
+icon associated with an imported entry's latest `remote_imports` provenance.
+The source-app name SHALL be exposed only through the icon's `title` and
+accessible label, not as visible text. QuickVault SHALL obtain metadata for
+the visible entry IDs through the existing bounded local projection, SHALL NOT
+request source-app metadata from a peer, and SHALL NOT wait for that projection
+before rendering the result list. Missing or invalid imported icons SHALL use
+the static imported-origin marker; missing names SHALL use an honest unknown
+source label. A stale projection or icon response SHALL NOT replace metadata
+for a newer result set. This presentation SHALL NOT mutate clipboard data,
+paste behavior, or the entry's local source-app metadata.
+
+#### Scenario: Imported entry appears in recent results
+
+- **WHEN** a text or image entry with source-app metadata from a peer import
+  appears in QuickVault recent results
+- **THEN** QuickVault displays the locally resolved imported app icon and
+  exposes its name through that icon's tooltip and accessible label
+- **AND** it does not display the name as visible text or expose a peer ID
+
+#### Scenario: Imported entry appears in search results
+
+- **WHEN** an imported entry appears in QuickVault search results
+- **THEN** QuickVault uses the same latest-provenance icon and name as recent
+  results without a per-entry peer request
+
+#### Scenario: Imported icon or name is unavailable
+
+- **WHEN** the latest provenance has no valid local icon reference or name
+- **THEN** QuickVault displays the static imported-origin icon and an honest
+  unknown-source label for whichever field is missing
+
+#### Scenario: Projection is pending or stale
+
+- **WHEN** source-app projection is pending or a previous recent/search
+  response completes after a newer result set
+- **THEN** the result rows render without waiting, and stale metadata or icon
+  responses are discarded
