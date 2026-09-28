@@ -9,14 +9,15 @@
 //! * It only ever touches `clipvault-kde-source-app` under the
 //!   user's `kwin/scripts/` directory; any pre-existing entry with
 //!   a foreign metadata identity is left untouched.
-//! * It refuses to write through `kwriteconfig`,
-//!   `qdbus`, `kpackagetool` or any other external binary — the
-//!   only side-effect channel is KWin's own D-Bus interface.
-//! * Activation / deactivation happen via KWin's documented
-//!   `Plugins/<id>Enabled` key in `kwinrc` and a follow-up
-//!   `reconfigure` call. `kwriteconfig` is forbidden; the
-//!   installer writes the file directly so the existing keys stay
-//!   intact.
+//! * It refuses to write through `kwriteconfig`, `qdbus`,
+//!   `kpackagetool` or any other external binary. The Tauri
+//!   integration asks KWin to reload through the typed `zbus`
+//!   client after the filesystem/configuration transaction.
+//! * Activation / deactivation change only KWin's documented
+//!   `Plugins/<id>Enabled` key in `kwinrc`. `kwriteconfig` is
+//!   forbidden; the installer writes the file directly so the
+//!   existing keys stay intact. The caller then asks KWin to reload
+//!   over the session bus.
 //! * `uninstall` removes only the bundle's own directory and only
 //!   after the script has been deactivated; foreign extensions
 //!   under `~/.local/share/kwin/scripts` are never deleted.
@@ -238,9 +239,8 @@ impl KwinInstaller {
     }
 
     /// Idempotent install. The first call writes the bundled
-    /// package, activates it and asks KWin to reload; subsequent
-    /// calls leave the directory untouched and return the live
-    /// `enabled` flag.
+    /// package and activates it. The caller asks KWin to reload over
+    /// the session bus after this method returns.
     pub fn install(
         &self,
         bundled: &BundledKwinScript,
@@ -288,7 +288,6 @@ impl KwinInstaller {
         let first_install = !self.is_enabled_in_kwinrc();
         if first_install {
             self.enable_in_kwinrc()?;
-            request_kwin_reconfigure()?;
         }
 
         Ok(KwinInstallOutcome {
@@ -300,6 +299,15 @@ impl KwinInstaller {
             },
             activated: first_install,
         })
+    }
+
+    /// Disable the ClipVault plugin without removing its package.
+    /// The caller asks KWin to reload after this write.
+    pub fn disable(&self) -> Result<KwinInstallation, KdeKwinInstallerError> {
+        self.disable_in_kwinrc()?;
+        Ok(self
+            .inspect()?
+            .unwrap_or_else(KwinInstallation::not_installed))
     }
 
     /// Idempotent uninstall. Removes the bundled package
@@ -327,11 +335,9 @@ impl KwinInstaller {
                 return Err(KdeKwinInstallerError::ForeignExtension(metadata.id));
             }
         }
-        // Disable first, then ask KWin to reload so the script
-        // can no longer publish envelopes while we delete the
-        // directory.
+        // Disable first. The caller reloads KWin before invoking
+        // this method so the script can no longer publish envelopes.
         self.disable_in_kwinrc()?;
-        request_kwin_reconfigure()?;
         fs::remove_dir_all(&target)
             .map_err(|error| KdeKwinInstallerError::Io(error.to_string()))?;
         Ok(KwinInstallation::not_installed())
@@ -473,45 +479,21 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), KdeKwinInstallerError> 
 /// future `KDE` session picks up the freshly written `kwinrc`
 /// automatically; the only error the helper raises is when the
 /// D-Bus call itself fails.
-fn request_kwin_reconfigure() -> Result<(), KdeKwinInstallerError> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-
-    let mut command = Command::new("dbus-send");
-    command
-        .args([
-            "--session",
-            "--print-reply=literal",
-            "--dest=org.kde.KWin",
-            "/Scripting",
-            "org.kde.kwin.Scripting.start",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    // `start` is the documented entry point on KWin's scripting
-    // bus; sending it asks KWin to reload its script registry and
-    // honour the freshly written `kwinrc` keys. We only check the
-    // exit code; the reply payload is irrelevant.
-    match command.spawn().and_then(|mut child| child.wait()) {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => {
-            let _ = writeln!(std::io::stderr(), "kwin reconfigure returned {status}");
-            Err(KdeKwinInstallerError::KwinReconfigure(format!(
-                "exit status {status}"
-            )))
-        }
-        Err(error) => {
-            // dbus-send missing is a transient environment issue
-            // and never fatal: KWin will pick the keys up at the
-            // next start.
-            if error.kind() == io::ErrorKind::NotFound {
-                Ok(())
-            } else {
-                Err(KdeKwinInstallerError::KwinReconfigure(error.to_string()))
-            }
-        }
-    }
+pub async fn request_kwin_reconfigure() -> Result<(), KdeKwinInstallerError> {
+    let connection = zbus::Connection::session()
+        .await
+        .map_err(|error| KdeKwinInstallerError::KwinReconfigure(error.to_string()))?;
+    connection
+        .call_method(
+            Some("org.kde.KWin"),
+            "/KWin",
+            Some("org.kde.KWin"),
+            "reconfigure",
+            &(),
+        )
+        .await
+        .map_err(|error| KdeKwinInstallerError::KwinReconfigure(error.to_string()))?;
+    Ok(())
 }
 
 #[cfg(test)]

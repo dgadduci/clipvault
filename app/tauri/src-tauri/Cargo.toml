@@ -21,6 +21,7 @@ default = [
     "clipboard-arboard",
     "hotkey-global",
     "linux-gnome-shell-integration",
+    "linux-kde-kwin-integration",
     "linux-xlib-init",
     "local-peer-identity-keychain",
     "local-peer-discovery-mdns",
@@ -109,10 +110,9 @@ linux-gnome-shell-integration = ["clipvault-platform/linux-gnome-shell-integrati
 # KDE Plasma Wayland KWin integration. The script and the D-Bus
 # bridge live behind this feature so macOS / Windows builds do not
 # link `zbus` and the bootstrap never references the KWin path on
-# sessions that cannot answer it. The runtime side decides per
-# session whether to install the bridge — see the
-# `try_build_kde_kwin_probe` helper in `bootstrap.rs`.
-linux-kde-kwin-integration = ["clipvault-platform/linux-kde-kwin-integration"]
+# sessions that cannot answer it. The runtime side activates the
+# bridge only after explicit consent in `kde_kwin_integration.rs`.
+linux-kde-kwin-integration = ["clipvault-platform/linux-kde-kwin-integration", "dep:tokio"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -167,6 +167,7 @@ clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
     "local-peer-discovery-mdns",
     "local-peer-pairing-tls",
 ] }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

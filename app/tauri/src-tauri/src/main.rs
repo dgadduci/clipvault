@@ -8,6 +8,8 @@ mod bootstrap;
 mod commands;
 #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
 mod gnome_integration;
+#[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+mod kde_kwin_integration;
 mod main_window_layout;
 mod metadata_scheduler;
 mod state;
@@ -76,6 +78,23 @@ fn main() {
 
             #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
             configure_gnome_quick_paste_sink(&state, app.handle());
+
+            #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+            if let Some(integration) = state.kde_kwin_integration.as_ref().cloned() {
+                let context = state.context.clone();
+                let fallback = state.adapters.active_app();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = integration
+                        .reactivate_if_consented(&context, fallback)
+                        .await
+                    {
+                        warn!(
+                            kind = error.stable_kind(),
+                            "KWin integration startup failed"
+                        );
+                    }
+                });
+            }
 
             // Install and retain the Tauri-backed tray. Its managed state owns
             // the native icon and is the sole dispatcher for native menu
@@ -234,6 +253,12 @@ fn main() {
             commands::clipvault_gnome_integration_install,
             commands::clipvault_gnome_integration_uninstall,
             commands::clipvault_gnome_integration_retry,
+            commands::clipvault_kde_kwin_integration_status,
+            commands::clipvault_kde_kwin_integration_activate,
+            commands::clipvault_kde_kwin_integration_decline,
+            commands::clipvault_kde_kwin_integration_disable,
+            commands::clipvault_kde_kwin_integration_uninstall,
+            commands::clipvault_kde_kwin_integration_retry,
             commands::clipvault_local_peer_profile_get,
             commands::clipvault_local_peer_profile_update,
             commands::clipvault_peer_sharing_toggle_get,

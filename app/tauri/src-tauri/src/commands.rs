@@ -2466,6 +2466,189 @@ mod gnome_commands {
 pub use gnome_commands::*;
 
 // ---------------------------------------------------------------------------
+// KDE Plasma Wayland KWin source-application integration.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+mod kde_kwin_commands {
+    use super::*;
+
+    use crate::kde_kwin_integration::{
+        read_bundled_script, KdeKwinIntegrationPayload, KdeKwinShellError,
+    };
+
+    fn integration(
+        state: &SharedState,
+    ) -> Result<Arc<crate::kde_kwin_integration::KdeKwinIntegrationState>, CommandError> {
+        state
+            .app_state()
+            .kde_kwin_integration
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| CommandError::new("feature_disabled", "KWin integration is unavailable"))
+    }
+
+    fn command_error(error: KdeKwinShellError) -> CommandError {
+        CommandError::new(error.stable_kind(), "KWin integration operation failed")
+    }
+
+    #[tauri::command]
+    pub fn clipvault_kde_kwin_integration_status(
+        state: State<'_, SharedState>,
+    ) -> Result<KdeKwinIntegrationPayload, CommandError> {
+        Ok(integration(&state)?.payload())
+    }
+
+    #[tauri::command]
+    pub async fn clipvault_kde_kwin_integration_activate(
+        state: State<'_, SharedState>,
+        handle: tauri::AppHandle,
+    ) -> Result<KdeKwinIntegrationPayload, CommandError> {
+        let integration = integration(&state)?;
+        let bundled = read_bundled_script(&handle).map_err(|_| {
+            CommandError::new("bundled_missing", "KWin script resources are unavailable")
+        })?;
+        let context = state.context().clone();
+        let fallback = state.adapters().active_app();
+        integration
+            .activate(&context, fallback, &bundled)
+            .await
+            .map_err(command_error)
+    }
+
+    #[tauri::command]
+    pub async fn clipvault_kde_kwin_integration_decline(
+        state: State<'_, SharedState>,
+    ) -> Result<KdeKwinIntegrationPayload, CommandError> {
+        let integration = integration(&state)?;
+        let context = state.context().clone();
+        let fallback = state.adapters().active_app();
+        integration
+            .decline(&context, fallback)
+            .await
+            .map_err(command_error)
+    }
+
+    #[tauri::command]
+    pub async fn clipvault_kde_kwin_integration_disable(
+        state: State<'_, SharedState>,
+    ) -> Result<KdeKwinIntegrationPayload, CommandError> {
+        let integration = integration(&state)?;
+        let context = state.context().clone();
+        let fallback = state.adapters().active_app();
+        integration
+            .disable(&context, fallback)
+            .await
+            .map_err(command_error)
+    }
+
+    #[tauri::command]
+    pub async fn clipvault_kde_kwin_integration_uninstall(
+        state: State<'_, SharedState>,
+    ) -> Result<KdeKwinIntegrationPayload, CommandError> {
+        let integration = integration(&state)?;
+        let context = state.context().clone();
+        let fallback = state.adapters().active_app();
+        integration
+            .uninstall(&context, fallback)
+            .await
+            .map_err(command_error)
+    }
+
+    #[tauri::command]
+    pub async fn clipvault_kde_kwin_integration_retry(
+        state: State<'_, SharedState>,
+    ) -> Result<KdeKwinIntegrationPayload, CommandError> {
+        let integration = integration(&state)?;
+        let context = state.context().clone();
+        let fallback = state.adapters().active_app();
+        integration
+            .retry(&context, fallback)
+            .await
+            .map_err(command_error)
+    }
+}
+
+#[cfg(not(all(target_os = "linux", feature = "linux-kde-kwin-integration")))]
+mod kde_kwin_commands {
+    use super::*;
+
+    #[derive(Debug, Serialize)]
+    pub struct KdeKwinIntegrationPayload {
+        pub applicable: bool,
+        pub session: String,
+        pub consent: String,
+        pub technical_state: String,
+        pub installed: bool,
+        pub enabled: bool,
+        pub backend: String,
+        pub protocol_version: u32,
+        pub detail: Option<String>,
+        pub error: Option<String>,
+    }
+
+    fn unavailable() -> CommandError {
+        CommandError::new("feature_disabled", "KWin integration is unavailable")
+    }
+
+    #[tauri::command]
+    pub fn clipvault_kde_kwin_integration_status(
+        _state: State<'_, SharedState>,
+    ) -> Result<KdeKwinIntegrationPayload, CommandError> {
+        Ok(KdeKwinIntegrationPayload {
+            applicable: false,
+            session: "non_linux".to_string(),
+            consent: "unknown".to_string(),
+            technical_state: "not_applicable".to_string(),
+            installed: false,
+            enabled: false,
+            backend: "kde_kwin_script".to_string(),
+            protocol_version: 1,
+            detail: None,
+            error: None,
+        })
+    }
+
+    #[tauri::command]
+    pub async fn clipvault_kde_kwin_integration_activate(
+        _state: State<'_, SharedState>,
+        _handle: tauri::AppHandle,
+    ) -> Result<KdeKwinIntegrationPayload, CommandError> {
+        Err(unavailable())
+    }
+
+    #[tauri::command]
+    pub async fn clipvault_kde_kwin_integration_decline(
+        _state: State<'_, SharedState>,
+    ) -> Result<KdeKwinIntegrationPayload, CommandError> {
+        Err(unavailable())
+    }
+
+    #[tauri::command]
+    pub async fn clipvault_kde_kwin_integration_disable(
+        _state: State<'_, SharedState>,
+    ) -> Result<KdeKwinIntegrationPayload, CommandError> {
+        Err(unavailable())
+    }
+
+    #[tauri::command]
+    pub async fn clipvault_kde_kwin_integration_uninstall(
+        _state: State<'_, SharedState>,
+    ) -> Result<KdeKwinIntegrationPayload, CommandError> {
+        Err(unavailable())
+    }
+
+    #[tauri::command]
+    pub async fn clipvault_kde_kwin_integration_retry(
+        _state: State<'_, SharedState>,
+    ) -> Result<KdeKwinIntegrationPayload, CommandError> {
+        Err(unavailable())
+    }
+}
+
+pub use kde_kwin_commands::*;
+
+// ---------------------------------------------------------------------------
 // Local peer identity commands.
 //
 // The shell exposes only metadata-only DTOs to the frontend; the

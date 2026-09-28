@@ -75,6 +75,10 @@ pub struct AppState {
     #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
     #[allow(dead_code)]
     pub gnome_integration: Option<Arc<crate::gnome_integration::GnomeIntegrationState>>,
+    /// Optional KDE Wayland KWin integration lifecycle. The state is
+    /// present only in Linux builds carrying the KWin feature.
+    #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+    pub kde_kwin_integration: Option<Arc<crate::kde_kwin_integration::KdeKwinIntegrationState>>,
 }
 
 /// How often the background capture loop polls the clipboard.
@@ -217,6 +221,14 @@ pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
     let metadata_scheduler = Arc::new(MetadataEnrichmentScheduler::new());
     #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
     let gnome_integration_state = build_gnome_integration_state(&context);
+    #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+    let kde_kwin_integration_state = {
+        let state = Arc::new(crate::kde_kwin_integration::KdeKwinIntegrationState::new(
+            Arc::new(context.kde_kwin_integration().clone()),
+        ));
+        state.load_consent(&context);
+        Some(state)
+    };
     // Once the AppContext exists we can read the persisted consent
     // decision and the install state. The helper below swaps the
     // GNOME probe into the cached active-app probe ahead of the
@@ -238,6 +250,8 @@ pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         active_app_refresher: None,
         metadata_scheduler: Arc::clone(&metadata_scheduler),
         gnome_integration: gnome_integration_state.clone(),
+        #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+        kde_kwin_integration: kde_kwin_integration_state.clone(),
     };
     #[cfg(not(all(target_os = "linux", feature = "linux-gnome-shell-integration")))]
     let provisional_state = AppState {
@@ -247,6 +261,8 @@ pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         cancel_capture: Arc::new(AtomicBool::new(false)),
         active_app_refresher: None,
         metadata_scheduler: Arc::clone(&metadata_scheduler),
+        #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+        kde_kwin_integration: kde_kwin_integration_state.clone(),
     };
     let (_refresher_outcome, active_app_refresher) =
         install_active_app_main_queue_refresher(&provisional_state);
@@ -262,6 +278,8 @@ pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         metadata_scheduler,
         #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
         gnome_integration: provisional_state.gnome_integration,
+        #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+        kde_kwin_integration: provisional_state.kde_kwin_integration,
     };
 
     // On startup with `local_peer_sharing_enabled = true`, the
@@ -1612,26 +1630,15 @@ fn build_active_application(
     // authoritative source when the user has accepted the
     // integration. The precedence chain documented in `design.md` is:
     //
-    // 1. KDE Plasma Wayland KWin script (when the user has
-    //    accepted the integration).
-    // 2. GNOME Shell Extension when connected.
-    // 3. Native Wayland public protocol.
-    // 4. XWayland / EWMH fallback.
-    // 5. Noop.
+    // 1. GNOME Shell Extension when connected.
+    // 2. Native Wayland public protocol.
+    // 3. XWayland / EWMH fallback.
+    // 4. Noop.
     //
     // When the consent decision is `accepted` AND the extension is
     // installed and connected, return the GNOME probe ahead of the
     // native Wayland adapter so a stale native identifier never
     // overrides the most recent GNOME focus.
-    #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
-    if matches!(
-        info.display_server,
-        clipvault_platform::DisplayServer::Wayland
-    ) {
-        if let Some(probe) = try_build_kde_kwin_probe(info) {
-            return probe;
-        }
-    }
     #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
     if matches!(
         info.display_server,
@@ -1793,28 +1800,6 @@ fn build_active_application(
 #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
 fn try_build_gnome_probe(_info: &PlatformInfo) -> Option<Arc<dyn ActiveApplicationProbe>> {
     None
-}
-
-/// Best-effort probe construction for the KDE Plasma Wayland KWin
-/// integration. The helper always returns the probe when the
-/// session is detected as KDE Plasma Wayland so the rest of the
-/// pipeline keeps using the same `CachedActiveApplication`
-/// wrapper; the actual D-Bus bridge is started later by the
-/// integration service once `AppContext` exists. Returning `None`
-/// on non-KDE sessions lets the GNOME / native / XWayland branches
-/// take over without further branching.
-#[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
-fn try_build_kde_kwin_probe(_info: &PlatformInfo) -> Option<Arc<dyn ActiveApplicationProbe>> {
-    use clipvault_platform::runtime::linux_kde_kwin_integration::{
-        detect_session as kde_detect_session, KdeKwinActiveApplication, KdeSessionKind,
-        SharedKdeKwinSnapshot,
-    };
-    if !matches!(kde_detect_session(), KdeSessionKind::KdePlasmaWayland) {
-        return None;
-    }
-    let snapshot = SharedKdeKwinSnapshot::new();
-    let probe = KdeKwinActiveApplication::new(snapshot);
-    Some(Arc::new(probe) as Arc<dyn ActiveApplicationProbe>)
 }
 
 /// Build the application-metadata provider used by the
@@ -4720,6 +4705,8 @@ mod tests {
             metadata_scheduler: Arc::new(MetadataEnrichmentScheduler::new()),
             #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
             gnome_integration: None,
+            #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+            kde_kwin_integration: None,
         }
     }
 

@@ -231,6 +231,8 @@ rustls-pki-types = { workspace = true, optional = true }
 # handshake. Already pulled in transitively by `rustls`; declaring
 # it directly keeps the pairing surface stable.
 rustls-webpki = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 # Typed D-Bus bridge the `kde-wayland-source-app-detection`
 # change drives from inside the platform crate. The platform
 # layer owns the receiver / sender / sender-validation surface
@@ -238,7 +240,9 @@ rustls-webpki = { workspace = true, optional = true }
 # features are disabled in the workspace declaration to avoid
 # pulling `async-io` / `async-executor` / `tls` into the bundle;
 # only `tokio` is enabled so the receiver plugs into the
-# workspace runtime.
+# workspace runtime. The target-specific declaration keeps the
+# dependency out of macOS builds even when Cargo resolves default
+# feature names globally.
 zbus = { workspace = true, optional = true }
 
 [dev-dependencies]

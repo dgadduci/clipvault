@@ -121,8 +121,9 @@ pub use runtime::linux_gnome_shell_integration::{
 };
 #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
 pub use runtime::linux_kde_kwin_installer::{
-    BundledKwinScript, KdeKwinInstallerError, KwinHostEnvironment, KwinInstallOutcome,
-    KwinInstallation, KwinInstaller, SystemKwinHostEnvironment, KWIN_SCRIPT_PLUGIN_ID,
+    request_kwin_reconfigure, BundledKwinScript, KdeKwinInstallerError, KwinHostEnvironment,
+    KwinInstallOutcome, KwinInstallation, KwinInstaller, SystemKwinHostEnvironment,
+    KWIN_SCRIPT_PLUGIN_ID,
 };
 #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
 pub use runtime::linux_kde_kwin_integration::{

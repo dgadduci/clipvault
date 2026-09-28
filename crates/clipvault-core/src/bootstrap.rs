@@ -28,6 +28,7 @@ use crate::code_language_service::CodeLanguageService;
 use crate::gnome_integration::GnomeIntegrationService;
 use crate::history::TextHistoryService;
 use crate::ignored_apps_service::IgnoredAppsService;
+use crate::kde_kwin_integration::KdeKwinIntegrationService;
 use crate::management::{HistoryManagementService, DEFAULT_RETENTION, RETENTION_SETTING_KEY};
 use crate::organization::OrganizationService;
 use crate::paste::PasteService;
@@ -196,6 +197,7 @@ pub struct AppContext {
     settings: SettingsService,
     ignored_apps: IgnoredAppsService,
     gnome_integration: GnomeIntegrationService,
+    kde_kwin_integration: KdeKwinIntegrationService,
     started_at: OffsetDateTime,
     version: &'static str,
     /// Cached probe that the background watcher consults. The shell
@@ -389,6 +391,10 @@ impl AppContext {
 
     pub fn gnome_integration(&self) -> &GnomeIntegrationService {
         &self.gnome_integration
+    }
+
+    pub fn kde_kwin_integration(&self) -> &KdeKwinIntegrationService {
+        &self.kde_kwin_integration
     }
 
     pub fn started_at(&self) -> OffsetDateTime {
@@ -1112,11 +1118,14 @@ impl AppBootstrap {
             IgnoredAppsService::new(Arc::clone(&self.options.clock), gate.clone());
         let gnome_integration_service =
             GnomeIntegrationService::new(Arc::clone(&self.options.clock));
+        let kde_kwin_integration_service =
+            KdeKwinIntegrationService::new(Arc::clone(&self.options.clock));
         // Wrap the database once so the GNOME integration service can
         // prime its in-memory cache without touching `AppContext` and
         // every later consumer sees the same `Arc<Mutex<Database>>`.
         let database_handle = Arc::new(Mutex::new(database));
         let _ = gnome_integration_service.prime_from_database(&database_handle);
+        let _ = kde_kwin_integration_service.prime_from_database(&database_handle);
         let active_app_diagnostics = ActiveAppDiagnosticsState::new(
             capabilities.active_application,
             active_app_backend_kind(&platform, capabilities.active_application),
@@ -1938,6 +1947,7 @@ impl AppBootstrap {
             settings: settings_service,
             ignored_apps: ignored_apps_service,
             gnome_integration: gnome_integration_service,
+            kde_kwin_integration: kde_kwin_integration_service,
             started_at,
             version: env!("CARGO_PKG_VERSION"),
             cached_active_app: cached_probe,

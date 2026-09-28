@@ -17,6 +17,12 @@
     captureTickCommand,
     diagnosticsCommand,
     gnomeIntegrationStatusCommand,
+    kdeKwinIntegrationActivateCommand,
+    kdeKwinIntegrationDeclineCommand,
+    kdeKwinIntegrationDisableCommand,
+    kdeKwinIntegrationRetryCommand,
+    kdeKwinIntegrationStatusCommand,
+    kdeKwinIntegrationUninstallCommand,
     pasteEntryCommand,
     platformCapabilitiesCommand,
     recentEntriesCommand,
@@ -31,6 +37,7 @@
     Diagnostics,
     EntryRecord,
     GnomeIntegrationStatusResponse,
+    KdeKwinIntegrationPayload,
     PasteResponse,
   } from "./types";
 
@@ -47,6 +54,9 @@
   let gnomeStatus: GnomeIntegrationStatusResponse | null = null;
   let gnomeBusy = false;
   let gnomeError: string | null = null;
+  let kdeKwinStatus: KdeKwinIntegrationPayload | null = null;
+  let kdeKwinBusy = false;
+  let kdeKwinError: string | null = null;
 
   const dispatch = createEventDispatcher<{
     refresh: void;
@@ -84,6 +94,33 @@
       gnomeError = describeGnomeIntegrationError(err);
     } finally {
       gnomeBusy = false;
+    }
+  }
+
+  async function refreshKdeKwinStatus(): Promise<void> {
+    kdeKwinBusy = true;
+    kdeKwinError = null;
+    try {
+      kdeKwinStatus = await kdeKwinIntegrationStatusCommand();
+    } catch (err) {
+      kdeKwinError = err instanceof Error ? err.message : String(err);
+    } finally {
+      kdeKwinBusy = false;
+    }
+  }
+
+  async function runKdeKwinAction(
+    action: () => Promise<KdeKwinIntegrationPayload>,
+  ): Promise<void> {
+    if (kdeKwinBusy) return;
+    kdeKwinBusy = true;
+    kdeKwinError = null;
+    try {
+      kdeKwinStatus = await action();
+    } catch (err) {
+      kdeKwinError = err instanceof Error ? err.message : String(err);
+    } finally {
+      kdeKwinBusy = false;
     }
   }
 
@@ -320,6 +357,101 @@
           data-testid="gnome-configure"
         >
           Configurar integración GNOME
+        </button>
+      {/if}
+    </div>
+  </article>
+
+  <article class="card-block" data-testid="kde-kwin-integration-card">
+    <h3 class="block-title">Integración KDE Plasma Wayland</h3>
+    <p class="muted">
+      Permite que KWin comunique el identificador de la aplicación enfocada.
+      ClipVault usa ese dato localmente para mostrar el nombre y el icono del
+      origen. No se transmiten títulos de ventanas ni contenido del portapapeles.
+    </p>
+    {#if kdeKwinStatus}
+      <dl class="diag-list">
+        <dt>Sesión</dt>
+        <dd><code>{kdeKwinStatus.session}</code></dd>
+        <dt>Consentimiento</dt>
+        <dd><code>{kdeKwinStatus.consent}</code></dd>
+        <dt>Estado</dt>
+        <dd><code>{kdeKwinStatus.technical_state}</code></dd>
+        <dt>Paquete instalado</dt>
+        <dd><code>{kdeKwinStatus.installed ? "sí" : "no"}</code></dd>
+        <dt>Paquete habilitado</dt>
+        <dd><code>{kdeKwinStatus.enabled ? "sí" : "no"}</code></dd>
+        {#if kdeKwinStatus.error}
+          <dt>Error</dt>
+          <dd><code>{kdeKwinStatus.error}</code></dd>
+        {/if}
+      </dl>
+    {:else}
+      <p class="muted">Consulta el estado para ver si esta sesión es compatible.</p>
+    {/if}
+    {#if kdeKwinError}
+      <p class="status error" role="alert" data-testid="kde-kwin-error">
+        {kdeKwinError}
+      </p>
+    {/if}
+    <div class="row">
+      <button
+        type="button"
+        on:click={refreshKdeKwinStatus}
+        disabled={kdeKwinBusy}
+        data-testid="kde-kwin-refresh"
+      >
+        {kdeKwinBusy ? "Actualizando…" : "Consultar estado KWin"}
+      </button>
+      {#if kdeKwinStatus?.applicable && (!kdeKwinStatus.enabled || kdeKwinStatus.consent !== "accepted")}
+        <button
+          type="button"
+          class="primary"
+          on:click={() => runKdeKwinAction(kdeKwinIntegrationActivateCommand)}
+          disabled={kdeKwinBusy}
+          data-testid="kde-kwin-activate"
+        >
+          {kdeKwinBusy ? "Procesando…" : "Dar consentimiento y activar"}
+        </button>
+      {/if}
+      {#if kdeKwinStatus?.applicable && kdeKwinStatus.consent === "unknown"}
+        <button
+          type="button"
+          class="secondary"
+          on:click={() => runKdeKwinAction(kdeKwinIntegrationDeclineCommand)}
+          disabled={kdeKwinBusy}
+          data-testid="kde-kwin-decline"
+        >
+          No activar
+        </button>
+      {/if}
+      {#if kdeKwinStatus?.applicable && kdeKwinStatus.installed && kdeKwinStatus.enabled}
+        <button
+          type="button"
+          on:click={() => runKdeKwinAction(kdeKwinIntegrationDisableCommand)}
+          disabled={kdeKwinBusy}
+          data-testid="kde-kwin-disable"
+        >
+          Desactivar
+        </button>
+        <button
+          type="button"
+          class="secondary"
+          on:click={() => runKdeKwinAction(kdeKwinIntegrationUninstallCommand)}
+          disabled={kdeKwinBusy}
+          data-testid="kde-kwin-uninstall"
+        >
+          Desinstalar
+        </button>
+      {/if}
+      {#if kdeKwinStatus?.applicable && kdeKwinStatus.consent === "accepted" && kdeKwinStatus.installed && kdeKwinStatus.enabled && kdeKwinStatus.technical_state !== "identified"}
+        <button
+          type="button"
+          on:click={() => runKdeKwinAction(kdeKwinIntegrationRetryCommand)}
+          disabled={kdeKwinBusy}
+          data-testid="kde-kwin-retry"
+        >
+          Reintentar conexión
         </button>
       {/if}
     </div>

@@ -1246,6 +1246,41 @@ export interface GnomeIntegrationInstallResult {
   };
 }
 
+// ---------------------------------------------------------------------------
+// `kde-wayland-source-app-detection` capability.
+// ---------------------------------------------------------------------------
+
+export type KdeKwinConsentDecision =
+  | "unknown"
+  | "accepted"
+  | "declined"
+  | "disabled";
+
+export type KdeKwinTechnicalState =
+  | "not_applicable"
+  | "awaiting_consent"
+  | "not_installed"
+  | "disabled"
+  | "activation_pending"
+  | "no_active_application"
+  | "identified"
+  | "disconnected"
+  | "communication_error";
+
+/** Metadata-only status for the optional KDE Plasma Wayland bridge. */
+export interface KdeKwinIntegrationPayload {
+  applicable: boolean;
+  session: string;
+  consent: KdeKwinConsentDecision;
+  technical_state: KdeKwinTechnicalState;
+  installed: boolean;
+  enabled: boolean;
+  backend: string;
+  protocol_version: number;
+  detail: string | null;
+  error: string | null;
+}
+
 export type CollectionKind = "system" | "user";
 
 export interface Collection {

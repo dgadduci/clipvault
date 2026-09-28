@@ -19,6 +19,7 @@ import type {
   GnomeIntegrationInstallResult,
   GnomeIntegrationPayload,
   GnomeIntegrationStatusResponse,
+  KdeKwinIntegrationPayload,
   IgnoredAppEntry,
   LinuxCatalogResponse,
   LinuxPickAndAddResponse,
@@ -1110,6 +1111,24 @@ export const gnomeIntegrationUninstallCommand: ClipvaultCommand<GnomeIntegration
 export const gnomeIntegrationRetryCommand: ClipvaultCommand<GnomeIntegrationPayload> =
   () => invoke<GnomeIntegrationPayload>("clipvault_gnome_integration_retry");
 
+export const kdeKwinIntegrationStatusCommand: ClipvaultCommand<KdeKwinIntegrationPayload> =
+  () => invoke<KdeKwinIntegrationPayload>("clipvault_kde_kwin_integration_status");
+
+export const kdeKwinIntegrationActivateCommand: ClipvaultCommand<KdeKwinIntegrationPayload> =
+  () => invoke<KdeKwinIntegrationPayload>("clipvault_kde_kwin_integration_activate");
+
+export const kdeKwinIntegrationDeclineCommand: ClipvaultCommand<KdeKwinIntegrationPayload> =
+  () => invoke<KdeKwinIntegrationPayload>("clipvault_kde_kwin_integration_decline");
+
+export const kdeKwinIntegrationDisableCommand: ClipvaultCommand<KdeKwinIntegrationPayload> =
+  () => invoke<KdeKwinIntegrationPayload>("clipvault_kde_kwin_integration_disable");
+
+export const kdeKwinIntegrationUninstallCommand: ClipvaultCommand<KdeKwinIntegrationPayload> =
+  () => invoke<KdeKwinIntegrationPayload>("clipvault_kde_kwin_integration_uninstall");
+
+export const kdeKwinIntegrationRetryCommand: ClipvaultCommand<KdeKwinIntegrationPayload> =
+  () => invoke<KdeKwinIntegrationPayload>("clipvault_kde_kwin_integration_retry");
+
 // Re-export the types so consumers don't need a second import.
 export type {
   ActiveAppDiagnostics,
@@ -1128,6 +1147,9 @@ export type {
   GnomeIntegrationPayload,
   GnomeIntegrationStatusResponse,
   GnomeTechnicalState,
+  KdeKwinConsentDecision,
+  KdeKwinIntegrationPayload,
+  KdeKwinTechnicalState,
   IgnoredAppEntry,
   LocalPeerProfile,
   LocalPeerProfileResponse,

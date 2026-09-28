@@ -23,6 +23,7 @@ pub mod history;
 pub mod ignored_apps;
 pub mod ignored_apps_service;
 pub mod image_capture_diagnostic;
+pub mod kde_kwin_integration;
 #[cfg(target_os = "linux")]
 pub mod linux_picker;
 pub mod management;
@@ -131,6 +132,10 @@ pub use ignored_apps_service::{IgnoredAppsService, IgnoredAppsServiceError};
 pub use image_capture_diagnostic::{
     log_image_capture_diagnostic, log_image_paste_diagnostic, ColorProfileKind,
     ImageCaptureDiagnostic, ImageSource, RepresentationSource,
+};
+pub use kde_kwin_integration::{
+    KdeKwinConsentDecision, KdeKwinIntegrationError, KdeKwinIntegrationService,
+    KDE_KWIN_CONSENT_STORAGE_KEY,
 };
 pub use management::{
     AssetCollectionOutcome, ClearOutcome, DeleteOutcome, HistoryManagementService,

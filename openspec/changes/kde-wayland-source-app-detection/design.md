@@ -76,6 +76,12 @@ operaciones deben conservar el resto de `kwinrc`, ser atómicas e idempotentes,
 y rechazar un directorio de paquete o una clave del plugin que pertenezca a
 otro recurso.
 
+La reconfiguración usa el método documentado `org.kde.KWin /KWin
+org.kde.KWin.reconfigure`, invocado directamente con `zbus`. El adapter de
+instalación escribe la clave y el paquete; el lifecycle de Tauri ordena la
+llamada D-Bus y sólo cambia el probe compartido cuando el receiver está
+registrado.
+
 Desactivar cambia sólo la clave del plugin propio a deshabilitado y confirma
 el estado con KWin; desinstalar además retira sólo el directorio de paquete
 propio una vez desactivado. Si ya existe un recurso con el mismo identificador

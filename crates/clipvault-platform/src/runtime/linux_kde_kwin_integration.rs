@@ -168,6 +168,9 @@ pub enum KdeKwinIntegrationState {
     /// The user accepted but the script is not installed on the
     /// user's account yet.
     NotInstalled,
+    /// The user disabled the integration while leaving the package
+    /// installed.
+    Disabled,
     /// The script is installed but the bridge has not observed a
     /// first `Publish` call.
     ActivationPending,
@@ -191,6 +194,7 @@ impl KdeKwinIntegrationState {
             KdeKwinIntegrationState::NotApplicable => "not_applicable",
             KdeKwinIntegrationState::AwaitingConsent => "awaiting_consent",
             KdeKwinIntegrationState::NotInstalled => "not_installed",
+            KdeKwinIntegrationState::Disabled => "disabled",
             KdeKwinIntegrationState::ActivationPending => "activation_pending",
             KdeKwinIntegrationState::NoActiveApplication => "no_active_application",
             KdeKwinIntegrationState::Identified => "identified",
