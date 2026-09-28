@@ -1612,15 +1612,26 @@ fn build_active_application(
     // authoritative source when the user has accepted the
     // integration. The precedence chain documented in `design.md` is:
     //
-    // 1. GNOME Shell Extension when connected.
-    // 2. Native Wayland public protocol.
-    // 3. XWayland / EWMH fallback.
-    // 4. Noop.
+    // 1. KDE Plasma Wayland KWin script (when the user has
+    //    accepted the integration).
+    // 2. GNOME Shell Extension when connected.
+    // 3. Native Wayland public protocol.
+    // 4. XWayland / EWMH fallback.
+    // 5. Noop.
     //
     // When the consent decision is `accepted` AND the extension is
     // installed and connected, return the GNOME probe ahead of the
     // native Wayland adapter so a stale native identifier never
     // overrides the most recent GNOME focus.
+    #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+    if matches!(
+        info.display_server,
+        clipvault_platform::DisplayServer::Wayland
+    ) {
+        if let Some(probe) = try_build_kde_kwin_probe(info) {
+            return probe;
+        }
+    }
     #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
     if matches!(
         info.display_server,
@@ -1782,6 +1793,28 @@ fn build_active_application(
 #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
 fn try_build_gnome_probe(_info: &PlatformInfo) -> Option<Arc<dyn ActiveApplicationProbe>> {
     None
+}
+
+/// Best-effort probe construction for the KDE Plasma Wayland KWin
+/// integration. The helper always returns the probe when the
+/// session is detected as KDE Plasma Wayland so the rest of the
+/// pipeline keeps using the same `CachedActiveApplication`
+/// wrapper; the actual D-Bus bridge is started later by the
+/// integration service once `AppContext` exists. Returning `None`
+/// on non-KDE sessions lets the GNOME / native / XWayland branches
+/// take over without further branching.
+#[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+fn try_build_kde_kwin_probe(_info: &PlatformInfo) -> Option<Arc<dyn ActiveApplicationProbe>> {
+    use clipvault_platform::runtime::linux_kde_kwin_integration::{
+        detect_session as kde_detect_session, KdeKwinActiveApplication, KdeSessionKind,
+        SharedKdeKwinSnapshot,
+    };
+    if !matches!(kde_detect_session(), KdeSessionKind::KdePlasmaWayland) {
+        return None;
+    }
+    let snapshot = SharedKdeKwinSnapshot::new();
+    let probe = KdeKwinActiveApplication::new(snapshot);
+    Some(Arc::new(probe) as Arc<dyn ActiveApplicationProbe>)
 }
 
 /// Build the application-metadata provider used by the

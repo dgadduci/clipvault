@@ -202,8 +202,17 @@ pub fn probe_image_clipboard(info: &PlatformInfo) -> ImageClipboardSupport {
         OsFamily::Macos => true,
         OsFamily::Linux => match info.display_server {
             DisplayServer::X11 => true,
-            // Structural: no `wayland-data-control` backend is linked.
-            DisplayServer::Wayland | DisplayServer::Unknown => false,
+            // Native Wayland sessions carry clipboard images when the
+            // build pulls in the `arboard/wayland-data-control`
+            // backend through `arboard-wayland-data-control`. Without
+            // that Cargo feature (or when the compositor does not
+            // publish `ext-data-control-v1` / `wlr-data-control-unstable-v1`)
+            // the matrix MUST stay honest and refuse the capability
+            // rather than over-promise it. The
+            // `kde-wayland-clipboard-capture` change documents the
+            // rule and the adapter test pins the relationship.
+            DisplayServer::Wayland => linux_wayland_session_supports_arboard(),
+            DisplayServer::Unknown => false,
         },
         OsFamily::Windows | OsFamily::Other => false,
     };
@@ -228,16 +237,19 @@ pub fn probe_image_clipboard(info: &PlatformInfo) -> ImageClipboardSupport {
 ///   surfaces both.
 /// - **Linux X11**: `arboard` exposes `text/html` and `text/rtf`
 ///   through the standard selection protocol.
-/// - **Linux Wayland**: ClipVault links `arboard` without the
-///   `wayland-data-control` backend, so rich-text transport is
-///   structural-unavailable. Plain text keeps working.
+/// - **Linux Wayland**: rich-text transport tracks the
+///   `arboard-wayland-data-control` Cargo feature for the same reason
+///   the image probe does — when the build links the data-control
+///   backend the host reports its flavours, otherwise it stays
+///   unavailable. Plain text keeps working.
 /// - **Anything else**: unavailable.
 pub fn probe_rich_text_clipboard(info: &PlatformInfo) -> RichTextClipboardSupport {
     let session_allows = match info.os_family {
         OsFamily::Macos => true,
         OsFamily::Linux => match info.display_server {
             DisplayServer::X11 => true,
-            DisplayServer::Wayland | DisplayServer::Unknown => false,
+            DisplayServer::Wayland => linux_wayland_session_supports_arboard(),
+            DisplayServer::Unknown => false,
         },
         OsFamily::Windows | OsFamily::Other => false,
     };
@@ -245,6 +257,20 @@ pub fn probe_rich_text_clipboard(info: &PlatformInfo) -> RichTextClipboardSuppor
         return RichTextClipboardSupport::NONE;
     }
     adapter_backed_rich_support()
+}
+
+/// Whether a native Wayland session can rely on the `arboard`
+/// data-control backend.
+///
+/// The `arboard-wayland-data-control` Cargo feature forwards
+/// `arboard/wayland-data-control`, which links `wl-clipboard-rs` so
+/// the Linux Wayland transport can serve images and rich-text flavours
+/// on compositors that publish `ext-data-control-v1` /
+/// `wlr-data-control-unstable-v1` (KDE Plasma, wlroots, ...). When
+/// the feature is off the adapter is structurally limited to X11 /
+/// XWayland and the capability matrix must reflect that.
+fn linux_wayland_session_supports_arboard() -> bool {
+    cfg!(feature = "arboard-wayland-data-control")
 }
 
 /// Whether a real rich-text-capable clipboard adapter is linked into
@@ -377,13 +403,22 @@ pub fn detect_capabilities_with_probes(
 
 /// "Best case per host" image support used by the pure detection
 /// entry points. Mirrors the structural rules of
-/// [`probe_image_clipboard`] without touching the host.
+/// [`probe_image_clipboard`] without touching the host. The Linux
+/// Wayland answer tracks the `arboard-wayland-data-control` Cargo
+/// feature so the "best case" and the probe answer agree.
 fn pure_image_support(info: &PlatformInfo) -> ImageClipboardSupport {
     match info.os_family {
         OsFamily::Macos => ImageClipboardSupport::BOTH,
         OsFamily::Linux => match info.display_server {
             DisplayServer::X11 => ImageClipboardSupport::BOTH,
-            DisplayServer::Wayland | DisplayServer::Unknown => ImageClipboardSupport::NONE,
+            DisplayServer::Wayland => {
+                if cfg!(feature = "arboard-wayland-data-control") {
+                    ImageClipboardSupport::BOTH
+                } else {
+                    ImageClipboardSupport::NONE
+                }
+            }
+            DisplayServer::Unknown => ImageClipboardSupport::NONE,
         },
         OsFamily::Windows | OsFamily::Other => ImageClipboardSupport::NONE,
     }
@@ -391,13 +426,21 @@ fn pure_image_support(info: &PlatformInfo) -> ImageClipboardSupport {
 
 /// "Best case per host" rich-text support used by the pure detection
 /// entry points. Mirrors [`probe_rich_text_clipboard`] without
-/// touching the host.
+/// touching the host and tracks the same Cargo feature as the image
+/// matrix so the two pure answers stay aligned.
 fn pure_rich_text_support(info: &PlatformInfo) -> RichTextClipboardSupport {
     match info.os_family {
         OsFamily::Macos => RichTextClipboardSupport::BOTH,
         OsFamily::Linux => match info.display_server {
             DisplayServer::X11 => RichTextClipboardSupport::BOTH,
-            DisplayServer::Wayland | DisplayServer::Unknown => RichTextClipboardSupport::NONE,
+            DisplayServer::Wayland => {
+                if cfg!(feature = "arboard-wayland-data-control") {
+                    RichTextClipboardSupport::BOTH
+                } else {
+                    RichTextClipboardSupport::NONE
+                }
+            }
+            DisplayServer::Unknown => RichTextClipboardSupport::NONE,
         },
         OsFamily::Windows | OsFamily::Other => RichTextClipboardSupport::NONE,
     }
@@ -438,19 +481,26 @@ fn capabilities_for(info: &PlatformInfo) -> Capabilities {
                 // it available and let the adapter surface failures.
                 clipboard_read: true,
                 clipboard_write: true,
-                // Image transport is NOT inferred from the text result:
-                // ClipVault links `arboard` without the
-                // `wayland-data-control` backend, so a Wayland session
-                // has no verifiable image path. This is a structural
-                // session limitation, not a permission, so the UI must
-                // show session guidance instead of a permission prompt.
-                clipboard_read_image: false,
-                clipboard_write_image: false,
-                // Same structural rule for rich text: the rich-text
-                // transport rides on the same `arboard` adapter. The
-                // Wayland session has no verifiable rich-text path.
-                clipboard_read_rich_text: false,
-                clipboard_write_rich_text: false,
+                // Image transport mirrors the
+                // `arboard-wayland-data-control` Cargo feature: with
+                // it on the build pulls in the `wl-clipboard-rs`
+                // backend (`ext-data-control-v1` /
+                // `wlr-data-control-unstable-v1`) and the
+                // `arboard` adapter can negotiate the data-control
+                // protocol. Without it the session has no
+                // verifiable image path and the UI must keep the
+                // session guidance visible instead of inventing a
+                // success path.
+                clipboard_read_image: cfg!(feature = "arboard-wayland-data-control"),
+                clipboard_write_image: cfg!(feature = "arboard-wayland-data-control"),
+                // Rich-text transport rides on the same `arboard`
+                // adapter, so the same feature gate applies. When
+                // the data-control backend is present the matrix is
+                // consistent with X11; otherwise the Wayland session
+                // stays struct-limited and the runtime probe remains
+                // the authority at observation time.
+                clipboard_read_rich_text: cfg!(feature = "arboard-wayland-data-control"),
+                clipboard_write_rich_text: cfg!(feature = "arboard-wayland-data-control"),
                 // Native Wayland global shortcuts are compositor-specific.
                 // GNOME can supply this capability through the separately
                 // consented Shell bridge; the runtime adapter remains the
@@ -682,22 +732,31 @@ mod tests {
     #[test]
     fn wayland_never_inherits_x11_image_support() {
         // Even a probe that claims full support cannot lift the
-        // structural Wayland limitation: the matrix is an
-        // intersection, never an assignment.
+        // structural Wayland limitation when the build does not
+        // link the data-control backend: the matrix is an
+        // intersection, never an assignment. When the feature is on
+        // the session lifts to the same answer as X11 because the
+        // backed adapter now exists.
         let wayland = detect_capabilities_with_probes(
             &info(OsFamily::Linux, DisplayServer::Wayland),
             granted,
             both_images,
             both_rich_text,
         );
-        assert!(!wayland.clipboard_read_image);
-        assert!(!wayland.clipboard_write_image);
         // Text history keeps working under Wayland.
         assert!(wayland.clipboard_read);
         assert!(wayland.clipboard_write);
-        // Same rule for rich text.
-        assert!(!wayland.clipboard_read_rich_text);
-        assert!(!wayland.clipboard_write_rich_text);
+        if cfg!(feature = "arboard-wayland-data-control") {
+            assert!(wayland.clipboard_read_image);
+            assert!(wayland.clipboard_write_image);
+            assert!(wayland.clipboard_read_rich_text);
+            assert!(wayland.clipboard_write_rich_text);
+        } else {
+            assert!(!wayland.clipboard_read_image);
+            assert!(!wayland.clipboard_write_image);
+            assert!(!wayland.clipboard_read_rich_text);
+            assert!(!wayland.clipboard_write_rich_text);
+        }
 
         let x11 = detect_capabilities_with_probes(
             &info(OsFamily::Linux, DisplayServer::X11),
@@ -725,11 +784,23 @@ mod tests {
         assert!(x11.clipboard_read_rich_text);
         assert!(x11.clipboard_write_rich_text);
 
+        // Linux Wayland support tracks the
+        // `arboard-wayland-data-control` Cargo feature, which
+        // forwards the upstream `arboard/wayland-data-control`
+        // gate. The probe mirrors the rule so the matrix and the
+        // real adapter agree.
         let wayland = detect_capabilities(&info(OsFamily::Linux, DisplayServer::Wayland));
-        assert!(!wayland.clipboard_read_image);
-        assert!(!wayland.clipboard_write_image);
-        assert!(!wayland.clipboard_read_rich_text);
-        assert!(!wayland.clipboard_write_rich_text);
+        if cfg!(feature = "arboard-wayland-data-control") {
+            assert!(wayland.clipboard_read_image);
+            assert!(wayland.clipboard_write_image);
+            assert!(wayland.clipboard_read_rich_text);
+            assert!(wayland.clipboard_write_rich_text);
+        } else {
+            assert!(!wayland.clipboard_read_image);
+            assert!(!wayland.clipboard_write_image);
+            assert!(!wayland.clipboard_read_rich_text);
+            assert!(!wayland.clipboard_write_rich_text);
+        }
 
         let unknown = detect_capabilities(&info(OsFamily::Linux, DisplayServer::Unknown));
         assert!(!unknown.clipboard_read_image);
@@ -739,13 +810,23 @@ mod tests {
     }
 
     #[test]
-    fn probe_image_clipboard_refuses_wayland_and_unknown_sessions() {
+    fn probe_image_clipboard_refuses_unrecognized_sessions() {
         // The real probe must never promise image transport on a
         // session ClipVault cannot serve, regardless of build features.
-        assert_eq!(
-            probe_image_clipboard(&info(OsFamily::Linux, DisplayServer::Wayland)),
-            ImageClipboardSupport::NONE
-        );
+        // For Linux Wayland the answer tracks the
+        // `arboard-wayland-data-control` Cargo feature so the matrix
+        // and the adapter agree.
+        if cfg!(feature = "arboard-wayland-data-control") {
+            assert_eq!(
+                probe_image_clipboard(&info(OsFamily::Linux, DisplayServer::Wayland)),
+                adapter_backed_support()
+            );
+        } else {
+            assert_eq!(
+                probe_image_clipboard(&info(OsFamily::Linux, DisplayServer::Wayland)),
+                ImageClipboardSupport::NONE
+            );
+        }
         assert_eq!(
             probe_image_clipboard(&info(OsFamily::Linux, DisplayServer::Unknown)),
             ImageClipboardSupport::NONE
@@ -761,14 +842,22 @@ mod tests {
     }
 
     #[test]
-    fn probe_rich_text_clipboard_refuses_wayland_and_unknown_sessions() {
+    fn probe_rich_text_clipboard_refuses_unrecognized_sessions() {
         // Mirrors the image probe rule: rich-text transport rides on
         // the same `arboard` adapter, so the structural Wayland
-        // limitation applies equally.
-        assert_eq!(
-            probe_rich_text_clipboard(&info(OsFamily::Linux, DisplayServer::Wayland)),
-            RichTextClipboardSupport::NONE
-        );
+        // limitation applies equally when the data-control feature is
+        // off and lifts to the same answer as X11 when it is on.
+        if cfg!(feature = "arboard-wayland-data-control") {
+            assert_eq!(
+                probe_rich_text_clipboard(&info(OsFamily::Linux, DisplayServer::Wayland)),
+                adapter_backed_rich_support()
+            );
+        } else {
+            assert_eq!(
+                probe_rich_text_clipboard(&info(OsFamily::Linux, DisplayServer::Wayland)),
+                RichTextClipboardSupport::NONE
+            );
+        }
         assert_eq!(
             probe_rich_text_clipboard(&info(OsFamily::Linux, DisplayServer::Unknown)),
             RichTextClipboardSupport::NONE
@@ -860,10 +949,21 @@ mod tests {
             probe_image,
             both_rich_text,
         );
-        assert!(
-            !wayland.clipboard_read_rich_text && !wayland.clipboard_write_rich_text,
-            "Wayland must not inherit X11 rich-text support"
-        );
+        // Rich-text support on Wayland tracks the
+        // `arboard-wayland-data-control` Cargo feature: with it on
+        // the probe AND the pure detection agree and report
+        // `BOTH`; without it the session has no verifiable rich-text
+        // path. The injection contract here intentionally uses
+        // `both_rich_text` to confirm the probe is the only authority,
+        // not the pure detection.
+        if cfg!(feature = "arboard-wayland-data-control") {
+            assert!(wayland.clipboard_read_rich_text && wayland.clipboard_write_rich_text);
+        } else {
+            assert!(
+                !wayland.clipboard_read_rich_text && !wayland.clipboard_write_rich_text,
+                "Wayland must not inherit X11 rich-text support when the data-control backend is missing"
+            );
+        }
     }
 
     #[test]

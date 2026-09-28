@@ -102,6 +102,33 @@ local-peer-pairing-tls = [
     "dep:rustls-pki-types",
     "dep:rustls-webpki",
 ]
+# `kde-wayland-clipboard-capture`: forward the `wayland-data-control`
+# feature so Linux builds can opt into the native Wayland data-control
+# adapter (`ext-data-control-v1` / `wlr-data-control-unstable-v1`).
+# The feature is Linux-only because `arboard` only exposes the
+# data-control backend on the unix family, so turning it on for
+# macOS or Windows would be a no-op at best and a configure-time
+# error at worst. Off by default upstream; ClipVault enables it
+# from the Linux target-specific dependency block in
+# `app/tauri/src-tauri/Cargo.toml`. The runtime in
+# `clipboard_arboard.rs` detects the active session and falls back
+# to the X11 / XWayland transport when the data-control protocols
+# are unavailable, so the build stays usable on compositors that do
+# not advertise them.
+arboard-wayland-data-control = ["arboard?/wayland-data-control"]
+# KDE Plasma Wayland source-application bridge. Pulls in the typed
+# D-Bus receiver the `kde-wayland-source-app-detection` change
+# introduces so Linux builds can subscribe to
+# `org.clipvault.SourceApp.Publish` over the session bus. Only the
+# receiver side is required: the script is bundled as a resource
+# and the bootstrap activates it over KWin's documented
+# `org.kde.KWin /Scripting` interface, never by shelling out.
+# Approved by OpenSpec:
+# `openspec/changes/kde-wayland-source-app-detection/design.md`
+# §"Dependencia D-Bus". The feature is Linux-only because the
+# bus + the script are Linux artefacts; enabling it for macOS or
+# Windows would link `zbus` for no gain.
+linux-kde-kwin-integration = ["dep:zbus", "dep:tokio"]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -204,6 +231,15 @@ rustls-pki-types = { workspace = true, optional = true }
 # handshake. Already pulled in transitively by `rustls`; declaring
 # it directly keeps the pairing surface stable.
 rustls-webpki = { workspace = true, optional = true }
+# Typed D-Bus bridge the `kde-wayland-source-app-detection`
+# change drives from inside the platform crate. The platform
+# layer owns the receiver / sender / sender-validation surface
+# so the core never references `zbus` directly. The default
+# features are disabled in the workspace declaration to avoid
+# pulling `async-io` / `async-executor` / `tls` into the bundle;
+# only `tokio` is enabled so the receiver plugs into the
+# workspace runtime.
+zbus = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.10"

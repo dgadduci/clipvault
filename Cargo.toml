@@ -25,6 +25,13 @@ dirs = "5.0"
 time = { version = "0.3", features = ["macros", "formatting", "serde", "serde-well-known"] }
 rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 parking_lot = "0.12"
+# Pinned to `3.x` so the `wayland-data-control` feature gate the
+# `kde-wayland-clipboard-capture` change documents remains
+# available. The feature is opt-in (off by default upstream) because
+# not every Wayland compositor publishes
+# `ext-data-control-v1` / `wlr-data-control-unstable-v1`; the platform
+# crate enables it for Linux builds and lets the adapter degrade to
+# the X11 / XWayland path when neither protocol is supported.
 arboard = "3"
 # Canonical PNG encode/decode for the `clipboard-rich-content` asset
 # store. `png` is the same small, mature, pure-Rust codec that already
@@ -139,6 +146,19 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # `TlsAcceptor` / `TlsConnector` API instead of building a custom
 # state machine on top of `rustls` directly.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# `zbus` is the typed D-Bus bridge the
+# `kde-wayland-source-app-detection` change uses to receive the
+# KWin-published active-application snapshot over the session
+# bus. Pinned to `=5.13.2` because 5.14 raised the MSRV to 1.87
+# and the workspace declares Rust 1.85; `~5.13.2` would have let
+# cargo resolve a different `zbus_macros` series (`5.19`) which
+# is incompatible with the `zbus 5.13.2` runtime. Only the
+# `tokio` feature is enabled so the receiver integrates with the
+# workspace's existing Tokio runtime without pulling in
+# `async-io` / `async-executor` / `tls`. Approved by OpenSpec:
+# `openspec/changes/kde-wayland-source-app-detection/design.md`
+# §"Dependencia D-Bus".
+zbus = { version = "=5.13.2", default-features = false, features = ["tokio"] }
 # X.509 certificate generator the pairing runtime uses to mint a
 # self-signed cert per local identity. Approved by OpenSpec: `rcgen`
 # is small, mature, and the canonical pure-Rust certificate
