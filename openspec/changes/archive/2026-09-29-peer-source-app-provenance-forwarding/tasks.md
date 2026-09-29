@@ -31,5 +31,5 @@
   validar OpenSpec estrictamente y ejecutar `git diff --check`.
 - [x] 4.2 Revisar el diff y confirmar que no expone peer_id, rutas o
   identificadores de aplicación y no modifica cambios ajenos.
-- [ ] 4.3 Prueba manual multi-hop: B captura y comparte con A; C explora A y ve
+- [x] 4.3 Prueba manual multi-hop: B captura y comparte con A; C explora A y ve
   el nombre de origen; después importa y confirma nombre e icono originales.
