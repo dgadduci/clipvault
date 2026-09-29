@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-09-29
+goal: Permitir que ambas partes aprueben el SAS independientemente del orden y evitar que fallos de transporte queden presentados como aprobaciones pendientes.

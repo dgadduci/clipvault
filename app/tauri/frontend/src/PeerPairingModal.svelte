@@ -62,7 +62,11 @@
       // removes the in-memory session. Reconcile that disappearance
       // with the metadata-only peer snapshot rather than continuing
       // to render a stale “Esperando aprobación” state.
-      if (!nextSession && previousSession?.local_approved && row) {
+      if (
+        !nextSession &&
+        row &&
+        (previousSession?.local_approved || outcome?.kind === "awaiting_remote_approval")
+      ) {
         const peerSnapshot = await peerSnapshotCommand();
         if (!isCurrentOpen(epoch)) return;
         const peer = peerSnapshot.entries.find((entry) => entry.peer_id === row!.peer_id);
@@ -216,10 +220,13 @@
   async function approve(): Promise<void> {
     if (!session) return;
     approving = true;
+    lastError = null;
     try {
-      outcome = await peerPairingApproveLocalCommand({
+      const response = await peerPairingApproveLocalCommand({
         session_id: session.session_id,
       });
+      outcome = response;
+      lastError = failedOutcomeMessage(response);
       await refreshSnapshot();
     } catch (error) {
       lastError = describeError(error);
@@ -346,7 +353,11 @@
             Nombre remoto: <code>{session.remote_display_name}</code>
           </p>
         {/if}
-        {#if session.local_approved && session.remote_approved}
+        {#if lastError}
+          <p class="error" role="alert" data-testid="peer-pairing-error">
+            {lastError}
+          </p>
+        {:else if session.local_approved && session.remote_approved}
           <p class="ok" role="status" data-testid="peer-pairing-trusted">
             Vínculo establecido.
           </p>
@@ -376,7 +387,6 @@
           data-testid="peer-pairing-approve"
           disabled={!session ||
             session.local_approved ||
-            session.remote_approved ||
             approving}
           on:click={approve}
         >

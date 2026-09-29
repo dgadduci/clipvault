@@ -462,7 +462,15 @@ struct SessionState {
     nonce_b: String,
     sas: String,
     local_approved: bool,
+    /// Local approval has been accepted by the UI and is being
+    /// signalled to the transport. It stays separate from
+    /// `local_approved` so a concurrent remote approval cannot
+    /// promote the peer before this send succeeds.
+    local_approval_pending: bool,
     remote_approved: bool,
+    /// Only one concurrent approval path may persist trust for
+    /// this session.
+    promotion_pending: bool,
     cert_fingerprint: String,
     #[allow(dead_code)]
     started_at: Instant,
@@ -483,6 +491,30 @@ struct SessionState {
 impl SessionState {
     fn expired(&self, now: Instant) -> bool {
         now >= self.expires_at
+    }
+
+    fn snapshot(&self, now: Instant) -> PairingSessionSnapshot {
+        PairingSessionSnapshot {
+            session_id: self.id,
+            remote_peer_id: self.remote_peer_id.clone(),
+            remote_fingerprint: self.remote_fingerprint.clone(),
+            is_inbound: self.is_inbound,
+            cert_fingerprint: if self.cert_fingerprint.is_empty() {
+                None
+            } else {
+                Some(self.cert_fingerprint.clone())
+            },
+            remote_display_name: self.remote_display_name.clone(),
+            local_approved: self.local_approved,
+            remote_approved: self.remote_approved,
+            sas: self.sas.clone(),
+            expires_at: format_rfc3339(
+                OffsetDateTime::now_utc()
+                    + time::Duration::seconds_f64(
+                        self.expires_at.saturating_duration_since(now).as_secs_f64(),
+                    ),
+            ),
+        }
     }
 }
 
@@ -1312,7 +1344,9 @@ impl PairingRuntime {
             nonce_b: metadata.remote_nonce.clone(),
             sas: metadata.sas.clone(),
             local_approved: false,
+            local_approval_pending: false,
             remote_approved: false,
+            promotion_pending: false,
             cert_fingerprint: metadata.remote_cert_fingerprint.clone(),
             started_at,
             expires_at,
@@ -1410,28 +1444,26 @@ impl PairingRuntime {
     /// call; the listener's bounded wait would never wake up and
     /// inbound approvals silently returned `UnknownPeer`.
     pub fn approve_local(&self, session_id: PairingSessionId) -> PairingOutcome {
-        let snapshot = match self.snapshot_session(session_id) {
-            Ok(snapshot) => snapshot,
-            Err(error) => return PairingOutcome::Failed(error),
+        let is_inbound = {
+            let sessions = self.inner.sessions.write();
+            let Some(guard) = sessions.get(&session_id) else {
+                return PairingOutcome::Failed(PairingError::UnknownOrKeyMismatch);
+            };
+            let mut session = guard.lock().expect("session lock");
+            if session.expired(Instant::now()) {
+                return PairingOutcome::Failed(PairingError::SessionExpired);
+            }
+            if session.local_approved {
+                drop(session);
+                drop(sessions);
+                return self.promote_approved_session(session_id, None);
+            }
+            if session.local_approval_pending {
+                return PairingOutcome::AwaitingRemoteApproval(session_id);
+            }
+            session.local_approval_pending = true;
+            session.is_inbound
         };
-        // Stamp the session as locally approved BEFORE the
-        // transport signal so a concurrent observation the
-        // transport pushes through `on_pairing_observed` cannot
-        // arrive in `AwaitingRemoteApproval` with `local_approved
-        // = false`. The previous wiring sent the signal first and
-        // raced the in-memory transition; the fix collapses the
-        // race window to zero.
-        let is_inbound = self
-            .inner
-            .sessions
-            .write()
-            .get(&session_id)
-            .map(|guard| {
-                let mut session = guard.lock().expect("session lock");
-                session.local_approved = true;
-                session.is_inbound
-            })
-            .unwrap_or(false);
         // The variable is only consumed by the productive
         // `local-peer-pairing-tls` branch below; touch it so the
         // non-feature build does not warn.
@@ -1452,13 +1484,39 @@ impl PairingRuntime {
                 self.inner.transport.approve_local(transport_id)
             };
             if let Err(error) = approve_result {
+                self.clear_local_approval_pending(session_id);
                 return PairingOutcome::Failed(map_transport_error_to_pairing_error(error));
             }
         }
-        if snapshot.local_approved {
-            return PairingOutcome::AwaitingRemoteApproval(session_id);
+
+        let remote_approved = {
+            let sessions = self.inner.sessions.write();
+            let Some(guard) = sessions.get(&session_id) else {
+                return PairingOutcome::Failed(PairingError::Cancelled);
+            };
+            let mut session = guard.lock().expect("session lock");
+            if session.expired(Instant::now()) {
+                session.local_approval_pending = false;
+                return PairingOutcome::Failed(PairingError::SessionExpired);
+            }
+            session.local_approval_pending = false;
+            session.local_approved = true;
+            session.remote_approved
+        };
+
+        if remote_approved {
+            self.promote_approved_session(session_id, None)
+        } else {
+            PairingOutcome::AwaitingRemoteApproval(session_id)
         }
-        PairingOutcome::AwaitingRemoteApproval(session_id)
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn clear_local_approval_pending(&self, session_id: PairingSessionId) {
+        let sessions = self.inner.sessions.write();
+        if let Some(guard) = sessions.get(&session_id) {
+            guard.lock().expect("session lock").local_approval_pending = false;
+        }
     }
 
     /// Record the remote peer's approval of the SAS code. The
@@ -1470,19 +1528,15 @@ impl PairingRuntime {
         let sessions = self.inner.sessions.read();
         let mut session_id = None;
         for (id, guard) in sessions.iter() {
-            let session = guard.lock().expect("session lock");
+            let mut session = guard.lock().expect("session lock");
             if session.remote_peer_id == remote_peer_id {
-                drop(session);
-                let mut session = guard.lock().expect("session lock");
-                session.remote_approved = true;
-                if !session.cert_fingerprint.is_empty() {
-                    // The runtime preserves the FIRST cert
-                    // fingerprint the transport delivered so a
-                    // future refactor that accepts renegotiation
-                    // cannot accidentally rotate the pin.
-                } else {
+                if !session.remote_approved && !cert_fingerprint.is_empty() {
+                    // The first fingerprint from an authenticated
+                    // transport observation supersedes any value
+                    // cached during the synchronous Hello exchange.
                     session.cert_fingerprint = cert_fingerprint.to_string();
                 }
+                session.remote_approved = true;
                 session_id = Some(*id);
                 break;
             }
@@ -1491,13 +1545,35 @@ impl PairingRuntime {
         let Some(session_id) = session_id else {
             return PairingOutcome::Failed(PairingError::UnknownOrKeyMismatch);
         };
-        let snapshot = match self.snapshot_session(session_id) {
-            Ok(snapshot) => snapshot,
-            Err(error) => return PairingOutcome::Failed(error),
+        self.promote_approved_session(session_id, Some(cert_fingerprint))
+    }
+
+    /// Complete trust promotion once both approvals have been
+    /// recorded. The optional fingerprint comes directly from an
+    /// authenticated transport observation; when local approval is
+    /// the second event, use the fingerprint already stored on the
+    /// session by the earlier remote observation.
+    fn promote_approved_session(
+        &self,
+        session_id: PairingSessionId,
+        observed_cert_fingerprint: Option<&str>,
+    ) -> PairingOutcome {
+        let snapshot = {
+            let sessions = self.inner.sessions.write();
+            let Some(guard) = sessions.get(&session_id) else {
+                return PairingOutcome::Failed(PairingError::UnknownOrKeyMismatch);
+            };
+            let mut session = guard.lock().expect("session lock");
+            let now = Instant::now();
+            if session.expired(now) {
+                return PairingOutcome::Failed(PairingError::SessionExpired);
+            }
+            if !session.local_approved || !session.remote_approved || session.promotion_pending {
+                return PairingOutcome::AwaitingRemoteApproval(session_id);
+            }
+            session.promotion_pending = true;
+            session.snapshot(now)
         };
-        if !snapshot.local_approved {
-            return PairingOutcome::AwaitingRemoteApproval(session_id);
-        }
         // Both sides approved: persist the trust transition and
         // return the trusted row. The transport's
         // `on_pairing_observed` invocation is the AUTHORITATIVE
@@ -1506,11 +1582,11 @@ impl PairingRuntime {
         // snapshot value cached at `start_outbound` is a fallback
         // for transports that mint a placeholder fingerprint
         // during the synchronous Hello/HelloAck handshake.
-        let persisted_fingerprint = if cert_fingerprint.is_empty() {
-            snapshot.cert_fingerprint.clone().unwrap_or_default()
-        } else {
-            cert_fingerprint.to_string()
-        };
+        let persisted_fingerprint = observed_cert_fingerprint
+            .filter(|fingerprint| !fingerprint.is_empty())
+            .map(str::to_string)
+            .or(snapshot.cert_fingerprint)
+            .unwrap_or_default();
         let result = self.inner.persistence.mark_trusted(
             &snapshot.remote_peer_id,
             &persisted_fingerprint,
@@ -1571,7 +1647,17 @@ impl PairingRuntime {
             }
             Err(_) => PairingOutcome::Failed(PairingError::TransportUnavailable),
         };
+        if !matches!(&outcome, PairingOutcome::Trusted(_)) {
+            self.clear_promotion_pending(session_id);
+        }
         outcome
+    }
+
+    fn clear_promotion_pending(&self, session_id: PairingSessionId) {
+        let sessions = self.inner.sessions.write();
+        if let Some(guard) = sessions.get(&session_id) {
+            guard.lock().expect("session lock").promotion_pending = false;
+        }
     }
 
     /// Cancel an in-flight pairing session. Idempotent: cancelling
@@ -1909,7 +1995,9 @@ impl PairingRuntime {
             nonce_b,
             sas,
             local_approved: false,
+            local_approval_pending: false,
             remote_approved: false,
+            promotion_pending: false,
             cert_fingerprint: cert_fingerprint.to_string(),
             started_at,
             expires_at,
@@ -1965,7 +2053,9 @@ impl PairingRuntime {
             nonce_b: metadata.remote_nonce.clone(),
             sas: metadata.sas.clone(),
             local_approved: false,
+            local_approval_pending: false,
             remote_approved: false,
+            promotion_pending: false,
             cert_fingerprint: String::new(),
             started_at,
             expires_at,
@@ -1990,30 +2080,7 @@ impl PairingRuntime {
         if session.expired(now) {
             return Err(PairingError::SessionExpired);
         }
-        Ok(PairingSessionSnapshot {
-            session_id: session.id,
-            remote_peer_id: session.remote_peer_id.clone(),
-            remote_fingerprint: session.remote_fingerprint.clone(),
-            is_inbound: session.is_inbound,
-            cert_fingerprint: if session.cert_fingerprint.is_empty() {
-                None
-            } else {
-                Some(session.cert_fingerprint.clone())
-            },
-            remote_display_name: session.remote_display_name.clone(),
-            local_approved: session.local_approved,
-            remote_approved: session.remote_approved,
-            sas: session.sas.clone(),
-            expires_at: format_rfc3339(
-                OffsetDateTime::now_utc()
-                    + time::Duration::seconds_f64(
-                        session
-                            .expires_at
-                            .saturating_duration_since(now)
-                            .as_secs_f64(),
-                    ),
-            ),
-        })
+        Ok(session.snapshot(now))
     }
 
     fn clear_sessions_for(&self, peer_id: &str) {
@@ -2353,7 +2420,7 @@ mod tests {
     #[cfg(feature = "local-peer-pairing-tls")]
     use std::net::SocketAddr;
     #[cfg(feature = "local-peer-pairing-tls")]
-    use std::sync::atomic::{AtomicU16, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicBool, AtomicU16, Ordering as AtomicOrdering};
 
     /// The two e2e tests each install two real TLS listeners. Keep
     /// only those fixtures serial; all fake-transport tests remain
@@ -3006,6 +3073,96 @@ mod tests {
     }
 
     #[test]
+    fn local_approval_after_remote_approval_promotes_without_another_event() {
+        let persistence = Arc::new(InMemoryPairingPersistence::new());
+        persistence.seed(known_peer("peer-bbbb", "fp-bbbb", "Studio B"));
+        let transport: Arc<dyn PeerTransport> = Arc::new(FakeTransport::new());
+        let runtime = PairingRuntime::new(transport, persistence.clone());
+        seed_local_identity(&runtime);
+        let session_id = match runtime
+            .start_outbound("peer-bbbb", "fp-bbbb", "Studio B")
+            .expect("start")
+        {
+            PairingOutcome::AwaitingRemoteApproval(id) => id,
+            other => panic!("expected AwaitingRemoteApproval, got {other:?}"),
+        };
+
+        let remote_approval = runtime.observe_approve("peer-bbbb", "fingerprint-aaaa");
+        assert!(matches!(
+            remote_approval,
+            PairingOutcome::AwaitingRemoteApproval(id) if id == session_id
+        ));
+        assert_eq!(
+            persistence
+                .load("peer-bbbb")
+                .expect("load")
+                .expect("present")
+                .trust_state,
+            TrustState::Unverified,
+            "remote approval alone must not promote the peer",
+        );
+
+        match runtime.approve_local(session_id) {
+            PairingOutcome::Trusted(row) => {
+                assert_eq!(row.trust_state, TrustState::Trusted);
+                assert_eq!(row.tls_cert_fingerprint, "fingerprint-aaaa");
+            }
+            other => panic!("the second approval must promote immediately, got {other:?}"),
+        }
+        assert!(runtime.snapshot().is_empty());
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn failed_local_approval_keeps_remote_approval_and_can_be_retried() {
+        let persistence = Arc::new(InMemoryPairingPersistence::new());
+        persistence.seed(known_peer("peer-bbbb", "fp-bbbb", "Studio B"));
+        let transport = Arc::new(FakeTransport::new());
+        let transport_adapter: Arc<dyn PeerTransport> = transport.clone();
+        let runtime = PairingRuntime::new(transport_adapter, persistence.clone());
+        seed_local_identity(&runtime);
+        let session_id = match runtime
+            .start_outbound("peer-bbbb", "fp-bbbb", "Studio B")
+            .expect("start")
+        {
+            PairingOutcome::AwaitingRemoteApproval(id) => id,
+            other => panic!("expected AwaitingRemoteApproval, got {other:?}"),
+        };
+        assert!(matches!(
+            runtime.observe_approve("peer-bbbb", "fingerprint-aaaa"),
+            PairingOutcome::AwaitingRemoteApproval(_)
+        ));
+
+        transport
+            .fail_next_approval
+            .store(true, AtomicOrdering::SeqCst);
+        assert!(matches!(
+            runtime.approve_local(session_id),
+            PairingOutcome::Failed(PairingError::TransportUnavailable)
+        ));
+        let snapshot = runtime
+            .snapshot()
+            .into_iter()
+            .find(|session| session.session_id == session_id)
+            .expect("failed approval leaves the session retryable");
+        assert!(!snapshot.local_approved);
+        assert!(snapshot.remote_approved);
+        assert_eq!(
+            persistence
+                .load("peer-bbbb")
+                .expect("load")
+                .expect("present")
+                .trust_state,
+            TrustState::Unverified,
+        );
+
+        assert!(matches!(
+            runtime.approve_local(session_id),
+            PairingOutcome::Trusted(_)
+        ));
+    }
+
+    #[test]
     fn remote_approval_alone_does_not_promote() {
         let persistence = Arc::new(InMemoryPairingPersistence::new());
         persistence.seed(known_peer("peer-bbbb", "fp-bbbb", "Studio B"));
@@ -3208,6 +3365,8 @@ mod tests {
     struct FakeTransport {
         #[cfg(feature = "local-peer-pairing-tls")]
         sessions: parking_lot::Mutex<Vec<u64>>,
+        #[cfg(feature = "local-peer-pairing-tls")]
+        fail_next_approval: AtomicBool,
     }
 
     impl FakeTransport {
@@ -3300,7 +3459,11 @@ mod tests {
             &self,
             _session_id: clipvault_platform::peer_transport::PairingSessionId,
         ) -> Result<(), TransportError> {
-            Ok(())
+            if self.fail_next_approval.swap(false, AtomicOrdering::SeqCst) {
+                Err(TransportError::Unavailable)
+            } else {
+                Ok(())
+            }
         }
 
         #[cfg(feature = "local-peer-pairing-tls")]
@@ -3308,7 +3471,11 @@ mod tests {
             &self,
             _session_id: clipvault_platform::peer_transport::PairingSessionId,
         ) -> Result<(), TransportError> {
-            Ok(())
+            if self.fail_next_approval.swap(false, AtomicOrdering::SeqCst) {
+                Err(TransportError::Unavailable)
+            } else {
+                Ok(())
+            }
         }
 
         #[cfg(feature = "local-peer-pairing-tls")]

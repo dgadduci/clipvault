@@ -209,6 +209,39 @@ test("peer-pairing modal owns focus, Escape and the two-minute timeout", () => {
   );
 });
 
+test("remote approval does not disable the local approval action", () => {
+  const body = peerPairingSource();
+  const marker = 'data-testid="peer-pairing-approve"';
+  const markerIndex = body.lastIndexOf(marker);
+  assert.notEqual(markerIndex, -1, "the local approval button must exist");
+  const buttonStart = body.lastIndexOf("<button", markerIndex);
+  const buttonEnd = body.indexOf("</button>", markerIndex);
+  const button = body.slice(buttonStart, buttonEnd);
+  const disabledExpression = button.match(/disabled=\{([\s\S]*?)\}/)?.[1];
+  assert.ok(disabledExpression, "the approval button must expose its disabled condition");
+  assert.match(disabledExpression, /session\.local_approved/);
+  assert.doesNotMatch(
+    disabledExpression,
+    /session\.remote_approved/,
+    "remote approval must not block the local user's approval",
+  );
+});
+
+test("typed local approval failures are shown while the SAS session remains open", () => {
+  const body = peerPairingSource();
+  const approve = body.slice(
+    body.indexOf("async function approve()"),
+    body.indexOf("function describeError("),
+  );
+  assert.match(approve, /outcome = response/);
+  assert.match(approve, /lastError = failedOutcomeMessage\(response\)/);
+  assert.match(
+    body,
+    /\{#if\s+lastError\s*\}[\s\S]{0,220}data-testid="peer-pairing-error"/,
+    "an active SAS session must render typed approval failures",
+  );
+});
+
 test("peer-pairing modal detects inbound sessions before auto-starting outbound", () => {
   // When a remote peer opens a pairing request, the listener
   // registers it through `on_pairing_session_started` and
