@@ -45,6 +45,49 @@ pub const MAX_SOURCE_APP_ICON_BYTES: usize = 512 * 1024;
 /// dimensions before comparing against the bound.
 pub const MAX_SOURCE_APP_ICON_LONGEST_SIDE: u32 = 256;
 
+/// Locally resolved source-app fields a host may forward to a
+/// capability-enabled peer. The icon remains a local reference until the
+/// explicit import path reads and validates its PNG bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg(feature = "local-peer-pairing-tls")]
+pub(crate) struct EffectiveSourceAppPresentation {
+    pub name: Option<String>,
+    pub icon_ref: Option<String>,
+}
+
+/// Select a row's own valid capture metadata first, falling back to the
+/// newest imported provenance only when the local row has no valid source
+/// field. The caller owns provenance ordering and must not pass or forward its
+/// peer identifier.
+#[cfg(feature = "local-peer-pairing-tls")]
+pub(crate) fn effective_source_app_presentation(
+    entry: &clipvault_db::EntryRecord,
+    imported_name: Option<&str>,
+    imported_icon_ref: Option<&str>,
+) -> EffectiveSourceAppPresentation {
+    let local = EffectiveSourceAppPresentation {
+        name: entry
+            .source_app_name
+            .as_deref()
+            .and_then(|name| validate_source_app_name(name).ok()),
+        icon_ref: entry
+            .source_app_icon_ref
+            .as_deref()
+            .filter(|asset_ref| crate::application_icons::is_safe_icon_ref(asset_ref))
+            .map(str::to_string),
+    };
+    if local.name.is_some() || local.icon_ref.is_some() {
+        return local;
+    }
+
+    EffectiveSourceAppPresentation {
+        name: imported_name.and_then(|name| validate_source_app_name(name).ok()),
+        icon_ref: imported_icon_ref
+            .filter(|asset_ref| crate::application_icons::is_safe_icon_ref(asset_ref))
+            .map(str::to_string),
+    }
+}
+
 /// Typed error the validation helpers surface. Every variant
 /// collapses to a stable identifier the caller can branch on
 /// without inspecting the rejected payload.
@@ -183,11 +226,69 @@ fn decode_png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
 
+    fn entry() -> clipvault_db::EntryRecord {
+        clipvault_db::EntryRecord {
+            id: 7,
+            content: "x".to_string(),
+            content_type: clipvault_db::ContentType::Text,
+            content_size: 1,
+            content_hash: "a".repeat(64),
+            source_app: None,
+            is_pinned: false,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            last_seen_at: "2026-01-01T00:00:00Z".to_string(),
+            title: None,
+            source_app_name: None,
+            source_app_icon_ref: None,
+            asset_ref: None,
+            mime_type: None,
+            payload_width: None,
+            payload_height: None,
+            rich_text_hash: None,
+            rich_html_ref: None,
+            rich_rtf_ref: None,
+            rich_preview_ref: None,
+            rich_html_size: None,
+            rich_rtf_size: None,
+            code_language: None,
+        }
+    }
+
     #[test]
     fn validate_source_app_name_trims_and_accepts_short_names() {
         let result =
             validate_source_app_name("  Visual Studio Code  ").expect("short name is valid");
         assert_eq!(result, "Visual Studio Code");
+    }
+
+    #[test]
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn effective_source_app_uses_imported_provenance_only_as_fallback() {
+        let mut entry = entry();
+        let imported = effective_source_app_presentation(
+            &entry,
+            Some("  Original Editor  "),
+            Some("application-icons/original.png"),
+        );
+        assert_eq!(imported.name.as_deref(), Some("Original Editor"));
+        assert_eq!(
+            imported.icon_ref.as_deref(),
+            Some("application-icons/original.png")
+        );
+
+        entry.source_app_name = Some("Local Capture App".to_string());
+        entry.source_app_icon_ref = Some("application-icons/local.png".to_string());
+        let local = effective_source_app_presentation(
+            &entry,
+            Some("Original Editor"),
+            Some("application-icons/original.png"),
+        );
+        assert_eq!(local.name.as_deref(), Some("Local Capture App"));
+        assert_eq!(
+            local.icon_ref.as_deref(),
+            Some("application-icons/local.png")
+        );
     }
 
     #[test]

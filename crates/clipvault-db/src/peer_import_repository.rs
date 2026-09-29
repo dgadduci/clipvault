@@ -347,6 +347,67 @@ impl<'a> PeerImportRepository<'a> {
         Ok(result)
     }
 
+    /// Resolve the newest source-app presentation available for each
+    /// imported local entry. This projection is used when a host shares an
+    /// imported capture onward: it deliberately returns no peer identifier
+    /// and remains independent of whether the user later removed the
+    /// peer-bound collection. Provenance rows without either source field do
+    /// not shadow an older row that still has presentation metadata.
+    pub fn source_app_presentations_for_entries(
+        &self,
+        local_entry_ids: &[i64],
+    ) -> Result<Vec<PeerImportedSourceAppPresentation>, PeerImportRepositoryError> {
+        let ids: Vec<i64> = local_entry_ids
+            .iter()
+            .copied()
+            .filter(|id| *id > 0)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if ids.is_empty() || ids.len() > 100 {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = (1..=ids.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT ri.local_entry_id, ri.source_app_name, ri.source_app_icon_ref
+             FROM remote_imports ri
+             WHERE ri.local_entry_id IN ({placeholders})
+               AND (ri.source_app_name IS NOT NULL OR ri.source_app_icon_ref IS NOT NULL)
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM remote_imports newer
+                   WHERE newer.local_entry_id = ri.local_entry_id
+                     AND (newer.source_app_name IS NOT NULL OR newer.source_app_icon_ref IS NOT NULL)
+                     AND (
+                         newer.imported_at > ri.imported_at
+                         OR (newer.imported_at = ri.imported_at
+                             AND newer.remote_entry_id < ri.remote_entry_id)
+                         OR (newer.imported_at = ri.imported_at
+                             AND newer.remote_entry_id = ri.remote_entry_id
+                             AND newer.peer_id < ri.peer_id)
+                     )
+               )
+             ORDER BY ri.local_entry_id ASC"
+        );
+        let values = ids
+            .into_iter()
+            .map(rusqlite::types::Value::Integer)
+            .collect::<Vec<_>>();
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(values), |row| {
+            Ok(PeerImportedSourceAppPresentation {
+                local_entry_id: row.get(0)?,
+                source_app_name: row.get(1)?,
+                source_app_icon_ref: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Collection-scoped compatibility wrapper for callers that need the
     /// provenance belonging to exactly one peer-bound collection.
     pub fn source_app_presentations_for_collection(
@@ -1142,6 +1203,60 @@ mod tests {
             .source_app_presentations_for_scope(Some(collection_a), &[entry_id + 100])
             .expect("unrelated entry projection")
             .is_empty());
+    }
+
+    #[test]
+    fn source_app_relay_selects_latest_metadata_without_peer_identity() {
+        let (_dir, mut db) = isolated_db();
+        seed_peer(&mut db, "peer-a");
+        seed_peer(&mut db, "peer-b");
+        seed_peer(&mut db, "peer-c");
+        let entry_id = seed_entry(&mut db, "relayed content");
+        let other_entry_id = seed_entry(&mut db, "unrelated content");
+        let imported_at = OffsetDateTime::now_utc();
+        let mut repo = PeerImportRepository::new(db.connection_mut());
+        repo.record_import_with_source_app(
+            "peer-a",
+            "remote-a",
+            "hash-a",
+            entry_id,
+            imported_at,
+            Some("Original Editor"),
+            Some("application-icons/original.png"),
+        )
+        .expect("older attributed provenance");
+        repo.record_import(
+            "peer-b",
+            "remote-b",
+            "hash-b",
+            entry_id,
+            imported_at + time::Duration::seconds(1),
+        )
+        .expect("newer metadata-free provenance");
+        repo.record_import_with_source_app(
+            "peer-c",
+            "remote-c",
+            "hash-c",
+            entry_id,
+            imported_at + time::Duration::seconds(2),
+            Some("Latest Editor"),
+            Some("application-icons/latest.png"),
+        )
+        .expect("latest attributed provenance");
+
+        let selected = repo
+            .source_app_presentations_for_entries(&[entry_id, other_entry_id, -1])
+            .expect("query relayed source attribution");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].local_entry_id, entry_id);
+        assert_eq!(
+            selected[0].source_app_name.as_deref(),
+            Some("Latest Editor")
+        );
+        assert_eq!(
+            selected[0].source_app_icon_ref.as_deref(),
+            Some("application-icons/latest.png")
+        );
     }
 
     #[test]

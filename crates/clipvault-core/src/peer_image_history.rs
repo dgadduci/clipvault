@@ -372,6 +372,17 @@ pub trait HostImageHistorySource: Send + Sync {
         limit: usize,
     ) -> Result<Vec<EntryRecord>, PeerImageHistoryPersistenceError>;
 
+    /// Return imported source-app names for a completed eligible page
+    /// without peer identifiers. The default keeps adapters without
+    /// provenance support local-only; production adapters implement a
+    /// bounded batch lookup.
+    fn imported_source_app_names(
+        &self,
+        _local_entry_ids: &[i64],
+    ) -> Result<HashMap<i64, String>, PeerImageHistoryPersistenceError> {
+        Ok(HashMap::new())
+    }
+
     /// Per-source eligibility filter. The default implementation
     /// matches the historical metadata-only predicate so
     /// adapters that do not need an asset validator keep
@@ -647,6 +658,7 @@ impl PeerImageCursorSecret {
 #[derive(Debug, Default)]
 pub struct InMemoryHostImageHistorySource {
     inner: RwLock<Vec<EntryRecord>>,
+    imported_source_app_names: RwLock<HashMap<i64, String>>,
 }
 
 impl InMemoryHostImageHistorySource {
@@ -660,6 +672,10 @@ impl InMemoryHostImageHistorySource {
     /// test can verify the contract without crafting SQL.
     pub fn seed(&self, entries: Vec<EntryRecord>) {
         *self.inner.write() = entries;
+    }
+
+    pub fn seed_imported_source_app_names(&self, source_app_names: HashMap<i64, String>) {
+        *self.imported_source_app_names.write() = source_app_names;
     }
 }
 
@@ -687,6 +703,17 @@ impl HostImageHistorySource for InMemoryHostImageHistorySource {
         });
         matching.truncate(limit);
         Ok(matching)
+    }
+
+    fn imported_source_app_names(
+        &self,
+        local_entry_ids: &[i64],
+    ) -> Result<HashMap<i64, String>, PeerImageHistoryPersistenceError> {
+        let names = self.imported_source_app_names.read();
+        Ok(local_entry_ids
+            .iter()
+            .filter_map(|id| names.get(id).map(|name| (*id, name.clone())))
+            .collect())
     }
 
     fn snapshot_id(&self) -> Result<String, PeerImageHistoryPersistenceError> {
@@ -776,6 +803,27 @@ impl HostImageHistorySource for EntryRepositoryHostImageHistorySource {
                 );
                 PeerImageHistoryPersistenceError::Failed
             })
+    }
+
+    fn imported_source_app_names(
+        &self,
+        local_entry_ids: &[i64],
+    ) -> Result<HashMap<i64, String>, PeerImageHistoryPersistenceError> {
+        let mut guard = self.database.lock();
+        let repo = clipvault_db::PeerImportRepository::new(guard.connection_mut());
+        let rows = repo
+            .source_app_presentations_for_entries(local_entry_ids)
+            .map_err(|error| {
+                tracing::warn!(
+                    ?error,
+                    "host image history source-app provenance lookup failed"
+                );
+                PeerImageHistoryPersistenceError::Failed
+            })?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.source_app_name.map(|name| (row.local_entry_id, name)))
+            .collect())
     }
 
     fn is_eligible(&self, entry: &EntryRecord) -> bool {
@@ -1223,10 +1271,23 @@ impl PeerImageHistoryService {
                 }
             }
         }
+        let local_entry_ids = all_eligible
+            .iter()
+            .take(limit)
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        let imported_source_app_names = source
+            .imported_source_app_names(&local_entry_ids)
+            .unwrap_or_default();
         let previews: Vec<RemoteImagePreview> = all_eligible
             .iter()
             .take(limit)
-            .map(project_image_row)
+            .map(|entry| {
+                project_image_row_with_imported_source_name(
+                    entry,
+                    imported_source_app_names.get(&entry.id).map(String::as_str),
+                )
+            })
             .collect();
         let next_cursor = match next_cursor.as_ref() {
             Some((created_at, id)) => Some(RemoteImageHistoryCursor::mint(
@@ -1266,6 +1327,13 @@ const SERVE_MAX_ITERATIONS: usize = 16;
 /// from the local primary key and validates the title through
 /// [`crate::peer_text_history::sanitize_remote_title`].
 pub fn project_image_row(entry: &EntryRecord) -> RemoteImagePreview {
+    project_image_row_with_imported_source_name(entry, None)
+}
+
+fn project_image_row_with_imported_source_name(
+    entry: &EntryRecord,
+    imported_source_app_name: Option<&str>,
+) -> RemoteImagePreview {
     let remote_entry_id = format!("entry-{}", entry.id);
     let title =
         crate::peer_text_history::sanitize_remote_title(entry.title.as_deref().unwrap_or(""));
@@ -1277,9 +1345,17 @@ pub fn project_image_row(entry: &EntryRecord) -> RemoteImagePreview {
         byte_size: entry.content_size.max(0) as u64,
         width: entry.payload_width.unwrap_or(0),
         height: entry.payload_height.unwrap_or(0),
-        source_app_name: entry.source_app_name.as_deref().and_then(|name| {
-            crate::peer_source_app_presentation::validate_source_app_name(name).ok()
-        }),
+        source_app_name: entry
+            .source_app_name
+            .as_deref()
+            .and_then(|name| {
+                crate::peer_source_app_presentation::validate_source_app_name(name).ok()
+            })
+            .or_else(|| {
+                imported_source_app_name.and_then(|name| {
+                    crate::peer_source_app_presentation::validate_source_app_name(name).ok()
+                })
+            }),
     }
 }
 
@@ -1430,10 +1506,10 @@ mod tests {
             ImageHistoryHostHandler as _, ImageHistoryHostResponse,
         };
 
-        let mut entry = record(1, "2026-01-01T00:00:00Z");
-        entry.source_app_name = Some("Screenshot App".to_string());
+        let entry = record(1, "2026-01-01T00:00:00Z");
         let source = InMemoryHostImageHistorySource::new();
         source.seed(vec![entry]);
+        source.seed_imported_source_app_names(HashMap::from([(1, "Screenshot App".to_string())]));
         let service = PeerImageHistoryService::new(Arc::new(NoopPeerImageHistoryTransport))
             .with_capability_resolver(Arc::new(|_| true));
         service.set_cursor_secret("capable", PeerImageCursorSecret::generate());

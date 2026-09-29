@@ -216,6 +216,28 @@ impl PeerImageImportPersistence for SqliteImageImportPersistence {
             .map_err(|error| PeerImageImportPersistenceError::Sqlite(format!("{error}")))
     }
 
+    fn imported_source_app_for_entry(
+        &self,
+        entry_id: i64,
+    ) -> Result<
+        Option<crate::peer_text_import::PeerImportedSourceAppPresentation>,
+        PeerImageImportPersistenceError,
+    > {
+        let mut db = self.database.lock();
+        let repo = PeerImportRepository::new(db.connection_mut());
+        repo.source_app_presentations_for_entries(&[entry_id])
+            .map(|mut rows| {
+                rows.pop().map(
+                    |row| crate::peer_text_import::PeerImportedSourceAppPresentation {
+                        local_entry_id: row.local_entry_id,
+                        source_app_name: row.source_app_name,
+                        source_app_icon_ref: row.source_app_icon_ref,
+                    },
+                )
+            })
+            .map_err(map_peer_import_repo_error)
+    }
+
     fn find_binding(&self, peer_id: &str) -> Result<Option<i64>, PeerImageImportPersistenceError> {
         let mut db = self.database.lock();
         let repo = PeerImportRepository::new(db.connection_mut());

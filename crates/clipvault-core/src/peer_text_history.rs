@@ -554,6 +554,16 @@ pub trait HostHistorySource: Send + Sync {
         limit: usize,
     ) -> Result<Vec<EntryRecord>, PeerHistoryPersistenceError>;
 
+    /// Return imported source-app names for this page without peer
+    /// identifiers. The default keeps adapters without provenance support
+    /// local-only; production adapters implement this as a bounded batch.
+    fn imported_source_app_names(
+        &self,
+        _local_entry_ids: &[i64],
+    ) -> Result<HashMap<i64, String>, PeerHistoryPersistenceError> {
+        Ok(HashMap::new())
+    }
+
     /// Snapshot fingerprint the runtime returns alongside the page.
     /// The runtime only uses the value as a tie-breaker for the
     /// frontend (so a local capture landing between page requests
@@ -681,6 +691,7 @@ impl PeerCursorSecret {
 #[derive(Debug, Default)]
 pub struct InMemoryHostHistorySource {
     inner: RwLock<Vec<EntryRecord>>,
+    imported_source_app_names: RwLock<HashMap<i64, String>>,
 }
 
 impl InMemoryHostHistorySource {
@@ -694,6 +705,10 @@ impl InMemoryHostHistorySource {
     /// test can verify the contract without crafting SQL.
     pub fn seed(&self, entries: Vec<EntryRecord>) {
         *self.inner.write() = entries;
+    }
+
+    pub fn seed_imported_source_app_names(&self, source_app_names: HashMap<i64, String>) {
+        *self.imported_source_app_names.write() = source_app_names;
     }
 }
 
@@ -721,6 +736,17 @@ impl HostHistorySource for InMemoryHostHistorySource {
         });
         matching.truncate(limit);
         Ok(matching)
+    }
+
+    fn imported_source_app_names(
+        &self,
+        local_entry_ids: &[i64],
+    ) -> Result<HashMap<i64, String>, PeerHistoryPersistenceError> {
+        let names = self.imported_source_app_names.read();
+        Ok(local_entry_ids
+            .iter()
+            .filter_map(|id| names.get(id).map(|name| (*id, name.clone())))
+            .collect())
     }
 
     fn snapshot_id(&self) -> Result<String, PeerHistoryPersistenceError> {
@@ -773,6 +799,24 @@ impl HostHistorySource for EntryRepositoryHostHistorySource {
                 PeerHistoryPersistenceError::Failed
             })?;
         Ok(page)
+    }
+
+    fn imported_source_app_names(
+        &self,
+        local_entry_ids: &[i64],
+    ) -> Result<HashMap<i64, String>, PeerHistoryPersistenceError> {
+        let mut guard = self.database.lock();
+        let repo = clipvault_db::PeerImportRepository::new(guard.connection_mut());
+        let rows = repo
+            .source_app_presentations_for_entries(local_entry_ids)
+            .map_err(|error| {
+                tracing::warn!(?error, "host history source-app provenance lookup failed");
+                PeerHistoryPersistenceError::Failed
+            })?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.source_app_name.map(|name| (row.local_entry_id, name)))
+            .collect())
     }
 
     fn snapshot_id(&self) -> Result<String, PeerHistoryPersistenceError> {
@@ -1188,6 +1232,10 @@ impl PeerTextHistoryService {
             Ok(rows) => rows,
             Err(_) => return HostHistoryResponse::Unavailable("persistence_unavailable"),
         };
+        let local_entry_ids = rows.iter().map(|row| row.id).collect::<Vec<_>>();
+        let imported_source_app_names = source
+            .imported_source_app_names(&local_entry_ids)
+            .unwrap_or_default();
         let mut previews: Vec<RemoteTextPreview> = Vec::with_capacity(limit);
         let mut has_more = false;
         for (index, row) in rows.into_iter().enumerate() {
@@ -1195,7 +1243,10 @@ impl PeerTextHistoryService {
                 has_more = true;
                 break;
             }
-            previews.push(project_row(&row));
+            previews.push(project_row_with_imported_source_name(
+                &row,
+                imported_source_app_names.get(&row.id).map(String::as_str),
+            ));
         }
         let next_cursor = if has_more {
             previews.last().map(|preview| {
@@ -1229,6 +1280,13 @@ impl PeerTextHistoryService {
 /// primary key, escapes the bounded preview and validates the
 /// title through [`sanitize_remote_title`].
 pub fn project_row(entry: &EntryRecord) -> RemoteTextPreview {
+    project_row_with_imported_source_name(entry, None)
+}
+
+fn project_row_with_imported_source_name(
+    entry: &EntryRecord,
+    imported_source_app_name: Option<&str>,
+) -> RemoteTextPreview {
     let remote_entry_id = format!("entry-{}", entry.id);
     let preview = build_preview(&entry.content);
     let title = sanitize_remote_title(entry.title.as_deref().unwrap_or(""));
@@ -1238,9 +1296,17 @@ pub fn project_row(entry: &EntryRecord) -> RemoteTextPreview {
         content_type: entry.content_type.as_str().to_string(),
         created_at: entry.created_at.clone(),
         preview,
-        source_app_name: entry.source_app_name.as_deref().and_then(|name| {
-            crate::peer_source_app_presentation::validate_source_app_name(name).ok()
-        }),
+        source_app_name: entry
+            .source_app_name
+            .as_deref()
+            .and_then(|name| {
+                crate::peer_source_app_presentation::validate_source_app_name(name).ok()
+            })
+            .or_else(|| {
+                imported_source_app_name.and_then(|name| {
+                    crate::peer_source_app_presentation::validate_source_app_name(name).ok()
+                })
+            }),
     }
 }
 
@@ -1344,10 +1410,10 @@ mod tests {
         use crate::peer_pairing::PeerTextHistoryHostHandlerAdapter;
         use clipvault_platform::peer_transport::{HistoryHostHandler as _, HistoryHostResponse};
 
-        let mut entry = record(1, ContentType::Text, "hello", "2026-01-01T00:00:00Z");
-        entry.source_app_name = Some("Terminal".to_string());
+        let entry = record(1, ContentType::Text, "hello", "2026-01-01T00:00:00Z");
         let source = InMemoryHostHistorySource::new();
         source.seed(vec![entry]);
+        source.seed_imported_source_app_names(HashMap::from([(1, "Terminal".to_string())]));
         let service = PeerTextHistoryService::new(Arc::new(NullPeerHistoryTransport));
         service.set_cursor_secret("capable", PeerCursorSecret::generate());
         service.set_cursor_secret("legacy", PeerCursorSecret::generate());

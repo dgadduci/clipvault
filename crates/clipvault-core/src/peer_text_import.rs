@@ -311,6 +311,16 @@ pub trait PeerImportPersistence: Send + Sync {
     /// Fetch a single entry by id.
     fn fetch_entry(&self, entry_id: i64)
         -> Result<Option<EntryRecord>, PeerImportPersistenceError>;
+    /// Return the newest source-app provenance for the entry when the host
+    /// re-shares a capture that was itself imported. The result deliberately
+    /// has no peer identifier and is only a fallback to the entry's own
+    /// source-app fields.
+    fn imported_source_app_for_entry(
+        &self,
+        _entry_id: i64,
+    ) -> Result<Option<PeerImportedSourceAppPresentation>, PeerImportPersistenceError> {
+        Ok(None)
+    }
     /// Best-effort read of an existing source-app icon by its locally
     /// validated application-icons reference. Missing/invalid icons must
     /// degrade to the generic icon, never fail a text import.
@@ -468,6 +478,10 @@ struct InMemoryImportState {
     /// two peers sharing one canonical entry keep their own
     /// metadata.
     provenance_source_app: HashMap<(String, String, String), (Option<String>, Option<String>)>,
+    /// Import-origin metadata keyed by the local entry id for host re-share
+    /// tests and in-memory projections.
+    imported_source_app_by_entry: HashMap<i64, PeerImportedSourceAppPresentation>,
+    source_app_icons: HashMap<String, Vec<u8>>,
 }
 
 impl Default for InMemoryImportPersistence {
@@ -482,6 +496,8 @@ impl Default for InMemoryImportPersistence {
                 next_collection_id: 1,
                 by_hash: HashMap::new(),
                 provenance_source_app: HashMap::new(),
+                imported_source_app_by_entry: HashMap::new(),
+                source_app_icons: HashMap::new(),
             })),
         }
     }
@@ -505,6 +521,29 @@ impl InMemoryImportPersistence {
             state.next_entry_id = state.next_entry_id.max(entry.id + 1);
             state.entries.insert(entry.id, entry);
         }
+    }
+
+    pub fn seed_imported_source_app_for_entry(
+        &self,
+        entry_id: i64,
+        source_app_name: Option<String>,
+        source_app_icon_ref: Option<String>,
+        source_app_icon_bytes: Option<Vec<u8>>,
+    ) {
+        let mut state = self.state.lock();
+        if let (Some(icon_ref), Some(bytes)) =
+            (source_app_icon_ref.as_deref(), source_app_icon_bytes)
+        {
+            state.source_app_icons.insert(icon_ref.to_string(), bytes);
+        }
+        state.imported_source_app_by_entry.insert(
+            entry_id,
+            PeerImportedSourceAppPresentation {
+                local_entry_id: entry_id,
+                source_app_name,
+                source_app_icon_ref,
+            },
+        );
     }
 }
 
@@ -589,6 +628,28 @@ impl PeerImportPersistence for InMemoryImportPersistence {
         entry_id: i64,
     ) -> Result<Option<EntryRecord>, PeerImportPersistenceError> {
         Ok(self.state.lock().entries.get(&entry_id).cloned())
+    }
+
+    fn imported_source_app_for_entry(
+        &self,
+        entry_id: i64,
+    ) -> Result<Option<PeerImportedSourceAppPresentation>, PeerImportPersistenceError> {
+        Ok(self
+            .state
+            .lock()
+            .imported_source_app_by_entry
+            .get(&entry_id)
+            .cloned())
+    }
+
+    fn read_source_app_icon(
+        &self,
+        asset_ref: &str,
+    ) -> Result<Option<Vec<u8>>, PeerImportPersistenceError> {
+        if !crate::application_icons::is_safe_icon_ref(asset_ref) {
+            return Ok(None);
+        }
+        Ok(self.state.lock().source_app_icons.get(asset_ref).cloned())
     }
 
     fn find_binding(&self, peer_id: &str) -> Result<Option<i64>, PeerImportPersistenceError> {
@@ -1277,12 +1338,22 @@ impl clipvault_platform::peer_transport::FetchTextHostHandler for PeerTextImport
         let title =
             crate::peer_text_history::sanitize_remote_title(entry.title.as_deref().unwrap_or(""));
         let content_type = entry.content_type.as_str().to_string();
-        let body = entry.content;
-        let source_app_name = entry.source_app_name.as_deref().and_then(|name| {
-            crate::peer_source_app_presentation::validate_source_app_name(name).ok()
-        });
-        let source_app_icon_bytes = entry
-            .source_app_icon_ref
+        let imported_source_app = self
+            .persistence
+            .imported_source_app_for_entry(local_id)
+            .ok()
+            .flatten();
+        let source_app = crate::peer_source_app_presentation::effective_source_app_presentation(
+            &entry,
+            imported_source_app
+                .as_ref()
+                .and_then(|source_app| source_app.source_app_name.as_deref()),
+            imported_source_app
+                .as_ref()
+                .and_then(|source_app| source_app.source_app_icon_ref.as_deref()),
+        );
+        let source_app_icon_bytes = source_app
+            .icon_ref
             .as_deref()
             .filter(|asset_ref| crate::application_icons::is_safe_icon_ref(asset_ref))
             .and_then(|asset_ref| {
@@ -1294,11 +1365,12 @@ impl clipvault_platform::peer_transport::FetchTextHostHandler for PeerTextImport
             .filter(|bytes| {
                 crate::peer_source_app_presentation::validate_source_app_icon(bytes).is_ok()
             });
+        let body = entry.content;
         clipvault_platform::peer_transport::HostFetchResponse::Ok {
             title,
             content_type,
             body,
-            source_app_name,
+            source_app_name: source_app.name,
             source_app_icon_bytes,
         }
     }
@@ -1422,6 +1494,20 @@ mod tests {
             source_app_name: None,
             source_app_icon_bytes: None,
         }
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn source_app_icon_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, 16, 16);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("PNG header");
+        writer
+            .write_image_data(&vec![0x80; 16 * 16 * 4])
+            .expect("PNG data");
+        writer.finish().expect("PNG finish");
+        bytes
     }
 
     #[test]
@@ -1958,5 +2044,36 @@ mod tests {
             outcome,
             clipvault_platform::peer_transport::HostFetchResponse::NotTransferable
         ));
+    }
+
+    #[test]
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn host_handler_forwards_imported_source_app_name_and_icon() {
+        use clipvault_platform::peer_transport::FetchTextHostHandler as _;
+
+        let concrete = InMemoryImportPersistence::new();
+        let entry = entry_record(99, ContentType::Text, "forwarded text");
+        concrete.seed_entries(vec![entry]);
+        let icon = source_app_icon_png();
+        concrete.seed_imported_source_app_for_entry(
+            99,
+            Some("Original Editor".to_string()),
+            Some("application-icons/original.png".to_string()),
+            Some(icon.clone()),
+        );
+        let persistence: StdArc<dyn PeerImportPersistence> = StdArc::new(concrete);
+        let adapter = PeerTextImportHostHandlerAdapter::new(persistence);
+
+        let outcome = adapter.fetch_text("peer-c", "entry-99");
+        let clipvault_platform::peer_transport::HostFetchResponse::Ok {
+            source_app_name,
+            source_app_icon_bytes,
+            ..
+        } = outcome
+        else {
+            panic!("expected successful text fetch");
+        };
+        assert_eq!(source_app_name.as_deref(), Some("Original Editor"));
+        assert_eq!(source_app_icon_bytes, Some(icon));
     }
 }
