@@ -252,12 +252,15 @@ impl RevisionSource {
     }
 }
 
-/// Thin wrapper around [`arboard::Clipboard`]. Each method takes the
-/// global lock lazily so the backend stays cheap to share across
-/// threads.
+/// Thin wrapper around [`arboard::Clipboard`]. Linux keeps one lazily
+/// initialized client so optional Wayland protocol negotiation happens once
+/// instead of once for every polled clipboard operation. The adapter lock
+/// serializes access to that client.
 pub struct ArboardClipboard {
     revision_source: RevisionSource,
     backend: ArboardBackend,
+    #[cfg(target_os = "linux")]
+    arboard_client: Mutex<Option<Arboard>>,
 }
 
 impl Default for ArboardClipboard {
@@ -284,6 +287,7 @@ impl ArboardClipboard {
         Self {
             revision_source: RevisionSource::for_session(session),
             backend,
+            arboard_client: Mutex::new(None),
         }
     }
 
@@ -307,6 +311,27 @@ impl ArboardClipboard {
     /// stays bound to the rest of the adapter.
     pub fn backend_kind(&self) -> &'static str {
         self.backend.stable_id()
+    }
+
+    fn with_arboard<T>(
+        &self,
+        operation: impl FnOnce(&mut Arboard) -> Result<T, ArboardError>,
+    ) -> Result<T, ArboardError> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut client = self.arboard_client.lock();
+            if client.is_none() {
+                *client = Some(Arboard::new()?);
+            }
+
+            operation(client.as_mut().expect("client was initialized above"))
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let mut client = Arboard::new()?;
+            operation(&mut client)
+        }
     }
 }
 
@@ -404,8 +429,7 @@ fn to_clipboard_image(data: ImageData<'_>) -> Result<ClipboardImage, ClipboardBa
 
 impl ClipboardBackend for ArboardClipboard {
     fn read_text(&self) -> Result<Option<String>, ClipboardBackendError> {
-        let mut clipboard = Arboard::new().map_err(ClipboardBackendError::backend)?;
-        match clipboard.get_text() {
+        match self.with_arboard(|clipboard| clipboard.get_text()) {
             Ok(text) if text.is_empty() => Ok(None),
             Ok(text) => Ok(Some(text)),
             Err(error) => Err(map_error(error)),
@@ -413,37 +437,49 @@ impl ClipboardBackend for ArboardClipboard {
     }
 
     fn write_text(&self, text: &str) -> Result<(), ClipboardBackendError> {
-        let mut clipboard = Arboard::new().map_err(ClipboardBackendError::backend)?;
-        clipboard
-            .set_text(text.to_string())
+        self.with_arboard(|clipboard| clipboard.set_text(text.to_string()))
             .map_err(ClipboardBackendError::backend)
     }
 
     fn read_rich(&self) -> Result<Option<RichTextPayload>, ClipboardBackendError> {
-        let mut clipboard = Arboard::new().map_err(ClipboardBackendError::backend)?;
         // arboard exposes only the HTML leg of a rich-text payload;
         // the plain-text companion comes from the standard `get_text`
         // call and is required by the `RichTextPayload` invariant.
-        let plain_text = match clipboard.get_text() {
-            Ok(text) if !text.is_empty() => text,
-            // No usable plain text: this is not a rich capture even if
-            // the HTML leg happens to exist. The watcher can still try
-            // the image pipeline afterwards.
-            Ok(_) => return Ok(None),
-            Err(ArboardError::ContentNotAvailable) | Err(ArboardError::ConversionFailure) => {
-                return Ok(None);
-            }
-            Err(error) => return Err(map_error(error)),
+        let Some((plain_text, html, html_conversion_failed)) = self
+            .with_arboard(|clipboard| {
+                let plain_text = match clipboard.get_text() {
+                    Ok(text) if !text.is_empty() => text,
+                    // No usable plain text: this is not a rich capture even if
+                    // the HTML leg happens to exist. The watcher can still try
+                    // the image pipeline afterwards.
+                    Ok(_) => return Ok(None),
+                    Err(ArboardError::ContentNotAvailable | ArboardError::ConversionFailure) => {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error),
+                };
+                let mut html_conversion_failed = false;
+                let html = match clipboard.get().html() {
+                    Ok(html) if !html.is_empty() => Some(html),
+                    Ok(_) => None,
+                    Err(ArboardError::ContentNotAvailable) => None,
+                    Err(ArboardError::ConversionFailure) => {
+                        html_conversion_failed = true;
+                        None
+                    }
+                    // An unexpected failure means the rich observation is
+                    // unreliable, so surface it through the backend error.
+                    Err(error) => return Err(error),
+                };
+                Ok(Some((plain_text, html, html_conversion_failed)))
+            })
+            .map_err(map_error)?
+        else {
+            return Ok(None);
         };
-        let html = match clipboard.get().html() {
-            Ok(html) if !html.is_empty() => Some(html),
-            Ok(_) => None,
-            Err(ArboardError::ContentNotAvailable | ArboardError::ConversionFailure) => None,
-            // `get_html` returns `ContentNotAvailable` for an absent
-            // leg; anything else surfaces as a hard backend failure so
-            // the caller knows the rich capture is unreliable.
-            Err(error) => return Err(map_image_error(error)),
-        };
+        if html_conversion_failed {
+            return Err(ClipboardBackendError::UnsupportedFormat);
+        }
         // RTF is not exposed by arboard: keep the leg explicit so a
         // future adapter that does expose it can fill it in without a
         // contract change.
@@ -461,7 +497,6 @@ impl ClipboardBackend for ArboardClipboard {
     }
 
     fn write_rich(&self, payload: &RichTextPayload) -> Result<(), ClipboardBackendError> {
-        let mut clipboard = Arboard::new().map_err(ClipboardBackendError::backend)?;
         // The contract forbids silently writing the plain text when
         // only RTF is available: doing so would falsify a rich paste
         // and the user would observe plain text in the receiving
@@ -482,9 +517,12 @@ impl ClipboardBackend for ArboardClipboard {
             // consumer that only knows about plain text still
             // receives the canonical `content` (the `arboard`
             // contract pins the alt-text behaviour).
-            return clipboard
-                .set()
-                .html(html.to_string(), Some(payload.plain_text().to_string()))
+            return self
+                .with_arboard(|clipboard| {
+                    clipboard
+                        .set()
+                        .html(html.to_string(), Some(payload.plain_text().to_string()))
+                })
                 .map_err(ClipboardBackendError::backend);
         }
         // The payload carries neither HTML nor RTF. The
@@ -501,22 +539,20 @@ impl ClipboardBackend for ArboardClipboard {
     }
 
     fn read_image(&self) -> Result<Option<ClipboardImage>, ClipboardBackendError> {
-        let mut clipboard = Arboard::new().map_err(ClipboardBackendError::backend)?;
-        match clipboard.get_image() {
-            Ok(data) => to_clipboard_image(data).map(Some),
-            Err(error) => Err(map_image_error(error)),
-        }
+        let data = match self.with_arboard(|clipboard| clipboard.get_image()) {
+            Ok(data) => data,
+            Err(error) => return Err(map_image_error(error)),
+        };
+        to_clipboard_image(data).map(Some)
     }
 
     fn write_image(&self, image: &ClipboardImage) -> Result<(), ClipboardBackendError> {
-        let mut clipboard = Arboard::new().map_err(ClipboardBackendError::backend)?;
         let data = ImageData {
             width: image.width() as usize,
             height: image.height() as usize,
             bytes: Cow::Borrowed(image.rgba()),
         };
-        clipboard
-            .set_image(data)
+        self.with_arboard(|clipboard| clipboard.set_image(data))
             .map_err(ClipboardBackendError::backend)
     }
 

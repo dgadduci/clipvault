@@ -1,4 +1,4 @@
 schema: spec-driven
 created: 2026-09-28
-status: proposed
+status: in_progress
 summary: Detectar la aplicación de origen en KDE Plasma Wayland y enriquecer sus capturas con nombre e icono locales, sin alterar macOS ni GNOME

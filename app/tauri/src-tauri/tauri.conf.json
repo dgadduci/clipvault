@@ -50,7 +50,6 @@
       "resources/gnome-extension/metadata.json",
       "resources/gnome-extension/extension.js",
       "resources/kde-kwin-script/metadata.json",
-      "resources/kde-kwin-script/contents/ui/main.qml",
       "resources/kde-kwin-script/contents/code/main.js"
     ],
     "icon": [

@@ -16,5 +16,6 @@
         "Name[en_GB]": "ClipVault KDE Source App",
         "Version": "1.0"
     },
-    "X-Plasma-API": "declarativescript"
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
 }

@@ -2,7 +2,7 @@
     ClipVault - local clipboard manager for KDE Plasma Wayland.
     SPDX-License-Identifier: MIT
 
-    Companion JavaScript module for the
+    JavaScript entry point for the
     `clipvault-kde-source-app` KWin script.
 
     The module reads `workspace.activeWindow.desktopFileName`,
@@ -10,16 +10,16 @@
     over the session D-Bus bus name `org.clipvault.SourceApp` at
     the object path `/org/clipvault/SourceApp`. The interface is
     `org.clipvault.SourceApp` and the method is `Publish(s id,
-    u state, u v)`, where:
+    s state, s v)`, where:
 
-        id    — the trimmed desktop file name (for example
+        id    — the canonical desktop file id (for example
                 `org.kate.editor.desktop`) or the empty string
                 when no application is focused;
-        state — `1` for `identified` (a valid identifier is being
+        state — string `"1"` for `identified` (a valid identifier is being
                 announced) and `2` for `cleared` (no active
                 application or the identifier was invalid; the
                 Rust bridge MUST clear its cached snapshot);
-        v     — the wire protocol version (`1`).
+        v     — string wire protocol version (`2`).
 
     Only the identifier, the state code and the protocol version
     travel over D-Bus. The Rust bridge rejects messages with a
@@ -27,31 +27,17 @@
     match the documented `[A-Za-z0-9._+-]+\.desktop` pattern.
 */
 
-.pragma library
-
 const CLIPVAULT_BUS_NAME = "org.clipvault.SourceApp";
 const CLIPVAULT_OBJECT_PATH = "/org/clipvault/SourceApp";
 const CLIPVAULT_INTERFACE = "org.clipvault.SourceApp";
 const CLIPVAULT_METHOD = "Publish";
-const CLIPVAULT_PROTOCOL_VERSION = 1;
+const CLIPVAULT_PROTOCOL_VERSION = 2;
+let loggedIdentifierAcknowledgement = false;
+let loggedEmptyAcknowledgement = false;
 
-// `state` carries an unsigned integer so a peer can tell apart
-// "valid identifier published" from "explicit snapshot clear".
+// State codes distinguish an identified app from an explicit clear.
 const STATE_IDENTIFIED = 1;
 const STATE_CLEARED = 2;
-
-// KWin's API is asynchronous; defer the very first publish until
-// the workspace has populated `activeWindow`. Otherwise the very
-// first activation can be missed when the script loads before the
-// window tree is ready.
-let attached = false;
-
-function attach() {
-    if (attached) {
-        return;
-    }
-    attached = true;
-}
 
 function onWindowActivated() {
     publishActiveWindow();
@@ -93,15 +79,27 @@ function normalizeIdentifier(raw) {
     if (value.length === 0) {
         return "";
     }
-    // Strip a leading absolute path KWin may report when the
-    // application is launched from a non-standard location. Only
-    // the basename ever leaves the script — the Rust bridge is
-    // responsible for refusing any leftover path-like shape.
+    // KWin normally returns the desktop file basename without an
+    // extension (for example `org.kate.editor`). It may instead
+    // return an absolute path ending in `.desktop`. In either case,
+    // only the canonical desktop file id leaves the script; paths
+    // never leave this function.
     let slash = value.lastIndexOf("/");
     if (slash >= 0) {
         value = value.substring(slash + 1);
     }
     if (value.length === 0) {
+        return "";
+    }
+    if (!value.endsWith(".desktop")) {
+        // Do not turn a malformed suffix into a superficially valid
+        // desktop file id by appending another extension.
+        if (value.includes(".desktop")) {
+            return "";
+        }
+        value += ".desktop";
+    }
+    if (value.length > 512 || !/^[A-Za-z0-9._+-]+\.desktop$/.test(value)) {
         return "";
     }
     return value;
@@ -111,19 +109,21 @@ function publish(rawIdentifier) {
     let identifier = normalizeIdentifier(rawIdentifier);
     let state = identifier.length === 0 ? STATE_CLEARED : STATE_IDENTIFIED;
 
-    // KWin exposes `callDBus` synchronously; the Rust bridge
-    // answers the `Publish` method without a reply payload so the
-    // script thread is not blocked on the bridge.
+    // KWin infers D-Bus argument types from the JavaScript values;
+    // it does not take a separate signature string. Sending all
+    // fields as strings keeps the bridge signature stable.
     try {
         callDBus(
             CLIPVAULT_BUS_NAME,
             CLIPVAULT_OBJECT_PATH,
             CLIPVAULT_INTERFACE,
             CLIPVAULT_METHOD,
-            "susu",
             identifier,
-            state,
-            CLIPVAULT_PROTOCOL_VERSION
+            String(state),
+            String(CLIPVAULT_PROTOCOL_VERSION),
+            function () {
+                reportPublishAcknowledgement(identifier.length > 0);
+            }
         );
     } catch (error) {
         // The bridge may not be running yet. The contract is that
@@ -131,3 +131,26 @@ function publish(rawIdentifier) {
         // we never propagate the failure further.
     }
 }
+
+function reportPublishAcknowledgement(hasIdentifier) {
+    if (hasIdentifier) {
+        if (loggedIdentifierAcknowledgement) {
+            return;
+        }
+        loggedIdentifierAcknowledgement = true;
+        print("ClipVault KWin bridge acknowledged a snapshot with an identifier");
+        return;
+    }
+
+    if (loggedEmptyAcknowledgement) {
+        return;
+    }
+    loggedEmptyAcknowledgement = true;
+    print("ClipVault KWin bridge acknowledged an empty snapshot");
+}
+
+// KWin executes this file as the package's JavaScript entry point.
+// Publish immediately for the current focus, then follow future changes.
+workspace.windowActivated.connect(onWindowActivated);
+print("ClipVault KWin source-app script started");
+publishInitial();

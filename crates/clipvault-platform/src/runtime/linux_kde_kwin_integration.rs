@@ -15,10 +15,10 @@
 //!    `/org/clipvault/SourceApp` using the interface
 //!    `org.clipvault.SourceApp`.
 //! 2. ClipVault owns the receiver end of that bus. The interface
-//!    surface is `Publish(s id, u state, u v)`; the `id` is the
-//!    trimmed desktop file name, `state` is `1` for `identified` and
-//!    `2` for `cleared`, and `v` is the protocol version. Anything
-//!    else is rejected.
+//!    surface is `Publish(s id, s state, s v)`; the `id` is the
+//!    canonical desktop file name, `state` is the string `1` for
+//!    `identified` and `2` for `cleared`, and `v` is the string
+//!    protocol version. Anything else is rejected.
 //! 3. The receiver validates the wire envelope, refuses messages
 //!    whose sender is not `org.kde.KWin`, refreshes the snapshot,
 //!    and exposes the same [`ActiveApplicationProbe`] contract the
@@ -35,15 +35,15 @@
 //! - Bus name: `org.clipvault.SourceApp` (session bus).
 //! - Object path: `/org/clipvault/SourceApp`.
 //! - Interface: `org.clipvault.SourceApp`.
-//! - Method: `Publish(s id, u state, u v)`.
-//! - The bridge accepts messages whose unique-name sender ends with
-//!   `.org.kde.KWin` (KWin's well-known bus name).
+//! - Method: `Publish(s id, s state, s v)`.
+//! - The bridge resolves `org.kde.KWin` to its current unique D-Bus
+//!   name at startup and accepts messages only from that connection.
 //!
 //! The protocol carries:
 //!   - `id` (string): the validated desktop file name (e.g.
 //!     `org.kate.editor.desktop`) or the empty string,
-//!   - `state` (unsigned): `1` for `identified`, `2` for `cleared`,
-//!   - `v` (unsigned): wire protocol version (`1`).
+//!   - `state` (string): `1` for `identified`, `2` for `cleared`,
+//!   - `v` (string): wire protocol version (`2`).
 //!
 //! It must never carry:
 //!   - the window title,
@@ -70,17 +70,15 @@ use crate::active_app::{ActiveAppError, ActiveApplication, ActiveApplicationProb
 /// Wire protocol version the bridge accepts. Bumped whenever the
 /// envelope shape changes; older versions are rejected with
 /// [`KdeKwinError::ProtocolVersion`].
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
-/// State the script publishes. The unsigned integer keeps the wire
-/// envelope free of magic strings.
+/// Numeric state code represented as a decimal string on the wire.
 pub const STATE_IDENTIFIED: u32 = 1;
 pub const STATE_CLEARED: u32 = 2;
 
 /// Session bus well-known name KWin answers on a stock KDE Plasma
-/// session. The bridge accepts `Publish` calls from the KWin
-/// process only — the sender unique name is matched against this
-/// well-known name with the `:1.x` suffix stripped.
+/// session. The bridge resolves it to KWin's unique owner at startup
+/// and accepts `Publish` calls only from that connection.
 pub const KWIN_BUS_NAME: &str = "org.kde.KWin";
 
 /// Session bus name the bridge claims. The script sends to this
@@ -433,8 +431,8 @@ impl KdeKwinReceiver {
         &self,
         #[zbus(header)] hdr: ZbusHeader<'_>,
         id: String,
-        state: u32,
-        v: u32,
+        state: String,
+        v: String,
     ) -> zbus::fdo::Result<()> {
         let sender_unique = match hdr.sender() {
             Some(sender) => sender.to_string(),
@@ -463,7 +461,7 @@ impl KdeKwinReceiver {
             ));
         }
 
-        if v != PROTOCOL_VERSION {
+        if v != PROTOCOL_VERSION.to_string() {
             self.snapshot
                 .set_last_error(Some(KdeKwinError::ProtocolVersion));
             self.snapshot.set_probe_stage(ProbeStage::Backend);
@@ -472,8 +470,8 @@ impl KdeKwinReceiver {
             ));
         }
 
-        match state {
-            STATE_IDENTIFIED => {
+        match state.as_str() {
+            "1" => {
                 let normalised = match normalize_identifier(&id) {
                     Some(value) => value,
                     None => {
@@ -490,19 +488,19 @@ impl KdeKwinReceiver {
                 self.snapshot.set_probe_stage(ProbeStage::Identified);
                 self.snapshot.set_last_error(None);
             }
-            STATE_CLEARED => {
+            "2" => {
                 self.snapshot.set_active_app_id(None);
                 self.snapshot
                     .set_state(KdeKwinIntegrationState::NoActiveApplication);
                 self.snapshot.set_probe_stage(ProbeStage::ActiveWindowEmpty);
                 self.snapshot.set_last_error(None);
             }
-            unknown => {
+            _ => {
                 self.snapshot
-                    .set_last_error(Some(KdeKwinError::UnknownState(unknown)));
+                    .set_last_error(Some(KdeKwinError::UnknownState(u32::MAX)));
                 self.snapshot.set_probe_stage(ProbeStage::Backend);
                 return Err(zbus::fdo::Error::Failed(
-                    KdeKwinError::UnknownState(unknown)
+                    KdeKwinError::UnknownState(u32::MAX)
                         .stable_label()
                         .to_string(),
                 ));

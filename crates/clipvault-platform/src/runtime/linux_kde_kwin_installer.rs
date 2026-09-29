@@ -14,7 +14,7 @@
 //!   integration asks KWin to reload through the typed `zbus`
 //!   client after the filesystem/configuration transaction.
 //! * Activation / deactivation change only KWin's documented
-//!   `Plugins/<id>Enabled` key in `kwinrc`. `kwriteconfig` is
+//!   `<id>Enabled` key in the `[Plugins]` group in `kwinrc`. `kwriteconfig` is
 //!   forbidden; the installer writes the file directly so the
 //!   existing keys stay intact. The caller then asks KWin to reload
 //!   over the session bus.
@@ -108,15 +108,13 @@ impl KwinInstallation {
 #[derive(Debug, Clone)]
 pub struct BundledKwinScript {
     pub metadata_json: String,
-    pub main_qml: String,
     pub main_js: String,
 }
 
 impl BundledKwinScript {
-    pub fn from_strings(metadata_json: String, main_qml: String, main_js: String) -> Self {
+    pub fn from_strings(metadata_json: String, main_js: String) -> Self {
         Self {
             metadata_json,
-            main_qml,
             main_js,
         }
     }
@@ -264,10 +262,7 @@ impl KwinInstaller {
         }
 
         let contents_dir = target.join("contents");
-        let ui_dir = contents_dir.join("ui");
         let code_dir = contents_dir.join("code");
-        fs::create_dir_all(&ui_dir)
-            .map_err(|error| KdeKwinInstallerError::Io(error.to_string()))?;
         fs::create_dir_all(&code_dir)
             .map_err(|error| KdeKwinInstallerError::Io(error.to_string()))?;
 
@@ -278,9 +273,22 @@ impl KwinInstaller {
             return Err(KdeKwinInstallerError::ForeignExtension(parsed.id));
         }
 
+        self.migrate_legacy_enabled_key()?;
+
         write_atomic(&metadata_path, bundled.metadata_json.as_bytes())?;
-        write_atomic(&ui_dir.join("main.qml"), bundled.main_qml.as_bytes())?;
         write_atomic(&code_dir.join("main.js"), bundled.main_js.as_bytes())?;
+
+        // Previous ClipVault releases installed a declarative QML
+        // wrapper that loaded the JavaScript file as a component.
+        // Remove only that obsolete entrypoint after package ownership
+        // has been checked above, so an upgraded package cannot leave
+        // KWin with both old and new script entrypoints.
+        let legacy_qml = contents_dir.join("ui").join("main.qml");
+        match fs::remove_file(legacy_qml) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(KdeKwinInstallerError::Io(error.to_string())),
+        }
 
         // Activate only on the first install. Re-installs leave
         // the existing `enabled` flag untouched so the call is
@@ -358,19 +366,30 @@ impl KwinInstaller {
         let Ok(raw) = fs::read_to_string(&path) else {
             return false;
         };
-        let key = format!("Plugins/{SCRIPT_PLUGIN_ID}Enabled");
-        for line in raw.lines() {
-            let trimmed = line.trim_start();
-            if !trimmed.starts_with(&key) {
-                continue;
-            }
-            let Some((_, value)) = trimmed.split_once('=') else {
-                continue;
-            };
-            let value = value.trim();
-            return value.eq_ignore_ascii_case("true");
-        }
-        false
+        read_plugin_enabled_value(&raw, &plugin_enabled_key()).unwrap_or(false)
+    }
+
+    /// Migrate the malformed key written by previous ClipVault
+    /// versions. It was stored as `Plugins/<id>Enabled` inside the
+    /// `[Plugins]` group, so KWin ignored it. The migration is scoped
+    /// to this plugin and preserves a correctly written value if one
+    /// already exists.
+    pub fn migrate_legacy_enabled_key(&self) -> Result<(), KdeKwinInstallerError> {
+        let Some(path) = self.kwinrc.kwinrc_path() else {
+            return Ok(());
+        };
+        let raw = match fs::read_to_string(&path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(KdeKwinInstallerError::Io(error.to_string())),
+        };
+        let Some(legacy_value) = read_plugin_enabled_value(&raw, &legacy_plugin_enabled_key())
+        else {
+            return Ok(());
+        };
+        let enabled =
+            read_plugin_enabled_value(&raw, &plugin_enabled_key()).unwrap_or(legacy_value);
+        self.write_plugin_enabled_value(&path, &raw, enabled)
     }
 
     fn enable_in_kwinrc(&self) -> Result<(), KdeKwinInstallerError> {
@@ -391,31 +410,66 @@ impl KwinInstaller {
             Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(KdeKwinInstallerError::Io(error.to_string())),
         };
-        let key = format!("Plugins/{SCRIPT_PLUGIN_ID}Enabled");
+        self.write_plugin_enabled_value(&path, &raw, enabled)
+    }
+
+    fn write_plugin_enabled_value(
+        &self,
+        path: &Path,
+        raw: &str,
+        enabled: bool,
+    ) -> Result<(), KdeKwinInstallerError> {
+        let key = plugin_enabled_key();
+        let legacy_key = legacy_plugin_enabled_key();
         let value = if enabled { "true" } else { "false" };
-        let mut lines: Vec<String> = raw.lines().map(|line| line.to_string()).collect();
+        let mut lines = Vec::new();
+        let mut group = String::new();
+        let mut found_group = false;
         let mut replaced = false;
-        for line in lines.iter_mut() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with(&key) {
-                *line = format!("{key}={value}");
-                replaced = true;
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                group = trimmed[1..trimmed.len() - 1].to_string();
+                found_group |= group == "Plugins";
+                lines.push(line.to_string());
+                continue;
             }
-        }
-        if !replaced {
-            if !lines.is_empty() && !lines.last().unwrap().is_empty() {
-                lines.push(String::new());
-            }
-            // Find / insert the [Plugins] group.
-            let mut inserted = false;
-            for index in 0..lines.len() {
-                if lines[index].trim() == "[Plugins]" {
-                    lines.insert(index + 1, format!("{key}={value}"));
-                    inserted = true;
-                    break;
+            if group == "Plugins" {
+                if let Some((name, _)) = trimmed.split_once('=') {
+                    match name.trim() {
+                        name if name == legacy_key => continue,
+                        name if name == key => {
+                            lines.push(format!("{key}={value}"));
+                            replaced = true;
+                            continue;
+                        }
+                        _ => {}
+                    }
                 }
             }
-            if !inserted {
+            lines.push(line.to_string());
+        }
+        if !replaced {
+            if found_group {
+                let group_start = lines
+                    .iter()
+                    .position(|line| line.trim() == "[Plugins]")
+                    .expect("found Plugins group");
+                let insert_at = lines
+                    .iter()
+                    .enumerate()
+                    .skip(group_start + 1)
+                    .find(|(_, line)| {
+                        let trimmed = line.trim();
+                        trimmed.starts_with('[') && trimmed.ends_with(']')
+                    })
+                    .map(|(index, _)| index)
+                    .unwrap_or(lines.len());
+                lines.insert(insert_at, format!("{key}={value}"));
+            } else {
+                if !lines.is_empty() && !lines.last().is_some_and(String::is_empty) {
+                    lines.push(String::new());
+                }
                 lines.push("[Plugins]".to_string());
                 lines.push(format!("{key}={value}"));
             }
@@ -425,9 +479,43 @@ impl KwinInstaller {
             fs::create_dir_all(parent)
                 .map_err(|error| KdeKwinInstallerError::Io(error.to_string()))?;
         }
-        fs::write(&path, body).map_err(|error| KdeKwinInstallerError::Io(error.to_string()))?;
-        Ok(())
+        fs::write(path, body).map_err(|error| KdeKwinInstallerError::Io(error.to_string()))
     }
+}
+
+fn plugin_enabled_key() -> String {
+    format!("{SCRIPT_PLUGIN_ID}Enabled")
+}
+
+fn legacy_plugin_enabled_key() -> String {
+    format!("Plugins/{SCRIPT_PLUGIN_ID}Enabled")
+}
+
+fn read_plugin_enabled_value(raw: &str, key: &str) -> Option<bool> {
+    let mut group = String::new();
+    let mut value = None;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            group = trimmed[1..trimmed.len() - 1].to_string();
+            continue;
+        }
+        if group != "Plugins" {
+            continue;
+        }
+        let Some((name, raw_value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if name.trim() != key {
+            continue;
+        }
+        value = match raw_value.trim().to_ascii_lowercase().as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        };
+    }
+    value
 }
 
 impl Default for KwinInstaller {
@@ -474,13 +562,23 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), KdeKwinInstallerError> 
     Ok(())
 }
 
-/// Ask KWin to reconfigure by sending `reconfigure` over the
-/// session bus. Returns `Ok(())` even when KWin is offline so a
-/// future `KDE` session picks up the freshly written `kwinrc`
-/// automatically; the only error the helper raises is when the
-/// D-Bus call itself fails.
+/// Reload ClipVault's KWin script and reconfigure the enabled-script
+/// list over the session bus. KWin keeps enabled scripts loaded across
+/// `reconfigure`, so unload the owned plugin first to make disk updates
+/// take effect. If KWin is offline, a future session picks up `kwinrc`
+/// automatically; D-Bus errors are returned to the caller.
 pub async fn request_kwin_reconfigure() -> Result<(), KdeKwinInstallerError> {
     let connection = zbus::Connection::session()
+        .await
+        .map_err(|error| KdeKwinInstallerError::KwinReconfigure(error.to_string()))?;
+    connection
+        .call_method(
+            Some("org.kde.KWin"),
+            "/Scripting",
+            Some("org.kde.kwin.Scripting"),
+            "unloadScript",
+            &(SCRIPT_PLUGIN_ID,),
+        )
         .await
         .map_err(|error| KdeKwinInstallerError::KwinReconfigure(error.to_string()))?;
     connection
@@ -527,10 +625,10 @@ mod tests {
         "Name": "ClipVault KDE Source App",
         "Version": "1.0"
     },
-    "X-Plasma-API": "declarativescript"
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
 }"#
             .to_string(),
-            "import QtQuick\nLoader {}\n".to_string(),
             "// js\n".to_string(),
         )
     }
@@ -560,7 +658,6 @@ mod tests {
             .join(".local/share/kwin/scripts")
             .join(SCRIPT_PLUGIN_ID);
         assert!(target.join("metadata.json").is_file());
-        assert!(target.join("contents/ui/main.qml").is_file());
         assert!(target.join("contents/code/main.js").is_file());
     }
 
@@ -586,10 +683,10 @@ mod tests {
             r#"{
     "KPackageStructure": "KWin/Script",
     "KPlugin": { "Id": "some-other-script", "Version": "1.0" },
-    "X-Plasma-API": "declarativescript"
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
 }"#
             .to_string(),
-            String::new(),
             String::new(),
         );
         let error = installer

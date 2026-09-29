@@ -83,17 +83,24 @@ fn main() {
             if let Some(integration) = state.kde_kwin_integration.as_ref().cloned() {
                 let context = state.context.clone();
                 let fallback = state.adapters.active_app();
-                tauri::async_runtime::spawn(async move {
-                    if let Err(error) = integration
-                        .reactivate_if_consented(&context, fallback)
-                        .await
-                    {
-                        warn!(
-                            kind = error.stable_kind(),
-                            "KWin integration startup failed"
-                        );
+                match crate::kde_kwin_integration::read_bundled_script(app.handle()) {
+                    Ok(bundled) => {
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(error) = integration
+                                .reactivate_if_consented(&context, fallback, &bundled)
+                                .await
+                            {
+                                warn!(
+                                    kind = error.stable_kind(),
+                                    "KWin integration startup failed"
+                                );
+                            }
+                        });
                     }
-                });
+                    Err(error) => {
+                        warn!(error = %error, "KWin integration script resources unavailable");
+                    }
+                }
             }
 
             // Install and retain the Tauri-backed tray. Its managed state owns

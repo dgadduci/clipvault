@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-28
+status: in_progress
+summary: Evitar warnings repetidos al usar el fallback X11 cuando Wayland no ofrece data-control

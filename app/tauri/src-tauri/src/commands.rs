@@ -2558,12 +2558,16 @@ mod kde_kwin_commands {
     #[tauri::command]
     pub async fn clipvault_kde_kwin_integration_retry(
         state: State<'_, SharedState>,
+        handle: tauri::AppHandle,
     ) -> Result<KdeKwinIntegrationPayload, CommandError> {
         let integration = integration(&state)?;
+        let bundled = read_bundled_script(&handle).map_err(|_| {
+            CommandError::new("bundled_missing", "KWin script resources are unavailable")
+        })?;
         let context = state.context().clone();
         let fallback = state.adapters().active_app();
         integration
-            .retry(&context, fallback)
+            .retry(&context, fallback, &bundled)
             .await
             .map_err(command_error)
     }
@@ -2603,7 +2607,7 @@ mod kde_kwin_commands {
             installed: false,
             enabled: false,
             backend: "kde_kwin_script".to_string(),
-            protocol_version: 1,
+            protocol_version: 2,
             detail: None,
             error: None,
         })
@@ -2641,6 +2645,7 @@ mod kde_kwin_commands {
     #[tauri::command]
     pub async fn clipvault_kde_kwin_integration_retry(
         _state: State<'_, SharedState>,
+        _handle: tauri::AppHandle,
     ) -> Result<KdeKwinIntegrationPayload, CommandError> {
         Err(unavailable())
     }

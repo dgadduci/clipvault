@@ -9,7 +9,7 @@ use clipvault_core::{AppContext, KdeKwinConsentDecision, KdeKwinIntegrationServi
 use clipvault_platform::{
     kde_kwin_start_bridge, request_kwin_reconfigure, ActiveApplicationProbe, BundledKwinScript,
     KdeKwinActiveApplication, KdeKwinBridgeHandle, KdeKwinError, KdeKwinInstallerError,
-    KdeKwinIntegrationState as ProbeState, KwinInstaller, SharedKdeKwinSnapshot,
+    KdeKwinIntegrationState as ProbeState, KwinInstaller, ProbeStage, SharedKdeKwinSnapshot,
     KDE_KWIN_BACKEND_NAME, KDE_KWIN_PROTOCOL_VERSION,
 };
 use parking_lot::Mutex;
@@ -19,7 +19,6 @@ use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
 
 const BUNDLED_METADATA: &str = "metadata.json";
-const BUNDLED_QML: &str = "contents/ui/main.qml";
 const BUNDLED_JS: &str = "contents/code/main.js";
 
 pub struct KdeKwinIntegrationState {
@@ -170,6 +169,7 @@ impl KdeKwinIntegrationState {
             context.swap_active_app_probe(fallback);
             return Err(error);
         }
+        self.prepare_script_reload();
         if let Err(error) = request_kwin_reconfigure().await {
             self.stop_bridge();
             context.swap_active_app_probe(fallback);
@@ -211,20 +211,32 @@ impl KdeKwinIntegrationState {
         &self,
         context: &AppContext,
         fallback: Arc<dyn ActiveApplicationProbe>,
+        bundled: &BundledKwinScript,
     ) -> Result<KdeKwinIntegrationPayload, KdeKwinShellError> {
         self.ensure_applicable()?;
         let _guard = self.lifecycle.lock().await;
         if !matches!(self.core.cached_consent(), KdeKwinConsentDecision::Accepted) {
             return Err(KdeKwinShellError::NotApplicable);
         }
-        self.installer
+        let installation = self
+            .installer
             .inspect()?
-            .filter(|value| value.installed && value.enabled)
+            .filter(|value| value.installed)
             .ok_or(KdeKwinShellError::NotReady)?;
+        self.installer.migrate_legacy_enabled_key()?;
+        let installation = self.installer.inspect()?.unwrap_or(installation);
+        if !installation.enabled {
+            return Err(KdeKwinShellError::NotReady);
+        }
+        if let Err(error) = self.installer.install(bundled) {
+            self.record_installer_error(&error);
+            return Err(error.into());
+        }
         if let Err(error) = self.start_bridge().await {
             context.swap_active_app_probe(fallback);
             return Err(error);
         }
+        self.prepare_script_reload();
         if let Err(error) = request_kwin_reconfigure().await {
             self.stop_bridge();
             context.swap_active_app_probe(fallback);
@@ -239,10 +251,12 @@ impl KdeKwinIntegrationState {
         &self,
         context: &AppContext,
         fallback: Arc<dyn ActiveApplicationProbe>,
+        bundled: &BundledKwinScript,
     ) -> Result<(), KdeKwinShellError> {
         if !self.is_applicable() {
             return Ok(());
         }
+        let _guard = self.lifecycle.lock().await;
         let decision = self
             .core
             .load_consent(context)
@@ -254,15 +268,21 @@ impl KdeKwinIntegrationState {
             self.snapshot.set_state(ProbeState::NotInstalled);
             return Ok(());
         };
+        self.installer.migrate_legacy_enabled_key()?;
+        let installation = self.installer.inspect()?.unwrap_or(installation);
         if !installation.enabled {
             self.snapshot.set_state(ProbeState::Disabled);
             return Ok(());
         }
-        let _guard = self.lifecycle.lock().await;
+        if let Err(error) = self.installer.install(bundled) {
+            self.record_installer_error(&error);
+            return Err(error.into());
+        }
         if let Err(error) = self.start_bridge().await {
             context.swap_active_app_probe(fallback);
             return Err(error);
         }
+        self.prepare_script_reload();
         if let Err(error) = request_kwin_reconfigure().await {
             self.stop_bridge();
             context.swap_active_app_probe(fallback);
@@ -292,6 +312,7 @@ impl KdeKwinIntegrationState {
         if self.bridge.lock().is_some() {
             return Ok(());
         }
+        self.snapshot.set_state(ProbeState::ActivationPending);
         match kde_kwin_start_bridge(self.snapshot.clone()).await {
             Ok(handle) => {
                 *self.bridge.lock() = Some(handle);
@@ -304,6 +325,12 @@ impl KdeKwinIntegrationState {
                 Err(error.into())
             }
         }
+    }
+
+    fn prepare_script_reload(&self) {
+        self.snapshot.set_active_app_id(None);
+        self.snapshot.set_probe_stage(ProbeStage::Started);
+        self.snapshot.set_state(ProbeState::ActivationPending);
     }
 
     fn stop_bridge(&self) {
@@ -390,15 +417,10 @@ pub fn read_bundled_script(
         .map_err(|_| BundledKwinScriptError::Missing)?;
     let metadata =
         find_resource(&resource_dir, BUNDLED_METADATA).ok_or(BundledKwinScriptError::Missing)?;
-    let qml = find_resource(&resource_dir, BUNDLED_QML).ok_or(BundledKwinScriptError::Missing)?;
     let js = find_resource(&resource_dir, BUNDLED_JS).ok_or(BundledKwinScriptError::Missing)?;
     let read =
         |path: PathBuf| std::fs::read_to_string(path).map_err(|_| BundledKwinScriptError::Read);
-    Ok(BundledKwinScript::from_strings(
-        read(metadata)?,
-        read(qml)?,
-        read(js)?,
-    ))
+    Ok(BundledKwinScript::from_strings(read(metadata)?, read(js)?))
 }
 
 fn find_resource(resource_dir: &std::path::Path, relative: &str) -> Option<PathBuf> {
