@@ -31,6 +31,7 @@ const CLIPVAULT_BUS_NAME = "org.clipvault.SourceApp";
 const CLIPVAULT_OBJECT_PATH = "/org/clipvault/SourceApp";
 const CLIPVAULT_INTERFACE = "org.clipvault.SourceApp";
 const CLIPVAULT_METHOD = "Publish";
+const CLIPVAULT_CAPTURE_TOGGLE_METHOD = "ToggleCapture";
 const CLIPVAULT_PROTOCOL_VERSION = 2;
 let loggedIdentifierAcknowledgement = false;
 let loggedEmptyAcknowledgement = false;
@@ -132,6 +133,22 @@ function publish(rawIdentifier) {
     }
 }
 
+function toggleLocalCapture() {
+    // This call carries no clipboard, window or application metadata. The
+    // Rust bridge accepts it only from KWin's authenticated D-Bus name.
+    try {
+        callDBus(
+            CLIPVAULT_BUS_NAME,
+            CLIPVAULT_OBJECT_PATH,
+            CLIPVAULT_INTERFACE,
+            CLIPVAULT_CAPTURE_TOGGLE_METHOD,
+            function () {}
+        );
+    } catch (error) {
+        // ClipVault may be restarting; no state change is replayed later.
+    }
+}
+
 function reportPublishAcknowledgement(hasIdentifier) {
     if (hasIdentifier) {
         if (loggedIdentifierAcknowledgement) {
@@ -152,5 +169,14 @@ function reportPublishAcknowledgement(hasIdentifier) {
 // KWin executes this file as the package's JavaScript entry point.
 // Publish immediately for the current focus, then follow future changes.
 workspace.windowActivated.connect(onWindowActivated);
+const captureShortcutRegistered = registerShortcut(
+    "clipvault-toggle-local-capture",
+    "Toggle ClipVault local clipboard capture",
+    "Ctrl+Alt+Shift+B",
+    toggleLocalCapture
+);
+if (!captureShortcutRegistered) {
+    print("ClipVault Ctrl+Alt+Shift+B shortcut unavailable (conflict)");
+}
 print("ClipVault KWin source-app script started");
 publishInitial();

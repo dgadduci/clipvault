@@ -286,6 +286,17 @@ export const settingsSetCommand: ClipvaultCommandArg<
 > = (args) =>
   invoke<Settings>("clipvault_settings_set", { update: args });
 
+export const captureControlGetCommand: ClipvaultCommand<boolean> = () =>
+  invoke<boolean>("clipvault_capture_control_get");
+
+export const captureControlSetCommand: ClipvaultCommandArg<
+  boolean,
+  { enabled: boolean }
+> = (args) =>
+  invoke<boolean>("clipvault_capture_control_set", {
+    enabled: args.enabled,
+  });
+
 export const ignoredAppsListCommand: ClipvaultCommand<string[]> = () =>
   invoke<string[]>("clipvault_ignored_apps_list");
 

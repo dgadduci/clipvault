@@ -125,7 +125,7 @@ fn protocol_constants_have_stable_serialised_values() {
     assert_eq!(KDE_KWIN_BUS_NAME, "org.clipvault.SourceApp");
     assert_eq!(KDE_KWIN_BUS_NAME_WELL, "org.kde.KWin");
     assert_eq!(KDE_KWIN_OBJECT_PATH, "/org/clipvault/SourceApp");
-    assert_eq!(KDE_KWIN_PROTOCOL_VERSION, 1);
+    assert_eq!(KDE_KWIN_PROTOCOL_VERSION, 2);
     assert_eq!(KDE_KWIN_STATE_IDENTIFIED, 1);
     assert_eq!(KDE_KWIN_STATE_CLEARED, 2);
 }

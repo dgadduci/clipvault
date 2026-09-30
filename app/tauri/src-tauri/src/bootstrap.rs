@@ -18,8 +18,9 @@ use clipvault_core::{
 };
 use clipvault_platform::{
     default_linux_binding, default_macos_binding, ActiveApplicationProbe, Capabilities,
-    ClipboardBackend, HotkeyManager, HotkeyOutcome, NoopSettingsNavigator, OsFamily,
-    PasteController, PlatformInfo, SettingsNavigator, TrayController,
+    ClipboardBackend, HotkeyKey, HotkeyManager, HotkeyModifiers, HotkeyOutcome,
+    NoopSettingsNavigator, OsFamily, PasteController, PlatformInfo, SettingsNavigator,
+    TrayController,
 };
 use tauri::{AppHandle, Emitter, Runtime};
 use tracing::{info, warn};
@@ -197,9 +198,11 @@ pub fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         context.install_default_pairing_material_loader(keychain);
     }
 
-    let watcher = Arc::new(CaptureWatcher::new(
+    let capture_enabled = context.settings().local_clipboard_capture_enabled(&context);
+    let watcher = Arc::new(CaptureWatcher::new_with_capture_enabled(
         Arc::clone(&clipboard),
         CaptureWatcher::default_interval(),
+        capture_enabled,
     ));
 
     // Wire the watcher handle into the management service so a
@@ -1228,6 +1231,7 @@ fn record_capture_decision(
             ..
         }) => "failed:backend",
         clipvault_core::WatchTickOutcome::Unchanged => "unchanged",
+        clipvault_core::WatchTickOutcome::Paused => "paused:local_capture",
         clipvault_core::WatchTickOutcome::Suppressed => "suppressed:paste_owned",
         clipvault_core::WatchTickOutcome::Ignored => "ignored:empty_clipboard",
         clipvault_core::WatchTickOutcome::Failed { .. } => "failed:watcher",
@@ -1280,6 +1284,9 @@ pub(crate) fn capture_loop_tick(
     watcher: &CaptureWatcher,
     context: &AppContext,
 ) -> WatchTickOutcome {
+    if !watcher.is_capture_enabled() {
+        return WatchTickOutcome::Paused;
+    }
     refresh_active_application_cache_for_loop_tick(context);
     let source_app = resolved_source_identifier(context);
     let outcome = watcher.tick(
@@ -1449,6 +1456,9 @@ fn log_capture_outcome(outcome: &clipvault_core::WatchTickOutcome) {
         WatchTickOutcome::Unchanged => {
             tracing::trace!("background capture tick: unchanged");
         }
+        WatchTickOutcome::Paused => {
+            tracing::trace!("background capture tick: local capture paused");
+        }
         WatchTickOutcome::Suppressed => {
             // Metadata-only: the trace line never carries the
             // payload, the hash or the snippet.
@@ -1499,10 +1509,50 @@ pub fn register_default_hotkey<R: Runtime>(
     outcome
 }
 
+/// Register the global local-capture toggle independently from quick search.
+/// The binding stays installed even while the capture watcher is paused.
+pub fn register_capture_toggle_hotkey<R: Runtime>(
+    state: &AppState,
+    handle: &AppHandle<R>,
+) -> HotkeyOutcome {
+    let binding = capture_toggle_binding_for(state.adapters.info());
+    let binding_for_log = binding.clone();
+    let app_handle = handle.clone();
+    let outcome = state
+        .adapters
+        .hotkey()
+        .register(
+            &binding,
+            Box::new(move || {
+                crate::commands::toggle_capture_from_hotkey(&app_handle);
+            }),
+        )
+        .unwrap_or(HotkeyOutcome::Failed {
+            reason: "hotkey backend rejected the binding".into(),
+        });
+    info!(
+        kind = outcome.kind(),
+        id = %binding_for_log.id,
+        "capture toggle hotkey outcome"
+    );
+    outcome
+}
+
 fn default_binding_for(info: &PlatformInfo) -> clipvault_platform::HotkeyBinding {
     match info.os_family {
         OsFamily::Macos => default_macos_binding("quick_search"),
         _ => default_linux_binding("quick_search"),
+    }
+}
+
+fn capture_toggle_binding_for(info: &PlatformInfo) -> clipvault_platform::HotkeyBinding {
+    clipvault_platform::HotkeyBinding {
+        id: "toggle_clipboard_capture".into(),
+        modifiers: match info.os_family {
+            OsFamily::Macos => HotkeyModifiers::CMD_ALT_SHIFT,
+            _ => HotkeyModifiers::CTRL_ALT_SHIFT,
+        },
+        key: HotkeyKey::B,
     }
 }
 
@@ -2160,6 +2210,27 @@ mod tests {
             .expect("bootstrap");
         let _ = CaptureWatcher::default_interval();
         (dir, context, fake_clipboard)
+    }
+
+    #[test]
+    fn capture_toggle_hotkey_uses_the_platform_modifier_and_b_key() {
+        use clipvault_platform::{DisplayServer, HotkeyKey, OsFamily, PlatformInfo};
+
+        let info = |os_family, display_server| PlatformInfo {
+            home_dir: std::path::PathBuf::from("/tmp"),
+            data_dir: std::path::PathBuf::from("/tmp/.clipvault"),
+            os_family,
+            display_server,
+        };
+
+        let mac = capture_toggle_binding_for(&info(OsFamily::Macos, DisplayServer::Unknown));
+        assert_eq!(mac.key, HotkeyKey::B);
+        assert_eq!(mac.modifiers, HotkeyModifiers::CMD_ALT_SHIFT);
+
+        let linux = capture_toggle_binding_for(&info(OsFamily::Linux, DisplayServer::X11));
+        assert_eq!(linux.key, HotkeyKey::B);
+        assert_eq!(linux.modifiers, HotkeyModifiers::CTRL_ALT_SHIFT);
+        assert_eq!(linux.id, "toggle_clipboard_capture");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use clipvault_core::{AppContext, PlatformAdapters, WatchTickOutcome};
+use clipvault_core::{AppContext, PlatformAdapters, SettingsServiceError, WatchTickOutcome};
 
 use crate::bootstrap::AppState;
 
@@ -47,6 +47,9 @@ impl SharedState {
     /// has focused after switching windows. On macOS the main-queue
     /// refresher keeps the cache populated.
     pub fn tick(&self, _source_app: Option<&str>) -> WatchTickOutcome {
+        if !self.inner.watcher.is_capture_enabled() {
+            return WatchTickOutcome::Paused;
+        }
         crate::bootstrap::refresh_active_application_cache_for_loop_tick(&self.inner.context);
         let identifier = crate::bootstrap::resolved_source_identifier(&self.inner.context);
         self.inner.watcher.tick(
@@ -54,6 +57,35 @@ impl SharedState {
             identifier.as_deref(),
             clipvault_core::AttemptOrigin::ManualTick,
         )
+    }
+
+    /// Return the effective local clipboard-capture state used by all
+    /// watcher and manual capture entry points.
+    pub fn capture_enabled(&self) -> bool {
+        self.inner.watcher.is_capture_enabled()
+    }
+
+    /// Persist and atomically apply a requested state, or toggle it when
+    /// `requested` is `None`. The watcher gate serializes this transition
+    /// with every in-flight local capture.
+    pub fn update_capture_enabled(
+        &self,
+        requested: Option<bool>,
+    ) -> Result<bool, SettingsServiceError> {
+        let context = &self.inner.context;
+        self.inner
+            .watcher
+            .update_capture_enabled(requested, |enabled| {
+                context
+                    .settings()
+                    .set_local_clipboard_capture_enabled(context, enabled)
+            })
+    }
+
+    /// Run a local capture entry point while holding the shared pause gate.
+    /// Returns `None` when capture is paused.
+    pub fn with_capture_enabled<T>(&self, action: impl FnOnce() -> T) -> Option<T> {
+        self.inner.watcher.with_capture_enabled(action)
     }
 
     /// Recompute the capability matrix from the cached platform info.

@@ -16,8 +16,9 @@ use clipvault_core::{
 };
 use clipvault_platform::{
     spawn_listener_thread_with_socket_and_events, GnomeConsentDecision as PlatformConsentDecision,
-    GnomeIntegrationService as PlatformIntegrationService, ListenerHandle, SharedGnomeSnapshot,
-    UnixListenerTransport, GNOME_BACKEND_NAME, GNOME_EXTENSION_UUID, GNOME_PROTOCOL_VERSION,
+    GnomeIntegrationService as PlatformIntegrationService, GnomeShellEventSink, ListenerHandle,
+    SharedGnomeSnapshot, UnixListenerTransport, GNOME_BACKEND_NAME, GNOME_EXTENSION_UUID,
+    GNOME_PROTOCOL_VERSION,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -34,10 +35,8 @@ pub const BUNDLED_EXTENSION_PATH: &str = "gnome-extension/extension.js";
 pub struct GnomeIntegrationState {
     core_service: Arc<CoreIntegrationService>,
     live: Mutex<Option<LiveGnomeHandle>>,
-    quick_paste_activation_sink: Arc<Mutex<Option<QuickPasteActivationSink>>>,
+    event_sink: Arc<Mutex<Option<GnomeShellEventSink>>>,
 }
-
-type QuickPasteActivationSink = Arc<dyn Fn() + Send + Sync + 'static>;
 
 /// Bundle the state keeps around the live probe + listener.
 pub struct LiveGnomeHandle {
@@ -61,15 +60,15 @@ impl GnomeIntegrationState {
         Self {
             core_service,
             live: Mutex::new(None),
-            quick_paste_activation_sink: Arc::new(Mutex::new(None)),
+            event_sink: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Set the shell callback for a valid GNOME Quick Paste request. The
+    /// Set the shell callback for metadata-free shortcut requests. The
     /// listener reads this indirection at event time because it can start
     /// while `build_state` is still assembling the Tauri application handle.
-    pub fn set_quick_paste_activation_sink(&self, sink: QuickPasteActivationSink) {
-        *self.quick_paste_activation_sink.lock() = Some(sink);
+    pub fn set_event_sink(&self, sink: GnomeShellEventSink) {
+        *self.event_sink.lock() = Some(sink);
     }
 
     /// Persist a consent decision through the core service. The helper
@@ -224,13 +223,13 @@ impl GnomeIntegrationState {
                 return Err(format!("bind: {error}"));
             }
         };
-        let quick_paste_activation_sink = Arc::clone(&self.quick_paste_activation_sink);
-        let event_sink = Arc::new(move |_event| {
+        let event_sink = Arc::clone(&self.event_sink);
+        let event_sink = Arc::new(move |event| {
             // Never call into Tauri while the indirection mutex is held: the
             // callback can synchronously schedule work on the UI runtime.
-            let activation = quick_paste_activation_sink.lock().clone();
-            if let Some(activation) = activation {
-                activation();
+            let handler = event_sink.lock().clone();
+            if let Some(handler) = handler {
+                handler(event);
             }
         });
         handle.listener = Some(spawn_listener_thread_with_socket_and_events(

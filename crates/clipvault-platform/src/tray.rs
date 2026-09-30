@@ -21,6 +21,7 @@ pub enum TrayAction {
     OpenFavorites,
     ClearHistory,
     OpenSettings,
+    ToggleClipboardCapture,
     Quit,
 }
 
@@ -32,6 +33,7 @@ impl TrayAction {
             TrayAction::OpenFavorites => "open_favorites",
             TrayAction::ClearHistory => "clear_history",
             TrayAction::OpenSettings => "open_settings",
+            TrayAction::ToggleClipboardCapture => "toggle_clipboard_capture",
             TrayAction::Quit => "quit",
         }
     }
@@ -43,7 +45,10 @@ impl TrayAction {
     pub fn is_supported_in_mvp(self) -> bool {
         matches!(
             self,
-            TrayAction::OpenMainWindow | TrayAction::OpenQuickSearch | TrayAction::Quit
+            TrayAction::OpenMainWindow
+                | TrayAction::OpenQuickSearch
+                | TrayAction::ToggleClipboardCapture
+                | TrayAction::Quit
         )
     }
 }
@@ -141,6 +146,10 @@ mod tests {
         assert_eq!(TrayAction::OpenFavorites.as_str(), "open_favorites");
         assert_eq!(TrayAction::ClearHistory.as_str(), "clear_history");
         assert_eq!(TrayAction::OpenSettings.as_str(), "open_settings");
+        assert_eq!(
+            TrayAction::ToggleClipboardCapture.as_str(),
+            "toggle_clipboard_capture"
+        );
         assert_eq!(TrayAction::Quit.as_str(), "quit");
     }
 
@@ -148,6 +157,7 @@ mod tests {
     fn mvp_supported_actions_are_a_subset() {
         assert!(TrayAction::OpenMainWindow.is_supported_in_mvp());
         assert!(TrayAction::OpenQuickSearch.is_supported_in_mvp());
+        assert!(TrayAction::ToggleClipboardCapture.is_supported_in_mvp());
         assert!(TrayAction::Quit.is_supported_in_mvp());
         assert!(!TrayAction::OpenFavorites.is_supported_in_mvp());
         assert!(!TrayAction::ClearHistory.is_supported_in_mvp());

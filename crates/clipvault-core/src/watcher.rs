@@ -96,6 +96,8 @@ pub enum WatchTickOutcome {
     Captured(HistoryOutcome),
     /// The clipboard is unchanged.
     Unchanged,
+    /// Local capture is paused. No clipboard payload was read.
+    Paused,
     /// The clipboard backend reported nothing ClipVault can capture:
     /// no usable text and no supported raster image (a file list,
     /// audio, video, an RTF-only payload, ...). No row was created and
@@ -126,6 +128,14 @@ pub struct CaptureWatcher {
 struct CaptureWatcherInner {
     clipboard: Arc<dyn ClipboardBackend>,
     state: Mutex<WatcherState>,
+    capture_control: Mutex<CaptureControlState>,
+}
+
+struct CaptureControlState {
+    enabled: bool,
+    /// When the host cannot expose a revision counter, the first read after
+    /// resuming establishes a payload fingerprint without storing it.
+    baseline_required: bool,
 }
 
 /// Outcome of [`CaptureWatcher::baseline_dedupe_state`]. The watcher
@@ -155,6 +165,16 @@ struct WatcherState {
 impl CaptureWatcher {
     /// Build a watcher that polls the given clipboard backend.
     pub fn new(clipboard: Arc<dyn ClipboardBackend>, interval: Duration) -> Self {
+        Self::new_with_capture_enabled(clipboard, interval, true)
+    }
+
+    /// Build a watcher with the local capture preference loaded from
+    /// persistent settings before the background loop is started.
+    pub fn new_with_capture_enabled(
+        clipboard: Arc<dyn ClipboardBackend>,
+        interval: Duration,
+        enabled: bool,
+    ) -> Self {
         Self {
             inner: Arc::new(CaptureWatcherInner {
                 clipboard,
@@ -163,8 +183,75 @@ impl CaptureWatcher {
                     last_hash: None,
                     interval,
                 }),
+                capture_control: Mutex::new(CaptureControlState {
+                    enabled,
+                    baseline_required: false,
+                }),
             }),
         }
+    }
+
+    /// Whether local clipboard capture is currently enabled.
+    pub fn is_capture_enabled(&self) -> bool {
+        self.inner.capture_control.lock().enabled
+    }
+
+    /// Serialize a local capture operation against pause/resume. The
+    /// supplied closure runs while holding the same gate as watcher ticks;
+    /// a successful pause therefore waits for already-started writes to
+    /// finish before it returns.
+    pub fn with_capture_enabled<T>(&self, action: impl FnOnce() -> T) -> Option<T> {
+        let control = self.inner.capture_control.lock();
+        control.enabled.then(action)
+    }
+
+    /// Persist and apply a requested capture state atomically with respect to
+    /// watcher ticks and other local capture entry points. The persistent
+    /// operation runs before the in-memory state changes, so an error leaves
+    /// the current state untouched. `None` toggles the current state.
+    pub fn update_capture_enabled<E>(
+        &self,
+        requested: Option<bool>,
+        persist: impl FnOnce(bool) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        let mut control = self.inner.capture_control.lock();
+        let next = requested.unwrap_or(!control.enabled);
+        persist(next)?;
+
+        if next != control.enabled {
+            if next {
+                let revision = self.inner.clipboard.revision();
+                let mut state = self.inner.state.lock();
+                if revision.is_unknown() {
+                    match self.inner.clipboard.read_observation() {
+                        Ok(observation) if observation.revision.is_unknown() => {
+                            state.last_revision = None;
+                            state.last_hash = observation.payload.as_ref().map(payload_fingerprint);
+                            control.baseline_required = false;
+                        }
+                        Ok(observation) => {
+                            state.last_revision = Some(observation.revision);
+                            state.last_hash = None;
+                            control.baseline_required = false;
+                        }
+                        Err(_) => {
+                            state.last_revision = None;
+                            state.last_hash = None;
+                            control.baseline_required = true;
+                        }
+                    }
+                } else {
+                    state.last_revision = Some(revision);
+                    state.last_hash = None;
+                    control.baseline_required = false;
+                }
+            } else {
+                control.baseline_required = false;
+            }
+            control.enabled = next;
+        }
+
+        Ok(next)
     }
 
     /// Suggested polling interval: 1.5 Hz.
@@ -245,6 +332,34 @@ impl CaptureWatcher {
         source_app: Option<&str>,
         origin: AttemptOrigin,
     ) -> WatchTickOutcome {
+        // Hold the control gate until this tick has either returned without
+        // writing or completed its history write. A concurrent pause cannot
+        // report success while this capture is still able to commit.
+        let mut capture_control = self.inner.capture_control.lock();
+        if !capture_control.enabled {
+            return WatchTickOutcome::Paused;
+        }
+        if capture_control.baseline_required {
+            let observation = match self.inner.clipboard.read_observation() {
+                Ok(observation) => observation,
+                Err(error) => {
+                    return WatchTickOutcome::Failed {
+                        message: error_message(&error),
+                    };
+                }
+            };
+            let mut state = self.inner.state.lock();
+            if observation.revision.is_unknown() {
+                state.last_revision = None;
+                state.last_hash = observation.payload.as_ref().map(payload_fingerprint);
+            } else {
+                state.last_revision = Some(observation.revision);
+                state.last_hash = None;
+            }
+            capture_control.baseline_required = false;
+            return WatchTickOutcome::Unchanged;
+        }
+
         let debug_handle = context.capture_debug();
         let debug_enabled = debug_handle.is_enabled();
         let correlation_id = if debug_enabled {
@@ -806,7 +921,10 @@ mod tests {
     use super::*;
     use crate::bootstrap::AppBootstrap;
     use crate::fakes::FakeClipboardBackend;
-    use clipvault_platform::{ClipboardBackend, ClipboardObservation};
+    use clipvault_platform::{
+        ClipboardBackend, ClipboardBackendError, ClipboardObservation, ClipboardPayload,
+        ClipboardRevision,
+    };
 
     fn tempdir() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
@@ -905,6 +1023,161 @@ mod tests {
             second,
             WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
         ));
+    }
+
+    #[test]
+    fn pause_does_not_read_or_store_and_resume_baselines_the_existing_clipboard() {
+        let backend = Arc::new(FakeClipboardBackend::new());
+        backend.push_read(Ok(Some("before pause".into())));
+        backend.push_read(Ok(Some("copied while paused".into())));
+        backend.push_read(Ok(Some("copied after resume".into())));
+        // Tick R1 stores, resume stamps R2, the first resumed tick sees that
+        // same R2 without storing, and the later R3 tick stores normally.
+        backend.push_revision(ClipboardRevision::new(3));
+        backend.push_revision(ClipboardRevision::new(2));
+        backend.push_revision(ClipboardRevision::new(2));
+        backend.push_revision(ClipboardRevision::new(1));
+        let context = bootstrap_default();
+        let watcher = CaptureWatcher::new(backend, Duration::from_millis(10));
+
+        assert!(matches!(
+            watcher.tick(&context, None, AttemptOrigin::BackgroundLoop),
+            WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
+        ));
+        assert_eq!(
+            watcher.update_capture_enabled(Some(false), |_| Ok::<_, ()>(())),
+            Ok(false)
+        );
+        assert_eq!(
+            watcher.tick(&context, None, AttemptOrigin::BackgroundLoop),
+            WatchTickOutcome::Paused
+        );
+        assert_eq!(
+            watcher.update_capture_enabled(Some(true), |_| Ok::<_, ()>(())),
+            Ok(true)
+        );
+        assert_eq!(
+            watcher.tick(&context, None, AttemptOrigin::BackgroundLoop),
+            WatchTickOutcome::Unchanged,
+            "the value already present when resumed is only used as a baseline"
+        );
+        assert!(matches!(
+            watcher.tick(&context, None, AttemptOrigin::BackgroundLoop),
+            WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
+        ));
+
+        let rows = context
+            .history()
+            .recent_entries(&context, 10)
+            .expect("history");
+        let contents = rows
+            .iter()
+            .map(|row| row.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec!["before pause", "copied after resume"]);
+    }
+
+    #[test]
+    fn failed_capture_preference_write_keeps_the_previous_state() {
+        let backend = Arc::new(FakeClipboardBackend::new());
+        backend.push_read(Ok(Some("still captured".into())));
+        backend.push_revision(ClipboardRevision::new(1));
+        let context = bootstrap_default();
+        let watcher = CaptureWatcher::new(backend, Duration::from_millis(10));
+
+        let result = watcher.update_capture_enabled(Some(false), |_| Err("settings write"));
+        assert_eq!(result, Err("settings write"));
+        assert!(watcher.is_capture_enabled());
+        assert!(matches!(
+            watcher.tick(&context, None, AttemptOrigin::BackgroundLoop),
+            WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
+        ));
+    }
+
+    #[test]
+    fn pausing_waits_for_an_in_flight_capture_before_reporting_success() {
+        use std::sync::mpsc;
+
+        struct BlockingClipboard {
+            started: mpsc::SyncSender<()>,
+            release: std::sync::Mutex<mpsc::Receiver<()>>,
+        }
+
+        impl ClipboardBackend for BlockingClipboard {
+            fn read_text(&self) -> Result<Option<String>, ClipboardBackendError> {
+                Ok(None)
+            }
+
+            fn write_text(&self, _text: &str) -> Result<(), ClipboardBackendError> {
+                Ok(())
+            }
+
+            fn revision(&self) -> ClipboardRevision {
+                ClipboardRevision::new(1)
+            }
+
+            fn read_observation(&self) -> Result<ClipboardObservation, ClipboardBackendError> {
+                self.started.send(()).expect("notify read started");
+                self.release
+                    .lock()
+                    .expect("release mutex")
+                    .recv()
+                    .expect("release blocked read");
+                Ok(ClipboardObservation {
+                    payload: Some(ClipboardPayload::Text("captured before pause".into())),
+                    revision: ClipboardRevision::new(1),
+                })
+            }
+
+            fn name(&self) -> &'static str {
+                "blocking_test_clipboard"
+            }
+        }
+
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::channel();
+        let backend = Arc::new(BlockingClipboard {
+            started: started_tx,
+            release: std::sync::Mutex::new(release_rx),
+        });
+        let watcher = CaptureWatcher::new(backend, Duration::from_millis(10));
+        let context = bootstrap_default();
+        let tick_watcher = watcher.clone();
+        let tick_context = context.clone();
+        let tick = std::thread::spawn(move || {
+            tick_watcher.tick(&tick_context, None, AttemptOrigin::BackgroundLoop)
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("watcher read has started");
+
+        let pause_watcher = watcher.clone();
+        let (paused_tx, paused_rx) = mpsc::channel();
+        let pause = std::thread::spawn(move || {
+            let result = pause_watcher.update_capture_enabled(Some(false), |_| Ok::<_, ()>(()));
+            paused_tx.send(result).expect("report pause result");
+        });
+        assert!(
+            paused_rx.recv_timeout(Duration::from_millis(25)).is_err(),
+            "pause must wait for a started capture to finish"
+        );
+
+        release_tx.send(()).expect("release watcher read");
+        assert!(matches!(
+            tick.join().expect("watcher thread"),
+            WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
+        ));
+        assert_eq!(
+            paused_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("pause completes after in-flight write"),
+            Ok(false)
+        );
+        pause.join().expect("pause thread");
+        assert_eq!(
+            watcher.tick(&context, None, AttemptOrigin::BackgroundLoop),
+            WatchTickOutcome::Paused
+        );
     }
 
     #[test]

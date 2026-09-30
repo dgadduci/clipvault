@@ -98,6 +98,7 @@ impl GlobalHotkeyManagerAdapter {
     fn map_key(key: HotkeyKey) -> Code {
         match key {
             HotkeyKey::V => Code::KeyV,
+            HotkeyKey::B => Code::KeyB,
             HotkeyKey::Enter => Code::Enter,
             HotkeyKey::Escape => Code::Escape,
         }
@@ -173,12 +174,11 @@ impl HotkeyManager for GlobalHotkeyManagerAdapter {
             }
             Err(error) => {
                 let reason = error.to_string();
-                if reason.to_lowercase().contains("already") {
-                    Ok(HotkeyOutcome::Conflict { reason })
-                } else {
+                let outcome = registration_error_outcome(reason.clone());
+                if matches!(outcome, HotkeyOutcome::Failed { .. }) {
                     warn!(reason = %reason, "hotkey registration failed");
-                    Ok(HotkeyOutcome::Failed { reason })
                 }
+                Ok(outcome)
             }
         }
     }
@@ -197,6 +197,14 @@ impl HotkeyManager for GlobalHotkeyManagerAdapter {
 
     fn name(&self) -> &'static str {
         "global_hotkey"
+    }
+}
+
+fn registration_error_outcome(reason: String) -> HotkeyOutcome {
+    if reason.to_lowercase().contains("already") {
+        HotkeyOutcome::Conflict { reason }
+    } else {
+        HotkeyOutcome::Failed { reason }
     }
 }
 
@@ -262,5 +270,17 @@ mod tests {
             mapped.contains(primary),
             "primary modifier must be present after mapping"
         );
+    }
+
+    #[test]
+    fn registration_conflicts_remain_typed_and_other_errors_remain_failed() {
+        assert!(matches!(
+            registration_error_outcome("binding already registered".to_string()),
+            HotkeyOutcome::Conflict { .. }
+        ));
+        assert!(matches!(
+            registration_error_outcome("backend unavailable".to_string()),
+            HotkeyOutcome::Failed { .. }
+        ));
     }
 }

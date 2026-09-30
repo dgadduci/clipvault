@@ -7,8 +7,7 @@
    *     with a visible platform-aware shortcut hint (⌘F on macOS,
    *     Ctrl F on every other supported host);
    *   - one ellipsis button that opens an accessible menu exposing
-   *     the four secondary desktop actions: Development, Privacidad,
-   *     Retención and Atajo de pegado rápido. The menu is the single
+   *     desktop settings and secondary actions. The menu is the single
    *     affordance for those four callbacks — there is no second
    *     toolbar surface that renders them inline;
    *   - the global clear-history trash icon, kept as a sibling of
@@ -92,6 +91,7 @@
   export let tagFilterOptions: TagFilterOptionValue[] = [];
   export let onSearchInput: (value: string) => void = () => {};
   export let onOpenDevelopment: (event: MouseEvent) => void = () => {};
+  export let onOpenGeneralSettings: (event: MouseEvent) => void = () => {};
   export let onOpenPrivacy: (event: MouseEvent) => void = () => {};
   export let onOpenPeerSharing: (event: MouseEvent) => void = () => {};
   export let onOpenRetention: (event: MouseEvent) => void = () => {};
@@ -306,6 +306,15 @@
               on:click={(event) => selectItem(onOpenDevelopment, event)}
             >
               Development
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              class="menu-item"
+              data-testid="open-general-settings"
+              on:click={(event) => selectItem(onOpenGeneralSettings, event)}
+            >
+              Configuración general
             </button>
             <button
               type="button"

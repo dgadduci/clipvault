@@ -22,6 +22,7 @@ const ID_OPEN_QUICK: &str = "clipvault://open_quick_search";
 const ID_OPEN_FAVORITES: &str = "clipvault://open_favorites";
 const ID_CLEAR_HISTORY: &str = "clipvault://clear_history";
 const ID_OPEN_SETTINGS: &str = "clipvault://open_settings";
+const ID_TOGGLE_CAPTURE: &str = "clipvault://toggle_clipboard_capture";
 const ID_QUIT: &str = "clipvault://quit";
 
 /// Tauri-backed tray handle. Implements the platform-agnostic
@@ -31,13 +32,15 @@ const ID_QUIT: &str = "clipvault://quit";
 pub struct TauriTrayHandle<R: Runtime = tauri::Wry> {
     app: AppHandle<R>,
     menu: Mutex<Vec<TrayAction>>,
+    capture_enabled: Mutex<bool>,
 }
 
 impl<R: Runtime> TauriTrayHandle<R> {
-    fn new(app: AppHandle<R>, actions: Vec<TrayAction>) -> Self {
+    fn new(app: AppHandle<R>, actions: Vec<TrayAction>, capture_enabled: bool) -> Self {
         Self {
             app,
             menu: Mutex::new(actions),
+            capture_enabled: Mutex::new(capture_enabled),
         }
     }
 }
@@ -50,7 +53,8 @@ impl<R: Runtime> TrayHandle for TauriTrayHandle<R> {
         let mut menu = self.menu.lock();
         menu.clear();
         menu.extend(entries.iter().map(|e| e.action));
-        rebuild_menu(&self.app, &menu)
+        let capture_enabled = *self.capture_enabled.lock();
+        rebuild_menu(&self.app, &menu, capture_enabled)
     }
 
     fn invoke(
@@ -77,6 +81,10 @@ impl<R: Runtime> TrayHandle for TauriTrayHandle<R> {
             TrayAction::Quit => {
                 self.app.exit(0);
             }
+            TrayAction::ToggleClipboardCapture => {
+                crate::commands::toggle_capture_from_app(&self.app)
+                    .map_err(|error| clipvault_platform::TrayError::backend(error.message))?;
+            }
             TrayAction::OpenFavorites | TrayAction::ClearHistory | TrayAction::OpenSettings => {
                 let _ = self.app.emit(
                     "clipvault://capability-unavailable",
@@ -90,6 +98,14 @@ impl<R: Runtime> TrayHandle for TauriTrayHandle<R> {
 
     fn shutdown(&self) -> Result<(), clipvault_platform::TrayError> {
         Ok(())
+    }
+}
+
+impl<R: Runtime> TauriTrayHandle<R> {
+    fn update_capture_enabled(&self, enabled: bool) -> Result<(), clipvault_platform::TrayError> {
+        let menu = self.menu.lock();
+        *self.capture_enabled.lock() = enabled;
+        rebuild_menu(&self.app, &menu, enabled)
     }
 }
 
@@ -110,6 +126,7 @@ fn capability_payload(action: TrayAction) -> serde_json::Value {
 fn rebuild_menu<R: Runtime>(
     app: &AppHandle<R>,
     actions: &[TrayAction],
+    capture_enabled: bool,
 ) -> Result<(), clipvault_platform::TrayError> {
     let menu = MenuBuilder::new(app)
         .items(&[
@@ -143,6 +160,12 @@ fn rebuild_menu<R: Runtime>(
                 "Settings",
                 actions.contains(&TrayAction::OpenSettings),
             ),
+            &menu_item(
+                app,
+                ID_TOGGLE_CAPTURE,
+                &capture_menu_label(capture_enabled),
+                actions.contains(&TrayAction::ToggleClipboardCapture),
+            ),
             &menu_separator(app),
             &menu_item(
                 app,
@@ -159,6 +182,19 @@ fn rebuild_menu<R: Runtime>(
             .map_err(clipvault_platform::TrayError::backend)?;
     }
     Ok(())
+}
+
+fn capture_menu_label(enabled: bool) -> String {
+    let action = if enabled {
+        "Pausar capturas"
+    } else {
+        "Reanudar capturas"
+    };
+    #[cfg(target_os = "macos")]
+    let shortcut = "⌘⌥⇧B";
+    #[cfg(not(target_os = "macos"))]
+    let shortcut = "Ctrl+Alt+Shift+B";
+    format!("{action} ({shortcut})")
 }
 
 fn menu_item<R: Runtime>(
@@ -191,6 +227,7 @@ pub struct TauriTrayController {
 impl TauriTrayController {
     pub fn install(
         app: &AppHandle<tauri::Wry>,
+        capture_enabled: bool,
         on_menu_event: impl Fn(&AppHandle<tauri::Wry>, MenuEvent) + Send + Sync + 'static,
         on_tray_event: impl Fn(&tauri::tray::TrayIcon<tauri::Wry>, TrayIconEvent)
             + Send
@@ -203,6 +240,7 @@ impl TauriTrayController {
             TrayAction::OpenFavorites,
             TrayAction::ClearHistory,
             TrayAction::OpenSettings,
+            TrayAction::ToggleClipboardCapture,
             TrayAction::Quit,
         ];
         let initial_menu = MenuBuilder::new(app)
@@ -212,6 +250,12 @@ impl TauriTrayController {
                 &menu_item(app, ID_OPEN_FAVORITES, "Favorites", true),
                 &menu_item(app, ID_CLEAR_HISTORY, "Clear history…", true),
                 &menu_item(app, ID_OPEN_SETTINGS, "Settings", true),
+                &menu_item(
+                    app,
+                    ID_TOGGLE_CAPTURE,
+                    &capture_menu_label(capture_enabled),
+                    true,
+                ),
                 &menu_separator(app),
                 &menu_item(app, ID_QUIT, "Quit ClipVault", true),
             ])
@@ -229,7 +273,7 @@ impl TauriTrayController {
             .build(app)?;
 
         Ok(Arc::new(Self {
-            handle: Arc::new(TauriTrayHandle::new(app.clone(), actions)),
+            handle: Arc::new(TauriTrayHandle::new(app.clone(), actions, capture_enabled)),
             _icon: icon,
         }))
     }
@@ -242,6 +286,10 @@ impl TauriTrayController {
     ) -> Result<clipvault_platform::TrayOutcome, clipvault_platform::TrayError> {
         self.handle.invoke(action)
     }
+
+    pub fn set_capture_enabled(&self, enabled: bool) -> Result<(), clipvault_platform::TrayError> {
+        self.handle.update_capture_enabled(enabled)
+    }
 }
 
 impl TrayController for TauriTrayController {
@@ -249,6 +297,7 @@ impl TrayController for TauriTrayController {
         Ok(Box::new(TauriTrayHandle {
             app: self.handle.app.clone(),
             menu: Mutex::new(self.handle.menu.lock().clone()),
+            capture_enabled: Mutex::new(*self.handle.capture_enabled.lock()),
         }))
     }
 
@@ -271,13 +320,23 @@ mod tests {
         WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
             .build()
             .expect("mock main window");
-        let tray = TauriTrayHandle::<MockRuntime>::new(app.handle().clone(), Vec::new());
+        let tray = TauriTrayHandle::<MockRuntime>::new(app.handle().clone(), Vec::new(), true);
 
         assert_eq!(
             tray.invoke(TrayAction::OpenMainWindow)
                 .expect("open main window action"),
             clipvault_platform::TrayOutcome::Delivered
         );
+    }
+
+    #[test]
+    fn capture_menu_label_reflects_the_current_state() {
+        let active = capture_menu_label(true);
+        let paused = capture_menu_label(false);
+        assert!(active.starts_with("Pausar capturas ("));
+        assert!(paused.starts_with("Reanudar capturas ("));
+        assert!(active.ends_with("B)"));
+        assert!(paused.ends_with("B)"));
     }
 }
 
@@ -290,6 +349,7 @@ pub fn menu_event_to_action(id: &str) -> Option<TrayAction> {
         ID_OPEN_FAVORITES => Some(TrayAction::OpenFavorites),
         ID_CLEAR_HISTORY => Some(TrayAction::ClearHistory),
         ID_OPEN_SETTINGS => Some(TrayAction::OpenSettings),
+        ID_TOGGLE_CAPTURE => Some(TrayAction::ToggleClipboardCapture),
         ID_QUIT => Some(TrayAction::Quit),
         _ => None,
     }

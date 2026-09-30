@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use clipvault_core::{AppContext, KdeKwinConsentDecision, KdeKwinIntegrationService};
 use clipvault_platform::{
-    kde_kwin_start_bridge, request_kwin_reconfigure, ActiveApplicationProbe, BundledKwinScript,
-    KdeKwinActiveApplication, KdeKwinBridgeHandle, KdeKwinError, KdeKwinInstallerError,
+    request_kwin_reconfigure, ActiveApplicationProbe, BundledKwinScript, KdeKwinActiveApplication,
+    KdeKwinBridgeHandle, KdeKwinCaptureToggleSink, KdeKwinError, KdeKwinInstallerError,
     KdeKwinIntegrationState as ProbeState, KwinInstaller, ProbeStage, SharedKdeKwinSnapshot,
     KDE_KWIN_BACKEND_NAME, KDE_KWIN_PROTOCOL_VERSION,
 };
@@ -28,6 +28,7 @@ pub struct KdeKwinIntegrationState {
     probe: Arc<KdeKwinActiveApplication>,
     lifecycle: AsyncMutex<()>,
     bridge: Mutex<Option<KdeKwinBridgeHandle>>,
+    capture_toggle_sink: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>,
 }
 
 #[derive(Debug, Error)]
@@ -89,7 +90,15 @@ impl KdeKwinIntegrationState {
             snapshot,
             lifecycle: AsyncMutex::new(()),
             bridge: Mutex::new(None),
+            capture_toggle_sink: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Attach the Tauri callback after the app handle becomes available.
+    /// The KWin bridge can start earlier during bootstrap, so it closes over
+    /// this shared slot instead of requiring the handle during construction.
+    pub fn set_capture_toggle_sink(&self, sink: Arc<dyn Fn() + Send + Sync + 'static>) {
+        *self.capture_toggle_sink.lock() = Some(sink);
     }
 
     pub fn load_consent(&self, context: &AppContext) {
@@ -313,7 +322,19 @@ impl KdeKwinIntegrationState {
             return Ok(());
         }
         self.snapshot.set_state(ProbeState::ActivationPending);
-        match kde_kwin_start_bridge(self.snapshot.clone()).await {
+        let sink_slot = Arc::clone(&self.capture_toggle_sink);
+        let sink: KdeKwinCaptureToggleSink = Arc::new(move || {
+            let callback = sink_slot.lock().clone();
+            if let Some(callback) = callback {
+                callback();
+            }
+        });
+        match clipvault_platform::kde_kwin_start_bridge_with_capture_toggle(
+            self.snapshot.clone(),
+            Some(sink),
+        )
+        .await
+        {
             Ok(handle) => {
                 *self.bridge.lock() = Some(handle);
                 Ok(())

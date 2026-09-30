@@ -25,8 +25,8 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
 use crate::bootstrap::{
-    build_state, install_capture_loop, refresh_active_app_cached, register_default_hotkey,
-    stop_network_subsystems, QUICK_SEARCH_EVENT,
+    build_state, install_capture_loop, refresh_active_app_cached, register_capture_toggle_hotkey,
+    register_default_hotkey, stop_network_subsystems, QUICK_SEARCH_EVENT,
 };
 use crate::commands::run_retention;
 use crate::state::SharedState;
@@ -77,7 +77,10 @@ fn main() {
             };
 
             #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
-            configure_gnome_quick_paste_sink(&state, app.handle());
+            configure_gnome_event_sink(&state, app.handle());
+
+            #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+            configure_kde_capture_toggle_sink(&state, app.handle());
 
             #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
             if let Some(integration) = state.kde_kwin_integration.as_ref().cloned() {
@@ -112,7 +115,12 @@ fn main() {
             let tray_handler = move |tray: &TrayIcon<tauri::Wry>, event: TrayIconEvent| {
                 on_tray_event(tray, event);
             };
-            match TauriTrayController::install(app.handle(), menu_handler, tray_handler) {
+            match TauriTrayController::install(
+                app.handle(),
+                state.watcher.is_capture_enabled(),
+                menu_handler,
+                tray_handler,
+            ) {
                 Ok(controller) => {
                     app.manage(controller);
                     info!("tray installed");
@@ -122,11 +130,6 @@ fn main() {
                 }
             }
             trace_main_window_lifecycle_for_app(app.handle(), "tray_configured", None);
-
-            // Register the default global hotkey.
-            let outcome = register_default_hotkey(&state, app.handle());
-            info!(kind = outcome.kind(), "default hotkey outcome");
-            trace_main_window_lifecycle_for_app(app.handle(), "hotkey_configured", None);
 
             // Apply the configured retention policy as part of the
             // startup pass. Failures are logged but never block the
@@ -156,6 +159,20 @@ fn main() {
             // `SharedState` — the setup callback MUST NOT touch it.
             app.manage(SharedState::new(state));
             trace_main_window_lifecycle_for_app(app.handle(), "state_managed", None);
+
+            // Register the default Quick Search and clipboard-capture
+            // shortcuts after managed state is available to their callbacks.
+            if let Some(shared) = app.try_state::<SharedState>() {
+                let outcome = register_default_hotkey(shared.app_state(), app.handle());
+                info!(kind = outcome.kind(), "default hotkey outcome");
+                let capture_outcome =
+                    register_capture_toggle_hotkey(shared.app_state(), app.handle());
+                info!(
+                    kind = capture_outcome.kind(),
+                    "capture toggle hotkey registration"
+                );
+            }
+            trace_main_window_lifecycle_for_app(app.handle(), "hotkey_configured", None);
 
             // Schedule the main-thread refresh of the active-app
             // cache and start polling the clipboard from a background
@@ -223,6 +240,8 @@ fn main() {
             commands::clipvault_retention_preview,
             commands::clipvault_settings_get,
             commands::clipvault_settings_set,
+            commands::clipvault_capture_control_get,
+            commands::clipvault_capture_control_set,
             commands::clipvault_ignored_apps_list,
             commands::clipvault_ignored_apps_add,
             commands::clipvault_ignored_apps_remove,
@@ -305,23 +324,41 @@ fn main() {
         .run(handle_run_event);
 }
 
-/// Route a valid metadata-free request from the consented GNOME bridge through
-/// the same event the X11 hotkey adapter emits. The integration may have
-/// started its listener during bootstrap, before Tauri exposed an `AppHandle`,
-/// so this attaches the deferred shell callback once the handle exists.
+/// Route metadata-free shortcut requests from the consented GNOME bridge.
+/// The integration may have started its listener during bootstrap, before
+/// Tauri exposed an `AppHandle`, so this attaches the deferred callback once
+/// the handle exists.
 #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
-fn configure_gnome_quick_paste_sink(
-    state: &crate::bootstrap::AppState,
-    handle: &AppHandle<tauri::Wry>,
-) {
+fn configure_gnome_event_sink(state: &crate::bootstrap::AppState, handle: &AppHandle<tauri::Wry>) {
     let Some(gnome_integration) = state.gnome_integration.as_ref() else {
         return;
     };
     let app_handle = handle.clone();
-    gnome_integration.set_quick_paste_activation_sink(Arc::new(move || {
-        if let Err(error) = app_handle.emit(QUICK_SEARCH_EVENT, ()) {
-            warn!(error = %error, "failed to emit GNOME quick-search event");
+    gnome_integration.set_event_sink(Arc::new(move |event| match event {
+        clipvault_platform::GnomeShellEvent::QuickPasteRequested => {
+            if let Err(error) = app_handle.emit(QUICK_SEARCH_EVENT, ()) {
+                warn!(error = %error, "failed to emit GNOME quick-search event");
+            }
         }
+        clipvault_platform::GnomeShellEvent::ClipboardCaptureToggleRequested => {
+            crate::commands::toggle_capture_from_hotkey(&app_handle);
+        }
+    }));
+}
+
+/// Route the KWin script's authenticated shortcut event through the same
+/// capture-toggle transition used by the native hotkey, tray and settings.
+#[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+fn configure_kde_capture_toggle_sink(
+    state: &crate::bootstrap::AppState,
+    handle: &AppHandle<tauri::Wry>,
+) {
+    let Some(kde_integration) = state.kde_kwin_integration.as_ref() else {
+        return;
+    };
+    let app_handle = handle.clone();
+    kde_integration.set_capture_toggle_sink(Arc::new(move || {
+        crate::commands::toggle_capture_from_hotkey(&app_handle);
     }));
 }
 
@@ -389,6 +426,7 @@ fn _unused_watcher_outcome(outcome: &WatchTickOutcome) -> &'static str {
     match outcome {
         WatchTickOutcome::Captured(_) => "captured",
         WatchTickOutcome::Unchanged => "unchanged",
+        WatchTickOutcome::Paused => "paused",
         WatchTickOutcome::Suppressed => "suppressed",
         WatchTickOutcome::Ignored => "ignored",
         WatchTickOutcome::Failed { .. } => "failed",

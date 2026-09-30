@@ -20,8 +20,10 @@ use crate::peer_identity::{
 };
 use crate::privacy::PrivacyGate;
 use crate::settings::{
-    local_peer_sharing_enabled_value, parse_local_peer_sharing_enabled, HotkeySpec, Settings,
-    SettingsUpdate, ValidationError, HOTKEY_SETTING_STORAGE_KEY, LOCAL_PEER_DISPLAY_NAME_KEY,
+    local_clipboard_capture_enabled_value, local_peer_sharing_enabled_value,
+    parse_local_clipboard_capture_enabled, parse_local_peer_sharing_enabled, HotkeySpec, Settings,
+    SettingsUpdate, ValidationError, HOTKEY_SETTING_STORAGE_KEY,
+    LOCAL_CLIPBOARD_CAPTURE_ENABLED_KEY, LOCAL_PEER_DISPLAY_NAME_KEY,
     LOCAL_PEER_SHARING_ENABLED_KEY,
 };
 
@@ -78,6 +80,35 @@ impl SettingsService {
     /// service field.
     pub fn peer_identity(&self) -> PeerIdentityService {
         self.peer_identity.clone()
+    }
+
+    /// Return the persisted local clipboard-capture preference. Existing
+    /// databases have no row, so they keep the historical enabled default.
+    pub fn local_clipboard_capture_enabled(&self, context: &AppContext) -> bool {
+        let mut db = context.database().lock();
+        let raw = AppSettingsRepository::new(db.connection_mut())
+            .get(LOCAL_CLIPBOARD_CAPTURE_ENABLED_KEY)
+            .ok()
+            .flatten()
+            .map(|setting| setting.value);
+        parse_local_clipboard_capture_enabled(raw.as_deref())
+    }
+
+    /// Persist the local clipboard-capture preference. The caller updates
+    /// the shared watcher gate while serializing against in-flight capture.
+    pub fn set_local_clipboard_capture_enabled(
+        &self,
+        context: &AppContext,
+        enabled: bool,
+    ) -> Result<(), SettingsServiceError> {
+        let now = self.clock.now();
+        let mut db = context.database().lock();
+        AppSettingsRepository::new(db.connection_mut()).set(
+            LOCAL_CLIPBOARD_CAPTURE_ENABLED_KEY,
+            local_clipboard_capture_enabled_value(enabled),
+            now,
+        )?;
+        Ok(())
     }
 
     /// Load the effective [`Settings`] aggregate from `app_settings` and
@@ -663,5 +694,35 @@ mod tests {
             !loaded.local_peer_sharing_enabled,
             "fresh install must default the toggle to false"
         );
+    }
+
+    #[test]
+    fn local_clipboard_capture_defaults_to_enabled_and_persists_changes() {
+        use crate::test_support::isolated_harness;
+        use std::sync::Arc;
+
+        let (_dir, context) = isolated_harness();
+        let probe = Arc::new(clipvault_platform::NoopActiveApplicationProbe);
+        let matcher = crate::privacy::CoreBlacklistMatcher::with_ignored(probe, vec![]);
+        let gate = crate::privacy::PrivacyGate::new(matcher);
+        let service = SettingsService::new(Arc::new(crate::clock::SystemClock), gate);
+
+        assert!(service.local_clipboard_capture_enabled(&context));
+        service
+            .set_local_clipboard_capture_enabled(&context, false)
+            .expect("persist pause");
+        assert!(!service.local_clipboard_capture_enabled(&context));
+        service
+            .set_local_clipboard_capture_enabled(&context, true)
+            .expect("persist resume");
+        assert!(service.local_clipboard_capture_enabled(&context));
+    }
+
+    #[test]
+    fn local_clipboard_capture_setting_defaults_on_for_malformed_values() {
+        assert!(parse_local_clipboard_capture_enabled(None));
+        assert!(parse_local_clipboard_capture_enabled(Some("unknown")));
+        assert!(parse_local_clipboard_capture_enabled(Some(" true ")));
+        assert!(!parse_local_clipboard_capture_enabled(Some(" false ")));
     }
 }

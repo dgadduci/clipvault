@@ -107,6 +107,7 @@
   import Modal from "./Modal.svelte";
   import DevelopmentModal from "./DevelopmentModal.svelte";
   import GnomeIntegrationModal from "./GnomeIntegrationModal.svelte";
+  import GeneralSettingsModal from "./GeneralSettingsModal.svelte";
   import PrivacyModal from "./PrivacyModal.svelte";
   import PeerSharingModal from "./PeerSharingModal.svelte";
   import PeerPairingModal from "./PeerPairingModal.svelte";
@@ -133,6 +134,7 @@
   type ModalId =
     | null
     | "development"
+    | "general_settings"
     | "gnome_integration"
     | "privacy"
     | "peer_sharing"
@@ -1706,6 +1708,10 @@
     openModalWith("privacy", event.currentTarget as HTMLElement | null);
   }
 
+  function onOpenGeneralSettings(event: MouseEvent): void {
+    openModalWith("general_settings", event.currentTarget as HTMLElement | null);
+  }
+
   function onOpenPeerSharing(event: MouseEvent): void {
     openModalWith("peer_sharing", event.currentTarget as HTMLElement | null);
   }
@@ -2106,6 +2112,7 @@
             tagFilterOptions={tagFilterOptions}
             onSearchInput={handleSearchInput}
             onOpenDevelopment={onOpenDevelopment}
+            onOpenGeneralSettings={onOpenGeneralSettings}
             onOpenPrivacy={onOpenPrivacy}
             onOpenPeerSharing={onOpenPeerSharing}
             onOpenRetention={onOpenRetention}
@@ -2301,6 +2308,20 @@
   <GnomeIntegrationModal
     initial={gnomeIntegrationStatus}
     on:statusChanged={onGnomeStatusChanged}
+  />
+</Modal>
+
+<Modal
+  open={openModal === "general_settings"}
+  titleId="general-settings-title"
+  title="Configuración general"
+  returnFocusTo={modalReturnFocus}
+  onClose={closeModal}
+>
+  <GeneralSettingsModal
+    open={openModal === "general_settings"}
+    platformOs={diagnostics?.platform_os ?? null}
+    displayServer={diagnostics?.display_server ?? null}
   />
 </Modal>
 

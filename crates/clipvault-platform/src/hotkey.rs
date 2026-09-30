@@ -54,6 +54,20 @@ impl HotkeyModifiers {
         alt: false,
         meta: false,
     };
+
+    pub const CMD_ALT_SHIFT: HotkeyModifiers = HotkeyModifiers {
+        cmd_or_ctrl: true,
+        shift: true,
+        alt: true,
+        meta: false,
+    };
+
+    pub const CTRL_ALT_SHIFT: HotkeyModifiers = HotkeyModifiers {
+        cmd_or_ctrl: true,
+        shift: true,
+        alt: true,
+        meta: false,
+    };
 }
 
 /// Minimal hotkey key set. The MVP only needs a handful of letters; the
@@ -63,6 +77,8 @@ impl HotkeyModifiers {
 pub enum HotkeyKey {
     #[serde(rename = "v")]
     V,
+    #[serde(rename = "b")]
+    B,
     #[serde(rename = "enter")]
     Enter,
     #[serde(rename = "escape")]
@@ -73,6 +89,7 @@ impl HotkeyKey {
     pub fn as_str(self) -> &'static str {
         match self {
             HotkeyKey::V => "v",
+            HotkeyKey::B => "b",
             HotkeyKey::Enter => "enter",
             HotkeyKey::Escape => "escape",
         }

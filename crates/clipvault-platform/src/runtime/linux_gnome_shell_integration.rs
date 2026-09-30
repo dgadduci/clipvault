@@ -8,11 +8,12 @@
 //!    resource bundled with the Tauri shell) reads the focused
 //!    application's desktop identifier through the public
 //!    `Shell.WindowTracker` API and publishes it, metadata-only,
-//!    over a local Unix-domain socket.
+//!    over a local Unix-domain socket. The same consented extension can
+//!    send metadata-free Quick Search and local-capture toggle requests.
 //! 2. ClipVault owns the listener end of that socket, drops
 //!    everything the extension sends except a JSON envelope that
-//!    carries only `{ v, kind, app_id }` or the metadata-free
-//!    `quick_paste` activation. The adapter implements
+//!    carries only `{ v, kind, app_id }` or metadata-free
+//!    `quick_paste` / `toggle_capture` activations. The adapter implements
 //!    [`ActiveApplicationProbe`] so the rest of the capture pipeline
 //!    keeps using the cached identifier contract the X11 / Wayland
 //!    probes also honour.
@@ -37,8 +38,9 @@
 //!   to `None` so the watcher can ask the X11 fallback for an answer
 //!   without inheriting a stale XWayland identity.
 //! - After the handshake the extension may send `{ "v": <protocol>,
-//!   "kind": "quick_paste" }`. The listener forwards that signal to
-//!   its caller without changing the focus snapshot.
+//!   "kind": "quick_paste" }` or `{ "kind": "toggle_capture" }`.
+//!   The listener forwards those signals to its caller without changing
+//!   the focus snapshot.
 //! - Messages that fail to parse JSON, that miss `kind`, that are
 //!   longer than [`MAX_FRAME_BYTES`] or that carry a different
 //!   protocol version are dropped. The connection is closed and the
@@ -46,7 +48,7 @@
 //!
 //! The protocol carries:
 //!   - `v` (u16): protocol version,
-//!   - `kind` (string): `hello`, `app_id` or `quick_paste`,
+//!   - `kind` (string): `hello`, `app_id`, `quick_paste` or `toggle_capture`,
 //!   - `app_id` (string): the desktop identifier or empty string.
 //!
 //! It must never carry:
@@ -119,6 +121,7 @@ pub const EXTENSION_RESOURCE_PARENT: &str = "gnome-extension";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GnomeShellEvent {
     QuickPasteRequested,
+    ClipboardCaptureToggleRequested,
 }
 
 /// Callback invoked by the listener for a valid GNOME Shell event.
@@ -391,8 +394,8 @@ impl WireEnvelope<'_> {
         }
         match self.kind {
             "hello" | "app_id" => Ok(()),
-            "quick_paste" if self.app_id.is_none() => Ok(()),
-            "quick_paste" => Err(WireError::UnexpectedAppId),
+            "quick_paste" | "toggle_capture" if self.app_id.is_none() => Ok(()),
+            "quick_paste" | "toggle_capture" => Err(WireError::UnexpectedAppId),
             other => Err(WireError::UnknownKind(other.to_string())),
         }
     }
@@ -432,7 +435,7 @@ impl std::fmt::Display for WireError {
             WireError::ProtocolVersion => f.write_str("protocol version does not match"),
             WireError::UnknownKind(kind) => write!(f, "unknown kind: {kind}"),
             WireError::UnexpectedAppId => {
-                f.write_str("quick_paste must not carry an application identifier")
+                f.write_str("control event must not carry an application identifier")
             }
             WireError::Json(error) => write!(f, "json parse failure: {error}"),
             WireError::Io(error) => write!(f, "i/o failure: {error}"),
@@ -856,6 +859,14 @@ fn process_peer(
                     event_sink(GnomeShellEvent::QuickPasteRequested);
                 }
             }
+            "toggle_capture" => {
+                if !handshake_seen {
+                    continue;
+                }
+                if let Some(event_sink) = event_sink {
+                    event_sink(GnomeShellEvent::ClipboardCaptureToggleRequested);
+                }
+            }
             _ => {}
         }
     }
@@ -1070,6 +1081,26 @@ pub fn possible_states() -> BTreeMap<&'static str, GnomeIntegrationState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MemoryPeer(std::io::Cursor<Vec<u8>>);
+
+    impl Read for MemoryPeer {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.0.read(buffer)
+        }
+    }
+
+    impl std::io::Write for MemoryPeer {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl PeerStream for MemoryPeer {}
     use std::os::unix::net::UnixListener as StdUnixListener;
 
     #[test]
@@ -1157,6 +1188,14 @@ mod tests {
             envelope.validate(),
             Err(WireError::UnexpectedAppId)
         ));
+    }
+
+    #[test]
+    fn wire_envelope_accepts_metadata_free_capture_toggle() {
+        let raw = "{\"v\":1,\"kind\":\"toggle_capture\"}";
+        let envelope: WireEnvelope = serde_json::from_str(raw).expect("parse");
+        envelope.validate().expect("validate");
+        assert!(envelope.app_id.is_none());
     }
 
     #[test]
@@ -1389,6 +1428,27 @@ mod tests {
             .expect("close writer");
 
         process_peer(Box::new(server), &snapshot, Some(&sink)).expect("process peer");
+
+        assert_eq!(events.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot.state(), GnomeIntegrationState::Connected);
+    }
+
+    #[test]
+    fn wire_protocol_reports_capture_toggle_only_after_hello() {
+        use std::sync::atomic::AtomicUsize;
+
+        let snapshot = SharedGnomeSnapshot::new();
+        let events = Arc::new(AtomicUsize::new(0));
+        let events_for_sink = events.clone();
+        let sink: GnomeShellEventSink = Arc::new(move |event| {
+            assert_eq!(event, GnomeShellEvent::ClipboardCaptureToggleRequested);
+            events_for_sink.fetch_add(1, Ordering::SeqCst);
+        });
+        let payload = format!(
+            "{{\"v\":{PROTOCOL_VERSION},\"kind\":\"toggle_capture\"}}\n{{\"v\":{PROTOCOL_VERSION},\"kind\":\"hello\"}}\n{{\"v\":{PROTOCOL_VERSION},\"kind\":\"toggle_capture\"}}\n"
+        );
+        let peer = MemoryPeer(std::io::Cursor::new(payload.into_bytes()));
+        process_peer(Box::new(peer), &snapshot, Some(&sink)).expect("process peer");
 
         assert_eq!(events.load(Ordering::SeqCst), 1);
         assert_eq!(snapshot.state(), GnomeIntegrationState::Connected);

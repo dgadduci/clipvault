@@ -25,6 +25,7 @@ const CONNECT_BACKOFF_MS = 250;
 const MAX_BACKOFF_MS = 4000;
 const FOCUS_HYSTERESIS_MS = 80;
 const QUICK_PASTE_ACCELERATOR = '<Control><Shift>v';
+const CAPTURE_TOGGLE_ACCELERATOR = '<Control><Alt><Shift>b';
 const QUICK_PASTE_ACTION_MODES = Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW;
 
 const AppState = {
@@ -35,6 +36,8 @@ const AppState = {
   focus_source: null,
   accelerator_source: null,
   accelerator_action: 0,
+  capture_toggle_source: null,
+  capture_toggle_action: 0,
   reconnect_attempts: 0,
   busy: false,
   // `sending` tracks every async write on the output stream so a new
@@ -51,6 +54,7 @@ const AppState = {
   handshake_complete: false,
   pending_app_id: null,
   pending_quick_paste: false,
+  pending_capture_toggle: false,
   last_app_id: null,
   destroyed: false,
 };
@@ -85,6 +89,7 @@ function _resetSocket() {
     AppState.sending = false;
     AppState.handshake_complete = false;
     AppState.pending_quick_paste = false;
+    AppState.pending_capture_toggle = false;
 }
 
 function _scheduleReconnect() {
@@ -130,6 +135,13 @@ function _nextQueuedMessage() {
             kind: 'quick_paste',
         }) + '\n';
     }
+    if (AppState.pending_capture_toggle) {
+        AppState.pending_capture_toggle = false;
+        return JSON.stringify({
+            v: PROTOCOL_VERSION,
+            kind: 'toggle_capture',
+        }) + '\n';
+    }
     return null;
 }
 
@@ -160,7 +172,8 @@ function _sendQueued() {
                 _onSocketLost();
                 return;
             }
-            if (AppState.pending_app_id !== null || AppState.pending_quick_paste) {
+            if (AppState.pending_app_id !== null || AppState.pending_quick_paste
+                || AppState.pending_capture_toggle) {
                 _sendQueued();
             }
         },
@@ -190,6 +203,14 @@ function _publishQuickPaste() {
     // a reconnect could open the modal long after the user pressed the key,
     // so `_resetSocket()` deliberately drops it on any socket failure.
     AppState.pending_quick_paste = true;
+    _sendQueued();
+}
+
+function _publishCaptureToggle() {
+    if (AppState.destroyed || AppState.output === null) return;
+    // Do not replay a toggle after reconnect; the user may have since
+    // changed the state through Settings or the tray.
+    AppState.pending_capture_toggle = true;
     _sendQueued();
 }
 
@@ -261,6 +282,49 @@ function _installQuickPasteBinding() {
         // A conflicting Shell shortcut must not destabilise the desktop.
         _uninstallQuickPasteBinding();
     }
+}
+
+function _installCaptureToggleBinding() {
+    if (AppState.capture_toggle_action) return;
+    try {
+        const action = global.display.grab_accelerator(
+            CAPTURE_TOGGLE_ACCELERATOR,
+            Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
+        );
+        if (!action || action === Meta.KeyBindingAction.NONE) {
+            print('ClipVault Ctrl+Alt+Shift+B shortcut unavailable (conflict)');
+            return;
+        }
+        AppState.capture_toggle_action = action;
+        const bindingName = Meta.external_binding_name_for_action(action);
+        Main.wm.allowKeybinding(bindingName, QUICK_PASTE_ACTION_MODES);
+        AppState.capture_toggle_source = global.display.connect(
+            'accelerator-activated',
+            function (_display, activatedAction) {
+                if (activatedAction !== AppState.capture_toggle_action) return;
+                _publishCaptureToggle();
+            },
+        );
+    } catch (e) {
+        _uninstallCaptureToggleBinding();
+    }
+}
+
+function _uninstallCaptureToggleBinding() {
+    if (AppState.capture_toggle_source !== null) {
+        try {
+            global.display.disconnect(AppState.capture_toggle_source);
+        } catch (e) {}
+        AppState.capture_toggle_source = null;
+    }
+    const action = AppState.capture_toggle_action;
+    AppState.capture_toggle_action = 0;
+    if (!action) return;
+    try {
+        const bindingName = Meta.external_binding_name_for_action(action);
+        Main.wm.allowKeybinding(bindingName, Shell.ActionMode.NONE);
+        global.display.ungrab_accelerator(action);
+    } catch (e) {}
 }
 
 function _uninstallQuickPasteBinding() {
@@ -338,7 +402,8 @@ function _connect() {
                             // while the handshake was in flight is
                             // flushed here, in protocol order.
                             AppState.handshake_complete = true;
-                            if (AppState.pending_app_id !== null || AppState.pending_quick_paste) {
+                            if (AppState.pending_app_id !== null || AppState.pending_quick_paste
+                                || AppState.pending_capture_toggle) {
                                 _sendQueued();
                             }
                         } catch (e) {
@@ -358,6 +423,7 @@ function _connect() {
 function enable() {
     AppState.destroyed = false;
     _installQuickPasteBinding();
+    _installCaptureToggleBinding();
     AppState.socket_path = _buildSocketPath();
     _connect();
     if (AppState.focus_source === null) {
@@ -376,6 +442,7 @@ function enable() {
 function disable() {
     AppState.destroyed = true;
     _uninstallQuickPasteBinding();
+    _uninstallCaptureToggleBinding();
     if (AppState.focus_source !== null) {
         GLib.source_remove(AppState.focus_source);
         AppState.focus_source = null;
@@ -395,6 +462,7 @@ function disable() {
     AppState.last_app_id = null;
     AppState.pending_app_id = null;
     AppState.pending_quick_paste = false;
+    AppState.pending_capture_toggle = false;
     AppState.reconnect_attempts = 0;
     AppState.handshake_complete = false;
 }

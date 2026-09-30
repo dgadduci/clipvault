@@ -80,6 +80,17 @@ test("the GNOME extension owns a Mutter Quick Paste accelerator for its enabled 
   );
 });
 
+test("the GNOME Wayland capture shortcut is a metadata-free Shell event", () => {
+  assert.match(
+    extensionSource,
+    /const CAPTURE_TOGGLE_ACCELERATOR = '<Control><Alt><Shift>b'/,
+  );
+  assert.match(extensionSource, /kind:\s*'toggle_capture'/);
+  assert.match(extensionSource, /function _publishCaptureToggle\(\)/);
+  assert.match(extensionSource, /_installCaptureToggleBinding\(\)/);
+  assert.match(extensionSource, /_uninstallCaptureToggleBinding\(\)/);
+});
+
 test("the GNOME accelerator serialises only the metadata-free Quick Paste request", () => {
   const quickPasteEnvelope = extensionSource.match(
     /JSON\.stringify\(\s*\{\s*v:\s*PROTOCOL_VERSION,\s*kind:\s*'quick_paste',\s*\}\s*\)\s*\+\s*'\\n'/,

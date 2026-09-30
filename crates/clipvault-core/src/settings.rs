@@ -36,6 +36,28 @@ pub const LOCAL_PEER_DISPLAY_NAME_KEY: &str = "local_peer_display_name";
 /// other key uses.
 pub const LOCAL_PEER_SHARING_ENABLED_KEY: &str = "local_peer_sharing_enabled";
 
+/// Local opt-out for reading and storing operating-system clipboard changes.
+/// Missing values keep the existing capture-on behavior.
+pub const LOCAL_CLIPBOARD_CAPTURE_ENABLED_KEY: &str = "local_clipboard_capture_enabled";
+
+/// Parse the local capture preference. Missing and malformed values default
+/// to enabled so databases created before this setting retain their existing
+/// behavior.
+pub fn parse_local_clipboard_capture_enabled(raw: Option<&str>) -> bool {
+    match raw.map(str::trim) {
+        Some(value) if value.eq_ignore_ascii_case("false") => false,
+        _ => true,
+    }
+}
+
+pub fn local_clipboard_capture_enabled_value(enabled: bool) -> &'static str {
+    if enabled {
+        "true"
+    } else {
+        "false"
+    }
+}
+
 /// Parse the persisted value into a boolean. Missing / empty
 /// strings collapse to the documented default (`false`); any other
 /// non-`"true"` value is treated as `false` so a manually edited

@@ -147,7 +147,7 @@ test("DesktopToolbar renders a single ellipsis trigger with accessible semantics
   );
 });
 
-test("DesktopToolbar menu exposes exactly four menuitems that forward the existing callbacks", () => {
+test("DesktopToolbar menu exposes its configured actions through the existing callbacks", () => {
   const source = stripComments(loadSource("src/DesktopToolbar.svelte"));
   // The menu container must use `role="menu"` so screen readers
   // announce it as a popup menu.
@@ -159,6 +159,7 @@ test("DesktopToolbar menu exposes exactly four menuitems that forward the existi
   // inside a string literal that drives the focus lookup.
   const menuItemTestIds = new Set([
     "open-development",
+    "open-general-settings",
     "open-privacy",
     "open-retention",
     "open-shortcut",
@@ -189,6 +190,7 @@ test("DesktopToolbar menu exposes exactly four menuitems that forward the existi
   // which in turn invokes the documented callback.
   for (const callback of [
     "onOpenDevelopment",
+    "onOpenGeneralSettings",
     "onOpenPrivacy",
     "onOpenRetention",
     "onOpenShortcut",
@@ -205,7 +207,13 @@ test("DesktopToolbar menu exposes exactly four menuitems that forward the existi
   // text buttons beside the search input. The regex matches a
   // `<button` opener, any markup, then the label as the text
   // content, then the closing `</button>`.
-  for (const literal of ["Development", "Privacidad", "Retención", "Atajo de pegado rápido"]) {
+  for (const literal of [
+    "Development",
+    "Configuración general",
+    "Privacidad",
+    "Retención",
+    "Atajo de pegado rápido",
+  ]) {
     const labelMatches = source.match(
       new RegExp(`<button[\\s\\S]*?>\\s*${literal}\\s*</button>`, "g"),
     ) ?? [];

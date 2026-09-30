@@ -56,7 +56,7 @@ export interface Capabilities {
 }
 
 export interface CaptureResponse {
-  kind: "stored" | "duplicate" | "ignored" | "failed";
+  kind: "stored" | "duplicate" | "ignored" | "failed" | "paused";
   id: number | null;
   message: string | null;
 }
@@ -68,6 +68,7 @@ export interface WatchTickResponse {
     | "captured_ignored"
     | "captured_failed"
     | "unchanged"
+    | "paused"
     | "ignored"
     | "failed";
   id: number | null;

@@ -35,6 +35,8 @@ const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const RAW_FALLBACK_WAIT: Duration = Duration::from_millis(25);
 const XK_V_LOWER: u32 = 0x0076;
 const XK_V_UPPER: u32 = 0x0056;
+const XK_B_LOWER: u32 = 0x0062;
+const XK_B_UPPER: u32 = 0x0042;
 const XK_RETURN: u32 = 0xff0d;
 const XK_ESCAPE: u32 = 0xff1b;
 type Callback = Arc<dyn Fn() + Send + Sync + 'static>;
@@ -277,6 +279,7 @@ impl Keymap {
 fn keysyms_for(key: HotkeyKey) -> &'static [u32] {
     match key {
         HotkeyKey::V => &[XK_V_LOWER, XK_V_UPPER],
+        HotkeyKey::B => &[XK_B_LOWER, XK_B_UPPER],
         HotkeyKey::Enter => &[XK_RETURN],
         HotkeyKey::Escape => &[XK_ESCAPE],
     }

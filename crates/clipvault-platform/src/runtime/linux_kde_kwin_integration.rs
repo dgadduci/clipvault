@@ -23,7 +23,9 @@
 //!    whose sender is not `org.kde.KWin`, refreshes the snapshot,
 //!    and exposes the same [`ActiveApplicationProbe`] contract the
 //!    rest of the platform uses so the capture pipeline picks up the
-//!    identifier transparently.
+//!    identifier transparently. The installed script also registers
+//!    the local-capture shortcut with KWin and sends a metadata-free
+//!    `ToggleCapture` method call over this same sender-verified bus.
 //!
 //! The bridge is opt-in: the bootstrap never installs or activates
 //! the script unless the user accepted the consent prompt the
@@ -36,6 +38,7 @@
 //! - Object path: `/org/clipvault/SourceApp`.
 //! - Interface: `org.clipvault.SourceApp`.
 //! - Method: `Publish(s id, s state, s v)`.
+//! - Method: `ToggleCapture()` for the native Wayland shortcut.
 //! - The bridge resolves `org.kde.KWin` to its current unique D-Bus
 //!   name at startup and accepts messages only from that connection.
 //!
@@ -103,6 +106,9 @@ pub const BACKEND_NAME: &str = "kde_kwin_script";
 /// contract is that the identifier is a basename, so anything above
 /// `512` bytes is rejected without further inspection.
 pub const MAX_IDENTIFIER_BYTES: usize = 512;
+
+/// Callback for the KWin-owned local-capture shortcut.
+pub type KdeKwinCaptureToggleSink = Arc<dyn Fn() + Send + Sync + 'static>;
 
 // =====================================================================
 // Errors
@@ -417,10 +423,36 @@ struct KdeKwinReceiver {
     /// capture the live value so every incoming envelope can be
     /// compared against it without round-tripping to the broker.
     kwin_unique_name: Arc<Mutex<Option<String>>>,
+    capture_toggle_sink: Option<KdeKwinCaptureToggleSink>,
 }
 
 #[interface(name = "org.clipvault.SourceApp")]
 impl KdeKwinReceiver {
+    /// Handle the fixed local-capture shortcut. No clipboard or window
+    /// metadata crosses D-Bus; only the already-authenticated KWin process
+    /// may trigger the callback.
+    async fn toggle_capture(&self, #[zbus(header)] hdr: ZbusHeader<'_>) -> zbus::fdo::Result<()> {
+        let sender_unique = hdr
+            .sender()
+            .map(|sender| sender.to_string())
+            .ok_or_else(|| {
+                zbus::fdo::Error::Failed(KdeKwinError::UnexpectedSender.stable_label().to_string())
+            })?;
+        if !sender_matches_kwin(&sender_unique, &self.kwin_unique_name.lock()) {
+            warn!("KDE bridge: dropped capture shortcut from non-KWin sender");
+            return Err(zbus::fdo::Error::Failed(
+                KdeKwinError::UnexpectedSender.stable_label().to_string(),
+            ));
+        }
+        let Some(sink) = &self.capture_toggle_sink else {
+            return Err(zbus::fdo::Error::Failed(
+                "capture_toggle_unavailable".to_string(),
+            ));
+        };
+        sink();
+        Ok(())
+    }
+
     /// Handle a `Publish` call from the KWin script.
     ///
     /// Returns `Ok(())` on success; returns a D-Bus error derived
@@ -645,6 +677,14 @@ async fn resolve_kwin_unique_name(connection: &zbus_connection::Connection) -> O
 pub async fn start_bridge(
     snapshot: SharedKdeKwinSnapshot,
 ) -> Result<KdeKwinBridgeHandle, KdeKwinError> {
+    start_bridge_with_capture_toggle(snapshot, None).await
+}
+
+/// Start the KWin bridge with a metadata-free local-capture shortcut sink.
+pub async fn start_bridge_with_capture_toggle(
+    snapshot: SharedKdeKwinSnapshot,
+    capture_toggle_sink: Option<KdeKwinCaptureToggleSink>,
+) -> Result<KdeKwinBridgeHandle, KdeKwinError> {
     snapshot.set_backend(Some(BACKEND_NAME));
 
     let kwin_unique_name = Arc::new(Mutex::new(None::<String>));
@@ -658,6 +698,7 @@ pub async fn start_bridge(
             KdeKwinReceiver {
                 snapshot: snapshot.clone(),
                 kwin_unique_name: kwin_unique_name.clone(),
+                capture_toggle_sink,
             },
         )
         .map_err(|error| KdeKwinError::Dbus(error.to_string()))?

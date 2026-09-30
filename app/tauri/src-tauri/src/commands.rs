@@ -24,7 +24,7 @@ use clipvault_platform::{
     read_icon_bytes, read_source_app_icon_bytes, ActiveAppError, IconReadError,
 };
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tracing::warn;
 
 use crate::state::SharedState;
@@ -55,6 +55,66 @@ fn sync_linux_picker_gnome_runtime_state(_state: &SharedState) {}
 /// surfaces as a frontend test failure instead of silently dropping
 /// the notification.
 pub const ORGANIZATION_UPDATED_EVENT: &str = "clipvault://organization-updated";
+pub const CAPTURE_CONTROL_CHANGED_EVENT: &str = "clipvault://capture-control-changed";
+pub const CAPTURE_CONTROL_ERROR_EVENT: &str = "clipvault://capture-control-error";
+
+#[derive(Debug, Clone, Serialize)]
+struct CaptureControlChanged {
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CaptureControlError {
+    kind: &'static str,
+}
+
+fn publish_capture_control_error<R: Runtime>(handle: &AppHandle<R>) {
+    if let Err(error) = handle.emit(
+        CAPTURE_CONTROL_ERROR_EVENT,
+        CaptureControlError {
+            kind: "persistence_failed",
+        },
+    ) {
+        warn!(error = %error, "failed to emit capture-control-error event");
+    }
+}
+
+fn publish_capture_control_changed<R: Runtime>(handle: &AppHandle<R>, enabled: bool) {
+    if let Some(controller) = handle.try_state::<Arc<crate::tray::TauriTrayController>>() {
+        if let Err(error) = controller.set_capture_enabled(enabled) {
+            warn!(error = %error, "failed to refresh tray capture action");
+        }
+    }
+    if let Err(error) = handle.emit(
+        CAPTURE_CONTROL_CHANGED_EVENT,
+        CaptureControlChanged { enabled },
+    ) {
+        warn!(error = %error, "failed to emit capture-control-changed event");
+    }
+}
+
+/// Route the tray action and global shortcut through the same synchronized
+/// state change used by the General Settings command.
+pub fn toggle_capture_from_app<R: Runtime>(handle: &AppHandle<R>) -> Result<bool, CommandError> {
+    let state = handle
+        .try_state::<SharedState>()
+        .ok_or_else(|| CommandError::new("state_unavailable", "ClipVault state is unavailable"))?;
+    let enabled = match state.update_capture_enabled(None) {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            publish_capture_control_error(handle);
+            return Err(error.into());
+        }
+    };
+    publish_capture_control_changed(handle, enabled);
+    Ok(enabled)
+}
+
+pub fn toggle_capture_from_hotkey<R: Runtime>(handle: &AppHandle<R>) {
+    if let Err(error) = toggle_capture_from_app(handle) {
+        warn!(kind = error.kind, "capture toggle hotkey failed");
+    }
+}
 
 /// Emit [`ORGANIZATION_UPDATED_EVENT`] after a successful
 /// organization mutation. Failures are logged and swallowed: an
@@ -117,6 +177,14 @@ impl CaptureResponse {
         };
         Self { kind, id, message }
     }
+
+    fn paused() -> Self {
+        Self {
+            kind: "paused",
+            id: None,
+            message: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -153,6 +221,11 @@ impl WatchTickResponse {
             }
             WatchTickOutcome::Unchanged => Self {
                 kind: "unchanged",
+                id: None,
+                message: None,
+            },
+            WatchTickOutcome::Paused => Self {
+                kind: "paused",
                 id: None,
                 message: None,
             },
@@ -396,11 +469,15 @@ pub fn clipvault_capture_text(
     source_app: Option<String>,
 ) -> Result<CaptureResponse, CommandError> {
     let _ = source_app;
-    let identifier = crate::bootstrap::resolved_source_identifier(state.context());
-    let outcome = state
-        .context()
-        .history()
-        .record_text(state.context(), identifier.as_deref());
+    let Some(outcome) = state.with_capture_enabled(|| {
+        let identifier = crate::bootstrap::resolved_source_identifier(state.context());
+        state
+            .context()
+            .history()
+            .record_text(state.context(), identifier.as_deref())
+    }) else {
+        return Ok(CaptureResponse::paused());
+    };
     Ok(CaptureResponse::from_outcome(outcome))
 }
 
@@ -900,6 +977,28 @@ pub fn run_retention(context: &clipvault_core::AppContext) {
 #[tauri::command]
 pub fn clipvault_settings_get(state: State<'_, SharedState>) -> Result<Settings, CommandError> {
     Ok(state.context().settings().load(state.context()))
+}
+
+#[tauri::command]
+pub fn clipvault_capture_control_get(state: State<'_, SharedState>) -> bool {
+    state.capture_enabled()
+}
+
+#[tauri::command]
+pub fn clipvault_capture_control_set(
+    app: AppHandle<tauri::Wry>,
+    state: State<'_, SharedState>,
+    enabled: bool,
+) -> Result<bool, CommandError> {
+    let enabled = match state.update_capture_enabled(Some(enabled)) {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            publish_capture_control_error(&app);
+            return Err(error.into());
+        }
+    };
+    publish_capture_control_changed(&app, enabled);
+    Ok(enabled)
 }
 
 #[derive(Debug, Serialize)]

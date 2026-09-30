@@ -130,12 +130,14 @@ pub use runtime::linux_kde_kwin_integration::{
     default_package_dir as kde_kwin_default_package_dir,
     is_valid_identifier as kde_kwin_is_valid_identifier,
     normalize_identifier as kde_kwin_normalize_identifier, start_bridge as kde_kwin_start_bridge,
-    KdeKwinActiveApplication, KdeKwinBridgeHandle, KdeKwinDiagnostics, KdeKwinError,
-    KdeKwinIntegrationState, SharedKdeKwinSnapshot, BACKEND_NAME as KDE_KWIN_BACKEND_NAME,
-    BUS_NAME as KDE_KWIN_BUS_NAME, INTERFACE as KDE_KWIN_INTERFACE,
-    KWIN_BUS_NAME as KDE_KWIN_BUS_NAME_WELL, OBJECT_PATH as KDE_KWIN_OBJECT_PATH,
-    PROTOCOL_VERSION as KDE_KWIN_PROTOCOL_VERSION, SCRIPT_PLUGIN_ID as KDE_KWIN_SCRIPT_PLUGIN_ID,
-    STATE_CLEARED as KDE_KWIN_STATE_CLEARED, STATE_IDENTIFIED as KDE_KWIN_STATE_IDENTIFIED,
+    start_bridge_with_capture_toggle as kde_kwin_start_bridge_with_capture_toggle,
+    KdeKwinActiveApplication, KdeKwinBridgeHandle, KdeKwinCaptureToggleSink, KdeKwinDiagnostics,
+    KdeKwinError, KdeKwinIntegrationState, SharedKdeKwinSnapshot,
+    BACKEND_NAME as KDE_KWIN_BACKEND_NAME, BUS_NAME as KDE_KWIN_BUS_NAME,
+    INTERFACE as KDE_KWIN_INTERFACE, KWIN_BUS_NAME as KDE_KWIN_BUS_NAME_WELL,
+    OBJECT_PATH as KDE_KWIN_OBJECT_PATH, PROTOCOL_VERSION as KDE_KWIN_PROTOCOL_VERSION,
+    SCRIPT_PLUGIN_ID as KDE_KWIN_SCRIPT_PLUGIN_ID, STATE_CLEARED as KDE_KWIN_STATE_CLEARED,
+    STATE_IDENTIFIED as KDE_KWIN_STATE_IDENTIFIED,
 };
 pub use stub::{data_dir, DefaultPlatform, PlatformError};
 pub use tiff_metadata::{parse_tiff_metadata, TiffMetadata, TiffResolutionUnit};
