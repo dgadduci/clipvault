@@ -140,6 +140,8 @@ struct MdnsHandle {
     daemon: mdns_sd::ServiceDaemon,
     fullname: String,
     announced_service: Arc<Mutex<AnnouncedService>>,
+    advertisement: DiscoveryAdvertisement,
+    port: u16,
     thread: Option<JoinHandle<()>>,
     announcement_thread: Option<JoinHandle<()>>,
     cancel: Arc<AtomicBool>,
@@ -366,6 +368,8 @@ impl MdnsPeerDiscoveryAdapter {
                 daemon,
                 fullname,
                 announced_service,
+                advertisement: advertisement.clone(),
+                port,
                 thread: Some(thread),
                 announcement_thread: Some(announcement_thread),
                 cancel,
@@ -415,6 +419,14 @@ impl MdnsPeerDiscoveryAdapter {
     ) -> Result<(), MdnsAdapterError> {
         let mut state = self.state.lock().expect("state lock");
         let handle = state.daemon.as_mut().ok_or(MdnsAdapterError::Register)?;
+        Self::reconfigure_handle(handle, advertisement, port)
+    }
+
+    fn reconfigure_handle(
+        handle: &mut MdnsHandle,
+        advertisement: &DiscoveryAdvertisement,
+        port: u16,
+    ) -> Result<(), MdnsAdapterError> {
         // Build the new service descriptor first so a malformed
         // advertisement cannot leave the adapter with the
         // previous record unregistered and no replacement
@@ -451,6 +463,8 @@ impl MdnsPeerDiscoveryAdapter {
             })?;
         announced_service.replace(service_info);
         handle.fullname = new_fullname;
+        handle.advertisement = advertisement.clone();
+        handle.port = port;
         debug!(port, "mdns-sd adapter reconfigured");
         Ok(())
     }
@@ -560,6 +574,18 @@ impl PeerDiscoveryAdapter for MdnsPeerDiscoveryAdapter {
         }
         self.reconfigure_record(advertisement, port)
             .map_err(map_install_error)
+    }
+
+    fn update_display_name(&self, display_name: &str) -> Result<(), AdapterError> {
+        let mut state = self.state.lock().expect("state lock");
+        let handle = state
+            .daemon
+            .as_mut()
+            .ok_or(AdapterError::DisplayNameUpdateUnavailable)?;
+        let mut advertisement = handle.advertisement.clone();
+        advertisement.display_name = display_name.to_string();
+        let port = handle.port;
+        Self::reconfigure_handle(handle, &advertisement, port).map_err(map_install_error)
     }
 
     fn is_running(&self) -> bool {

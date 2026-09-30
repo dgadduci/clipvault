@@ -2755,9 +2755,17 @@ pub fn clipvault_local_peer_profile_update(
     // not depend on the secure store status — a temporarily
     // unavailable keychain MUST NOT block the user from editing
     // their visible name.
-    context
+    let settings = context
         .settings()
         .set_local_peer_display_name(context, update.name.as_deref())?;
+    context
+        .refresh_local_peer_display_name(settings.local_peer_display_name.as_deref())
+        .map_err(|_| {
+            CommandError::new(
+                "local_peer_display_name_update_failed",
+                "No se pudo actualizar el nombre anunciado en la red local.",
+            )
+        })?;
     // Re-load the profile so the response carries the updated
     // `display_name` together with the stable `peer_id` and
     // `fingerprint`. When the secure store is unavailable the

@@ -328,6 +328,11 @@ pub enum AdapterError {
     /// as a typed error instead of panicking.
     #[error("discovery adapter received malformed advertisement")]
     MalformedAdvertisement,
+    /// The adapter cannot update its running announcement in
+    /// place. Callers keep the stored name and surface this typed
+    /// failure rather than restarting the browser implicitly.
+    #[error("discovery adapter cannot update the active display name")]
+    DisplayNameUpdateUnavailable,
 }
 
 /// Platform-neutral trait the runtime uses to drive the adapter.
@@ -390,6 +395,15 @@ pub trait PeerDiscoveryAdapter: Send + Sync {
     ) -> Result<(), AdapterError> {
         let _ = (advertisement, port);
         Err(AdapterError::AlreadyRunning)
+    }
+
+    /// Replace only the display name in the active announcement.
+    /// Implementations must preserve the current identity,
+    /// capability set, pairing port and browse loop. The default
+    /// reports that an active name update is unsupported.
+    fn update_display_name(&self, display_name: &str) -> Result<(), AdapterError> {
+        let _ = display_name;
+        Err(AdapterError::DisplayNameUpdateUnavailable)
     }
 
     /// Stop the browser / registrant. Idempotent: a second call

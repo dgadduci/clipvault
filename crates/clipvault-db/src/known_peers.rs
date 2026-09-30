@@ -4,8 +4,7 @@
 //! The repository stores ONLY the validated non-content fields the
 //! `local-peer-discovery` change persists: a stable `peer_id`, the
 //! public key fingerprint, the validated display name, the protocol
-//! major version and the `capability` advertised (always
-//! `discovery_only` for this change). The discovery surface is
+//! major version and the current `capability`. The discovery surface is
 //! metadata-only by construction — IP addresses, ports, raw public
 //! key bytes, private keys, clipboard payloads, previews, hashes and
 //! source identifiers never reach this table. The `core` layer is
@@ -13,10 +12,10 @@
 //! calling `upsert_observation` so the comparison stays in one
 //! place; the repository never re-normalises.
 //!
-//! Re-observing a known peer is idempotent: the merge updates
-//! `last_discovered_at` and `updated_at`, and refreshes the public
-//! fields the core re-validates (fingerprint, display name, protocol
-//! and additive `caps_extra` capabilities).
+//! Re-observing a known peer is idempotent: when its identity and
+//! protocol remain stable, the merge updates `display_name`,
+//! `last_discovered_at` and `updated_at`, and refreshes compatible
+//! capability metadata. Pairing trust fields are preserved.
 //! `discovery_only` and `pairing` are a live listener-state transition
 //! of that same identity, not a competing identity, so their transition
 //! updates the capability while preserving a previously learned full
@@ -177,11 +176,10 @@ pub enum UpsertObservationOutcome {
     /// state (insert for a new peer; update for a known peer).
     Stored(KnownPeer),
     /// The observation conflicted with a previously persisted
-    /// identity (different fingerprint, display name, protocol major
-    /// or an incompatible capability transition reusing the same `peer_id`). The repository
-    /// left the previously persisted row untouched and returned the
-    /// existing record so the core can log the rejection without
-    /// inspecting the conflicting bytes.
+    /// identity (different fingerprints, protocol major or an
+    /// incompatible capability transition reusing the same `peer_id`).
+    /// The repository leaves the previously persisted row untouched
+    /// and returns it so the core can handle the rejection.
     Conflict(KnownPeer),
 }
 
@@ -271,18 +269,20 @@ impl<'a> KnownPeerRepository<'a> {
     ///
     /// Conflict handling:
     /// - A new `peer_id` always inserts.
-    /// - A re-observed `peer_id` with the same fingerprint / display
-    ///   name / protocol major refreshes
-    ///   `last_discovered_at` and `updated_at`; `first_seen_at` is
-    ///   preserved.
+    /// - A re-observed `peer_id` with the same fingerprints,
+    ///   protocol major and a compatible capability transition may
+    ///   refresh its display name and dynamic discovery metadata;
+    ///   `first_seen_at` and pairing trust metadata are preserved.
     /// - `discovery_only` ↔ `pairing` is a compatible dynamic
     ///   transition. A pairing observation upgrades the canonical
     ///   full fingerprint; a discovery-only withdrawal changes the
     ///   current capability without erasing that fingerprint.
-    /// - A re-observed `peer_id` whose fingerprint, display name,
-    ///   protocol major or incompatible capability transition diverges from the previously
-    ///   persisted row is reported as [`UpsertObservationOutcome::Conflict`]
-    ///   and the persisted row is left intact.
+    /// - A re-observed `peer_id` whose fingerprints, protocol major
+    ///   or incompatible capability transition diverges from the
+    ///   previously persisted row is reported as
+    ///   [`UpsertObservationOutcome::Conflict`] and the persisted
+    ///   row is left intact. The display name is editable metadata,
+    ///   not part of peer identity.
     pub fn upsert_observation(
         &mut self,
         observation: &PeerObservation,
@@ -343,8 +343,16 @@ impl<'a> KnownPeerRepository<'a> {
                         ),
                         ("discovery_only", "pairing") | ("pairing", "discovery_only")
                     );
+                let conflicting_full_fingerprint = observation
+                    .full_public_key_fingerprint
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .is_some_and(|observed| {
+                        !previous.full_public_key_fingerprint.is_empty()
+                            && previous.full_public_key_fingerprint != observed
+                    });
                 if previous.public_key_fingerprint != observation.public_key_fingerprint
-                    || previous.display_name != observation.display_name
+                    || conflicting_full_fingerprint
                     || previous.protocol_major != observation.protocol_major
                     || !compatible_capability_transition
                 {
@@ -370,11 +378,12 @@ impl<'a> KnownPeerRepository<'a> {
                         .unwrap_or_else(|| previous.full_public_key_fingerprint.clone());
                     tx.execute(
                         "UPDATE known_peers \
-                         SET full_public_key_fingerprint = ?1, capability = ?2, caps_extra = ?3, caps_extra_v2 = ?4, \
-                             last_discovered_at = ?5, updated_at = ?5 \
-                         WHERE peer_id = ?6",
+                         SET full_public_key_fingerprint = ?1, display_name = ?2, capability = ?3, \
+                             caps_extra = ?4, caps_extra_v2 = ?5, last_discovered_at = ?6, updated_at = ?6 \
+                         WHERE peer_id = ?7",
                         params![
                             merged_full,
+                            observation.display_name,
                             observation.capability,
                             observation.caps_extra,
                             observation.caps_extra_v2,
@@ -1017,7 +1026,95 @@ mod tests {
     }
 
     #[test]
-    fn upsert_rejects_a_conflicting_display_name_without_overwriting() {
+    fn upsert_updates_display_name_without_changing_pairing_trust_metadata() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        {
+            let mut repo = KnownPeerRepository::new(db.connection_mut());
+            let mut initial = observation(
+                "peer-aaaa",
+                "0123456789abcdef",
+                "Studio",
+                1,
+                "pairing",
+                when,
+            );
+            initial.full_public_key_fingerprint = Some("a".repeat(64));
+            let _ = repo.upsert_observation(&initial).expect("first insert");
+        }
+        db.connection_mut()
+            .execute(
+                "UPDATE known_peers SET trust_state = 'trusted', tls_cert_fingerprint = 'cert-pin', \
+                    paired_at = '2026-01-01T00:00:00Z', paired_protocol_major = 1, cursor_secret = 'cursor-secret' \
+                 WHERE peer_id = 'peer-aaaa'",
+                [],
+            )
+            .expect("set pairing metadata");
+        let mut repo = KnownPeerRepository::new(db.connection_mut());
+        let mut renamed = observation(
+            "peer-aaaa",
+            "0123456789abcdef",
+            "Studio renombrado",
+            1,
+            "pairing",
+            when + time::Duration::seconds(10),
+        );
+        renamed.full_public_key_fingerprint = Some("a".repeat(64));
+        let outcome = repo
+            .upsert_observation(&renamed)
+            .expect("refresh observation");
+        let UpsertObservationOutcome::Stored(updated) = outcome else {
+            panic!("expected Stored, got {outcome:?}");
+        };
+        assert_eq!(updated.peer_id, "peer-aaaa");
+        assert_eq!(updated.public_key_fingerprint, "0123456789abcdef");
+        assert_eq!(updated.full_public_key_fingerprint, "a".repeat(64));
+        assert_eq!(updated.protocol_major, 1);
+        assert_eq!(updated.display_name, "Studio renombrado");
+        assert_eq!(updated.trust_state, TrustState::Trusted);
+        assert_eq!(updated.tls_cert_fingerprint, "cert-pin");
+        assert_eq!(updated.paired_at, "2026-01-01T00:00:00Z");
+        assert_eq!(updated.paired_protocol_major, 1);
+        assert_eq!(updated.cursor_secret, "cursor-secret");
+        assert_eq!(updated.first_seen_at, format_timestamp(when));
+        let reloaded = repo.get("peer-aaaa").expect("reload").expect("present");
+        assert_eq!(reloaded.display_name, "Studio renombrado");
+    }
+
+    #[test]
+    fn upsert_rejects_a_conflicting_full_fingerprint_without_overwriting() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let mut existing = observation(
+            "peer-aaaa",
+            "0123456789abcdef",
+            "Studio",
+            1,
+            "pairing",
+            when,
+        );
+        existing.full_public_key_fingerprint = Some("a".repeat(64));
+        let mut repo = KnownPeerRepository::new(db.connection_mut());
+        let _ = repo.upsert_observation(&existing).expect("first insert");
+
+        let mut renamed = observation(
+            "peer-aaaa",
+            "0123456789abcdef",
+            "Studio renombrado",
+            1,
+            "pairing",
+            when + time::Duration::seconds(10),
+        );
+        renamed.full_public_key_fingerprint = Some("b".repeat(64));
+        let outcome = repo.upsert_observation(&renamed).expect("conflict insert");
+        assert!(matches!(outcome, UpsertObservationOutcome::Conflict(_)));
+        let reloaded = repo.get("peer-aaaa").expect("reload").expect("present");
+        assert_eq!(reloaded.display_name, "Studio");
+        assert_eq!(reloaded.full_public_key_fingerprint, "a".repeat(64));
+    }
+
+    #[test]
+    fn upsert_rejects_an_incompatible_capability_transition_without_overwriting() {
         let (_dir, mut db) = open_temp_db();
         let when = datetime!(2026-01-02 03:04:05 UTC);
         let mut repo = KnownPeerRepository::new(db.connection_mut());
@@ -1035,15 +1132,17 @@ mod tests {
             .upsert_observation(&observation(
                 "peer-aaaa",
                 "0123456789abcdef",
-                "Impostor",
+                "Studio renombrado",
                 1,
-                "discovery_only",
-                when,
+                "unsupported_capability",
+                when + time::Duration::seconds(10),
             ))
-            .expect("conflict insert");
+            .expect("conflicting observation");
+
         assert!(matches!(outcome, UpsertObservationOutcome::Conflict(_)));
         let reloaded = repo.get("peer-aaaa").expect("reload").expect("present");
         assert_eq!(reloaded.display_name, "Studio");
+        assert_eq!(reloaded.capability, "discovery_only");
     }
 
     #[test]

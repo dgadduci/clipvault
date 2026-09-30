@@ -1465,17 +1465,10 @@ mod tests {
             }
         }
         let mut db = crate::Database::open(&db_path).expect("reopen");
-        // Simulate a remote rename that lands through whichever
-        // future code path the discovery / pairing runtime exposes.
-        // We exercise the raw SQL the bootstrap keeps so the
-        // projection test does not depend on the conflict
-        // semantics of `upsert_observation`.
-        db.connection()
-            .execute(
-                "UPDATE known_peers SET display_name = ?1 WHERE peer_id = ?2",
-                rusqlite::params!["Equipo A · Renombrado", "peer-a"],
-            )
-            .expect("rename peer");
+        // Apply the rename through the same observation upsert the
+        // discovery runtime uses, then confirm bound collections
+        // project the newest persisted name after a restart.
+        seed_peer(&mut db, "peer-a", "Equipo A · Renombrado");
         let repo = OrganizationRepository::new(db.connection_mut());
         let rows = repo.list_collections().expect("list");
         let bound = rows.iter().find(|c| c.is_peer_bound).expect("bound row");

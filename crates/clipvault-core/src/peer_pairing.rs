@@ -1037,6 +1037,13 @@ impl PairingRuntime {
         *self.inner.local_identity.write() = identity;
     }
 
+    /// Refresh the editable local name used by future wire
+    /// handshakes. The transport updates only its cached name; the
+    /// local key material, certificate and pairing trust stay put.
+    pub fn set_local_display_name(&self, display_name: &str) {
+        self.inner.transport.set_local_display_name(display_name);
+    }
+
     /// Read the cached local identity. Used by tests to assert the
     /// bootstrap forwarded the value the keychain minted.
     #[cfg(feature = "local-peer-pairing-tls")]

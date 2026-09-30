@@ -698,13 +698,16 @@ pub fn install_with_material_resolver_and_history(
     // installs them after the install call returns; the previous
     // wiring left the state empty until the second call, which
     // collapsed the very first request to `not_available`).
-    {
+    let local_display_name_slot = {
         let mut state = transport.state.lock().expect("state lock");
+        state.local_display_name = display_name.clone();
+        *state.local_display_name_slot.write() = display_name.clone();
         state.image_history_handler = image_history_handler.clone();
         state.image_fetch_handler = image_fetch_handler.clone();
         state.image_thumbnail_handler = image_thumbnail_handler.clone();
         *state.source_app_presentation_handler.write() = source_app_presentation_handler.clone();
-    }
+        Arc::clone(&state.local_display_name_slot)
+    };
 
     let identity = material.identity().clone();
     let install_outcome = (|| -> Result<u16, TlsTransportInstallError> {
@@ -752,7 +755,6 @@ pub fn install_with_material_resolver_and_history(
         // the mTLS dialer and the signed approval use.
         let local_fingerprint = full_public_key_fingerprint(&identity.public_key);
         let peer_cert_slot_for_task = Arc::clone(&peer_cert_slot);
-        let local_display_name_for_task = display_name.clone();
         // Use the shared handshake pin lookup the transport owns
         // (the same map the verifiers consult during the
         // handshake, the `arm_pin` / `disarm_pin` API mutates and
@@ -797,7 +799,7 @@ pub fn install_with_material_resolver_and_history(
                 local_public_key,
                 local_peer_id,
                 local_fingerprint,
-                local_display_name_for_task,
+                Arc::clone(&local_display_name_slot),
                 peer_cert_slot_for_task,
                 handshake_pins_lookup,
                 inbound_sessions_for_task,
@@ -821,7 +823,6 @@ pub fn install_with_material_resolver_and_history(
         state.sink = Some(Arc::clone(&sink));
         state.peer_cert_slot = Some(peer_cert_slot);
         state.local_material = Some(material);
-        state.local_display_name = display_name;
         state.resolver = resolver;
         state.session_sink = Some(sink);
         state.history_handler = history_handler;
@@ -1264,7 +1265,7 @@ async fn run_accept_loop(
     local_public_key: [u8; 32],
     local_peer_id: String,
     local_fingerprint: String,
-    local_display_name: String,
+    local_display_name: Arc<parking_lot::RwLock<String>>,
     peer_cert_slot: Arc<PeerCertSlot>,
     // Shared handshake pin lookup the transport owns. The
     // verifiers, `arm_pin` / `disarm_pin` and the inbound health
@@ -1344,7 +1345,7 @@ async fn run_accept_loop(
         let local_public_key_for_session = local_public_key;
         let local_peer_id_for_session = local_peer_id.clone();
         let local_fingerprint_for_session = local_fingerprint.clone();
-        let local_display_name_for_session = local_display_name.clone();
+        let local_display_name_for_session = Arc::clone(&local_display_name);
         let peer_cert_slot_for_session = Arc::clone(&peer_cert_slot);
         let handshake_pins_for_session = handshake_pins.clone();
         let inbound_sessions_for_session = Arc::clone(&inbound_sessions);
@@ -1419,7 +1420,7 @@ async fn handle_connection(
     local_public_key: [u8; 32],
     local_peer_id: String,
     local_fingerprint: String,
-    local_display_name: String,
+    local_display_name: Arc<parking_lot::RwLock<String>>,
     cancel: Arc<AtomicBool>,
     peer_cert_slot: Arc<PeerCertSlot>,
     handshake_pins: Arc<HandshakePinLookup>,
@@ -1462,6 +1463,7 @@ async fn handle_connection(
         peer_cert_slot.publish(cert_der);
     }
 
+    let local_display_name = local_display_name.read().clone();
     let outcome = tokio::time::timeout(
         CONNECTION_TIMEOUT,
         run_pairing_session(

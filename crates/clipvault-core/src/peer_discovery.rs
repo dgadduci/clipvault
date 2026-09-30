@@ -858,6 +858,26 @@ impl PeerDiscoveryRuntime {
         *self.local_identity.write() = identity;
     }
 
+    /// Update the editable local name in both the runtime snapshot
+    /// and an active discovery advertisement. The platform adapter
+    /// changes only the TXT name, preserving its current pairing
+    /// capability, port, identity and browse loop.
+    pub fn update_local_display_name(&self, display_name: &str) -> Result<(), AdapterError> {
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
+            return Err(AdapterError::MalformedAdvertisement);
+        }
+        let Some(mut identity) = self.local_identity.read().clone() else {
+            return Ok(());
+        };
+        if *self.running.read() {
+            self.adapter.update_display_name(display_name)?;
+        }
+        identity.display_name = display_name.to_string();
+        *self.local_identity.write() = Some(identity);
+        Ok(())
+    }
+
     /// Install the persistence closure the worker thread calls
     /// on every drained observation. The bootstrap wires the
     /// `KnownPeerRepository::upsert_observation` call here; tests
@@ -1222,6 +1242,7 @@ mod tests {
         running: AtomicUsize,
         start_calls: AtomicUsize,
         stop_calls: AtomicUsize,
+        display_name_updates: Mutex<Vec<String>>,
         start_outcome: Mutex<Result<(), AdapterError>>,
     }
 
@@ -1231,6 +1252,7 @@ mod tests {
                 running: AtomicUsize::new(0),
                 start_calls: AtomicUsize::new(0),
                 stop_calls: AtomicUsize::new(0),
+                display_name_updates: Mutex::new(Vec::new()),
                 start_outcome: Mutex::new(Ok(())),
             }
         }
@@ -1245,6 +1267,13 @@ mod tests {
 
         fn running_calls(&self) -> usize {
             self.running.load(Ordering::Acquire)
+        }
+
+        fn display_name_updates(&self) -> Vec<String> {
+            self.display_name_updates
+                .lock()
+                .expect("display names")
+                .clone()
         }
     }
 
@@ -1277,6 +1306,17 @@ mod tests {
         fn is_running(&self) -> bool {
             self.running_calls() > 0
         }
+
+        fn update_display_name(&self, display_name: &str) -> Result<(), AdapterError> {
+            if !self.is_running() {
+                return Err(AdapterError::DisplayNameUpdateUnavailable);
+            }
+            self.display_name_updates
+                .lock()
+                .expect("display names")
+                .push(display_name.to_string());
+            Ok(())
+        }
     }
 
     fn apply_in_memory(
@@ -1294,9 +1334,26 @@ mod tests {
             match idx {
                 Some(idx) => {
                     let existing = guard.remove(idx);
+                    let full_fingerprint_matches = observation
+                        .full_public_key_fingerprint
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                        .map_or(true, |observed| {
+                            existing.full_public_key_fingerprint.is_empty()
+                                || existing.full_public_key_fingerprint == observed
+                        });
+                    let capability_compatible = existing.capability == observation.capability
+                        || matches!(
+                            (
+                                existing.capability.as_str(),
+                                observation.capability.as_str()
+                            ),
+                            ("discovery_only", "pairing") | ("pairing", "discovery_only")
+                        );
                     if existing.public_key_fingerprint == observation.public_key_fingerprint
-                        && existing.display_name == observation.display_name
+                        && full_fingerprint_matches
                         && existing.protocol_major == observation.protocol_major
+                        && capability_compatible
                     {
                         // Merge: upgrade the full fingerprint when
                         // the new observation carries one and the
@@ -1796,6 +1853,28 @@ mod tests {
     }
 
     #[test]
+    fn local_display_name_updates_without_restarting_discovery() {
+        let adapter = Arc::new(ScriptedAdapter::new());
+        let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runtime = runtime_with_storage(adapter.clone(), storage);
+        runtime.set_local_identity(Some(local_identity(
+            "00000000000000000000000000000000",
+            "ffffffffffffffff",
+        )));
+        runtime.start().expect("start");
+
+        runtime
+            .update_local_display_name("  Studio Renombrado  ")
+            .expect("update name");
+
+        assert_eq!(adapter.display_name_updates(), vec!["Studio Renombrado"]);
+        assert_eq!(adapter.start_calls(), 1);
+        assert_eq!(adapter.stop_calls(), 0);
+        assert!(runtime.is_running());
+        runtime.stop().expect("stop");
+    }
+
+    #[test]
     fn stop_is_idempotent_when_not_running() {
         let adapter = Arc::new(ScriptedAdapter::new());
         let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1826,7 +1905,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_persists_a_new_observation() {
+    fn drain_persists_a_new_observation_and_refreshes_a_known_name() {
         let adapter = Arc::new(ScriptedAdapter::new());
         let storage = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let runtime = runtime_with_storage(adapter, std::sync::Arc::clone(&storage));
@@ -1841,11 +1920,17 @@ mod tests {
             "Studio",
         )));
         wait_for_drain(&runtime, 2_000);
+        runtime.enqueue(DiscoveryEvent::Observed(txt(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            "Studio renombrado",
+        )));
+        wait_for_drain(&runtime, 2_000);
         let rows = storage.lock().expect("storage");
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(row.peer_id, "0123456789abcdef0123456789abcdef");
-        assert_eq!(row.display_name, "Studio");
+        assert_eq!(row.display_name, "Studio renombrado");
         drop(rows);
         runtime.stop().expect("stop");
     }

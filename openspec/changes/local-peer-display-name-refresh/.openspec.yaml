@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-29
+goal: Actualizar el nombre anunciado y las filas de pares existentes sin alterar
+  peer_id, huella ni confianza.

@@ -675,6 +675,22 @@ impl AppContext {
         self.peer_discovery.set_local_identity(snapshot);
     }
 
+    /// Publish a newly saved local name through the active
+    /// discovery and pairing runtimes. The identity and listener
+    /// remain installed; only metadata carried by future discovery
+    /// records and pairing handshakes changes.
+    pub fn refresh_local_peer_display_name(
+        &self,
+        display_name: Option<&str>,
+    ) -> Result<(), clipvault_platform::peer_discovery::AdapterError> {
+        let Some(display_name) = display_name.map(str::trim).filter(|name| !name.is_empty()) else {
+            return Ok(());
+        };
+        let result = self.peer_discovery.update_local_display_name(display_name);
+        self.peer_pairing.set_local_display_name(display_name);
+        result
+    }
+
     /// Install the [`crate::peer_pairing::MaterialLoader`] the
     /// production pairing transport uses to bind a real listener.
     /// The bootstrap leaves the slot empty by default; the shell

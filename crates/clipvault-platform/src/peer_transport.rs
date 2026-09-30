@@ -952,6 +952,13 @@ pub trait PeerTransport: Send + Sync {
 
     fn is_running(&self) -> bool;
 
+    /// Refresh the visible local name used by new pairing
+    /// handshakes. Implementations must leave identity material,
+    /// certificate pins, sessions and trust unchanged.
+    fn set_local_display_name(&self, display_name: &str) {
+        let _ = display_name;
+    }
+
     /// Arm the cert fingerprint pin the productive pairing
     /// transport enforces against the next mTLS handshake from
     /// the matching `peer_id`. The runtime MUST call this
@@ -1873,6 +1880,11 @@ pub(crate) struct TransportState {
     /// fingerprint for the visible name — that projection is
     /// only a UI badge for the discovery row.
     pub local_display_name: String,
+    /// Shared name slot the inbound listener reads after each TLS
+    /// handshake. Updating the visible name while the listener is
+    /// running changes the next HelloAck without reinstalling the
+    /// certificate or interrupting the listener.
+    pub local_display_name_slot: Arc<parking_lot::RwLock<String>>,
     /// mDNS adapter the transport uses to resolve a `peer_id`
     /// to the `SocketAddr` of the listener the remote peer
     /// currently advertises. The transport owns the lookup so
@@ -1981,6 +1993,7 @@ impl Default for TransportState {
             handshake_pins: Arc::new(crate::peer_transport::tls::HandshakePinLookup::new()),
             local_material: None,
             local_display_name: String::new(),
+            local_display_name_slot: Arc::new(parking_lot::RwLock::new(String::new())),
             resolver: None,
             sessions: parking_lot::Mutex::new(std::collections::HashMap::new()),
             next_session_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -2110,6 +2123,12 @@ impl PeerTransport for TlsPeerTransport {
             sink,
             resolver,
         )
+    }
+
+    fn set_local_display_name(&self, display_name: &str) {
+        let mut state = self.state.lock().expect("state lock");
+        state.local_display_name = display_name.to_string();
+        *state.local_display_name_slot.write() = display_name.to_string();
     }
 
     fn stop(&self) -> Result<(), TransportError> {
@@ -3141,6 +3160,20 @@ mod tests {
         let transport = NoopPeerTransport::new();
         transport.stop().expect("noop stop is a no-op");
         assert!(!transport.is_running());
+    }
+
+    #[cfg(feature = "local-peer-pairing-tls")]
+    #[test]
+    fn tls_transport_refreshes_the_name_shared_with_its_listener() {
+        let transport = TlsPeerTransport::new();
+        transport.set_local_display_name("Studio renombrado");
+
+        let state = transport.state.lock().expect("transport state");
+        assert_eq!(state.local_display_name, "Studio renombrado");
+        assert_eq!(
+            state.local_display_name_slot.read().as_str(),
+            "Studio renombrado"
+        );
     }
 
     #[test]
