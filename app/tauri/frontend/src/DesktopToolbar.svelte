@@ -62,6 +62,7 @@
    * view where the destructive branch would be misleading.
    */
   export let showClearHistory: boolean = true;
+  export let canCreateManualText: boolean = false;
   /**
    * Source-application filter the combobox renders. The toolbar is
    * still presentational: the parent owns the canonical state so
@@ -107,6 +108,10 @@
    */
   export let onOpenAbout: (event: MouseEvent) => void = () => {};
   export let onRequestClearHistory: (event: MouseEvent) => void = () => {};
+  export let onCreateManualText: (
+    event: MouseEvent,
+    returnFocusTo: HTMLElement | null,
+  ) => void = () => {};
   export let onSourceAppFilterChange: (next: SourceAppFilterValue) => void = () => {};
   export let onTagFilterChange: (next: TagFilterValue) => void = () => {};
 
@@ -148,6 +153,11 @@
   function selectItem(invoke: (event: MouseEvent) => void, event: MouseEvent): void {
     menuOpen = false;
     invoke(event);
+  }
+
+  function selectCreateManualText(event: MouseEvent): void {
+    menuOpen = false;
+    onCreateManualText(event, ellipsisEl);
   }
 
   function toggleMenu(): void {
@@ -298,6 +308,17 @@
             bind:this={menuEl}
             on:keydown={onMenuKeydown}
           >
+            {#if canCreateManualText}
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                data-testid="create-manual-text-entry"
+                on:click={selectCreateManualText}
+              >
+                Nueva captura de texto
+              </button>
+            {/if}
             <button
               type="button"
               role="menuitem"

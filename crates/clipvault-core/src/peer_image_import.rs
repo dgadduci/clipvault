@@ -912,6 +912,7 @@ impl PeerImageImportPersistence for InMemoryImageImportPersistence {
                 updated_at: ts,
                 is_peer_bound: true,
                 peer_display_name: Some(name.to_string()),
+                has_note: false,
             },
         );
         Ok(id)
@@ -1251,6 +1252,7 @@ impl PeerImageImportPersistence for InMemoryImageImportPersistence {
                         updated_at: ts,
                         is_peer_bound: true,
                         peer_display_name: Some(spec.display_name.clone()),
+                        has_note: false,
                     },
                 );
                 state.bindings.insert(spec.peer_id.clone(), id);

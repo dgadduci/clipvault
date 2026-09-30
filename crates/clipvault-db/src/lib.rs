@@ -13,6 +13,7 @@ mod error;
 mod ignored_apps;
 mod known_peers;
 mod migration;
+mod notes;
 mod organization;
 mod peer_import_repository;
 mod registry;
@@ -35,6 +36,7 @@ pub use known_peers::{
     TrustTransitionOutcome, UpsertObservationOutcome,
 };
 pub use migration::{Migration, MigrationOutcome};
+pub use notes::{NoteRecord, NoteRepository, NoteRepositoryError};
 pub use organization::{
     normalise_tag_identity, validate_collection_color, validate_user_collection_name, Collection,
     CollectionDeletionOutcome, CollectionDeletionPreview, CollectionKind, OrganizationError,

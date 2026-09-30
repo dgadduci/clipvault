@@ -1085,6 +1085,28 @@ const MIGRATION_0020_PEER_IMPORT_HISTORY_MEMBERSHIP: Migration = Migration {
     down_sql: "SELECT 1;",
 };
 
+/// `collection-text-documents-and-notes`: store one local note for each
+/// history entry and collection. Foreign keys keep notes from outliving
+/// their owner; these tables deliberately do not participate in peer transfer.
+const MIGRATION_0021_LOCAL_NOTES: Migration = Migration {
+    version: 21,
+    description: "collection-text-documents-and-notes: add local entry and collection notes",
+    up_sql: "CREATE TABLE entry_notes (
+        entry_id INTEGER PRIMARY KEY,
+        body TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (entry_id) REFERENCES clipboard_entries(id) ON DELETE CASCADE
+    );
+    CREATE TABLE collection_notes (
+        collection_id INTEGER PRIMARY KEY,
+        body TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE
+    );",
+    down_sql: "DROP TABLE IF EXISTS collection_notes;
+    DROP TABLE IF EXISTS entry_notes;",
+};
+
 /// Returns the migrations shipped with ClipVault. Each new migration is
 /// appended to this slice to keep ordering deterministic.
 pub fn builtin_migrations() -> Vec<Migration> {
@@ -1109,6 +1131,7 @@ pub fn builtin_migrations() -> Vec<Migration> {
         MIGRATION_0018_KNOWN_PEERS_CAPS_EXTRA,
         MIGRATION_0019_PEER_SOURCE_APP_PRESENTATION,
         MIGRATION_0020_PEER_IMPORT_HISTORY_MEMBERSHIP,
+        MIGRATION_0021_LOCAL_NOTES,
     ]
 }
 

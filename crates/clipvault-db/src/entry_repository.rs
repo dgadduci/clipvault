@@ -5,7 +5,7 @@
 //! `&Connection`; writes expect a `&mut Connection` so the caller can
 //! own the lock returned by the surrounding [`crate::Database`].
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::collections::BTreeSet;
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
@@ -34,6 +34,8 @@ pub enum EntryRepositoryError {
     Sqlite(#[from] rusqlite::Error),
     #[error("organization error: {0}")]
     Organization(#[from] OrganizationError),
+    #[error("manual text entries are not allowed in peer-import collections")]
+    InvalidCollectionTarget,
 }
 
 /// Result of [`EntryRepository::insert_or_touch`]. Tells the service
@@ -169,7 +171,30 @@ impl<'a> EntryRepository<'a> {
     /// the membership on dedupe is important for older rows created by
     /// import paths that did not enforce the invariant.
     pub fn insert_or_touch(&mut self, new: NewEntry) -> Result<EntryOutcome, EntryRepositoryError> {
+        self.insert_or_touch_inner(new, None)
+    }
+
+    /// Insert or resolve an entry using the regular capture identity and
+    /// attach it to an eligible local collection atomically with Historial.
+    /// This is the explicit user-created text path; ordinary clipboard
+    /// captures continue to call `insert_or_touch` without an extra target.
+    pub fn insert_or_touch_in_local_collection(
+        &mut self,
+        new: NewEntry,
+        collection_id: i64,
+    ) -> Result<EntryOutcome, EntryRepositoryError> {
+        self.insert_or_touch_inner(new, Some(collection_id))
+    }
+
+    fn insert_or_touch_inner(
+        &mut self,
+        new: NewEntry,
+        collection_id: Option<i64>,
+    ) -> Result<EntryOutcome, EntryRepositoryError> {
         let tx = self.conn.transaction()?;
+        if let Some(collection_id) = collection_id {
+            validate_manual_collection_target(&tx, collection_id)?;
+        }
         let plain_hash = new.content_hash.clone();
         let rich_hash = new.rich_text_hash.clone();
         let last_seen = format_timestamp(new.last_seen_at);
@@ -233,6 +258,18 @@ impl<'a> EntryRepository<'a> {
             new.last_seen_at,
         )
         .map_err(EntryRepositoryError::Organization)?;
+
+        if let Some(collection_id) = collection_id {
+            tx.execute(
+                "INSERT OR IGNORE INTO entry_collections (entry_id, collection_id, created_at)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    outcome.record().id,
+                    collection_id,
+                    format_timestamp(new.last_seen_at)
+                ],
+            )?;
+        }
 
         tx.commit()?;
         Ok(outcome)
@@ -1527,6 +1564,33 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord> {
         rich_rtf_size: row.get(22)?,
         code_language: parse_code_language(row.get(23)?)?,
     })
+}
+
+fn validate_manual_collection_target(
+    tx: &Transaction<'_>,
+    collection_id: i64,
+) -> Result<(), EntryRepositoryError> {
+    let target: Option<(String, Option<String>, bool)> = tx
+        .query_row(
+            "SELECT c.kind, c.stable_key,
+                    EXISTS(SELECT 1 FROM peer_collection_bindings pcb
+                            WHERE pcb.collection_id = c.id)
+               FROM collections c
+              WHERE c.id = ?1",
+            params![collection_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    match target {
+        None => Err(OrganizationError::CollectionNotFound(collection_id).into()),
+        Some((kind, stable_key, _))
+            if kind == "system" && stable_key.as_deref() == Some("history") =>
+        {
+            Ok(())
+        }
+        Some((kind, _, false)) if kind == "user" => Ok(()),
+        Some(_) => Err(EntryRepositoryError::InvalidCollectionTarget),
+    }
 }
 
 fn parse_content_type(raw: &str) -> Option<ContentType> {

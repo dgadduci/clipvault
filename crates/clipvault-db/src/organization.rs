@@ -135,6 +135,11 @@ pub struct Collection {
     /// surfaces a generic safe label when this field is `None`.
     #[serde(default)]
     pub peer_display_name: Option<String>,
+    /// `true` when this collection has a local note. The note body is
+    /// deliberately fetched through the explicit notes API, never in the
+    /// collection-list projection.
+    #[serde(default)]
+    pub has_note: bool,
 }
 
 /// Metadata-only snapshot used to confirm deleting a collection. It
@@ -240,10 +245,12 @@ impl<'a> OrganizationRepository<'a> {
             "SELECT c.id, c.stable_key, c.name, c.kind, c.color_hex,
                     c.created_at, c.updated_at,
                     CASE WHEN pcb.peer_id IS NULL THEN 0 ELSE 1 END AS is_peer_bound,
-                    NULLIF(TRIM(kp.display_name), '') AS peer_display_name
+                    NULLIF(TRIM(kp.display_name), '') AS peer_display_name,
+                    CASE WHEN cn.collection_id IS NULL THEN 0 ELSE 1 END AS has_note
              FROM collections c
              LEFT JOIN peer_collection_bindings pcb ON pcb.collection_id = c.id
              LEFT JOIN known_peers kp ON kp.peer_id = pcb.peer_id
+             LEFT JOIN collection_notes cn ON cn.collection_id = c.id
              ORDER BY CASE WHEN c.kind = 'system' THEN 0 ELSE 1 END,
                       c.name COLLATE NOCASE ASC",
         )?;
@@ -269,10 +276,12 @@ impl<'a> OrganizationRepository<'a> {
                 "SELECT c.id, c.stable_key, c.name, c.kind, c.color_hex,
                         c.created_at, c.updated_at,
                         CASE WHEN pcb.peer_id IS NULL THEN 0 ELSE 1 END AS is_peer_bound,
-                        NULLIF(TRIM(kp.display_name), '') AS peer_display_name
+                        NULLIF(TRIM(kp.display_name), '') AS peer_display_name,
+                        CASE WHEN cn.collection_id IS NULL THEN 0 ELSE 1 END AS has_note
                  FROM collections c
                  LEFT JOIN peer_collection_bindings pcb ON pcb.collection_id = c.id
                  LEFT JOIN known_peers kp ON kp.peer_id = pcb.peer_id
+                 LEFT JOIN collection_notes cn ON cn.collection_id = c.id
                  WHERE c.id = ?1",
                 params![id],
                 row_to_collection,
@@ -314,6 +323,7 @@ impl<'a> OrganizationRepository<'a> {
             updated_at: ts,
             is_peer_bound: false,
             peer_display_name: None,
+            has_note: false,
         })
     }
 
@@ -958,6 +968,7 @@ fn row_to_collection(row: &rusqlite::Row<'_>) -> rusqlite::Result<Collection> {
         updated_at: row.get(6)?,
         is_peer_bound: is_peer_bound_raw != 0,
         peer_display_name: row.get(8)?,
+        has_note: row.get::<_, i64>(9)? != 0,
     })
 }
 

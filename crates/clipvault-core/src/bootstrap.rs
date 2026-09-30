@@ -30,6 +30,7 @@ use crate::history::TextHistoryService;
 use crate::ignored_apps_service::IgnoredAppsService;
 use crate::kde_kwin_integration::KdeKwinIntegrationService;
 use crate::management::{HistoryManagementService, DEFAULT_RETENTION, RETENTION_SETTING_KEY};
+use crate::notes::NotesService;
 use crate::organization::OrganizationService;
 use crate::paste::PasteService;
 use crate::paste_suppression::PasteSuppression;
@@ -192,6 +193,7 @@ pub struct AppContext {
     history: TextHistoryService,
     management: HistoryManagementService,
     organization: OrganizationService,
+    notes: NotesService,
     paste: PasteService,
     search: SearchService,
     settings: SettingsService,
@@ -371,6 +373,10 @@ impl AppContext {
 
     pub fn organization(&self) -> &OrganizationService {
         &self.organization
+    }
+
+    pub fn notes(&self) -> &NotesService {
+        &self.notes
     }
 
     pub fn paste(&self) -> &PasteService {
@@ -1175,6 +1181,7 @@ impl AppBootstrap {
             .with_rich_asset_store(rich_asset_store);
 
         let organization = OrganizationService::new(Arc::clone(&self.options.clock));
+        let notes = NotesService::new();
 
         // The suppression registry is built before the paste service
         // so the service can attach the same handle the watcher
@@ -1958,6 +1965,7 @@ impl AppBootstrap {
             history,
             management,
             organization,
+            notes,
             paste,
             search,
             settings: settings_service,

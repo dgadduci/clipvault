@@ -13,6 +13,7 @@ import type {
   CollectionDeleteResponse,
   CollectionDeletionPreview,
   CopyResponse,
+  CreateManualTextResponse,
   DatabasePath,
   DeleteResponse,
   Diagnostics,
@@ -54,6 +55,7 @@ import type {
   SourceAppFilter,
   SourceApplicationsSnapshot,
   Tag,
+  TextNoteRecord,
   UpdateTextEntryResponse,
   WatchTickResponse,
 } from "../types.ts";
@@ -941,6 +943,52 @@ export const updateTextEntryCommand: ClipvaultCommandArg<
   invoke<UpdateTextEntryResponse>("clipvault_update_text_entry", {
     entryId: args.id,
     content: args.content,
+  });
+
+export const createManualTextCommand: ClipvaultCommandArg<
+  CreateManualTextResponse,
+  { collectionId: number; content: string }
+> = (args) =>
+  invoke<CreateManualTextResponse>("clipvault_create_manual_text", {
+    collectionId: args.collectionId,
+    content: args.content,
+  });
+
+export const entryNoteCommand: ClipvaultCommandArg<
+  TextNoteRecord | null,
+  { entryId: number }
+> = (args) =>
+  invoke<TextNoteRecord | null>("clipvault_entry_note", {
+    entryId: args.entryId,
+  });
+
+export const entryNoteIdsCommand: ClipvaultCommand<number[]> = () =>
+  invoke<number[]>("clipvault_entry_note_ids");
+
+export const setEntryNoteCommand: ClipvaultCommandArg<
+  boolean,
+  { entryId: number; body: string }
+> = (args) =>
+  invoke<boolean>("clipvault_set_entry_note", {
+    entryId: args.entryId,
+    body: args.body,
+  });
+
+export const collectionNoteCommand: ClipvaultCommandArg<
+  TextNoteRecord | null,
+  { collectionId: number }
+> = (args) =>
+  invoke<TextNoteRecord | null>("clipvault_collection_note", {
+    collectionId: args.collectionId,
+  });
+
+export const setCollectionNoteCommand: ClipvaultCommandArg<
+  boolean,
+  { collectionId: number; body: string }
+> = (args) =>
+  invoke<boolean>("clipvault_set_collection_note", {
+    collectionId: args.collectionId,
+    body: args.body,
   });
 
 // ---------------------------------------------------------------------------

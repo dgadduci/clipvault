@@ -117,11 +117,13 @@
   import CollectionSelectorModal from "./CollectionSelectorModal.svelte";
   import CollectionMembershipModal from "./CollectionMembershipModal.svelte";
   import EntryTextEditorModal from "./EntryTextEditorModal.svelte";
+  import TextNoteModal from "./TextNoteModal.svelte";
   import { isEditableTextEntry } from "./types";
 
   export let entry: EntryRecord;
   /** Present only while rendering the matching peer-bound import collection. */
   export let peerImportedSourceApp: PeerImportedSourceAppPresentation | null = null;
+  export let hasNote: boolean = false;
   export let onTogglePin: (entry: EntryRecord) => void = () => {};
   export let onRequestDelete: (entry: EntryRecord) => void = () => {};
   export let onAfterMutation: (entry: EntryRecord) => void = () => {};
@@ -946,6 +948,8 @@
    * from the new target.
    */
   let textEditorReturnFocusTarget: HTMLElement | null = null;
+  let noteModalOpen = false;
+  let noteReturnFocusTarget: HTMLElement | null = null;
   /**
    * DOM handle on the inline collection chip row. The
    * `ResizeObserver` the card installs during `onMount` reads
@@ -1229,6 +1233,27 @@
       if (cardArticleEl && document.contains(cardArticleEl)) {
         cardArticleEl.focus();
       }
+    });
+  }
+
+  function openNote(event?: MouseEvent): void {
+    const trigger = event?.currentTarget instanceof HTMLElement
+      ? event.currentTarget
+      : null;
+    noteReturnFocusTarget = trigger?.closest('[role="menu"]')
+      ? cardArticleEl
+      : trigger ?? cardArticleEl;
+    noteModalOpen = true;
+    if (event) {
+      event.stopPropagation();
+      closeMenuAfterAction();
+    }
+  }
+
+  function closeNote(): void {
+    noteModalOpen = false;
+    queueMicrotask(() => {
+      if (cardArticleEl && document.contains(cardArticleEl)) cardArticleEl.focus();
     });
   }
 
@@ -2211,7 +2236,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     </p>
   {/if}
 
-  <footer class="card-actions">
+  <footer class="card-actions" class:has-note={hasNote}>
     {#if selected}
       <span
         class="preview-hint"
@@ -2228,6 +2253,24 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           {previewShortcutLabel(previewPlatform)}
         </span>
       </span>
+    {/if}
+    {#if hasNote}
+      <button
+        type="button"
+        class="note-trigger"
+        aria-label={`Editar nota de ${displayTitle}`}
+        aria-haspopup="dialog"
+        aria-expanded={noteModalOpen}
+        title="Editar nota"
+        data-testid="history-card-note"
+        data-entry-id={entry.id}
+        on:click={(event) => openNote(event)}
+      >
+        <svg aria-hidden="true" focusable="false" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M7 3.75h7l4 4v11.5A1.75 1.75 0 0 1 16.25 21h-9.5A1.75 1.75 0 0 1 5 19.25v-13.5A2 2 0 0 1 7 3.75Z" />
+          <path d="M14 4v4h4M8 12h8M8 16h6" />
+        </svg>
+      </button>
     {/if}
     <button
       type="button"
@@ -2377,6 +2420,15 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       <button
         type="button"
         role="menuitem"
+        class="menu-item"
+        data-testid="history-card-note-action"
+        on:click={(event) => openNote(event)}
+      >
+        {hasNote ? "Editar nota" : "Agregar nota"}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
         class="menu-item preview-action"
         data-testid="history-card-preview"
         data-shortcut-platform={previewPlatform}
@@ -2506,6 +2558,15 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   {displayTitle}
   returnFocusTo={textEditorReturnFocusTarget}
   on:close={closeTextEditor}
+/>
+
+<TextNoteModal
+  open={noteModalOpen}
+  targetKind="entry"
+  targetId={entry.id}
+  targetLabel={displayTitle}
+  returnFocusTo={noteReturnFocusTarget}
+  on:close={closeNote}
 />
 
 {@html CONTENT_TYPE_ICON_SPRITE}
@@ -3005,6 +3066,9 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     flex: 0 1 auto;
     min-width: 0;
   }
+  .card-actions.has-note .preview-hint {
+    max-width: calc(100% - 7rem);
+  }
   .preview-hint-label {
     font-weight: 600;
     color: #93c5fd;
@@ -3016,6 +3080,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   }
 
   .card-actions :global(.pin),
+  .card-actions :global(.note-trigger),
   .card-actions :global(.menu-trigger) {
     background: #1f2937;
     color: inherit;
@@ -3050,6 +3115,20 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     justify-content: center;
     color: #aab4c8;
     transition: color 0.15s ease, background 0.15s ease;
+  }
+  .card-actions :global(.note-trigger) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #93c5fd;
+    transition: color 0.15s ease, background 0.15s ease;
+  }
+  .card-actions :global(.note-trigger:hover:not(:disabled)) {
+    background: rgba(96, 165, 250, 0.18);
+  }
+  .card-actions :global(.note-trigger:focus-visible) {
+    outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.45));
+    outline-offset: 2px;
   }
   .card-actions :global(.pin[aria-pressed="true"]) {
     color: #f5c542;

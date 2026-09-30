@@ -27,6 +27,7 @@ pub mod kde_kwin_integration;
 #[cfg(target_os = "linux")]
 pub mod linux_picker;
 pub mod management;
+pub mod notes;
 pub mod organization;
 pub mod paste;
 pub mod paste_suppression;
@@ -124,8 +125,8 @@ pub use gnome_integration::{
     GnomeTechnicalState, GNOME_CONSENT_STORAGE_KEY, GNOME_STATE_STORAGE_KEY,
 };
 pub use history::{
-    hash_content, HistoryOutcome, HistoryServiceError, SetTitleOutcome, TextHistoryService,
-    TitleValidationError, UpdateTextHistoryOutcome, MAX_TITLE_LENGTH,
+    hash_content, HistoryOutcome, HistoryServiceError, ManualTextCreationOutcome, SetTitleOutcome,
+    TextHistoryService, TitleValidationError, UpdateTextHistoryOutcome, MAX_TITLE_LENGTH,
 };
 pub use ignored_apps::{normalize_identifier, IgnoredAppEntry, IgnoredAppError, PickAndAddOutcome};
 pub use ignored_apps_service::{IgnoredAppsService, IgnoredAppsServiceError};
@@ -143,6 +144,7 @@ pub use management::{
     RetentionPolicy, RetentionPreview, SetFavoriteResult, SettingsReader, DEFAULT_RETENTION,
     RETENTION_SETTING_KEY,
 };
+pub use notes::{NotesService, NotesServiceError};
 pub use organization::{
     CollectionColorRng, OrganizationService, OrganizationServiceError, OrganizationSidebarSnapshot,
     SystemCollectionColorRng,

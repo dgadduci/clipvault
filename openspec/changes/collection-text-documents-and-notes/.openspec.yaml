@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-30
+goal: Permitir texto persistente con saltos de línea en colecciones no
+  importadas y anotaciones locales editables desde modales reutilizables.

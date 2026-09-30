@@ -14,8 +14,8 @@ use clipvault_core::{
 use clipvault_core::{
     ActiveAppDiagnostics, Capabilities, ClearOutcome, ClipboardAssetStore,
     CodeLanguageServiceError, CopyOutcome, DeleteOutcome, IgnoredAppEntry, IgnoredAppError,
-    LocalSettingsReader, PasteMode, PasteOutcome, PickAndAddOutcome, PlatformGuidance,
-    PlatformSettingsTarget, RetentionOutcome, RetentionPolicy, RetentionPreview,
+    LocalSettingsReader, ManualTextCreationOutcome, PasteMode, PasteOutcome, PickAndAddOutcome,
+    PlatformGuidance, PlatformSettingsTarget, RetentionOutcome, RetentionPolicy, RetentionPreview,
     RichTextAssetStore, SetFavoriteResult, SetTitleOutcome, Settings, SettingsNavigator,
     SettingsOpenOutcome, SettingsServiceError, SettingsUpdate, TitleValidationError,
     UpdateTextHistoryOutcome, ValidationCode, ValidationError, WatchTickOutcome,
@@ -1774,6 +1774,115 @@ pub fn clipvault_update_text_entry_for_test(
         .update_text(context, entry_id, content)
         .map_err(|err| CommandError::new("history_error", err.to_string()))?;
     Ok(outcome.into())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CreateManualTextResponse {
+    Stored { id: i64 },
+    Duplicate { id: i64 },
+    EmptyContent,
+    CollectionNotFound,
+    InvalidCollectionTarget,
+}
+
+impl From<ManualTextCreationOutcome> for CreateManualTextResponse {
+    fn from(outcome: ManualTextCreationOutcome) -> Self {
+        match outcome {
+            ManualTextCreationOutcome::Stored { id } => Self::Stored { id },
+            ManualTextCreationOutcome::Duplicate { id } => Self::Duplicate { id },
+            ManualTextCreationOutcome::EmptyContent => Self::EmptyContent,
+            ManualTextCreationOutcome::CollectionNotFound => Self::CollectionNotFound,
+            ManualTextCreationOutcome::InvalidCollectionTarget => Self::InvalidCollectionTarget,
+        }
+    }
+}
+
+#[tauri::command]
+pub fn clipvault_create_manual_text(
+    state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
+    collection_id: i64,
+    content: String,
+) -> Result<CreateManualTextResponse, CommandError> {
+    let outcome = state
+        .context()
+        .history()
+        .create_manual_text(state.context(), collection_id, content)
+        .map_err(|err| CommandError::new("history_error", err.to_string()))?;
+    if matches!(
+        outcome,
+        ManualTextCreationOutcome::Stored { .. } | ManualTextCreationOutcome::Duplicate { .. }
+    ) {
+        emit_history_updated(&handle);
+        emit_organization_updated(&handle);
+    }
+    Ok(outcome.into())
+}
+
+#[tauri::command]
+pub fn clipvault_entry_note(
+    state: State<'_, SharedState>,
+    entry_id: i64,
+) -> Result<Option<clipvault_db::NoteRecord>, CommandError> {
+    state
+        .context()
+        .notes()
+        .get_entry_note(state.context(), entry_id)
+        .map_err(|err| CommandError::new(err.kind_str(), err.to_string()))
+}
+
+#[tauri::command]
+pub fn clipvault_entry_note_ids(state: State<'_, SharedState>) -> Result<Vec<i64>, CommandError> {
+    state
+        .context()
+        .notes()
+        .entry_note_ids(state.context())
+        .map_err(|err| CommandError::new(err.kind_str(), err.to_string()))
+}
+
+#[tauri::command]
+pub fn clipvault_set_entry_note(
+    state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
+    entry_id: i64,
+    body: String,
+) -> Result<bool, CommandError> {
+    let has_note = state
+        .context()
+        .notes()
+        .set_entry_note(state.context(), entry_id, &body)
+        .map_err(|err| CommandError::new(err.kind_str(), err.to_string()))?;
+    emit_history_updated(&handle);
+    Ok(has_note)
+}
+
+#[tauri::command]
+pub fn clipvault_collection_note(
+    state: State<'_, SharedState>,
+    collection_id: i64,
+) -> Result<Option<clipvault_db::NoteRecord>, CommandError> {
+    state
+        .context()
+        .notes()
+        .get_collection_note(state.context(), collection_id)
+        .map_err(|err| CommandError::new(err.kind_str(), err.to_string()))
+}
+
+#[tauri::command]
+pub fn clipvault_set_collection_note(
+    state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
+    collection_id: i64,
+    body: String,
+) -> Result<bool, CommandError> {
+    let has_note = state
+        .context()
+        .notes()
+        .set_collection_note(state.context(), collection_id, &body)
+        .map_err(|err| CommandError::new(err.kind_str(), err.to_string()))?;
+    emit_organization_updated(&handle);
+    Ok(has_note)
 }
 
 /// Resolve a persisted `source_app_icon_ref` to the PNG bytes the

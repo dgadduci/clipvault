@@ -126,6 +126,17 @@ pub enum UpdateTextHistoryOutcome {
     DuplicateContent,
 }
 
+/// Result of creating a user-authored plain text capture in Historial
+/// and its selected local collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManualTextCreationOutcome {
+    Stored { id: i64 },
+    Duplicate { id: i64 },
+    EmptyContent,
+    CollectionNotFound,
+    InvalidCollectionTarget,
+}
+
 /// Validation outcome of [`TextHistoryService::validate_title`]. The
 /// helper centralises the rules the GUI enforces so the shell can
 /// surface consistent copy.
@@ -867,6 +878,47 @@ impl TextHistoryService {
             UpdateTextOutcome::DuplicateContent => UpdateTextHistoryOutcome::DuplicateContent,
         })
     }
+
+    /// Persist a user-authored multiline text entry using the same content
+    /// classification and deduplication rules as clipboard captures. The
+    /// repository atomically attaches it to Historial and to the selected
+    /// eligible local collection.
+    pub fn create_manual_text(
+        &self,
+        context: &AppContext,
+        collection_id: i64,
+        text: String,
+    ) -> Result<ManualTextCreationOutcome, HistoryServiceError> {
+        if text.is_empty() {
+            return Ok(ManualTextCreationOutcome::EmptyContent);
+        }
+
+        let now = self.clock.now();
+        let content_type = detect_content_type(&text);
+        let size = text.len() as i64;
+        let hash = hash_content(&text);
+        let new_entry = NewEntry::text(text, content_type, size, hash, None, now, now);
+
+        let outcome = {
+            let mut db = context.database().lock();
+            let mut repo = EntryRepository::new(db.connection_mut());
+            match repo.insert_or_touch_in_local_collection(new_entry, collection_id) {
+                Ok(outcome) => outcome,
+                Err(EntryRepositoryError::InvalidCollectionTarget) => {
+                    return Ok(ManualTextCreationOutcome::InvalidCollectionTarget);
+                }
+                Err(EntryRepositoryError::Organization(
+                    clipvault_db::OrganizationError::CollectionNotFound(_),
+                )) => return Ok(ManualTextCreationOutcome::CollectionNotFound),
+                Err(error) => return Err(error.into()),
+            }
+        };
+
+        Ok(match outcome {
+            EntryOutcome::Inserted(record) => ManualTextCreationOutcome::Stored { id: record.id },
+            EntryOutcome::Updated(record) => ManualTextCreationOutcome::Duplicate { id: record.id },
+        })
+    }
 }
 
 /// Resolve the metadata fields used by the opt-in image diagnostic.
@@ -1212,6 +1264,130 @@ mod tests {
         .expect("insert")
         .record()
         .id
+    }
+
+    fn create_user_collection(context: &AppContext, name: &str) -> i64 {
+        context
+            .organization()
+            .create_collection(context, name)
+            .expect("create collection")
+            .id
+    }
+
+    #[test]
+    fn create_manual_text_preserves_multiline_and_attaches_history_and_collection() {
+        let (context, service) = isolated_service();
+        let collection_id = create_user_collection(&context, "Manual local");
+        let text = "line one\n  indented line\núltima 🚀";
+
+        let outcome = service
+            .create_manual_text(&context, collection_id, text.to_string())
+            .expect("manual text");
+        let ManualTextCreationOutcome::Stored { id } = outcome else {
+            panic!("expected stored outcome, got {outcome:?}");
+        };
+
+        let record = {
+            let mut db = context.database().lock();
+            let repo = clipvault_db::EntryRepository::new(db.connection_mut());
+            repo.find_by_id(id)
+                .expect("read entry")
+                .expect("entry exists")
+        };
+        assert_eq!(record.content, text);
+        assert_eq!(record.content_hash, hash_content(text));
+        assert_eq!(record.content_size, text.len() as i64);
+        assert_eq!(record.content_type, ContentType::Text);
+
+        let memberships = {
+            let mut db = context.database().lock();
+            clipvault_db::OrganizationRepository::new(db.connection_mut())
+                .entry_collection_ids(id)
+                .expect("memberships")
+        };
+        let history_id = context
+            .organization()
+            .history_collection_id(&context)
+            .expect("history collection");
+        assert!(memberships.contains(&history_id));
+        assert!(memberships.contains(&collection_id));
+    }
+
+    #[test]
+    fn create_manual_text_deduplicates_and_adds_requested_membership() {
+        let (context, service) = isolated_service();
+        let existing_id = insert_text(&context, "already captured\nwith two lines");
+        let collection_id = create_user_collection(&context, "Duplicate target");
+
+        let outcome = service
+            .create_manual_text(
+                &context,
+                collection_id,
+                "already captured\nwith two lines".to_string(),
+            )
+            .expect("manual duplicate");
+        assert_eq!(
+            outcome,
+            ManualTextCreationOutcome::Duplicate { id: existing_id }
+        );
+        let memberships = {
+            let mut db = context.database().lock();
+            clipvault_db::OrganizationRepository::new(db.connection_mut())
+                .entry_collection_ids(existing_id)
+                .expect("memberships")
+        };
+        assert!(memberships.contains(&collection_id));
+    }
+
+    #[test]
+    fn create_manual_text_rejects_peer_bound_collection_and_empty_input() {
+        let (context, service) = isolated_service();
+        let imported_collection_id = create_user_collection(&context, "Imported collection");
+        let history_count_before = crate::DiagnosticsService::history_count(&context).count;
+        {
+            let mut db = context.database().lock();
+            db.connection_mut()
+                .execute(
+                    "INSERT INTO known_peers
+                        (peer_id, public_key_fingerprint, display_name, protocol_major,
+                         capability, first_seen_at, last_discovered_at, updated_at)
+                     VALUES ('peer-test', 'fingerprint', 'Test peer', 1, 'history',
+                             '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z',
+                             '2025-01-01T00:00:00Z')",
+                    [],
+                )
+                .expect("insert known peer");
+            db.connection_mut()
+                .execute(
+                    "INSERT INTO peer_collection_bindings
+                        (peer_id, collection_id, created_at, updated_at)
+                     VALUES ('peer-test', ?1, '2025-01-01T00:00:00Z',
+                             '2025-01-01T00:00:00Z')",
+                    [imported_collection_id],
+                )
+                .expect("bind imported collection");
+        }
+
+        assert_eq!(
+            service
+                .create_manual_text(&context, imported_collection_id, "blocked".to_string())
+                .expect("rejected target is typed"),
+            ManualTextCreationOutcome::InvalidCollectionTarget
+        );
+        let history_id = context
+            .organization()
+            .history_collection_id(&context)
+            .expect("history collection");
+        assert_eq!(
+            service
+                .create_manual_text(&context, history_id, String::new())
+                .expect("empty input is typed"),
+            ManualTextCreationOutcome::EmptyContent
+        );
+        assert_eq!(
+            crate::DiagnosticsService::history_count(&context).count,
+            history_count_before
+        );
     }
 
     #[test]

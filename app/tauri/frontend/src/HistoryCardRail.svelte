@@ -41,6 +41,7 @@
     number,
     PeerImportedSourceAppPresentation
   > = new Map();
+  export let entryNoteIds: Set<number> = new Set();
   /**
    * Whether the rail currently renders a search-filtered subset. The
    * flag drives the empty-state copy so a search that yields no
@@ -506,6 +507,7 @@
       <HistoryCard
         {entry}
         peerImportedSourceApp={peerImportedSourceApps.get(entry.id) ?? null}
+        hasNote={entryNoteIds.has(entry.id)}
         assignedTags={lookupTags(entry.id)}
         assignedCollections={lookupCollections(entry.id)}
         entryOrganizationLoaded={lookupHydration(entry.id) === "loaded"}

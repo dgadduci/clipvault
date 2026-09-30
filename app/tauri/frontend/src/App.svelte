@@ -39,6 +39,7 @@
     deleteEntryCommand,
     diagnosticsCommand,
     entryCollectionsCommand,
+    entryNoteIdsCommand,
     entryCollectionsSetCommand,
     entryRemoveFromCollectionCommand,
     entryTagsCommand,
@@ -119,6 +120,7 @@
   import QuickPasteShortcutModal from "./QuickPasteShortcutModal.svelte";
   import AboutModal from "./AboutModal.svelte";
   import ClipboardPreview from "./ClipboardPreview.svelte";
+  import CreateTextEntryModal from "./CreateTextEntryModal.svelte";
 
   /**
    * Single source of truth for the visual tokens, computed at module
@@ -158,6 +160,11 @@
   let retryError: string | null = null;
   let searchQuery = "";
   let visibleEntries: EntryRecord[] = [];
+  let entryNoteIds: Set<number> = new Set();
+  let createTextEntryOpen = false;
+  let createTextCollectionId: number | null = null;
+  let createTextCollectionName = "Historial";
+  let createTextReturnFocus: HTMLElement | null = null;
   let searching = false;
   let searchError: string | null = null;
   let searchStatus: "idle" | "loading" | "ok" | "empty" | "no_matches" = "idle";
@@ -377,6 +384,10 @@
   $: activeCollectionIsHistory =
     selectedCollectionId === null ||
     (activeCollection !== null && activeCollection.kind === "system");
+  $: canCreateManualText = activePeerId === null && (
+    activeCollectionIsHistory ||
+    (activeCollection !== null && activeCollection.kind === "user" && !activeCollection.is_peer_bound)
+  );
   $: isFiltering = searchQuery.trim().length > 0;
   $: if (diagnostics) {
     shortcutPlatform = searchShortcutPlatform(diagnostics.platform_os);
@@ -873,7 +884,12 @@
   }
 
   async function refreshEntries(): Promise<void> {
-    entries = await loadEntries();
+    const [loadedEntries, noteIds] = await Promise.all([
+      loadEntries(),
+      entryNoteIdsCommand(),
+    ]);
+    entries = loadedEntries;
+    entryNoteIds = new Set(noteIds);
     if (isFiltering) {
       // A reload while the search filter is active must re-run the
       // search so the rail keeps reflecting the latest captures; a
@@ -884,6 +900,28 @@
       await refreshPeerImportedSourceApps(entries);
       await hydrateEntryOrganization(entries);
     }
+  }
+
+  function openCreateTextEntry(
+    _event: MouseEvent,
+    returnFocusTo: HTMLElement | null,
+  ): void {
+    const target = activeCollectionIsHistory
+      ? organization?.collections.find((collection) => collection.kind === "system") ?? null
+      : activeCollection;
+    if (!target || target.is_peer_bound) return;
+    createTextCollectionId = target.id;
+    createTextCollectionName = target.name;
+    createTextReturnFocus = returnFocusTo;
+    createTextEntryOpen = true;
+  }
+
+  async function handleManualTextCreated(): Promise<void> {
+    createTextEntryOpen = false;
+    await Promise.all([
+      refreshEntries(),
+      organizationSnapshotCommand().then((snapshot) => { organization = snapshot; }),
+    ]);
   }
 
   /**
@@ -2269,6 +2307,7 @@
             searchShortcut={searchShortcutLabelText}
             searchShortcutAccessible={searchShortcutAccessibleText}
             showClearHistory={activeCollectionIsHistory}
+            canCreateManualText={canCreateManualText}
             sourceAppFilter={sourceAppFilter}
             sourceAppOptions={sourceAppOptions}
             tagFilter={tagFilter}
@@ -2282,6 +2321,7 @@
             onOpenShortcut={onOpenShortcut}
             onOpenAbout={onOpenAbout}
             onRequestClearHistory={onRequestClearHistory}
+            onCreateManualText={openCreateTextEntry}
             onSourceAppFilterChange={(next) => handleSourceAppFilterChange(next)}
             onTagFilterChange={(next) => handleTagFilterChange(next)}
           />
@@ -2319,6 +2359,7 @@
           <HistoryCardRail
             entries={visibleEntries}
             peerImportedSourceApps={peerImportedSourceApps}
+            {entryNoteIds}
             allTags={organization?.tags ?? []}
             allCollections={organization?.collections ?? []}
             activeCollectionId={selectedCollectionId}
@@ -2348,6 +2389,17 @@
   testIdPrefix="history-card-preview"
   onClose={closePreview}
 />
+
+{#if createTextEntryOpen && createTextCollectionId !== null}
+  <CreateTextEntryModal
+    open={createTextEntryOpen}
+    collectionId={createTextCollectionId}
+    collectionName={createTextCollectionName}
+    returnFocusTo={createTextReturnFocus}
+    on:created={() => void handleManualTextCreated()}
+    on:close={() => { createTextEntryOpen = false; }}
+  />
+{/if}
 
 <Modal
   open={pendingCollectionDeletion !== null}

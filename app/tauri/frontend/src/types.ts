@@ -61,6 +61,18 @@ export interface CaptureResponse {
   message: string | null;
 }
 
+export type CreateManualTextResponse =
+  | { kind: "stored"; id: number }
+  | { kind: "duplicate"; id: number }
+  | { kind: "empty_content" }
+  | { kind: "collection_not_found" }
+  | { kind: "invalid_collection_target" };
+
+export interface TextNoteRecord {
+  body: string;
+  updated_at: string;
+}
+
 export interface WatchTickResponse {
   kind:
     | "captured_stored"
@@ -1319,6 +1331,8 @@ export interface Collection {
    * `false`. The wire payload never carries the `peer_id` itself.
    */
   is_peer_bound?: boolean;
+  /** Whether a local multiline note is attached to this collection. */
+  has_note?: boolean;
   /**
    * Current visible peer display name resolved through the
    * `known_peers` join. `null` (or absent) when the peer row is

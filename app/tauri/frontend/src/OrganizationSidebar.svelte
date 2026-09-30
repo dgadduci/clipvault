@@ -26,6 +26,7 @@
   import { endDragSession, isDropTarget } from "./lib/dragAndDrop";
   import { POINTER_DRAG_END_EVENT } from "./lib/pointerDragAndDrop";
   import CollectionColorModal from "./CollectionColorModal.svelte";
+  import TextNoteModal from "./TextNoteModal.svelte";
   import LinkedPeers from "./LinkedPeers.svelte";
 
   export let collections: Collection[] = [];
@@ -73,6 +74,8 @@
    * the square on close and the picker never drifts out of sync.
    */
   let pendingColorCollection: Collection | null = null;
+  let pendingNoteCollection: Collection | null = null;
+  let noteReturnFocusTarget: HTMLElement | null = null;
   let lastColorError: string | null = null;
   /**
    * Id of the collection row currently receiving a drag. The visual
@@ -204,6 +207,18 @@
     dispatch("set-color", { collectionId, colorHex });
     pendingColorCollection = null;
     lastColorError = null;
+  }
+
+  function openCollectionNote(collection: Collection, event: MouseEvent): void {
+    event.stopPropagation();
+    pendingNoteCollection = collection;
+    noteReturnFocusTarget = event.currentTarget instanceof HTMLElement
+      ? event.currentTarget
+      : null;
+  }
+
+  function closeCollectionNote(): void {
+    pendingNoteCollection = null;
   }
 
   function isActive(id: number | null): boolean {
@@ -646,6 +661,29 @@
               askEditColor(collection, event)}
             on:keydown={(event) => onColorSquareKeydown(event, collection)}
           ></button>
+          <button
+            type="button"
+            class="icon-only note-icon"
+            aria-label={collection.has_note
+              ? `Editar nota de ${collection.name}`
+              : `Agregar nota a ${collection.name}`}
+            aria-haspopup="dialog"
+            aria-expanded={pendingNoteCollection?.id === collection.id}
+            title={collection.has_note ? "Editar nota" : "Agregar nota"}
+            data-testid="sidebar-collection-note"
+            data-has-note={collection.has_note ? "true" : "false"}
+            on:click={(event) => openCollectionNote(collection, event)}
+          >
+            <svg aria-hidden="true" focusable="false" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M7 3.75h7l4 4v11.5A1.75 1.75 0 0 1 16.25 21h-9.5A1.75 1.75 0 0 1 5 19.25v-13.5A2 2 0 0 1 7 3.75Z" />
+              <path d="M14 4v4h4" />
+              {#if collection.has_note}
+                <path d="M8 12h8M8 16h6" />
+              {:else}
+                <path d="M11 12v5M8.5 14.5h5" />
+              {/if}
+            </svg>
+          </button>
           {#if collection.kind === "user"}
             <button
               type="button"
@@ -704,6 +742,17 @@
   on:save={(event) => commitColorEdit(event.detail.colorHex)}
   on:cancel={cancelColorEdit}
 />
+
+{#if pendingNoteCollection}
+  <TextNoteModal
+    open={true}
+    targetKind="collection"
+    targetId={pendingNoteCollection.id}
+    targetLabel={pendingNoteCollection.name}
+    returnFocusTo={noteReturnFocusTarget}
+    on:close={closeCollectionNote}
+  />
+{/if}
 
 {#if lastColorError}
   <p
@@ -945,6 +994,14 @@
   }
   .new-icon {
     color: #93c5fd;
+  }
+  .note-icon {
+    color: #93c5fd;
+    flex: 0 0 1.65rem;
+  }
+  .note-icon[data-has-note="true"] {
+    color: #bfdbfe;
+    background: rgba(96, 165, 250, 0.12);
   }
   .confirm-icon {
     color: #4ade80;
