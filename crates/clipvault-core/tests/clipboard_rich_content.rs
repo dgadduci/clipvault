@@ -17,11 +17,11 @@ use std::sync::Arc;
 
 use clipvault_core::{
     AppBootstrap, AppContext, AssetError, Capabilities, ClipboardAssetStore, ClipboardBackend,
-    ClipboardBackendError, ClipboardImage, ClipboardPayload, DisplayServer, FakeActiveApplication,
-    FakeClipboardBackend, FakeHotkeyManager, FakePasteController, FakeSettingsNavigator,
-    FakeTrayController, HistoryOutcome, OsFamily, PasteMode, PasteOutcome, PlatformAdapters,
-    PlatformInfo, PlatformIssueKind, RetentionPolicy, SettingsReader, SourceAppFilter,
-    WatchTickOutcome, CLIPBOARD_WRITE_IMAGE_CAPABILITY,
+    ClipboardBackendError, ClipboardImage, ClipboardPayload, CollectionDeleteOutcome,
+    DisplayServer, FakeActiveApplication, FakeClipboardBackend, FakeHotkeyManager,
+    FakePasteController, FakeSettingsNavigator, FakeTrayController, HistoryOutcome, OsFamily,
+    PasteMode, PasteOutcome, PlatformAdapters, PlatformInfo, PlatformIssueKind, RetentionPolicy,
+    SettingsReader, SourceAppFilter, WatchTickOutcome, CLIPBOARD_WRITE_IMAGE_CAPABILITY,
 };
 use clipvault_db::{ContentType, EntryRepository};
 use clipvault_platform::ClipboardRevision;
@@ -1504,6 +1504,84 @@ fn shared_asset_survives_every_pass_including_failing_query() {
     assert!(
         h.store.read_bytes(&shared_ref).is_ok(),
         "a shared asset must survive a failing query"
+    );
+}
+
+#[test]
+fn collection_delete_keeps_shared_assets_until_the_last_entry_is_removed() {
+    let h = harness(vec![]);
+    let (first_id, shared_ref) = store_image(&h, 0x79);
+    let shared_hash = h.record(first_id).content_hash.clone();
+    let second_id = {
+        let mut db = h.context.database().lock();
+        let mut repo = EntryRepository::new(db.connection_mut());
+        repo.insert_or_touch(clipvault_db::NewEntry {
+            content: clipvault_db::IMAGE_CONTENT_SENTINEL.to_string(),
+            content_type: ContentType::Image,
+            content_size: 128,
+            content_hash: format!("{shared_hash}-shared"),
+            source_app: None,
+            created_at: datetime!(2026-01-02 03:04:05 UTC),
+            last_seen_at: datetime!(2026-01-02 03:04:05 UTC),
+            asset_ref: Some(shared_ref.clone()),
+            mime_type: Some(clipvault_db::IMAGE_MIME_PNG.to_string()),
+            payload_width: Some(6),
+            payload_height: Some(6),
+            rich_text_hash: None,
+            rich_html_ref: None,
+            rich_rtf_ref: None,
+            rich_preview_ref: None,
+            rich_html_size: None,
+            rich_rtf_size: None,
+            code_language: None,
+        })
+        .expect("shared image row")
+        .record()
+        .id
+    };
+    let organization = h.context.organization();
+    let first_collection = organization
+        .create_collection(&h.context, "Primera")
+        .expect("first collection");
+    organization
+        .replace_entry_collections(&h.context, first_id, &[first_collection.id])
+        .expect("first membership");
+
+    let management = h.context.management();
+    let first_preview = management
+        .preview_collection_deletion(&h.context, first_collection.id)
+        .expect("first preview");
+    assert_eq!(first_preview.entries, 1);
+    assert_eq!(
+        management
+            .delete_collection(&h.context, first_collection.id, true, first_preview, true)
+            .expect("first global delete"),
+        CollectionDeleteOutcome::Deleted { removed_entries: 1 }
+    );
+    assert!(
+        h.store.read_bytes(&shared_ref).is_ok(),
+        "the second entry still references the shared asset"
+    );
+
+    let second_collection = organization
+        .create_collection(&h.context, "Segunda")
+        .expect("second collection");
+    organization
+        .replace_entry_collections(&h.context, second_id, &[second_collection.id])
+        .expect("second membership");
+    let second_preview = management
+        .preview_collection_deletion(&h.context, second_collection.id)
+        .expect("second preview");
+    assert_eq!(second_preview.entries, 1);
+    assert_eq!(
+        management
+            .delete_collection(&h.context, second_collection.id, true, second_preview, true)
+            .expect("second global delete"),
+        CollectionDeleteOutcome::Deleted { removed_entries: 1 }
+    );
+    assert_eq!(
+        h.store.read_bytes(&shared_ref).unwrap_err(),
+        AssetError::NotFound
     );
 }
 

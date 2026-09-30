@@ -1945,6 +1945,15 @@ fn organization_command_error(error: OrganizationServiceError) -> CommandError {
     CommandError::new(kind, error.to_string())
 }
 
+fn management_command_error(error: clipvault_core::ManagementServiceError) -> CommandError {
+    match error {
+        clipvault_core::ManagementServiceError::Organization(error) => {
+            organization_command_error(OrganizationServiceError::Repository(error))
+        }
+        error => CommandError::new("management_error", error.to_string()),
+    }
+}
+
 #[tauri::command]
 pub fn clipvault_organization_snapshot(
     state: State<'_, SharedState>,
@@ -1989,14 +1998,47 @@ pub fn clipvault_collections_delete(
     state: State<'_, SharedState>,
     handle: AppHandle<tauri::Wry>,
     collection_id: i64,
-) -> Result<bool, CommandError> {
-    let removed = state
+    delete_entries: bool,
+    expected_entries: i64,
+    expected_favorites: i64,
+    confirm: bool,
+) -> Result<clipvault_core::CollectionDeleteOutcome, CommandError> {
+    let outcome = state
         .context()
-        .organization()
-        .delete_collection(state.context(), collection_id)
-        .map_err(organization_command_error)?;
-    emit_organization_updated(&handle);
-    Ok(removed)
+        .management()
+        .delete_collection(
+            state.context(),
+            collection_id,
+            delete_entries,
+            clipvault_core::CollectionDeletionPreview {
+                entries: expected_entries,
+                favorites: expected_favorites,
+            },
+            confirm,
+        )
+        .map_err(management_command_error)?;
+    if matches!(
+        &outcome,
+        clipvault_core::CollectionDeleteOutcome::Deleted { .. }
+    ) {
+        emit_organization_updated(&handle);
+        if delete_entries {
+            emit_history_updated(&handle);
+        }
+    }
+    Ok(outcome)
+}
+
+#[tauri::command]
+pub fn clipvault_collections_delete_preview(
+    state: State<'_, SharedState>,
+    collection_id: i64,
+) -> Result<clipvault_core::CollectionDeletionPreview, CommandError> {
+    state
+        .context()
+        .management()
+        .preview_collection_deletion(state.context(), collection_id)
+        .map_err(management_command_error)
 }
 
 /// Update the persistent `#rrggbb` colour of any collection (system or

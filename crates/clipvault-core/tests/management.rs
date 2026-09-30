@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use clipvault_core::{
-    AppBootstrap, AppContext, ClearOutcome, Clock, DeleteOutcome, HistoryManagementService,
-    LocalSettingsReader, RetentionPolicy, SetFavoriteResult, SettingsReader,
+    AppBootstrap, AppContext, ClearOutcome, Clock, CollectionDeleteOutcome, DeleteOutcome,
+    HistoryManagementService, LocalSettingsReader, RetentionPolicy, SetFavoriteResult,
+    SettingsReader,
 };
-use clipvault_db::{ContentType, EntryRepository, NewEntry};
+use clipvault_db::{CollectionDeletionPreview, ContentType, EntryRepository, NewEntry};
 use tempfile::TempDir;
 use time::macros::datetime;
 
@@ -131,6 +132,122 @@ fn delete_entry_is_idempotent() {
         .delete_entry(&context, id, true)
         .expect("delete again");
     assert_eq!(outcome, DeleteOutcome::NotFound);
+}
+
+#[test]
+fn collection_deletion_requires_confirmation_and_applies_the_selected_scope() {
+    let when = datetime!(2026-01-02 03:04:05 UTC);
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock { instant: when });
+    let (_dir, context) = bootstrap_with_clock(clock.clone());
+    let organization = context.organization();
+    let preserve = organization
+        .create_collection(&context, "Conservar")
+        .expect("preserve collection");
+    let other = organization
+        .create_collection(&context, "Otra")
+        .expect("other collection");
+    let first = insert_entry(&context, "first", when);
+    let favorite = insert_entry(&context, "favorite", when);
+    let untouched = insert_entry(&context, "untouched", when);
+    organization
+        .replace_entry_collections(&context, first, &[preserve.id, other.id])
+        .expect("first memberships");
+    organization
+        .replace_entry_collections(&context, favorite, &[preserve.id])
+        .expect("favorite membership");
+    let service = HistoryManagementService::new(clock.clone());
+    service
+        .set_favorite(&context, favorite, true)
+        .expect("set favorite");
+
+    let preview = service
+        .preview_collection_deletion(&context, preserve.id)
+        .expect("preview");
+    assert_eq!(preview.entries, 2);
+    assert_eq!(preview.favorites, 1);
+    assert_eq!(
+        service
+            .delete_collection(&context, preserve.id, false, preview, false)
+            .expect("unconfirmed preserve"),
+        CollectionDeleteOutcome::ConfirmationRequired
+    );
+    assert_eq!(
+        service
+            .delete_collection(
+                &context,
+                preserve.id,
+                true,
+                CollectionDeletionPreview {
+                    entries: preview.entries + 1,
+                    favorites: preview.favorites,
+                },
+                true,
+            )
+            .expect("stale preview"),
+        CollectionDeleteOutcome::PreviewChanged { preview }
+    );
+    assert_eq!(
+        EntryRepository::new(context.database().lock().connection_mut())
+            .count()
+            .expect("entries before confirmation"),
+        3
+    );
+
+    assert_eq!(
+        service
+            .delete_collection(&context, preserve.id, false, preview, true)
+            .expect("confirmed preserve"),
+        CollectionDeleteOutcome::Deleted { removed_entries: 0 }
+    );
+    assert!(
+        EntryRepository::new(context.database().lock().connection_mut())
+            .find_by_id(first)
+            .expect("preserved entry query")
+            .is_some()
+    );
+    let history_id = organization
+        .history_collection_id(&context)
+        .expect("history collection");
+    let mut first_memberships = organization
+        .entry_collection_ids(&context, first)
+        .expect("preserved memberships");
+    first_memberships.sort_unstable();
+    let mut expected_first_memberships = vec![history_id, other.id];
+    expected_first_memberships.sort_unstable();
+    assert_eq!(first_memberships, expected_first_memberships);
+
+    let delete_all = organization
+        .create_collection(&context, "Eliminar")
+        .expect("delete collection");
+    organization
+        .replace_entry_collections(&context, first, &[other.id, delete_all.id])
+        .expect("reassign first");
+    organization
+        .replace_entry_collections(&context, favorite, &[delete_all.id])
+        .expect("reassign favorite");
+    let delete_preview = service
+        .preview_collection_deletion(&context, delete_all.id)
+        .expect("delete preview");
+    assert_eq!(delete_preview.entries, 2);
+    assert_eq!(delete_preview.favorites, 1);
+    assert_eq!(
+        service
+            .delete_collection(&context, delete_all.id, true, delete_preview, true)
+            .expect("confirmed global delete"),
+        CollectionDeleteOutcome::Deleted { removed_entries: 2 }
+    );
+    assert_eq!(
+        EntryRepository::new(context.database().lock().connection_mut())
+            .count()
+            .expect("remaining entry"),
+        1
+    );
+    assert!(
+        EntryRepository::new(context.database().lock().connection_mut())
+            .find_by_id(untouched)
+            .expect("untouched entry query")
+            .is_some()
+    );
 }
 
 #[test]

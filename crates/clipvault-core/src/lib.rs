@@ -81,7 +81,7 @@ pub use clipboard_assets::{
     CLIPBOARD_ASSETS_DIR, CLIPBOARD_ASSET_EXTENSION, MAX_CLIPBOARD_ASSET_BYTES,
 };
 pub use clipvault_db::SourceAppFilter;
-pub use clipvault_db::{Collection, CollectionKind, Tag};
+pub use clipvault_db::{Collection, CollectionDeletionPreview, CollectionKind, Tag};
 pub use clipvault_platform::{
     checked_rgba_len, default_linux_binding, default_macos_binding, detect_capabilities,
     macos_accessibility_guidance, parse_tiff_metadata, png_metadata_summary, probe_image_clipboard,
@@ -138,9 +138,10 @@ pub use kde_kwin_integration::{
     KDE_KWIN_CONSENT_STORAGE_KEY,
 };
 pub use management::{
-    AssetCollectionOutcome, ClearOutcome, DeleteOutcome, HistoryManagementService,
-    LocalSettingsReader, ManagementServiceError, RetentionOutcome, RetentionPolicy,
-    RetentionPreview, SetFavoriteResult, SettingsReader, DEFAULT_RETENTION, RETENTION_SETTING_KEY,
+    AssetCollectionOutcome, ClearOutcome, CollectionDeleteOutcome, DeleteOutcome,
+    HistoryManagementService, LocalSettingsReader, ManagementServiceError, RetentionOutcome,
+    RetentionPolicy, RetentionPreview, SetFavoriteResult, SettingsReader, DEFAULT_RETENTION,
+    RETENTION_SETTING_KEY,
 };
 pub use organization::{
     CollectionColorRng, OrganizationService, OrganizationServiceError, OrganizationSidebarSnapshot,

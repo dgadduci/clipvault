@@ -10,6 +10,8 @@ import type {
   ClipvaultCommand,
   ClipvaultCommandArg,
   Collection,
+  CollectionDeleteResponse,
+  CollectionDeletionPreview,
   CopyResponse,
   DatabasePath,
   DeleteResponse,
@@ -963,12 +965,30 @@ export const collectionsRenameCommand: ClipvaultCommandArg<
     name: args.name,
   });
 
-export const collectionsDeleteCommand: ClipvaultCommandArg<
-  boolean,
+export const collectionsDeletePreviewCommand: ClipvaultCommandArg<
+  CollectionDeletionPreview,
   { collectionId: number }
 > = (args) =>
-  invoke<boolean>("clipvault_collections_delete", {
+  invoke<CollectionDeletionPreview>("clipvault_collections_delete_preview", {
     collectionId: args.collectionId,
+  });
+
+export const collectionsDeleteCommand: ClipvaultCommandArg<
+  CollectionDeleteResponse,
+  {
+    collectionId: number;
+    deleteEntries: boolean;
+    expectedEntries: number;
+    expectedFavorites: number;
+    confirm: boolean;
+  }
+> = (args) =>
+  invoke<CollectionDeleteResponse>("clipvault_collections_delete", {
+    collectionId: args.collectionId,
+    deleteEntries: args.deleteEntries,
+    expectedEntries: args.expectedEntries,
+    expectedFavorites: args.expectedFavorites,
+    confirm: args.confirm,
   });
 
 export const collectionsSetColorCommand: ClipvaultCommandArg<

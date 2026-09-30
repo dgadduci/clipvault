@@ -1067,6 +1067,24 @@ const MIGRATION_0019_PEER_SOURCE_APP_PRESENTATION: Migration = Migration {
         ON known_peers (trust_state);",
 };
 
+/// Repair rows imported before image imports began attaching them to
+/// the system `Historial` collection. This is intentionally additive
+/// and idempotent: rollback keeps memberships because later user
+/// actions may already depend on them.
+const MIGRATION_0020_PEER_IMPORT_HISTORY_MEMBERSHIP: Migration = Migration {
+    version: 20,
+    description: "collection-entry-deletion-scope: repair history membership for peer imports",
+    up_sql: "INSERT OR IGNORE INTO entry_collections (entry_id, collection_id, created_at)
+    SELECT DISTINCT ri.local_entry_id, history.id, ri.imported_at
+      FROM remote_imports ri
+      JOIN collections history ON history.stable_key = 'history'
+      LEFT JOIN entry_collections existing
+        ON existing.entry_id = ri.local_entry_id
+       AND existing.collection_id = history.id
+     WHERE existing.entry_id IS NULL;",
+    down_sql: "SELECT 1;",
+};
+
 /// Returns the migrations shipped with ClipVault. Each new migration is
 /// appended to this slice to keep ordering deterministic.
 pub fn builtin_migrations() -> Vec<Migration> {
@@ -1090,6 +1108,7 @@ pub fn builtin_migrations() -> Vec<Migration> {
         MIGRATION_0017_PEER_IMPORT_BINDINGS,
         MIGRATION_0018_KNOWN_PEERS_CAPS_EXTRA,
         MIGRATION_0019_PEER_SOURCE_APP_PRESENTATION,
+        MIGRATION_0020_PEER_IMPORT_HISTORY_MEMBERSHIP,
     ]
 }
 
@@ -1857,6 +1876,160 @@ mod tests {
         // metadata is rebuilt on the next discovery refresh, not
         // out of band.
         assert_eq!(caps_extra_v2, "");
+    }
+
+    #[test]
+    fn peer_import_history_repair_migration_is_idempotent_and_preserves_entry_metadata() {
+        use crate::{
+            ContentType, EntryRepository, NewEntry, OrganizationRepository,
+            HISTORY_DEFAULT_COLOR_HEX, HISTORY_STABLE_KEY,
+        };
+        use rusqlite::params;
+        use time::OffsetDateTime;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut db = crate::Database::open(dir.path().join("clipvault.db")).expect("open");
+        let mut previous = builtin_migrations();
+        previous.pop();
+        db.run_migrations(&previous).expect("prior migrations");
+        db.connection_mut()
+            .execute(
+                "INSERT INTO known_peers
+                    (peer_id, public_key_fingerprint, display_name, protocol_major,
+                     capability, first_seen_at, last_discovered_at, updated_at)
+                 VALUES ('peer-a', 'fingerprint', 'Equipo A', 1, 'pairing', 'now', 'now', 'now')",
+                [],
+            )
+            .expect("peer");
+        let now = OffsetDateTime::now_utc();
+        let (missing_history, existing_history) = {
+            let mut entries = EntryRepository::new(db.connection_mut());
+            let first = entries
+                .insert_or_touch(NewEntry::text(
+                    "older import".to_string(),
+                    ContentType::Text,
+                    12,
+                    "hash-older-import".to_string(),
+                    Some("Terminal".to_string()),
+                    now,
+                    now,
+                ))
+                .expect("first entry")
+                .record()
+                .id;
+            let second = entries
+                .insert_or_touch(NewEntry::text(
+                    "favorite import".to_string(),
+                    ContentType::Text,
+                    15,
+                    "hash-favorite-import".to_string(),
+                    Some("Editor".to_string()),
+                    now,
+                    now,
+                ))
+                .expect("second entry")
+                .record()
+                .id;
+            (first, second)
+        };
+        let other_collection = {
+            let mut organization = OrganizationRepository::new(db.connection_mut());
+            organization
+                .create_user_collection("Otra", HISTORY_DEFAULT_COLOR_HEX, now)
+                .expect("other collection")
+                .id
+        };
+        {
+            let mut organization = OrganizationRepository::new(db.connection_mut());
+            organization
+                .replace_entry_collections(missing_history, &[other_collection], now)
+                .expect("other membership");
+        }
+        let history_id: i64 = db
+            .connection()
+            .query_row(
+                "SELECT id FROM collections WHERE stable_key = ?1",
+                params![HISTORY_STABLE_KEY],
+                |row| row.get(0),
+            )
+            .expect("history");
+        db.connection_mut()
+            .execute(
+                "UPDATE clipboard_entries SET is_pinned = 1 WHERE id = ?1",
+                params![existing_history],
+            )
+            .expect("favorite");
+        db.connection_mut()
+            .execute(
+                "DELETE FROM entry_collections WHERE entry_id = ?1 AND collection_id = ?2",
+                params![missing_history, history_id],
+            )
+            .expect("remove legacy History membership");
+        for (remote_id, hash, entry_id) in [
+            ("remote-a", "remote-hash-a", missing_history),
+            ("remote-b", "remote-hash-b", existing_history),
+        ] {
+            db.connection_mut()
+                .execute(
+                    "INSERT INTO remote_imports
+                        (peer_id, remote_entry_id, imported_content_hash,
+                         local_entry_id, imported_at)
+                     VALUES ('peer-a', ?1, ?2, ?3, '2026-01-01T00:00:00Z')",
+                    params![remote_id, hash, entry_id],
+                )
+                .expect("provenance");
+        }
+
+        db.run_migrations(&[MIGRATION_0020_PEER_IMPORT_HISTORY_MEMBERSHIP])
+            .expect("repair migration");
+        db.connection_mut()
+            .execute_batch(MIGRATION_0020_PEER_IMPORT_HISTORY_MEMBERSHIP.up_sql)
+            .expect("replay repair migration");
+
+        let memberships: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM entry_collections WHERE entry_id = ?1 AND collection_id = ?2",
+                params![missing_history, history_id],
+                |row| row.get(0),
+            )
+            .expect("repaired membership");
+        assert_eq!(memberships, 1);
+        let old_membership_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM entry_collections WHERE entry_id = ?1 AND collection_id = ?2",
+                params![existing_history, history_id],
+                |row| row.get(0),
+            )
+            .expect("existing membership");
+        assert_eq!(old_membership_count, 1, "replay does not duplicate rows");
+        let row: (String, i64, Option<String>) = db
+            .connection()
+            .query_row(
+                "SELECT content, is_pinned, source_app FROM clipboard_entries WHERE id = ?1",
+                params![existing_history],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("existing entry unchanged");
+        assert_eq!(
+            row,
+            ("favorite import".to_string(), 1, Some("Editor".to_string()))
+        );
+        let other_membership: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM entry_collections WHERE entry_id = ?1 AND collection_id = ?2",
+                params![missing_history, other_collection],
+                |row| row.get(0),
+            )
+            .expect("other membership");
+        assert_eq!(other_membership, 1);
+        let provenance_count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM remote_imports", [], |row| row.get(0))
+            .expect("provenance preserved");
+        assert_eq!(provenance_count, 2);
     }
 
     #[test]

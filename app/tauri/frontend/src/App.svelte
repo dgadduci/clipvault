@@ -8,6 +8,8 @@
     ActiveApplicationResponse,
     Capabilities,
     Collection,
+    CollectionDeleteResponse,
+    CollectionDeletionPreview,
     Diagnostics,
     EntryRecord,
     GnomeIntegrationStatusResponse,
@@ -31,6 +33,7 @@
     clearUnorganizedHistoryCommand,
     collectionsCreateCommand,
     collectionsDeleteCommand,
+    collectionsDeletePreviewCommand,
     collectionsRenameCommand,
     collectionsSetColorCommand,
     deleteEntryCommand,
@@ -185,6 +188,18 @@
     | { kind: "delete"; id: number; label: string }
     | { kind: "clear"; count: number }
     | null = null;
+  let pendingCollectionDeletion: { collectionId: number; name: string } | null = null;
+  let collectionDeletionPreview: CollectionDeletionPreview | null = null;
+  let collectionDeletionBusy = false;
+  let collectionDeletionError: string | null = null;
+  let collectionDeletionPreviewChanged = false;
+  let collectionDeletionTrigger: HTMLElement | null = null;
+  let pendingScopedEntryDeletion:
+    | { entryId: number; collectionId: number; collectionName: string }
+    | null = null;
+  let scopedEntryDeletionBusy = false;
+  let scopedEntryDeletionError: string | null = null;
+  let scopedEntryDeletionTrigger: HTMLElement | null = null;
   let nonEditableTextNotice: {
     contentType: EntryRecord["content_type"];
   } | null = null;
@@ -731,11 +746,79 @@
   }
 
   function requestDelete(entry: EntryRecord): void {
+    if (selectedCollectionId !== null && !activeCollectionIsHistory) {
+      const collection = organization?.collections.find(
+        (candidate) => candidate.id === selectedCollectionId,
+      );
+      pendingScopedEntryDeletion = {
+        entryId: entry.id,
+        collectionId: selectedCollectionId,
+        collectionName: collection?.name ?? "la colección seleccionada",
+      };
+      scopedEntryDeletionBusy = false;
+      scopedEntryDeletionError = null;
+      scopedEntryDeletionTrigger = findHistoryCardElement(entry.id);
+      return;
+    }
     pendingConfirmation = {
       kind: "delete",
       id: entry.id,
       label: entry.content.replace(/\s+/g, " ").trim().slice(0, 60) || "(empty)",
     };
+  }
+
+  function cancelScopedEntryDeletion(): void {
+    pendingScopedEntryDeletion = null;
+    scopedEntryDeletionBusy = false;
+    scopedEntryDeletionError = null;
+    scopedEntryDeletionTrigger = null;
+  }
+
+  async function removeEntryFromActiveCollection(): Promise<void> {
+    const pending = pendingScopedEntryDeletion;
+    if (!pending || scopedEntryDeletionBusy) return;
+    scopedEntryDeletionBusy = true;
+    scopedEntryDeletionError = null;
+    try {
+      await entryRemoveFromCollectionCommand({
+        entryId: pending.entryId,
+        collectionId: pending.collectionId,
+      });
+      await refreshEntries();
+      await refreshEntryOrganization(pending.entryId);
+      await refreshUnorganizedClearableCount();
+      cancelScopedEntryDeletion();
+    } catch (err) {
+      scopedEntryDeletionError =
+        err instanceof Error ? err.message : String(err);
+      scopedEntryDeletionBusy = false;
+    }
+  }
+
+  async function deleteEntryGloballyFromCollection(): Promise<void> {
+    const pending = pendingScopedEntryDeletion;
+    if (!pending || scopedEntryDeletionBusy) return;
+    scopedEntryDeletionBusy = true;
+    scopedEntryDeletionError = null;
+    try {
+      const response = await deleteEntryCommand({
+        id: pending.entryId,
+        confirm: true,
+      });
+      if (response.kind === "confirmation_required") {
+        scopedEntryDeletionError =
+          "El sistema requiere una nueva confirmación para eliminar la captura.";
+        scopedEntryDeletionBusy = false;
+        return;
+      }
+      await refreshEntries();
+      await refreshOrganizationForAllEntries();
+      cancelScopedEntryDeletion();
+    } catch (err) {
+      scopedEntryDeletionError =
+        err instanceof Error ? err.message : String(err);
+      scopedEntryDeletionBusy = false;
+    }
   }
 
   async function requestClearHistory(): Promise<void> {
@@ -1021,18 +1104,98 @@
   async function handleDeleteCollection(
     event: CustomEvent<{ collectionId: number }>,
   ): Promise<void> {
+    const collection = organization?.collections.find(
+      (candidate) => candidate.id === event.detail.collectionId,
+    );
+    if (!collection || collection.kind !== "user") return;
+    pendingCollectionDeletion = {
+      collectionId: collection.id,
+      name: collection.name,
+    };
+    collectionDeletionPreview = null;
+    collectionDeletionPreviewChanged = false;
+    collectionDeletionError = null;
+    collectionDeletionBusy = true;
+    collectionDeletionTrigger =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
     try {
-      await collectionsDeleteCommand({
-        collectionId: event.detail.collectionId,
+      collectionDeletionPreview = await collectionsDeletePreviewCommand({
+        collectionId: collection.id,
       });
-      if (selectedCollectionId === event.detail.collectionId) {
+    } catch (err) {
+      collectionDeletionError =
+        err instanceof Error ? err.message : String(err);
+    } finally {
+      collectionDeletionBusy = false;
+    }
+  }
+
+  function cancelCollectionDeletion(): void {
+    pendingCollectionDeletion = null;
+    collectionDeletionPreview = null;
+    collectionDeletionBusy = false;
+    collectionDeletionError = null;
+    collectionDeletionPreviewChanged = false;
+    collectionDeletionTrigger = null;
+  }
+
+  async function refreshCollectionDeletionPreview(): Promise<void> {
+    const pending = pendingCollectionDeletion;
+    if (!pending || collectionDeletionBusy) return;
+    collectionDeletionBusy = true;
+    collectionDeletionError = null;
+    try {
+      collectionDeletionPreview = await collectionsDeletePreviewCommand({
+        collectionId: pending.collectionId,
+      });
+      collectionDeletionPreviewChanged = false;
+    } catch (err) {
+      collectionDeletionError =
+        err instanceof Error ? err.message : String(err);
+    } finally {
+      collectionDeletionBusy = false;
+    }
+  }
+
+  async function confirmCollectionDeletion(deleteEntries: boolean): Promise<void> {
+    const pending = pendingCollectionDeletion;
+    const preview = collectionDeletionPreview;
+    if (!pending || !preview || collectionDeletionBusy) return;
+    collectionDeletionBusy = true;
+    collectionDeletionError = null;
+    collectionDeletionPreviewChanged = false;
+    try {
+      const outcome: CollectionDeleteResponse = await collectionsDeleteCommand({
+        collectionId: pending.collectionId,
+        deleteEntries,
+        expectedEntries: preview.entries,
+        expectedFavorites: preview.favorites,
+        confirm: true,
+      });
+      if (outcome.kind === "confirmation_required") {
+        collectionDeletionError =
+          "El sistema requiere una nueva confirmación. Revisa las cantidades y vuelve a intentarlo.";
+        return;
+      }
+      if (outcome.kind === "preview_changed") {
+        collectionDeletionPreview = outcome.preview;
+        collectionDeletionPreviewChanged = true;
+        return;
+      }
+      if (selectedCollectionId === pending.collectionId) {
         selectedCollectionId = null;
       }
+      cancelCollectionDeletion();
       await refreshOrganization();
       await refreshEntries();
+      await refreshUnorganizedClearableCount();
     } catch (err) {
-      organizationError =
+      collectionDeletionError =
         err instanceof Error ? err.message : String(err);
+    } finally {
+      collectionDeletionBusy = false;
     }
   }
 
@@ -2185,6 +2348,130 @@
   testIdPrefix="history-card-preview"
   onClose={closePreview}
 />
+
+<Modal
+  open={pendingCollectionDeletion !== null}
+  titleId="collection-delete-modal-title"
+  title="Eliminar colección"
+  busy={collectionDeletionBusy}
+  returnFocusTo={collectionDeletionTrigger}
+  onClose={cancelCollectionDeletion}
+>
+  {#if pendingCollectionDeletion}
+    <div data-testid="collection-delete-modal">
+      <p data-testid="collection-delete-summary">
+        ¿Eliminar “{pendingCollectionDeletion.name}”?
+        {#if collectionDeletionPreview}
+          Tiene {collectionDeletionPreview.entries} captura{collectionDeletionPreview.entries === 1 ? "" : "s"}, incluidas {collectionDeletionPreview.favorites} favorita{collectionDeletionPreview.favorites === 1 ? "" : "s"}.
+        {:else if collectionDeletionBusy}
+          Consultando cantidades…
+        {/if}
+      </p>
+      {#if collectionDeletionPreviewChanged}
+        <p role="status" data-testid="collection-delete-preview-changed">
+          Las cantidades cambiaron. Revisa los valores actualizados y confirma otra vez.
+        </p>
+      {/if}
+      {#if collectionDeletionError}
+        <p role="alert" data-testid="collection-delete-error">
+          {collectionDeletionError}
+        </p>
+      {/if}
+      <div class="row">
+        {#if !collectionDeletionPreview}
+          <button
+            type="button"
+            on:click={() => void refreshCollectionDeletionPreview()}
+            disabled={collectionDeletionBusy}
+            data-testid="collection-delete-retry-preview"
+          >
+            Reintentar cantidades
+          </button>
+        {:else}
+          <button
+            type="button"
+            on:click={() => void confirmCollectionDeletion(false)}
+            disabled={collectionDeletionBusy}
+            data-testid="collection-delete-preserve"
+          >
+            Eliminar colección y conservar capturas
+          </button>
+          <button
+            type="button"
+            class="danger"
+            on:click={() => void confirmCollectionDeletion(true)}
+            disabled={collectionDeletionBusy}
+            data-testid="collection-delete-entries"
+            data-cv-danger="collection-delete-confirm"
+          >
+            Eliminar colección y sus capturas
+          </button>
+        {/if}
+        <button
+          type="button"
+          on:click={cancelCollectionDeletion}
+          disabled={collectionDeletionBusy}
+          data-testid="collection-delete-cancel"
+        >
+          Cancelar
+        </button>
+      </div>
+    </div>
+  {/if}
+</Modal>
+
+<Modal
+  open={pendingScopedEntryDeletion !== null}
+  titleId="scoped-entry-delete-modal-title"
+  title="Eliminar captura"
+  busy={scopedEntryDeletionBusy}
+  returnFocusTo={scopedEntryDeletionTrigger}
+  onClose={cancelScopedEntryDeletion}
+>
+  {#if pendingScopedEntryDeletion}
+    <div data-testid="scoped-entry-delete-modal">
+      <p>
+        La captura está en “{pendingScopedEntryDeletion.collectionName}”. Elige dónde quitarla.
+      </p>
+      <p>
+        Puedes quitarla solo de esta colección y conservarla en Historial y en las demás colecciones, o eliminarla de todo el historial local.
+      </p>
+      {#if scopedEntryDeletionError}
+        <p role="alert" data-testid="scoped-entry-delete-error">
+          {scopedEntryDeletionError}
+        </p>
+      {/if}
+      <div class="row">
+        <button
+          type="button"
+          on:click={() => void removeEntryFromActiveCollection()}
+          disabled={scopedEntryDeletionBusy}
+          data-testid="scoped-entry-delete-collection-only"
+        >
+          Quitar solo de esta colección
+        </button>
+        <button
+          type="button"
+          class="danger"
+          on:click={() => void deleteEntryGloballyFromCollection()}
+          disabled={scopedEntryDeletionBusy}
+          data-testid="scoped-entry-delete-global"
+          data-cv-danger="card-delete"
+        >
+          Eliminar de Historial y todas las colecciones
+        </button>
+        <button
+          type="button"
+          on:click={cancelScopedEntryDeletion}
+          disabled={scopedEntryDeletionBusy}
+          data-testid="scoped-entry-delete-cancel"
+        >
+          Cancelar
+        </button>
+      </div>
+    </div>
+  {/if}
+</Modal>
 
 <Modal
   open={nonEditableTextNotice !== null}

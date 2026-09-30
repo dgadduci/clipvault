@@ -360,6 +360,66 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_text_import_attaches_history_and_repairs_deduplicated_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut db = clipvault_db::Database::open(dir.path().join("clipvault.db")).expect("open");
+        db.run_migrations(&clipvault_db::builtin_migrations())
+            .expect("migrate");
+        let persistence = SqliteImportPersistence::new(Arc::new(parking_lot::Mutex::new(db)));
+        let imported_at = OffsetDateTime::now_utc();
+        let entry_id = persistence
+            .insert_entry(
+                "peer text".to_string(),
+                ContentType::Text,
+                9,
+                "peer-text-hash".to_string(),
+                None,
+                imported_at,
+                imported_at,
+            )
+            .expect("import text");
+        let history_id = {
+            let mut db = persistence.database.lock();
+            let repo = OrganizationRepository::new(db.connection_mut());
+            repo.system_collection_id(clipvault_db::HISTORY_STABLE_KEY)
+                .expect("history lookup")
+                .expect("history collection")
+        };
+        {
+            let mut db = persistence.database.lock();
+            db.connection_mut()
+                .execute(
+                    "DELETE FROM entry_collections WHERE entry_id = ?1 AND collection_id = ?2",
+                    rusqlite::params![entry_id, history_id],
+                )
+                .expect("simulate legacy import without History");
+        }
+        let deduplicated_id = persistence
+            .insert_entry(
+                "peer text".to_string(),
+                ContentType::Text,
+                9,
+                "peer-text-hash".to_string(),
+                None,
+                imported_at,
+                imported_at,
+            )
+            .expect("deduplicate text");
+        assert_eq!(deduplicated_id, entry_id);
+        let db = persistence.database.lock();
+        let membership_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM entry_collections
+                  WHERE entry_id = ?1 AND collection_id = ?2",
+                rusqlite::params![entry_id, history_id],
+                |row| row.get(0),
+            )
+            .expect("History membership");
+        assert_eq!(membership_count, 1);
+    }
+
+    #[test]
     fn sqlite_text_import_icon_stage_rolls_back_only_new_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("clipvault.db");

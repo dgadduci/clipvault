@@ -387,6 +387,16 @@ export type ClearResponse =
   | { kind: "removed"; removed: number }
   | { kind: "confirmation_required" };
 
+export interface CollectionDeletionPreview {
+  entries: number;
+  favorites: number;
+}
+
+export type CollectionDeleteResponse =
+  | { kind: "deleted"; removed_entries: number }
+  | { kind: "preview_changed"; preview: CollectionDeletionPreview }
+  | { kind: "confirmation_required" };
+
 export type RetentionPolicy = "forever" | "days_7" | "days_30" | "days_90";
 
 export interface RetentionResponse {

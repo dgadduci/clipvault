@@ -577,7 +577,8 @@ impl<'a> PeerImportRepository<'a> {
     /// - attachment to the `peer_collection_bindings` row for
     ///   `peer_id`, creating the user collection when the
     ///   binding is missing;
-    /// - membership attach (`entry_collections`);
+    /// - membership attach to `Historial` and the peer collection
+    ///   (`entry_collections`);
     /// - provenance row insert (`remote_imports`).
     ///
     /// A failure at any step rolls the whole transaction back so
@@ -699,9 +700,24 @@ impl<'a> PeerImportRepository<'a> {
             }
         };
 
-        // Membership: idempotent (composite PK) so the
-        // operation collapses to a no-op on a duplicate.
+        // History membership: idempotent so both a fresh image and a
+        // reused local row satisfy the application invariant. Keep it
+        // in this transaction with the peer membership and provenance.
         let ts = format_timestamp(spec.now);
+        let history_id: i64 = tx.query_row(
+            "SELECT id FROM collections WHERE stable_key = ?1",
+            params![crate::HISTORY_STABLE_KEY],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO entry_collections
+                 (entry_id, collection_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![entry_id, history_id, ts],
+        )?;
+
+        // Peer membership: idempotent (composite PK) so the
+        // operation collapses to a no-op on a duplicate.
         tx.execute(
             "INSERT OR IGNORE INTO entry_collections
                  (entry_id, collection_id, created_at)
@@ -1527,6 +1543,23 @@ mod tests {
             )
             .expect("count");
         assert_eq!(count, 1);
+        let history_id: i64 = db
+            .connection()
+            .query_row(
+                "SELECT id FROM collections WHERE stable_key = ?1",
+                params![HISTORY_STABLE_KEY],
+                |row| row.get(0),
+            )
+            .expect("History collection");
+        let history_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM entry_collections WHERE entry_id = ?1 AND collection_id = ?2",
+                params![outcome.entry_id, history_id],
+                |row| row.get(0),
+            )
+            .expect("History membership");
+        assert_eq!(history_count, 1);
         // Provenance is recorded.
         let found = {
             let repo = PeerImportRepository::new(db.connection_mut());
@@ -1551,6 +1584,20 @@ mod tests {
         let (_dir, mut db) = isolated_db();
         seed_peer(&mut db, "peer-a");
         let existing_id = seed_image_entry(&mut db, "hash-reuse", "clipboard/hash-reuse.png");
+        let history_id: i64 = db
+            .connection()
+            .query_row(
+                "SELECT id FROM collections WHERE stable_key = ?1",
+                params![HISTORY_STABLE_KEY],
+                |row| row.get(0),
+            )
+            .expect("History collection");
+        db.connection_mut()
+            .execute(
+                "DELETE FROM entry_collections WHERE entry_id = ?1 AND collection_id = ?2",
+                params![existing_id, history_id],
+            )
+            .expect("simulate broken old import");
         let outcome = {
             let mut repo = PeerImportRepository::new(db.connection_mut());
             repo.commit_image_import_transaction(ImageImportSpec {
@@ -1572,6 +1619,15 @@ mod tests {
         };
         assert!(outcome.deduplicated);
         assert_eq!(outcome.entry_id, existing_id);
+        let history_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM entry_collections WHERE entry_id = ?1 AND collection_id = ?2",
+                params![existing_id, history_id],
+                |row| row.get(0),
+            )
+            .expect("History membership");
+        assert_eq!(history_count, 1);
         // The reused entry keeps its existing title (None in this case).
         let title: Option<String> = db
             .connection()

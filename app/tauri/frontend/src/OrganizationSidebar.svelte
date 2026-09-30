@@ -14,13 +14,10 @@
    * The component never inspects clipboard content; it only renders
    * names and ids.
    *
-   * The collection delete confirmation flows through a modal backed
-   * by the shared `Modal` shell so the destructive branch never
-   * grows the sidebar above the documented rail height and the
-   * focus trap, Escape handling and return-focus stay consistent
-   * with the rest of the desktop.
+   * The parent owns collection deletion and its scoped confirmation
+   * so the operation stays next to the history-management bridge.
    */
-  import { createEventDispatcher, onDestroy, onMount, tick } from "svelte";
+  import { createEventDispatcher, onDestroy, onMount } from "svelte";
   import type { Collection, PeerSnapshot } from "./types";
   import {
     COLLECTION_DROP_TARGET_VALUE,
@@ -28,7 +25,6 @@
   } from "./lib/collectionDropZone";
   import { endDragSession, isDropTarget } from "./lib/dragAndDrop";
   import { POINTER_DRAG_END_EVENT } from "./lib/pointerDragAndDrop";
-  import Modal from "./Modal.svelte";
   import CollectionColorModal from "./CollectionColorModal.svelte";
   import LinkedPeers from "./LinkedPeers.svelte";
 
@@ -72,15 +68,6 @@
   let renamingId: number | null = null;
   let renameDraft = "";
   /**
-   * Modal state for the collection-delete confirmation. The modal
-   * owns the destructive branch so the panel never grows an inline
-   * confirmation row above the rail's stable height.
-   */
-  let pendingDelete: Collection | null = null;
-  let pendingDeleteBusy = false;
-  let pendingDeleteTrigger: HTMLElement | null = null;
-  let lastDeleteError: string | null = null;
-  /**
    * Modal state for the colour editor. The sidebar owns the
    * triggering row (the colour square) so the modal can re-focus
    * the square on close and the picker never drifts out of sync.
@@ -113,9 +100,6 @@
     if (renamingId !== null) {
       cancelRename();
     }
-    if (pendingDelete !== null) {
-      cancelDelete();
-    }
     if (pendingColorCollection !== null) {
       cancelColorEdit();
     }
@@ -145,9 +129,6 @@
     if (creating) {
       cancelCreate();
     }
-    if (pendingDelete !== null) {
-      cancelDelete();
-    }
     if (pendingColorCollection !== null) {
       cancelColorEdit();
     }
@@ -172,14 +153,13 @@
   }
 
   /**
-   * Open the delete-collection modal. The trigger element is
-   * captured so the modal can restore focus to the icon the user
-   * just clicked instead of an arbitrary element when the modal
-   * closes.
+   * Ask the parent to open the collection deletion flow. The
+   * parent owns the preview and confirmation because it calls the
+   * history-management command surface.
    */
   function askDelete(
     collection: Collection,
-    event: MouseEvent | KeyboardEvent,
+    _event: MouseEvent | KeyboardEvent,
   ): void {
     if (collection.kind !== "user") {
       return;
@@ -187,35 +167,7 @@
     if (renamingId !== null) {
       cancelRename();
     }
-    pendingDelete = collection;
-    pendingDeleteBusy = false;
-    lastDeleteError = null;
-    pendingDeleteTrigger =
-      (event.currentTarget as HTMLElement | null) ?? null;
-  }
-
-  function cancelDelete(): void {
-    pendingDelete = null;
-    pendingDeleteBusy = false;
-    lastDeleteError = null;
-    pendingDeleteTrigger = null;
-  }
-
-  async function confirmDelete(): Promise<void> {
-    if (pendingDelete === null || pendingDeleteBusy) return;
-    const collectionId = pendingDelete.id;
-    pendingDeleteBusy = true;
-    lastDeleteError = null;
-    // Close the modal optimistically; the parent re-renders the
-    // collections list through `refreshOrganization` so the
-    // confirmation step never lingers when the round-trip
-    // succeeds. A failure surfaces through `organizationError`
-    // surfaced by the parent.
-    dispatch("delete", { collectionId });
-    await tick();
-    pendingDelete = null;
-    pendingDeleteBusy = false;
-    pendingDeleteTrigger = null;
+    dispatch("delete", { collectionId: collection.id });
   }
 
   /**
@@ -235,9 +187,6 @@
   ): void {
     if (renamingId !== null) {
       cancelRename();
-    }
-    if (pendingDelete !== null) {
-      cancelDelete();
     }
     pendingColorCollection = collection;
     lastColorError = null;
@@ -749,58 +698,6 @@
   />
 </aside>
 
-<Modal
-  open={pendingDelete !== null}
-  titleId="sidebar-delete-collection-modal-title"
-  title="Eliminar colección"
-  busy={pendingDeleteBusy}
-  returnFocusTo={pendingDeleteTrigger}
-  onClose={cancelDelete}
->
-  <div
-    class="sidebar-delete-modal"
-    data-testid="sidebar-delete-modal"
-    data-collection-id={pendingDelete?.id ?? null}
-  >
-    <p
-      class="sidebar-delete-modal-warning"
-      data-testid="sidebar-delete-modal-warning"
-    >
-      ¿Eliminar “{pendingDelete?.name ?? ""}”? Las capturas no se borran.
-    </p>
-    {#if lastDeleteError}
-      <p
-        class="sidebar-delete-modal-error"
-        role="alert"
-        data-testid="sidebar-delete-modal-error"
-      >
-        {lastDeleteError}
-      </p>
-    {/if}
-    <div class="sidebar-delete-modal-actions">
-      <button
-        type="button"
-        class="modal-action modal-action-secondary"
-        on:click={cancelDelete}
-        disabled={pendingDeleteBusy}
-        data-testid="sidebar-delete-modal-cancel"
-      >
-        Cancelar
-      </button>
-      <button
-        type="button"
-        class="modal-action modal-action-danger"
-        on:click={() => void confirmDelete()}
-        disabled={pendingDeleteBusy}
-        data-testid="sidebar-delete-modal-confirm"
-        data-cv-danger="collection-delete-confirm"
-      >
-        Eliminar
-      </button>
-    </div>
-  </div>
-</Modal>
-
 <CollectionColorModal
   open={pendingColorCollection !== null}
   collection={pendingColorCollection}
@@ -1097,42 +994,6 @@
   .inline-rename {
     flex-wrap: nowrap;
   }
-  /*
-   * Delete-collection modal body. The shared `Modal` shell owns the
-   * overlay, the focus trap and the Escape handler — this block
-   * styles the body content so the destructive action stays
-   * consistent with the rest of the desktop (primary cancel,
-   * danger-coloured confirm, accessible focus ring, disabled
-   * state while the parent round-trip is in flight).
-   */
-  :global(.sidebar-delete-modal) {
-    display: flex;
-    flex-direction: column;
-    gap: 0.85rem;
-    min-width: 320px;
-  }
-  :global(.sidebar-delete-modal-warning) {
-    margin: 0;
-    font-size: var(--cv-body, 0.9rem);
-    line-height: 1.4;
-    color: var(--cv-fg, #f0f4f8);
-    word-break: break-word;
-  }
-  :global(.sidebar-delete-modal-error) {
-    margin: 0;
-    padding: 0.5rem 0.65rem;
-    border-radius: var(--cv-radius-sm, 6px);
-    background: rgba(248, 113, 113, 0.12);
-    border: 1px solid rgba(248, 113, 113, 0.45);
-    color: #fee2e2;
-    font-size: 0.8rem;
-  }
-  :global(.sidebar-delete-modal-actions) {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
   :global(.modal-action) {
     border: 0;
     padding: 0.45rem 0.95rem;
@@ -1154,13 +1015,6 @@
   :global(.modal-action-secondary:hover:not(:disabled)) {
     background: rgba(255, 255, 255, 0.05);
     color: var(--cv-fg, #f0f4f8);
-  }
-  :global(.modal-action-danger) {
-    background: var(--cv-danger, #b91c1c);
-    color: white;
-  }
-  :global(.modal-action-danger:hover:not(:disabled)) {
-    background: var(--cv-danger-hover, #991b1b);
   }
   :global(.modal-action:focus-visible) {
     outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.45));

@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-30
+goal: Garantizar que las capturas importadas pertenezcan a Historial y pedir
+  alcance explícito al eliminar colecciones o capturas desde una colección.

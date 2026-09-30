@@ -137,6 +137,25 @@ pub struct Collection {
     pub peer_display_name: Option<String>,
 }
 
+/// Metadata-only snapshot used to confirm deleting a collection. It
+/// deliberately excludes entry identifiers and all clipboard-derived
+/// fields so the UI can show a safe count without loading the rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CollectionDeletionPreview {
+    pub entries: i64,
+    pub favorites: i64,
+}
+
+/// Result of confirming a collection deletion. A changed preview is
+/// returned without applying any mutation so the caller can ask the
+/// user to confirm the updated counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CollectionDeletionOutcome {
+    Deleted { removed_entries: usize },
+    PreviewChanged { preview: CollectionDeletionPreview },
+}
+
 impl Collection {
     pub fn is_system(&self) -> bool {
         matches!(self.kind, CollectionKind::System)
@@ -397,6 +416,93 @@ impl<'a> OrganizationRepository<'a> {
         let removed = tx.execute("DELETE FROM collections WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(removed > 0)
+    }
+
+    /// Return the total and favorite-entry counts for a user
+    /// collection. No entry identifiers, content, hashes, provenance
+    /// or asset references leave the repository.
+    pub fn preview_collection_deletion(
+        &self,
+        id: i64,
+    ) -> Result<CollectionDeletionPreview, OrganizationError> {
+        let collection = self
+            .find_collection(id)?
+            .ok_or(OrganizationError::CollectionNotFound(id))?;
+        if collection.is_system() {
+            return Err(OrganizationError::SystemCollectionProtected(
+                HISTORY_STABLE_KEY,
+            ));
+        }
+        collection_deletion_preview(self.conn, id)
+    }
+
+    /// Delete a user collection atomically, either preserving all
+    /// associated entries outside of the collection or deleting those
+    /// entries from local history. The preview counts are checked in
+    /// the same transaction before any mutation; a stale preview
+    /// returns its fresh metadata and leaves the database unchanged.
+    pub fn delete_collection_with_scope(
+        &mut self,
+        id: i64,
+        delete_entries: bool,
+        expected: CollectionDeletionPreview,
+    ) -> Result<CollectionDeletionOutcome, OrganizationError> {
+        let tx = self.conn.transaction()?;
+        let collection_kind: Option<(String, Option<String>)> = tx
+            .query_row(
+                "SELECT kind, stable_key FROM collections WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((kind, stable_key)) = collection_kind else {
+            return Err(OrganizationError::CollectionNotFound(id));
+        };
+        if kind == "system" || stable_key.as_deref() == Some(HISTORY_STABLE_KEY) {
+            return Err(OrganizationError::SystemCollectionProtected(
+                HISTORY_STABLE_KEY,
+            ));
+        }
+
+        let current = collection_deletion_preview(&tx, id)?;
+        if current != expected {
+            return Ok(CollectionDeletionOutcome::PreviewChanged { preview: current });
+        }
+
+        let removed_entries = if delete_entries {
+            tx.execute(
+                "DELETE FROM clipboard_entries
+                 WHERE id IN (
+                    SELECT entry_id FROM entry_collections WHERE collection_id = ?1
+                 )",
+                params![id],
+            )?
+        } else {
+            // A malformed legacy row may have lost its mandatory
+            // History membership. Repair that invariant before the
+            // collection membership cascades away.
+            let history_id: i64 = tx.query_row(
+                "SELECT id FROM collections WHERE stable_key = ?1",
+                params![HISTORY_STABLE_KEY],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO entry_collections (entry_id, collection_id, created_at)
+                 SELECT ec.entry_id, ?1, ec.created_at
+                   FROM entry_collections ec
+                  WHERE ec.collection_id = ?2",
+                params![history_id, id],
+            )?;
+            0
+        };
+
+        let removed_collection =
+            tx.execute("DELETE FROM collections WHERE id = ?1", params![id])?;
+        if removed_collection == 0 {
+            return Err(OrganizationError::CollectionNotFound(id));
+        }
+        tx.commit()?;
+        Ok(CollectionDeletionOutcome::Deleted { removed_entries })
     }
 
     /// List every tag in case-insensitive display order. The
@@ -853,6 +959,21 @@ fn row_to_collection(row: &rusqlite::Row<'_>) -> rusqlite::Result<Collection> {
         is_peer_bound: is_peer_bound_raw != 0,
         peer_display_name: row.get(8)?,
     })
+}
+
+fn collection_deletion_preview(
+    conn: &Connection,
+    id: i64,
+) -> Result<CollectionDeletionPreview, OrganizationError> {
+    let (entries, favorites) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(ce.is_pinned), 0)
+           FROM entry_collections ec
+           JOIN clipboard_entries ce ON ce.id = ec.entry_id
+          WHERE ec.collection_id = ?1",
+        params![id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(CollectionDeletionPreview { entries, favorites })
 }
 
 fn row_to_tag(row: &rusqlite::Row<'_>) -> rusqlite::Result<Tag> {
@@ -1636,5 +1757,273 @@ mod tests {
             import_repo.find_binding("peer-a").expect("find").is_some()
         };
         assert!(rebound_present);
+    }
+
+    #[test]
+    fn scoped_collection_preserve_then_clear_keeps_peer_provenance_until_entry_delete() {
+        let (_dir, mut db) = open_temp_db();
+        seed_peer(&mut db, "peer-a", "Equipo A");
+        let when = OffsetDateTime::now_utc();
+        {
+            let mut peers = crate::KnownPeerRepository::new(db.connection_mut());
+            peers
+                .mark_trusted("peer-a", "tls-fingerprint", when, 1)
+                .expect("trust peer");
+        }
+        let collection_id = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.create_user_collection("Equipo A", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("collection")
+                .id
+        };
+        let entry_id = insert_text_entry(db.connection_mut(), "imported", when);
+        {
+            let mut imports = crate::PeerImportRepository::new(db.connection_mut());
+            imports
+                .upsert_binding("peer-a", collection_id, when)
+                .expect("binding");
+            imports
+                .attach_entry_to_binding(entry_id, collection_id, when)
+                .expect("peer membership");
+            imports
+                .record_import("peer-a", "remote-1", "hash-1", entry_id, when)
+                .expect("provenance");
+        }
+        let preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_deletion(collection_id)
+                .expect("preview")
+        };
+        assert_eq!(preview.entries, 1);
+        assert_eq!(preview.favorites, 0);
+
+        let preserved = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.delete_collection_with_scope(collection_id, false, preview)
+                .expect("preserve collection delete")
+        };
+        assert_eq!(
+            preserved,
+            CollectionDeletionOutcome::Deleted { removed_entries: 0 }
+        );
+        {
+            let imports = crate::PeerImportRepository::new(db.connection_mut());
+            assert!(imports.find_binding("peer-a").expect("binding").is_none());
+            assert_eq!(
+                imports
+                    .find_import("peer-a", "remote-1", "hash-1")
+                    .expect("provenance")
+                    .expect("import remains")
+                    .local_entry_id,
+                entry_id
+            );
+        }
+        {
+            let mut entries = EntryRepository::new(db.connection_mut());
+            assert_eq!(entries.count_unorganized_clearable().expect("count"), 1);
+            assert_eq!(entries.clear_unorganized_history().expect("clear"), 1);
+            assert_eq!(entries.count().expect("remaining entries"), 0);
+        }
+        let provenance_count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM remote_imports", [], |row| row.get(0))
+            .expect("count provenance");
+        assert_eq!(provenance_count, 0, "entry deletion cascades provenance");
+        let peer_count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM known_peers", [], |row| row.get(0))
+            .expect("count peers");
+        assert_eq!(peer_count, 1, "local clearing does not remove the peer");
+
+        let peer_trust: (String, Option<String>) = db
+            .connection()
+            .query_row(
+                "SELECT trust_state, tls_cert_fingerprint FROM known_peers WHERE peer_id = 'peer-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("peer trust remains");
+        assert_eq!(
+            peer_trust,
+            ("trusted".to_string(), Some("tls-fingerprint".to_string()))
+        );
+
+        // The deleted peer-bound collection is recreated on a later
+        // import while its known peer and pairing trust remain intact.
+        let reimport = {
+            let mut imports = crate::PeerImportRepository::new(db.connection_mut());
+            imports
+                .commit_image_import_transaction(crate::ImageImportSpec {
+                    peer_id: "peer-a".to_string(),
+                    remote_entry_id: "remote-after-delete".to_string(),
+                    display_name: "Equipo A".to_string(),
+                    canonical_hash: "hash-after-delete".to_string(),
+                    asset_ref: "clipboard/hash-after-delete.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    width: 4,
+                    height: 4,
+                    content_size: 16,
+                    validated_title: None,
+                    now: when,
+                    source_app_name: None,
+                    source_app_icon_ref: None,
+                })
+                .expect("future import")
+        };
+        assert!(!reimport.deduplicated);
+        assert_ne!(reimport.collection_id, collection_id);
+        let history_id: i64 = db
+            .connection()
+            .query_row(
+                "SELECT id FROM collections WHERE stable_key = ?1",
+                params![HISTORY_STABLE_KEY],
+                |row| row.get(0),
+            )
+            .expect("History collection");
+        let history_membership: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM entry_collections WHERE entry_id = ?1 AND collection_id = ?2",
+                params![reimport.entry_id, history_id],
+                |row| row.get(0),
+            )
+            .expect("History membership after reimport");
+        assert_eq!(history_membership, 1);
+        let peer_binding: i64 = db
+            .connection()
+            .query_row(
+                "SELECT collection_id FROM peer_collection_bindings WHERE peer_id = 'peer-a'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("new peer binding");
+        assert_eq!(peer_binding, reimport.collection_id);
+    }
+
+    #[test]
+    fn scoped_collection_delete_checks_counts_rolls_back_and_includes_favorites() {
+        let (_dir, mut db) = open_temp_db();
+        let when = OffsetDateTime::now_utc();
+        let (target, other) = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            let target = org
+                .create_user_collection("Target", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("target")
+                .id;
+            let other = org
+                .create_user_collection("Other", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("other")
+                .id;
+            (target, other)
+        };
+        let first = insert_text_entry(db.connection_mut(), "first private payload", when);
+        let favorite = insert_text_entry(db.connection_mut(), "favorite private payload", when);
+        let untouched = insert_text_entry(db.connection_mut(), "untouched", when);
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.replace_entry_collections(first, &[target, other], when)
+                .expect("memberships");
+            org.replace_entry_collections(favorite, &[target], when)
+                .expect("favorite membership");
+            org.upsert_and_assign_tag(first, "keep definition", when)
+                .expect("tag");
+        }
+        db.connection_mut()
+            .execute(
+                "UPDATE clipboard_entries SET is_pinned = 1 WHERE id = ?1",
+                params![favorite],
+            )
+            .expect("favorite");
+        let preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_deletion(target).expect("preview")
+        };
+        assert_eq!(preview.entries, 2);
+        assert_eq!(preview.favorites, 1);
+        let safe_preview = serde_json::to_string(&preview).expect("serialize preview");
+        assert!(!safe_preview.contains("first private payload"));
+        assert!(!safe_preview.contains("favorite private payload"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&safe_preview).expect("preview JSON"),
+            serde_json::json!({ "entries": 2, "favorites": 1 }),
+            "preview exposes only aggregate counts, never entry IDs or clipboard fields"
+        );
+
+        let stale = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.delete_collection_with_scope(
+                target,
+                true,
+                CollectionDeletionPreview {
+                    entries: preview.entries + 1,
+                    favorites: preview.favorites,
+                },
+            )
+            .expect("stale preview")
+        };
+        assert_eq!(stale, CollectionDeletionOutcome::PreviewChanged { preview });
+
+        db.connection_mut()
+            .execute_batch(&format!(
+                "CREATE TRIGGER reject_collection_delete BEFORE DELETE ON collections
+                 WHEN OLD.id = {target}
+                 BEGIN SELECT RAISE(ABORT, 'forced collection failure'); END;"
+            ))
+            .expect("create rollback trigger");
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            assert!(org
+                .delete_collection_with_scope(target, true, preview)
+                .is_err());
+        }
+        let entry_count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM clipboard_entries", [], |row| {
+                row.get(0)
+            })
+            .expect("entries after rollback");
+        assert_eq!(
+            entry_count, 3,
+            "entry deletes roll back with collection failure"
+        );
+        db.connection_mut()
+            .execute_batch("DROP TRIGGER reject_collection_delete")
+            .expect("drop rollback trigger");
+
+        let deleted = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.delete_collection_with_scope(target, true, preview)
+                .expect("delete entries")
+        };
+        assert_eq!(
+            deleted,
+            CollectionDeletionOutcome::Deleted { removed_entries: 2 }
+        );
+        let count_remaining: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM clipboard_entries", [], |row| {
+                row.get(0)
+            })
+            .expect("remaining entries");
+        assert_eq!(count_remaining, 1);
+        let ids = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.entry_collection_ids(untouched).expect("untouched ids")
+        };
+        assert!(ids.iter().all(|id| *id != target && *id != other));
+        let target_exists: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM collections WHERE id = ?1",
+                params![target],
+                |row| row.get(0),
+            )
+            .expect("collection gone");
+        assert_eq!(target_exists, 0);
+        let tag_count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))
+            .expect("tag definition remains");
+        assert_eq!(tag_count, 1);
     }
 }

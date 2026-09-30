@@ -21,7 +21,9 @@ use time::OffsetDateTime;
 use tracing::warn;
 
 use clipvault_db::{
-    AppSettingsRepository, EntryRecord, EntryRepository, EntryRepositoryError, SetFavoriteOutcome,
+    AppSettingsRepository, CollectionDeletionOutcome as RepositoryCollectionDeletionOutcome,
+    CollectionDeletionPreview, EntryRecord, EntryRepository, EntryRepositoryError,
+    OrganizationError, OrganizationRepository, SetFavoriteOutcome,
 };
 
 use crate::bootstrap::AppContext;
@@ -178,6 +180,8 @@ fn app_settings_error_message(error: clipvault_db::AppSettingsError) -> String {
 pub enum ManagementServiceError {
     #[error("entry repository error: {0}")]
     Repository(#[from] EntryRepositoryError),
+    #[error("organization repository error: {0}")]
+    Organization(#[from] OrganizationError),
 }
 
 /// Outcome of [`HistoryManagementService::set_favorite`]. The service
@@ -207,6 +211,17 @@ impl SetFavoriteResult {
 pub enum DeleteOutcome {
     Removed { removed: usize },
     NotFound,
+    ConfirmationRequired,
+}
+
+/// Outcome of confirming deletion for a collection. The preview can
+/// change between the initial prompt and confirmation; that response
+/// carries only refreshed counts and requires another user action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CollectionDeleteOutcome {
+    Deleted { removed_entries: usize },
+    PreviewChanged { preview: CollectionDeletionPreview },
     ConfirmationRequired,
 }
 
@@ -580,6 +595,54 @@ impl HistoryManagementService {
             self.collect_unreferenced_assets(context);
             self.notify_destructive_change(removed);
             Ok(DeleteOutcome::Removed { removed })
+        }
+    }
+
+    /// Return a safe, metadata-only preview for deleting a user
+    /// collection. The repository never returns entry identifiers or
+    /// any clipboard-derived fields.
+    pub fn preview_collection_deletion(
+        &self,
+        context: &AppContext,
+        collection_id: i64,
+    ) -> Result<CollectionDeletionPreview, ManagementServiceError> {
+        let mut db = context.database().lock();
+        let repo = OrganizationRepository::new(db.connection_mut());
+        Ok(repo.preview_collection_deletion(collection_id)?)
+    }
+
+    /// Confirm deletion of a collection, either preserving its rows or
+    /// deleting them from local history. The repository checks the
+    /// preview counts inside its transaction and returns fresh counts
+    /// without mutation when they changed. Asset collection and watcher
+    /// invalidation run only after entries were deleted and committed.
+    pub fn delete_collection(
+        &self,
+        context: &AppContext,
+        collection_id: i64,
+        delete_entries: bool,
+        expected: CollectionDeletionPreview,
+        confirm: bool,
+    ) -> Result<CollectionDeleteOutcome, ManagementServiceError> {
+        if !confirm {
+            return Ok(CollectionDeleteOutcome::ConfirmationRequired);
+        }
+        let outcome = {
+            let mut db = context.database().lock();
+            let mut repo = OrganizationRepository::new(db.connection_mut());
+            repo.delete_collection_with_scope(collection_id, delete_entries, expected)?
+        };
+        match outcome {
+            RepositoryCollectionDeletionOutcome::PreviewChanged { preview } => {
+                Ok(CollectionDeleteOutcome::PreviewChanged { preview })
+            }
+            RepositoryCollectionDeletionOutcome::Deleted { removed_entries } => {
+                if removed_entries > 0 {
+                    self.collect_unreferenced_assets(context);
+                    self.notify_destructive_change(removed_entries);
+                }
+                Ok(CollectionDeleteOutcome::Deleted { removed_entries })
+            }
         }
     }
 
@@ -1138,6 +1201,54 @@ mod tests {
             context.history().history_count(&context).unwrap(),
             1,
             "exactly one row (the recapture) must remain after the deletion"
+        );
+    }
+
+    #[test]
+    fn confirmed_collection_entry_delete_invalidates_the_watcher() {
+        use crate::capture_diagnostic::AttemptOrigin;
+        use crate::watcher::WatchTickOutcome;
+
+        let (_dir, context, watcher) = build_context_with_watcher(&[
+            (Some("collection-delete"), 1),
+            (Some("collection-delete"), 1),
+            (Some("collection-delete"), 1),
+        ]);
+        let entry_id = match watcher.tick(&context, None, AttemptOrigin::BackgroundLoop) {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { id }) => id,
+            other => panic!("first tick must store the entry, got {other:?}"),
+        };
+        let collection = context
+            .organization()
+            .create_collection(&context, "Eliminar")
+            .expect("collection");
+        context
+            .organization()
+            .replace_entry_collections(&context, entry_id, &[collection.id])
+            .expect("membership");
+
+        let management = context.management();
+        let preview = management
+            .preview_collection_deletion(&context, collection.id)
+            .expect("preview");
+        assert_eq!(preview.entries, 1);
+        assert_eq!(
+            management
+                .delete_collection(&context, collection.id, true, preview, false)
+                .expect("unconfirmed collection delete"),
+            CollectionDeleteOutcome::ConfirmationRequired
+        );
+        assert_eq!(
+            management
+                .delete_collection(&context, collection.id, true, preview, true)
+                .expect("confirmed collection delete"),
+            CollectionDeleteOutcome::Deleted { removed_entries: 1 }
+        );
+
+        assert_eq!(
+            watcher.tick(&context, None, AttemptOrigin::BackgroundLoop),
+            WatchTickOutcome::Unchanged,
+            "the deleted capture must not be recreated at the same clipboard revision"
         );
     }
 

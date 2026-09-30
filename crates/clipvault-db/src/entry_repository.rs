@@ -164,10 +164,10 @@ impl<'a> EntryRepository<'a> {
     /// from creating a second history card, while two independently
     /// captured rich style variants can still coexist.
     ///
-    /// A freshly inserted row is attached to the system `Historial`
-    /// collection inside the same transaction so the invariant "every
-    /// entry belongs to `Historial`" holds even when an error rolls
-    /// the whole insert back.
+    /// Every inserted or reused row is attached to the system
+    /// `Historial` collection inside the same transaction. Repairing
+    /// the membership on dedupe is important for older rows created by
+    /// import paths that did not enforce the invariant.
     pub fn insert_or_touch(&mut self, new: NewEntry) -> Result<EntryOutcome, EntryRepositoryError> {
         let tx = self.conn.transaction()?;
         let plain_hash = new.content_hash.clone();
@@ -220,20 +220,19 @@ impl<'a> EntryRepository<'a> {
                 ],
             )?;
             let id = tx.last_insert_rowid();
-            // Attach the new row to the system `Historial` collection
-            // inside the same transaction so an error here rolls the
-            // insert back. The migration guarantees the row exists;
-            // if it does not we surface the same typed error the
-            // organization layer would surface to a service caller.
-            crate::organization::OrganizationRepository::attach_entry_to_history_in_tx(
-                &tx,
-                id,
-                new.created_at,
-            )
-            .map_err(EntryRepositoryError::Organization)?;
             let record = fetch_by_id(&tx, id)?.expect("row inserted above must still exist");
             EntryOutcome::Inserted(record)
         };
+
+        // The migration guarantees the system row exists; if it does
+        // not, surface the typed organization error and roll back both
+        // the timestamp refresh and any new row.
+        crate::organization::OrganizationRepository::attach_entry_to_history_in_tx(
+            &tx,
+            outcome.record().id,
+            new.last_seen_at,
+        )
+        .map_err(EntryRepositoryError::Organization)?;
 
         tx.commit()?;
         Ok(outcome)
@@ -1721,6 +1720,48 @@ mod tests {
 
         let repo = EntryRepository::new(db.connection_mut());
         assert_eq!(repo.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn insert_or_touch_repairs_history_membership_when_deduplicating() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let existing_id = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_entry("peer text", when))
+                .expect("insert")
+                .record()
+                .id
+        };
+        let history_id = {
+            let repo = crate::organization::OrganizationRepository::new(db.connection_mut());
+            repo.system_collection_id(crate::organization::HISTORY_STABLE_KEY)
+                .expect("history lookup")
+                .expect("history collection")
+        };
+        db.connection_mut()
+            .execute(
+                "DELETE FROM entry_collections WHERE entry_id = ?1 AND collection_id = ?2",
+                params![existing_id, history_id],
+            )
+            .expect("simulate an older import missing History");
+
+        let result = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_entry("peer text", when))
+                .expect("dedupe and repair")
+        };
+        assert!(matches!(result, EntryOutcome::Updated(ref row) if row.id == existing_id));
+        let history_memberships: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM entry_collections
+                  WHERE entry_id = ?1 AND collection_id = ?2",
+                params![existing_id, history_id],
+                |row| row.get(0),
+            )
+            .expect("history membership");
+        assert_eq!(history_memberships, 1);
     }
 
     #[test]

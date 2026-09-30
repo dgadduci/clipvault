@@ -223,139 +223,55 @@ test("OrganizationSidebar delete icon is local, accessible and replaces the lega
 });
 
 // ---------------------------------------------------------------------------
-// Collection delete confirmation now lives in a dedicated modal backed
-// by the shared `Modal` shell. The legacy inline confirmation row
-// must be gone — a regression that re-introduced it would lift the
-// panel above the documented rail height.
+// Deletion scope is confirmed in App.svelte, beside the management
+// bridge. The sidebar only requests the flow; the modal exposes safe
+// counts and never renders clipboard content or row identifiers.
 // ---------------------------------------------------------------------------
 
-test("OrganizationSidebar renders the collection delete confirmation in a modal", () => {
+test("OrganizationSidebar requests collection deletion from its parent", () => {
   const source = loadSource("src/OrganizationSidebar.svelte");
-  // The modal is anchored on `pendingDelete` and shares the shared
-  // shell so the focus trap, Escape handler and return-focus stay
-  // consistent with the rest of the desktop.
   assert.match(
     source,
-    /import\s+Modal\s+from\s+"\.\/Modal\.svelte"/,
-    "the sidebar must import the shared Modal shell",
+    /dispatch\(\s*"delete",\s*\{\s*collectionId:\s*collection\.id\s*\}\s*\)/,
   );
-  assert.match(
-    source,
-    /<Modal[\s\S]*?titleId="sidebar-delete-collection-modal-title"/,
-    "the delete modal must render with the documented title id",
-  );
-  assert.match(
-    source,
-    /open=\{pendingDelete !== null\}/,
-    "the modal must open when a delete is pending",
-  );
-  assert.match(
-    source,
-    /onClose=\{cancelDelete\}/,
-    "Escape / backdrop close must funnel through cancelDelete",
-  );
-  assert.match(
-    source,
-    /returnFocusTo=\{pendingDeleteTrigger\}/,
-    "the modal must restore focus to the icon that triggered it",
-  );
-  // The modal must keep the warning copy and the documented action
-  // buttons so the user gets the destructive branch in lock-step
-  // with the rest of the desktop.
-  assert.match(
-    source,
-    /data-testid="sidebar-delete-modal-warning"/,
-    "the modal must render the documented warning node",
-  );
-  assert.match(
-    source,
-    /data-testid="sidebar-delete-modal-cancel"/,
-    "the modal must render the documented cancel button",
-  );
-  assert.match(
-    source,
-    /data-testid="sidebar-delete-modal-confirm"/,
-    "the modal must render the documented confirm button",
-  );
-  // The legacy inline confirmation row is the regression this
-  // change removes: it never lifted the panel above the rail
-  // height and forced the user to read the destructive branch
-  // inside the cramped row.
-  assert.equal(
-    source.includes("confirm-delete"),
-    false,
-    "the legacy inline confirmation row must be gone",
-  );
-  assert.equal(
-    source.includes("confirmingDeleteId"),
-    false,
-    "the legacy confirmingDeleteId state must be gone",
-  );
-  assert.equal(
-    source.includes("sidebar-delete-confirm-yes"),
-    false,
-    "the legacy inline confirm test id must be gone",
-  );
-  assert.equal(
-    source.includes("sidebar-delete-confirm-no"),
-    false,
-    "the legacy inline cancel test id must be gone",
+  assert.doesNotMatch(source, /pendingDeleteBusy|sidebar-delete-modal/);
+});
+
+test("App confirms collection deletion with safe counts and reconfirms stale previews", () => {
+  const source = loadSource("src/App.svelte");
+  assert.match(source, /collectionsDeletePreviewCommand/);
+  assert.match(source, /expectedEntries:\s*preview\.entries/);
+  assert.match(source, /expectedFavorites:\s*preview\.favorites/);
+  assert.match(source, /kind === "preview_changed"/);
+  assert.match(source, /collection-delete-preview-changed/);
+  assert.match(source, /collection-delete-preserve/);
+  assert.match(source, /collection-delete-entries/);
+  assert.match(source, /collection-delete-cancel/);
+  assert.doesNotMatch(
+    source.match(/data-testid="collection-delete-modal"[\s\S]*?\n    <\/div>/)?.[0] ?? "",
+    /entry\.content|content_hash|asset_ref|remote_entry_id/,
   );
 });
 
-test("OrganizationSidebar confirm button dispatches the delete event and refreshes the list", () => {
-  const source = loadSource("src/OrganizationSidebar.svelte");
-  // The confirm button must dispatch `delete` with the pending
-  // collection id; the parent already calls `refreshOrganization`
-  // and `refreshEntries` so the collections list refreshes as
-  // soon as the destructive round-trip commits.
-  assert.match(
-    source,
-    /dispatch\(\s*"delete",\s*\{\s*collectionId(?:\s*:\s*collectionId)?\s*,?\s*\}\s*\)/,
-    "the confirm path must dispatch the delete event",
-  );
-  // The confirm path must also drive the modal closed so the
-  // user sees the rail refresh without lingering UI.
-  assert.match(
-    source,
-    /pendingDelete\s*=\s*null/,
-    "the confirm path must close the modal",
-  );
-  // The cancel button must never dispatch — a regression that
-  // wired both buttons to `confirmDelete` would delete the
-  // collection when the user pressed Cancel.
-  assert.match(
-    source,
-    /on:click=\{cancelDelete\}/,
-    "the cancel button must funnel through cancelDelete",
+test("App offers collection-only and global deletion from a user collection without payload text", () => {
+  const source = loadSource("src/App.svelte");
+  assert.match(source, /selectedCollectionId !== null && !activeCollectionIsHistory/);
+  assert.match(source, /scoped-entry-delete-collection-only/);
+  assert.match(source, /scoped-entry-delete-global/);
+  assert.match(source, /entryRemoveFromCollectionCommand\(\{/);
+  assert.match(source, /deleteEntryCommand\(\{\s*id:\s*pending\.entryId,\s*confirm:\s*true/s);
+  assert.match(source, /scoped-entry-delete-cancel/);
+  assert.match(source, /returnFocusTo=\{scopedEntryDeletionTrigger\}/);
+  assert.doesNotMatch(
+    source.match(/data-testid="scoped-entry-delete-modal"[\s\S]*?\n    <\/div>/)?.[0] ?? "",
+    /entry\.content|content_hash|asset_ref|remote_entry_id/,
   );
 });
 
-test("OrganizationSidebar modal buttons use the documented danger and secondary tokens", () => {
-  const source = loadSource("src/OrganizationSidebar.svelte");
-  // The confirm button must carry the danger colour hook so a
-  // regression that drifted back to `--cv-accent` would surface
-  // here. The cancel button stays neutral so the destructive
-  // branch remains visually distinct.
-  assert.match(
-    source,
-    /data-cv-danger="collection-delete-confirm"/,
-    "the confirm button must advertise its danger hook",
-  );
-  assert.match(
-    source,
-    /class="modal-action modal-action-danger"/,
-    "the confirm button must use the danger variant",
-  );
-  assert.match(
-    source,
-    /class="modal-action modal-action-secondary"/,
-    "the cancel button must use the secondary variant",
-  );
-  // Both buttons must stay disabled while the parent's
-  // destructive round-trip is in flight so a double click
-  // cannot dispatch the event twice.
-  assert.match(source, /disabled=\{pendingDeleteBusy\}/);
+test("collection and scoped entry destructive choices use the danger hook", () => {
+  const source = loadSource("src/App.svelte");
+  assert.match(source, /data-testid="collection-delete-entries"[\s\S]{0,200}data-cv-danger="collection-delete-confirm"/);
+  assert.match(source, /data-testid="scoped-entry-delete-global"[\s\S]{0,200}data-cv-danger="card-delete"/);
 });
 
 test("App.svelte registers exactly one search-shortcut listener and removes it", () => {
