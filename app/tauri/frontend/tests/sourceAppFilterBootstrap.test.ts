@@ -102,12 +102,10 @@ test("loadEntries always routes through clipvault_recent_entries_filtered", () =
   );
 });
 
-test("loadEntries forwards activeCollectionIsHistory as collectionId null", () => {
-  // The wire contract the rest of the backend speaks treats
-  // `collection_id: null` as the Historial scope. The new
-  // `loadEntries` mirrors that explicitly so the bridge never has
-  // to guess whether a missing collectionId means "no filter" or
-  // "Historial" — both are the same `null`.
+test("loadEntries resolves the collection scope from the selected id", () => {
+  // The wire contract treats collection_id: null as Historial. The
+  // helper resolves this without relying on a derived Svelte value
+  // that may still represent the previous collection.
   const source = stripComments(loadSource("src/App.svelte"));
   const block = source.match(
     /async function loadEntries[^{]*\{[\s\S]*?\n\s{2}\}/,
@@ -116,8 +114,8 @@ test("loadEntries forwards activeCollectionIsHistory as collectionId null", () =
   const body = block[0];
   assert.match(
     body,
-    /collectionId:\s*activeCollectionIsHistory\s*\?\s*null\s*:\s*selectedCollectionId/,
-    "loadEntries must map activeCollectionIsHistory to collectionId: null",
+    /collectionId:\s*activeCollectionScopeId\(selectedCollectionId\)/,
+    "loadEntries must derive the request scope from the selected collection id",
   );
   assert.match(
     body,
@@ -148,8 +146,13 @@ test("source-app combobox still drives refreshEntries on selection change", () =
   assert.ok(refreshBlock, "refreshEntries must exist");
   assert.match(
     refreshBlock[0],
-    /entries = await loadEntries\(\)/,
+    /loadEntries\(\)/,
     "refreshEntries must call loadEntries",
+  );
+  assert.match(
+    refreshBlock[0],
+    /entries = loadedEntries/,
+    "refreshEntries must publish the rows returned by loadEntries",
   );
 });
 
@@ -157,7 +160,7 @@ test("source-app combobox still drives refreshEntries on selection change", () =
 // Search path: text + source-app filter must compose in Historial.
 // ---------------------------------------------------------------------------
 
-test("searchEntriesCommand receives both collectionId null and sourceApp filter in Historial", () => {
+test("searchEntriesCommand receives the resolved collection scope and sourceApp filter", () => {
   // The bootstrap regression touched the recents path; the search
   // path was already routed through `searchEntriesCommand` with
   // both facets, but a regression that mirrored the recents bug
@@ -172,8 +175,8 @@ test("searchEntriesCommand receives both collectionId null and sourceApp filter 
   const body = searchBlock[0];
   assert.match(
     body,
-    /collectionId:\s*selectedCollectionId\s*!==\s*null\s*&&\s*!activeCollectionIsHistory\s*\?\s*selectedCollectionId\s*:\s*null/,
-    "search must map activeCollectionIsHistory to collectionId: null",
+    /collectionId:\s*activeCollectionScopeId\(selectedCollectionId\)/,
+    "search must derive its scope from the selected collection id",
   );
   assert.match(
     body,
@@ -206,8 +209,8 @@ test("selectCollectionFromSidebar resets the source-app filter to Todas and relo
   );
   assert.match(
     body,
-    /await refreshSourceAppOptions\(\)/,
-    "collection switch must reload the combobox options",
+    /await refreshSourceAppOptions\(targetCollectionId\)/,
+    "collection switch must request options for the destination id immediately",
   );
   assert.match(
     body,
@@ -216,27 +219,21 @@ test("selectCollectionFromSidebar resets the source-app filter to Todas and relo
   );
 });
 
-test("refreshSourceAppOptions uses activeCollectionIsHistory to derive the collectionId", () => {
-  // The combobox options are computed against the same scope the
-  // rail reads. The fix keeps the explicit
-  // `activeCollectionIsHistory ? null : selectedCollectionId`
-  // expression so a regression that hardcodes a numeric id (e.g.
-  // the legacy history collection id) fails this assertion.
+test("collection scope helper maps History and system collections to null", () => {
   const source = stripComments(loadSource("src/App.svelte"));
-  const optionsBlock = source.match(
-    /async function refreshSourceAppOptions\(\)[\s\S]*?\n\s{2}\}/,
+  const scopeBlock = source.match(
+    /function activeCollectionScopeId\(collectionId: number \| null\)[\s\S]*?\n\s{2}\}/,
   );
-  assert.ok(optionsBlock, "refreshSourceAppOptions must exist");
+  assert.ok(scopeBlock, "activeCollectionScopeId helper must exist");
   assert.match(
-    optionsBlock[0],
-    /collectionId:\s*activeCollectionIsHistory\s*\?\s*null\s*:\s*selectedCollectionId/,
-    "refreshSourceAppOptions must derive the scope from activeCollectionIsHistory",
+    scopeBlock[0],
+    /if\s*\(collectionId\s*===\s*null\)\s*return\s+null/,
+    "the null History selection must stay the null backend scope",
   );
-  // No numeric id is hardcoded as the history collection id.
-  assert.equal(
-    /historyCollectionId\s*\}\s*\?/.test(optionsBlock[0]),
-    false,
-    "refreshSourceAppOptions must not branch on historyCollectionId",
+  assert.match(
+    scopeBlock[0],
+    /return\s+collection\?\.kind\s*===\s*"system"\s*\?\s*null\s*:\s*collectionId/,
+    "system collections must also map to the null History scope",
   );
 });
 
@@ -258,6 +255,29 @@ test("refreshSourceAppOptions keeps a monotonic token to drop stale bootstrap re
     source,
     /if \(token !== sourceAppOptionsToken\) \{[\s\S]*?return;[\s\S]*?\}/,
     "refreshSourceAppOptions must drop stale responses",
+  );
+});
+
+test("refreshSourceAppOptions does not suppress a destination scope while another request is active", () => {
+  const source = stripComments(loadSource("src/App.svelte"));
+  const optionsBlock = source.match(
+    /async function refreshSourceAppOptions\([\s\S]*?\n\s{2}\}/,
+  );
+  assert.ok(optionsBlock, "refreshSourceAppOptions must exist");
+  assert.match(
+    optionsBlock[0],
+    /const collectionId = activeCollectionScopeId\(selectedCollectionIdAtRequest\)/,
+    "the request must use the destination id it receives",
+  );
+  assert.match(
+    optionsBlock[0],
+    /snapshot\.scope\.collection_id !== collectionId/,
+    "a response computed for a different collection must not be published",
+  );
+  assert.equal(
+    /if\s*\(sourceAppOptionsLoading\)\s*\{\s*return/.test(optionsBlock[0]),
+    false,
+    "an in-flight request must not suppress the latest scope refresh",
   );
 });
 

@@ -1,6 +1,6 @@
 # Propuesta: identificar la aplicación de origen en KDE Wayland
 
-## Problema
+## Why
 
 En Arch Linux con KDE Plasma Wayland, ClipVault captura el portapapeles, pero
 las entradas no reciben el origen de la aplicación; por eso no se muestran su
@@ -42,7 +42,7 @@ KWin ignorase la activación. La corrección escribirá la clave con el formato
 KConfig correcto y migrará sólo la clave antigua de ClipVault, conservando su
 valor habilitado/deshabilitado y las demás claves.
 
-## Objetivos
+## What Changes
 
 - Obtener en KDE Plasma Wayland un identificador estable de la ventana activa
   cuando KWin lo publique, canonizando el nombre base que KWin documenta como

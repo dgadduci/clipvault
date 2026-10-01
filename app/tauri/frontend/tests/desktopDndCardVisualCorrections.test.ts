@@ -494,10 +494,14 @@ test("HistoryCard source-app icon visual size is exactly 50% larger than the 1.1
   assert.match(source, /\.source-app-icon,\s*\.source-app-fallback\s*\{[^}]*object-fit:\s*contain/s);
   // The fallback still relies on the same icon resolver pipeline.
   assert.match(source, /source-app-fallback[\s\S]*?\{@html APP_FALLBACK_ICON_SVG\}/);
-  // The card keeps its `aria-label` and `title` from the
-  // accessible label helper.
-  assert.match(source, /aria-label=\{sourceAppAccessibleLabel\(entry\)\}/);
-  assert.match(source, /title=\{sourceAppAccessibleLabel\(entry\)\}/);
+  // The card keeps its `aria-label` and `title` from the effective
+  // local-or-imported source-app presentation helper.
+  assert.match(
+    source,
+    /sourceAppLabel\s*=\s*sourceAppPresentationAccessibleLabel\(\s*entry,\s*peerImportedSourceApp,\s*\)/,
+  );
+  assert.match(source, /aria-label=\{sourceAppLabel\}/);
+  assert.match(source, /title=\{sourceAppLabel\}/);
   // The card width stays on `--cv-card-size` so the source icon
   // enlargement cannot push it out of the rail.
   assert.match(source, /\.card\s*\{[^}]*width:\s*var\(--cv-card-size/s);

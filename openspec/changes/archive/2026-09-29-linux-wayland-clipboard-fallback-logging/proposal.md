@@ -1,6 +1,6 @@
 # Propuesta: inicialización estable del clipboard fallback en Wayland
 
-## Problema
+## Why
 
 En Ubuntu Wayland, la captura continúa sin regresiones observables, pero la
 consola repite a intervalos cortos el warning de `arboard` que anuncia que el
@@ -19,7 +19,7 @@ se vuelve ruido operativo.
 
 El usuario autorizó corregir la inicialización repetida el 2026-09-28.
 
-## Objetivos
+## What Changes
 
 - Inicializar y reutilizar el cliente de clipboard de `arboard` durante la
   sesión de la aplicación cuando su conexión siga siendo válida.

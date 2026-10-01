@@ -58,6 +58,27 @@ impl<'a> NoteRepository<'a> {
         Ok(has_note)
     }
 
+    /// Import a note only when the local entry has none. This prevents an
+    /// explicit peer import from replacing a note the user already wrote.
+    pub fn set_entry_note_if_absent(
+        &mut self,
+        entry_id: i64,
+        body: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, NoteRepositoryError> {
+        if body.is_empty() {
+            return Ok(false);
+        }
+        let tx = self.conn.transaction()?;
+        ensure_entry_exists(&tx, entry_id)?;
+        let changed = tx.execute(
+            "INSERT OR IGNORE INTO entry_notes (entry_id, body, updated_at) VALUES (?1, ?2, ?3)",
+            params![entry_id, body, format_timestamp(now)],
+        )?;
+        tx.commit()?;
+        Ok(changed > 0)
+    }
+
     pub fn entry_note_ids(&self) -> Result<Vec<i64>, NoteRepositoryError> {
         Ok(list_note_ids(
             self.conn,

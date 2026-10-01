@@ -265,7 +265,6 @@
    * embedded `scope` and dropped silently.
    */
   let sourceAppOptions: SourceApplicationOption[] = [];
-  let sourceAppOptionsLoading = false;
   /**
    * Tag filter the toolbar combobox renders between the
    * source-application combobox and the configuration menu. The
@@ -384,6 +383,22 @@
   $: activeCollectionIsHistory =
     selectedCollectionId === null ||
     (activeCollection !== null && activeCollection.kind === "system");
+
+  /**
+   * Resolve the backend scope from the collection id being queried,
+   * rather than from Svelte's derived activeCollectionIsHistory value.
+   * Collection selection updates are synchronous while reactive values
+   * flush afterward, so a request started in the same handler could
+   * otherwise inherit the previous collection's History state.
+   */
+  function activeCollectionScopeId(collectionId: number | null): number | null {
+    if (collectionId === null) return null;
+    const collection = organization?.collections.find(
+      (candidate) => candidate.id === collectionId,
+    );
+    return collection?.kind === "system" ? null : collectionId;
+  }
+
   $: canCreateManualText = activePeerId === null && (
     activeCollectionIsHistory ||
     (activeCollection !== null && activeCollection.kind === "user" && !activeCollection.is_peer_bound)
@@ -579,21 +594,17 @@
    * `recentEntriesCommand`, which silently dropped the
    * `sourceAppFilter` while the active view was Historial (the
    * default). The combobox kept loading its options correctly
-   * because `refreshSourceAppOptions` already uses the explicit
-   * `activeCollectionIsHistory ? null : selectedCollectionId`
-   * scope; the rail needed the same pattern.
+   * using the collection id directly keeps a same-turn scope change
+   * independent from Svelte's next reactive flush.
    *
-   * `activeCollectionIsHistory` is the documented scope helper: it
-   * returns `true` for the default Historial view (`selectedCollectionId
-   * === null`) and for a collection whose kind is `system`. Mapping
-   * the `true` branch to `collectionId: null` keeps the wire contract
-   * the `clipvault_recent_entries_filtered` command already expects
-   * for Historial and removes the need to hardcode any numeric id.
+   * `activeCollectionScopeId` maps the default Historial view and any
+   * system collection to the `null` scope the backend expects, without
+   * relying on a reactive value that may not have flushed yet.
    */
   async function loadEntries(): Promise<EntryRecord[]> {
     return recentEntriesFilteredCommand({
       limit: RAIL_LIMIT,
-      collectionId: activeCollectionIsHistory ? null : selectedCollectionId,
+      collectionId: activeCollectionScopeId(selectedCollectionId),
       tagIds: currentTagFilterIds(),
       sourceApp: sourceAppFilter,
     });
@@ -604,7 +615,7 @@
   ): Promise<void> {
     const token = ++peerImportedSourceAppsToken;
     const selectedCollectionIdAtRequest = selectedCollectionId;
-    const collectionId = activeCollectionIsHistory ? null : selectedCollectionId;
+    const collectionId = activeCollectionScopeId(selectedCollectionId);
     const entryIds = Array.from(new Set(records.map((entry) => entry.id)))
       .filter((id) => Number.isInteger(id) && id > 0)
       .slice(0, 100);
@@ -932,16 +943,22 @@
    * request and immediately re-run the active query.
    */
   async function handleSourceAppFilterChange(next: SourceAppFilter): Promise<void> {
-    if (
-      next.kind === sourceAppFilter.kind &&
-      (next.kind !== "known" ||
-        (sourceAppFilter.kind === "known" &&
-          next.source_app === sourceAppFilter.source_app))
-    ) {
-      return;
-    }
+    if (sameSourceAppFilter(next, sourceAppFilter)) return;
     sourceAppFilter = next;
     await refreshEntries();
+  }
+
+  function sameSourceAppFilter(a: SourceAppFilter, b: SourceAppFilter): boolean {
+    if (a.kind !== b.kind) return false;
+    switch (a.kind) {
+      case "all":
+      case "unknown":
+        return true;
+      case "known":
+        return b.kind === "known" && a.source_app === b.source_app;
+      case "imported":
+        return b.kind === "imported" && a.display_name === b.display_name;
+    }
   }
 
   /**
@@ -1003,23 +1020,28 @@
    * active collection scope. The bridge call is anchored on a
    * monotonic token so a stale response (a collection switch that
    * landed while the bridge call was in flight) never overwrites a
-   * fresher snapshot — the guard mirrors the one
-   * `performSearch` already uses.
+   * fresher snapshot. Each new scope starts its own request, and the
+   * response's embedded scope is checked before publishing options.
    */
   let sourceAppOptionsToken = 0;
-  async function refreshSourceAppOptions(): Promise<void> {
-    if (sourceAppOptionsLoading) {
-      return;
-    }
-    sourceAppOptionsLoading = true;
+  async function refreshSourceAppOptions(
+    selectedCollectionIdAtRequest: number | null = selectedCollectionId,
+  ): Promise<void> {
+    const collectionId = activeCollectionScopeId(selectedCollectionIdAtRequest);
     const token = ++sourceAppOptionsToken;
     try {
       const snapshot: SourceApplicationsSnapshot = await sourceApplicationsCommand({
-        collectionId: activeCollectionIsHistory ? null : selectedCollectionId,
+        collectionId,
         tagIds: [],
       });
       if (token !== sourceAppOptionsToken) {
         return;
+      }
+      if (
+        snapshot.scope.collection_id !== collectionId ||
+        snapshot.scope.tag_ids.length !== 0
+      ) {
+        throw new Error("Source-app options returned a different collection scope");
       }
       sourceAppOptions = snapshot.options;
     } catch (err) {
@@ -1027,10 +1049,6 @@
         organizationError = `Source-app options unavailable: ${
           err instanceof Error ? err.message : String(err)
         }`;
-      }
-    } finally {
-      if (token === sourceAppOptionsToken) {
-        sourceAppOptionsLoading = false;
       }
     }
   }
@@ -1072,7 +1090,8 @@
   async function selectCollectionFromSidebar(
     event: CustomEvent<{ collectionId: number | null }>,
   ): Promise<void> {
-    selectedCollectionId = event.detail.collectionId;
+    const targetCollectionId = event.detail.collectionId;
+    selectedCollectionId = targetCollectionId;
     peerImportedSourceAppsToken += 1;
     peerImportedSourceApps = new Map();
     // Switching collection MUST reset the source-app filter to
@@ -1108,7 +1127,7 @@
     // Reload the combobox options for the new scope and refresh
     // the rail so the cards reflect the new active collection
     // without stale options or stale rows.
-    await refreshSourceAppOptions();
+    await refreshSourceAppOptions(targetCollectionId);
     await refreshEntries();
   }
 
@@ -1764,10 +1783,7 @@
         const response: SearchResponse = await searchEntriesCommand({
           query: q,
           limit: RAIL_LIMIT,
-          collectionId:
-            selectedCollectionId !== null && !activeCollectionIsHistory
-              ? selectedCollectionId
-              : null,
+          collectionId: activeCollectionScopeId(selectedCollectionId),
           tagIds: currentTagFilterIds(),
           sourceApp: sourceAppFilter,
         });

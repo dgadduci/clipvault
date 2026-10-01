@@ -41,8 +41,15 @@ multiple additional flat collections.
 
 ClipVault SHALL allow users to create, rename and delete flat user
 collections, and every collection SHALL expose a validated persistent color.
-Deleting a user collection SHALL remove only its memberships and SHALL NOT
-delete entries, tags, `Historial` or memberships in other collections.
+Before deleting a user collection, ClipVault SHALL show a metadata-only count
+of its entries and favorites and ask whether to preserve those entries in
+`Historial` or delete them from all local history. Preserving entries SHALL
+remove only the collection and its memberships; entries, `Historial` and other
+collection memberships SHALL remain. Choosing to delete entries SHALL remove
+all entries currently in that collection from local history and every other
+collection, including favorites, in the same transaction as collection
+deletion. Tag definitions SHALL remain. The protected system `Historial`
+collection SHALL NOT be deleted.
 
 #### Scenario: Create collection
 
@@ -59,11 +66,49 @@ delete entries, tags, `Historial` or memberships in other collections.
 - **THEN** only that collection's display name changes and its memberships
   remain intact
 
+#### Scenario: Preview collection deletion
+
+- **WHEN** the user opens the delete prompt for a user collection
+- **THEN** the prompt displays the number of entries and favorites currently
+  associated with that collection without exposing entry content or identifiers
+- **AND** it offers separate choices to preserve entries in `Historial` or to
+  delete them from all local history
+
 #### Scenario: Delete collection
 
-- **WHEN** the user confirms deletion of a user collection
-- **THEN** the collection and its association rows are removed while every
-  associated entry remains in `Historial` and other collections
+- **WHEN** the user confirms collection deletion and chooses to preserve entries
+- **THEN** the collection and its association rows are removed
+- **AND** every associated entry remains in `Historial` and other collections
+- **AND** import provenance remains available for preserved imported entries
+
+#### Scenario: Delete collection and its entries
+
+- **WHEN** the user confirms collection deletion and chooses to delete its entries
+- **THEN** all currently associated entries, including favorites, are removed
+  from history and other collections atomically with the collection
+- **AND** tag and unrelated collection definitions remain
+- **AND** referenced assets are retained if any remaining entry still uses them
+
+#### Scenario: Collection contents changed after preview
+
+- **GIVEN** the user previewed deletion counts for a collection
+- **AND** the total or favorite-entry count changes before confirmation
+- **WHEN** the user confirms deletion of the collection's entries
+- **THEN** ClipVault leaves the collection and all entries unchanged
+- **AND** the prompt receives the updated counts and requires confirmation
+  again before deleting entries
+
+#### Scenario: Cancel collection deletion
+
+- **WHEN** the user cancels the delete prompt
+- **THEN** the collection, entries, memberships, provenance and assets remain
+  unchanged
+
+#### Scenario: Protected system collection
+
+- **WHEN** a user attempts to rename or delete `Historial`
+- **THEN** ClipVault rejects the operation with a typed validation result and
+  leaves the system collection unchanged
 
 #### Scenario: Duplicate collection name
 
@@ -302,3 +347,62 @@ and events SHALL remain free of clipboard content, hashes, snippets and paths.
 - **WHEN** a command targets a missing entry, tag or collection
 - **THEN** it returns a typed non-fatal result and does not modify unrelated
   history
+
+### Requirement: Persist and edit one local note per collection
+
+ClipVault SHALL allow one optional plain-text note per collection, including
+Historial, user collections and collections bound to peer imports. A note
+SHALL support line breaks and SHALL be persisted locally, independently from
+the collection name, color, kind and memberships. The collection list SHALL
+identify collections with a saved note using an accessible note icon whose
+activation opens the shared note editor. A collection without a note SHALL
+provide an accessible action to create one. Collection notes SHALL NOT be
+included in peer-to-peer capture transfers, logs, diagnostics or collection
+list bodies. Deleting a collection SHALL remove its note with the collection,
+even when its entries are preserved.
+
+#### Scenario: Add a collection note
+
+- **WHEN** the user creates and saves a multiline note for a collection
+- **THEN** ClipVault persists the note locally
+- **AND** the collection row identifies the saved note with an accessible
+  note icon
+
+#### Scenario: Open and edit a collection note
+
+- **GIVEN** a collection has a saved note
+- **WHEN** the user activates its note icon in the collection list
+- **THEN** the shared note modal opens with the persisted note and allows the
+  user to edit it
+
+#### Scenario: Create a note for a collection without one
+
+- **GIVEN** a collection has no saved note
+- **WHEN** the user activates its add-note action
+- **THEN** the shared note modal opens with an empty multiline editor
+- **AND** the collection list shows the note icon after a successful save
+
+#### Scenario: Remove a collection note
+
+- **WHEN** the user saves an empty collection note
+- **THEN** ClipVault removes the note association and the collection row no
+  longer identifies a saved note
+
+#### Scenario: Cancel collection note editing
+
+- **WHEN** the user cancels, presses Escape or closes the backdrop before
+  saving
+- **THEN** the persisted collection note remains unchanged
+
+#### Scenario: Collection deletion removes its note
+
+- **WHEN** the user deletes a collection while preserving its entries
+- **THEN** ClipVault deletes the collection note with the collection
+- **AND** the preserved entries, their memberships in other collections and
+  their capture notes remain unchanged
+
+#### Scenario: Collection note stays local
+
+- **WHEN** a collection is bound to peer imports and has a local note
+- **THEN** the note remains local and is not included in any capture transfer
+- **AND** the collection's import binding and entries remain unchanged

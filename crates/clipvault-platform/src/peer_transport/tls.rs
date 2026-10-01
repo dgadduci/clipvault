@@ -2151,6 +2151,7 @@ where
                     body,
                     source_app_name,
                     source_app_icon_bytes,
+                    capture_note,
                 } => {
                     if body.len() > FETCH_TEXT_MAX_BODY_BYTES {
                         // Defence in depth: the handler contract
@@ -2176,6 +2177,8 @@ where
                                 .map(|bytes| {
                                     base64::engine::general_purpose::STANDARD.encode(bytes)
                                 }),
+                            capture_note: capture_note
+                                .filter(|note| note.len() <= super::FETCH_CAPTURE_NOTE_MAX_BYTES),
                         }
                     }
                 }
@@ -2369,6 +2372,7 @@ where
                 bytes,
                 source_app_name,
                 source_app_icon_bytes,
+                capture_note,
             } => {
                 if bytes.len() > FETCH_IMAGE_MAX_BODY_BYTES {
                     // Defence in depth: the handler contract
@@ -2400,6 +2404,8 @@ where
                         source_app_icon_b64: source_app_icon_bytes
                             .filter(|icon| icon.len() <= FETCH_SOURCE_APP_ICON_MAX_BYTES)
                             .map(|icon| base64::engine::general_purpose::STANDARD.encode(icon)),
+                        capture_note: capture_note
+                            .filter(|note| note.len() <= super::FETCH_CAPTURE_NOTE_MAX_BYTES),
                     }
                 }
             }
@@ -5005,6 +5011,7 @@ async fn dial_fetch_text_async(
             body,
             source_app_name,
             source_app_icon_b64,
+            capture_note,
         } => {
             if ack_peer_id != peer_id {
                 return Err(super::TransportError::UnknownPeer);
@@ -5023,6 +5030,8 @@ async fn dial_fetch_text_async(
                 body,
                 source_app_name,
                 source_app_icon_bytes: decode_optional_source_app_icon(source_app_icon_b64),
+                capture_note: capture_note
+                    .filter(|note| note.len() <= super::FETCH_CAPTURE_NOTE_MAX_BYTES),
             })
         }
         PairingMessage::FetchTextUnavailable { reason, .. } => {
@@ -5170,6 +5179,7 @@ async fn dial_fetch_image_async(
             bytes_b64,
             source_app_name,
             source_app_icon_b64,
+            capture_note,
         } => {
             if ack_peer_id != peer_id {
                 return Err(super::TransportError::UnknownPeer);
@@ -5195,6 +5205,8 @@ async fn dial_fetch_image_async(
                 bytes,
                 source_app_name,
                 source_app_icon_bytes: decode_optional_source_app_icon(source_app_icon_b64),
+                capture_note: capture_note
+                    .filter(|note| note.len() <= super::FETCH_CAPTURE_NOTE_MAX_BYTES),
             })
         }
         PairingMessage::FetchImageUnavailable { reason, .. } => match reason.as_str() {

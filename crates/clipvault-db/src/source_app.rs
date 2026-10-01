@@ -30,6 +30,10 @@ pub enum SourceAppFilter {
     Known { source_app: String },
     /// Restrict to rows whose `source_app` is `NULL` or empty.
     Unknown,
+    /// Restrict to entries whose effective visible attribution uses this
+    /// imported application name. The repository resolves provenance using
+    /// the active collection's peer binding when one exists.
+    Imported { display_name: String },
 }
 
 /// SQL predicate builder used by the recents/search queries and
@@ -68,6 +72,7 @@ pub(crate) fn source_app_predicate(filter: &SourceAppFilter) -> Option<SourceApp
             sql: "source_app IS NULL OR source_app = ''",
             params: vec![],
         }),
+        SourceAppFilter::Imported { .. } => None,
     }
 }
 

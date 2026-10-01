@@ -95,7 +95,7 @@ test("imported source metadata loads in history and stays a tooltip tag beside t
   const refresh = SOURCE.app.match(
     /async function refreshPeerImportedSourceApps\([\s\S]*?\n  \}/,
   )?.[0] ?? "";
-  assert.match(refresh, /collectionId = activeCollectionIsHistory \? null : selectedCollectionId/);
+  assert.match(refresh, /collectionId = activeCollectionScopeId\(selectedCollectionId\)/);
   assert.doesNotMatch(refresh, /is_peer_bound/);
   assert.match(refresh, /collection_id: collectionId/);
   assert.match(refresh, /selectedCollectionId !== selectedCollectionIdAtRequest/);
@@ -116,7 +116,7 @@ test("imported source metadata loads in history and stays a tooltip tag beside t
   );
   assert.match(SOURCE.repository, /JOIN remote_imports ri ON ri\.peer_id = pcb\.peer_id/);
   assert.match(SOURCE.repository, /source_app_presentations_for_scope/);
-  assert.match(SOURCE.app, /activeCollectionIsHistory \? null : selectedCollectionId/);
+  assert.match(SOURCE.app, /function activeCollectionScopeId\(collectionId: number \| null\)/);
 });
 
 test("peer-bound attribution bridge stays scoped to opaque local entry IDs", () => {

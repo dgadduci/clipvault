@@ -20,9 +20,10 @@ use crate::peer_identity::{
 };
 use crate::privacy::PrivacyGate;
 use crate::settings::{
-    local_clipboard_capture_enabled_value, local_peer_sharing_enabled_value,
+    capture_notes_sharing_enabled_value, local_clipboard_capture_enabled_value,
+    local_peer_sharing_enabled_value, parse_capture_notes_sharing_enabled,
     parse_local_clipboard_capture_enabled, parse_local_peer_sharing_enabled, HotkeySpec, Settings,
-    SettingsUpdate, ValidationError, HOTKEY_SETTING_STORAGE_KEY,
+    SettingsUpdate, ValidationError, CAPTURE_NOTES_SHARING_ENABLED_KEY, HOTKEY_SETTING_STORAGE_KEY,
     LOCAL_CLIPBOARD_CAPTURE_ENABLED_KEY, LOCAL_PEER_DISPLAY_NAME_KEY,
     LOCAL_PEER_SHARING_ENABLED_KEY,
 };
@@ -170,6 +171,16 @@ impl SettingsService {
         settings.local_peer_sharing_enabled =
             parse_local_peer_sharing_enabled(sharing_enabled_raw.as_deref());
 
+        let capture_notes_sharing_raw = {
+            let repo = AppSettingsRepository::new(db.connection_mut());
+            repo.get(CAPTURE_NOTES_SHARING_ENABLED_KEY)
+                .ok()
+                .flatten()
+                .map(|setting| setting.value)
+        };
+        settings.capture_notes_sharing_enabled =
+            parse_capture_notes_sharing_enabled(capture_notes_sharing_raw.as_deref());
+
         let ignored = {
             let repo = IgnoredAppRepository::new(db.connection_mut());
             repo.list()
@@ -252,6 +263,15 @@ impl SettingsService {
             repo.set(
                 LOCAL_PEER_SHARING_ENABLED_KEY,
                 local_peer_sharing_enabled_value(next.local_peer_sharing_enabled),
+                now,
+            )?;
+        }
+
+        if next.capture_notes_sharing_enabled != current.capture_notes_sharing_enabled {
+            let conn = db.connection_mut();
+            AppSettingsRepository::new(conn).set(
+                CAPTURE_NOTES_SHARING_ENABLED_KEY,
+                capture_notes_sharing_enabled_value(next.capture_notes_sharing_enabled),
                 now,
             )?;
         }
@@ -694,6 +714,43 @@ mod tests {
             !loaded.local_peer_sharing_enabled,
             "fresh install must default the toggle to false"
         );
+    }
+
+    #[test]
+    fn capture_note_sharing_defaults_off_and_persists_as_a_partial_setting() {
+        use crate::test_support::isolated_harness;
+        use std::sync::Arc;
+
+        let (_dir, context) = isolated_harness();
+        let probe = Arc::new(clipvault_platform::NoopActiveApplicationProbe);
+        let gate = crate::privacy::PrivacyGate::new(
+            crate::privacy::CoreBlacklistMatcher::with_ignored(probe, vec![]),
+        );
+        let service = SettingsService::new(Arc::new(crate::clock::SystemClock), gate);
+        assert!(!service.load(&context).capture_notes_sharing_enabled);
+
+        let stored = service
+            .apply(
+                &context,
+                &SettingsUpdate {
+                    capture_notes_sharing_enabled: Some(true),
+                    ..SettingsUpdate::default()
+                },
+            )
+            .expect("enable capture-note export");
+        assert!(stored.capture_notes_sharing_enabled);
+        assert!(service.load(&context).capture_notes_sharing_enabled);
+
+        let _ = service
+            .apply(
+                &context,
+                &SettingsUpdate {
+                    retention: Some(RetentionPolicy::Days7),
+                    ..SettingsUpdate::default()
+                },
+            )
+            .expect("unrelated partial setting");
+        assert!(service.load(&context).capture_notes_sharing_enabled);
     }
 
     #[test]

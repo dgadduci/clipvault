@@ -1,6 +1,6 @@
 # Propuesta: documentos de texto y notas para capturas y colecciones
 
-## Contexto
+## Why
 
 Las colecciones sólo pueden organizar capturas que ya provienen del
 portapapeles o de una importación. No hay una forma de crear desde ClipVault un
@@ -12,7 +12,7 @@ historial, cards y edición textual. La solución debe integrarse con esas
 entidades sin convertir las notas en contenido del portapapeles ni alterar los
 datos de una captura.
 
-## Objetivo
+## What Changes
 
 - Crear y editar documentos de texto plano con saltos de línea desde
   Historial o cualquier colección local que no esté vinculada a importaciones

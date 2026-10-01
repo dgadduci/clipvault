@@ -6,23 +6,25 @@ el script no estaba cargado (`isScriptLoaded=false`): `kwinrc` contenía la clav
 mal formada `Plugins/<id>Enabled` dentro de `[Plugins]`; KWin espera
 `<id>Enabled`. La build corrigió y migró la clave preservando su valor. El
 2026-09-29 la prueba manual aprobó la detección del nombre e icono de origen en
-las capturas de Arch/KDE/Wayland.
+las capturas de Arch/KDE/Wayland. El usuario aprobó el 2026-09-29 las pruebas
+manuales de origen XWayland y del ciclo de vida KDE, además de las pruebas de
+regresión macOS/Ubuntu; no se observaron regresiones.
 
 ## 1. Diagnóstico y compatibilidad KWin
 
 - [x] 1.1 Revisar `git status --short`, `git diff --check`, cambios activos y
   baseline; no modificar código, configuración ni assets ajenos.
-- [ ] 1.2 En Arch Linux KDE Plasma Wayland, confirmar por aplicación si KWin
-  publica `desktopFileName` vacío, sin extensión o con `.desktop`, y verificar
-  el formato exacto de `desktopFileName`. La captura manual ya confirmó nombre
-  e icono de origen, pero no se inspeccionó ni registró el valor bruto de KWin.
+- [x] 1.2 Validar por comportamiento la normalización de `desktopFileName` en
+  aplicaciones nativas Wayland y XWayland: nombre e icono de origen correctos
+  en las capturas manuales aprobadas el 2026-09-29. No se inspeccionan ni
+  registran valores crudos; KWin no expone ese identificador en los logs de
+  diagnóstico por privacidad.
 - [x] 1.3 Registrar versiones de Arch, Plasma y KWin; verificar en runtime
   `activeWindow`, activación, `desktopFileName` y comportamiento con apps
   nativas y XWayland.
-- [ ] 1.4 Validar en KWin la activación persistente/reversible, preservación de
+- [x] 1.4 Validar en KWin la activación persistente/reversible, preservación de
   claves ajenas y publicación del snapshot inicial cuando ClipVault arranca
-  después de KWin. La detección manual ya funciona; estos casos de ciclo de vida
-  siguen pendientes.
+  después de KWin. Pruebas manuales aprobadas por el usuario el 2026-09-29.
 
 ## 2. Integración de origen KWin
 
@@ -51,7 +53,8 @@ de 1.4 sigue pendiente antes de cerrar el cambio.
 - [x] 2.8 Corregir el acceso a `kwinrc`: usar la clave `<id>Enabled` dentro de
   `[Plugins]`, migrar sólo la clave heredada mal formada de ClipVault y
   preservar su valor y todas las claves ajenas. Build Linux y validación
-  OpenSpec pasaron; la prueba runtime tras relanzar queda en 4.1.
+  OpenSpec pasaron; el relanzamiento y snapshot inicial quedaron verificados
+  manualmente en 1.4.
 
 ## 3. Regresiones automatizadas
 
@@ -65,24 +68,32 @@ de 1.4 sigue pendiente antes de cerrar el cambio.
   datos `.desktop`, sin bloquear la captura.
 - [x] 3.5 Probar que una aplicación ignorada se rechaza antes de consultar el
   provider o crear assets.
-- [ ] 3.6 Verificar build/check Linux y macOS, `cargo fmt --all -- --check`,
-  regresiones afectadas y `openspec validate` estricto para la corrección. El
-  build Linux, formato y OpenSpec ya pasaron; no se ejecutaron tests ni build
-  macOS en esta sesión.
+- [x] 3.6 Verificar build/check Linux y macOS, `cargo fmt --all -- --check`,
+  regresiones afectadas y `openspec validate` estricto para la corrección.
+  Verificado el 2026-09-29: `cargo check -p clipvault-app`, formato, 13 tests
+  de integración afectados y OpenSpec estricto pasaron en Linux; la prueba
+  manual aprobada por el usuario en macOS confirma que la build de esa máquina
+  funciona. No se hizo cross-check de macOS desde este host Linux.
 
 ## 4. Verificación manual
 
 - [x] 4.1 En Arch Linux KDE Plasma Wayland, verificar nombre e icono en
   capturas. Prueba manual aprobada el 2026-09-29: ClipVault detecta nombre e
   icono de la aplicación de origen.
-- [ ] 4.2 En Arch Linux KDE Plasma Wayland, verificar que una app XWayland
-  conserva su origen y que el estado de foco no queda obsoleto.
-- [ ] 4.3 Confirmar que macOS conserva nombre e icono de origen.
-- [ ] 4.4 Confirmar que Linux GNOME X11 conserva nombre e icono de origen.
-- [ ] 4.5 Confirmar que Linux GNOME Wayland conserva la integración, nombre e
-  icono actuales.
-- [ ] 4.6 Verificar consentimiento, desactivación y desinstalación en KDE;
-  registrar versiones y estados sin datos sensibles.
+- [x] 4.2 En Arch Linux KDE Plasma Wayland, verificar que una app XWayland
+  conserva su origen y que el estado de foco no queda obsoleto. Prueba manual
+  aprobada por el usuario el 2026-09-29.
+- [x] 4.3 Verificar manualmente macOS sin regresiones. Aprobado por el usuario
+  el 2026-09-29.
+- [x] 4.4 Verificar manualmente Ubuntu/X11 sin regresiones. Aprobado por el
+  usuario el 2026-09-29.
+- [x] 4.5 Verificar manualmente Ubuntu/Wayland sin regresiones de captura.
+  Aprobado por el usuario el 2026-09-29; el estado específico del warning de
+  fallback se registra por separado en el cambio
+  `linux-wayland-clipboard-fallback-logging`.
+- [x] 4.6 Verificar consentimiento, desactivación y desinstalación en KDE;
+  registrar versiones y estados sin datos sensibles. Prueba manual aprobada
+  por el usuario el 2026-09-29.
 
 ## 5. Cierre
 

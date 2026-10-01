@@ -42,6 +42,9 @@ pub struct SourceApplicationOption {
     /// Whether the combobox must render the generic glyph because
     /// no persisted icon was found.
     pub fallback: bool,
+    /// The exact filter discriminator this visible option selects. Imported
+    /// application names are labels, never peer identifiers.
+    pub filter: clipvault_db::SourceAppFilter,
 }
 
 /// Result of [`SourceApplicationsQuery::load`]. `options` always
@@ -126,6 +129,7 @@ impl SourceApplicationsQuery {
             display_name: "Todas".to_string(),
             icon_ref: None,
             fallback: true,
+            filter: clipvault_db::SourceAppFilter::All,
         });
 
         let aggregated = {
@@ -140,6 +144,7 @@ impl SourceApplicationsQuery {
                 display_name: "Aplicación desconocida".to_string(),
                 icon_ref: None,
                 fallback: true,
+                filter: clipvault_db::SourceAppFilter::Unknown,
             });
         }
 
@@ -164,10 +169,11 @@ impl SourceApplicationsQuery {
         for entry in known {
             let fallback = entry.icon_ref.is_none();
             options.push(SourceApplicationOption {
-                source_app: Some(entry.source_app),
+                source_app: (!entry.source_app.is_empty()).then_some(entry.source_app),
                 display_name: entry.display_name,
                 icon_ref: entry.icon_ref,
                 fallback,
+                filter: entry.filter,
             });
         }
 
@@ -189,6 +195,9 @@ mod tests {
             display_name: "Editor".to_string(),
             icon_ref: Some("application-icons/com_example_Editor.png".to_string()),
             fallback: false,
+            filter: clipvault_db::SourceAppFilter::Known {
+                source_app: "com.example.Editor".to_string(),
+            },
         };
         let json = serde_json::to_value(&value).expect("serialize");
         assert_eq!(json["source_app"], "com.example.Editor");

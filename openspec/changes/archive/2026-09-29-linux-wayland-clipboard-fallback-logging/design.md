@@ -7,11 +7,11 @@ El lockfile fija `arboard 3.6.1`. En su implementación Linux,
 `WAYLAND_DISPLAY`; si la negociación de data-control falla, emite el warning
 reportado y construye el cliente X11 como fallback.
 
-`ArboardClipboard` invoca `Arboard::new()` en cada operación de lectura o
+`ArboardClipboard` invocaba `Arboard::new()` en cada operación de lectura o
 escritura. El watcher de captura sondea el portapapeles periódicamente, por lo
-que una sesión donde la negociación siempre falla repite el warning en cada
-nuevo cliente. El resultado manual confirma que el fallback observado sigue
-permitiendo el uso de la aplicación.
+que una sesión donde la negociación siempre falla repetía el warning en cada
+nuevo cliente. El resultado manual confirmó que el fallback observado permite
+el uso de la aplicación y que la captura se recupera tras una desconexión.
 
 ## Decisión aprobada
 
@@ -23,11 +23,19 @@ y no en cada lectura periódica.
 
 En Linux, `ArboardClipboard` conserva el cliente tras una inicialización
 correcta. Lo inicializa al primer uso bajo un `parking_lot::Mutex` para
-serializar operaciones concurrentes. Si una operación devuelve
-`ArboardError::Unknown`, descarta ese cliente; la próxima operación intenta
-reconectarse una vez y vuelve a conservar la nueva instancia si la
-inicialización tiene éxito. Errores de formato ausente, conversión,
-clipboard ocupado o clipboard no soportado no invalidan la conexión.
+serializar operaciones concurrentes. El adaptador conserva el wrapper también
+si una operación devuelve `ArboardError::Unknown`, devuelve ese error al
+llamador y permite que las operaciones posteriores sigan usando el backend.
+La prueba manual confirmó que la captura se recupera tras una desconexión; el
+adaptador no fuerza una recreación del cliente para obtener esa recuperación.
+Los errores de formato ausente, conversión, clipboard ocupado o clipboard no
+soportado tampoco invalidan la instancia.
+
+Esta decisión evita describir como reinicio del backend la recreación del
+wrapper de `arboard`: en la versión 3.6.1, el backend X11 reutiliza estado
+compartido a nivel de proceso, así que crear otro wrapper no garantiza una
+conexión nativa nueva. En una sesión Wayland que usa ese fallback, recrear el
+wrapper también repetiría la negociación opcional que originó el warning.
 
 La API documenta que la instancia de Linux mantiene el acceso necesario al
 clipboard mientras vive. El lock evita operaciones simultáneas a través de

@@ -35,10 +35,18 @@
 - [x] 3.4 Run affected Rust and frontend checks/builds, focused tests, OpenSpec
   validation and `git diff --check`; preserve existing tray, hotkey and
   clipboard-capture behavior.
-- [ ] 3.5 Perform manual pause/resume checks on macOS, Ubuntu X11, Ubuntu
+- [x] 3.5 Perform manual pause/resume checks on macOS, Ubuntu X11, Ubuntu
   Wayland and Arch KDE Wayland, including restart persistence and the
   no-backfill behavior.
 
 Verification note: focused checks pass. The complete Tauri binary suite reports
 14 failures in active-app attribution fixtures and the host Wayland probe; the
 capture-toggle binding test passes independently.
+
+Manual verification completed (2026-09-30): pause/resume passed on macOS,
+Ubuntu X11, Ubuntu GNOME Wayland and Arch KDE Wayland, including the keyboard
+shortcut, General Settings and tray controls, restart persistence, and
+no-backfill behavior.
+
+Separate observation: Arch KDE Wayland was reported not to open Quick Paste
+with `Ctrl+Alt+V`; this is unrelated to capture pause/resume verification.

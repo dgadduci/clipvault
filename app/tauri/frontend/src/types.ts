@@ -440,6 +440,7 @@ export interface Settings {
    * panel renders the Identity section with a stable shape.
    */
   local_peer_display_name: string | null;
+  capture_notes_sharing_enabled: boolean;
 }
 
 export interface SettingsUpdate {
@@ -448,6 +449,7 @@ export interface SettingsUpdate {
   ignored_apps_remove?: string[];
   quick_paste_hotkey?: HotkeySpec | null;
   local_peer_display_name?: string | null;
+  capture_notes_sharing_enabled?: boolean;
 }
 
 /**
@@ -1380,7 +1382,8 @@ export interface OrganizationSnapshot {
 export type SourceAppFilter =
   | { kind: "all" }
   | { kind: "known"; source_app: string }
-  | { kind: "unknown" };
+  | { kind: "unknown" }
+  | { kind: "imported"; display_name: string };
 
 /**
  * Single metadata-only entry the combobox renders. `source_app` is the
@@ -1396,6 +1399,7 @@ export interface SourceApplicationOption {
   display_name: string;
   icon_ref: string | null;
   fallback: boolean;
+  filter: SourceAppFilter;
 }
 
 // ---------------------------------------------------------------------------

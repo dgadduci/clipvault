@@ -15,6 +15,118 @@ use crate::entry::{ContentType, EntryRecord, NewEntry};
 use crate::organization::OrganizationError;
 use crate::source_app::{source_app_predicate, SourceAppFilter, SourceAppParam};
 
+#[derive(Debug, Clone)]
+enum ScopedSourceAppParam {
+    Text(String),
+    Integer(i64),
+}
+
+struct ScopedSourceAppPredicate {
+    sql: String,
+    params: Vec<ScopedSourceAppParam>,
+}
+
+fn collection_has_peer_binding(
+    conn: &Connection,
+    collection_id: i64,
+) -> Result<bool, rusqlite::Error> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM peer_collection_bindings WHERE collection_id = ?1)",
+        params![collection_id],
+        |row| row.get(0),
+    )
+}
+
+/// SQL expression for the imported display name that the card projection
+/// would use as a fallback. A peer collection resolves only its bound peer;
+/// History and ordinary collections use the newest deterministic provenance.
+fn imported_source_name_sql(collection_id: Option<i64>) -> (String, Vec<ScopedSourceAppParam>) {
+    let latest_for_peer = "(SELECT ri.source_app_name FROM remote_imports ri
+        WHERE ri.local_entry_id = clipboard_entries.id
+          AND ri.source_app_name IS NOT NULL AND ri.source_app_name <> ''
+          AND ri.peer_id = (SELECT pcb.peer_id FROM peer_collection_bindings pcb
+                            WHERE pcb.collection_id = ?)
+        ORDER BY ri.imported_at DESC, ri.remote_entry_id ASC, ri.peer_id ASC LIMIT 1)";
+    let latest_any = "(SELECT ri.source_app_name FROM remote_imports ri
+        WHERE ri.local_entry_id = clipboard_entries.id
+          AND ri.source_app_name IS NOT NULL AND ri.source_app_name <> ''
+        ORDER BY ri.imported_at DESC, ri.remote_entry_id ASC, ri.peer_id ASC LIMIT 1)";
+    match collection_id {
+        Some(id) => (
+            format!(
+                "CASE WHEN EXISTS (SELECT 1 FROM peer_collection_bindings pcb WHERE pcb.collection_id = ?) \
+                 THEN {latest_for_peer} ELSE {latest_any} END"
+            ),
+            vec![
+                ScopedSourceAppParam::Integer(id),
+                ScopedSourceAppParam::Integer(id),
+            ],
+        ),
+        None => (latest_any.to_string(), Vec::new()),
+    }
+}
+
+fn scoped_source_app_predicate(
+    filter: &SourceAppFilter,
+    collection_id: Option<i64>,
+    peer_bound: bool,
+) -> Option<ScopedSourceAppPredicate> {
+    match filter {
+        SourceAppFilter::All => None,
+        SourceAppFilter::Known { .. } => {
+            if peer_bound {
+                return Some(ScopedSourceAppPredicate {
+                    sql: "0".to_string(),
+                    params: Vec::new(),
+                });
+            }
+            let predicate = source_app_predicate(filter)?;
+            Some(ScopedSourceAppPredicate {
+                sql: predicate.sql.to_string(),
+                params: predicate
+                    .params
+                    .into_iter()
+                    .map(|param| match param {
+                        SourceAppParam::Text(value) => ScopedSourceAppParam::Text(value),
+                    })
+                    .collect(),
+            })
+        }
+        SourceAppFilter::Unknown => {
+            let (imported_name, params) = imported_source_name_sql(collection_id);
+            let sql = if peer_bound {
+                format!("NULLIF({imported_name}, '') IS NULL")
+            } else {
+                format!(
+                    "(source_app IS NULL OR source_app = '') \
+                     AND NULLIF(source_app_name, '') IS NULL \
+                     AND NULLIF({imported_name}, '') IS NULL"
+                )
+            };
+            Some(ScopedSourceAppPredicate { sql, params })
+        }
+        SourceAppFilter::Imported { display_name } => {
+            let (imported_name, mut params) = imported_source_name_sql(collection_id);
+            params.push(ScopedSourceAppParam::Text(display_name.clone()));
+            let effective_name = if peer_bound {
+                imported_name
+            } else {
+                format!(
+                    "CASE WHEN NULLIF(source_app_name, '') IS NOT NULL \
+                       OR NULLIF(source_app_icon_ref, '') IS NOT NULL \
+                     THEN COALESCE(NULLIF(source_app_name, ''), NULLIF(source_app, '')) \
+                     ELSE COALESCE(NULLIF({imported_name}, ''), NULLIF(source_app_name, ''), NULLIF(source_app, '')) \
+                     END"
+                )
+            };
+            Some(ScopedSourceAppPredicate {
+                sql: format!("{effective_name} = ?"),
+                params,
+            })
+        }
+    }
+}
+
 /// Column list shared by every `SELECT` that materialises an
 /// [`EntryRecord`]. Kept in one place so a future column addition
 /// cannot be applied to some queries and forgotten in others — the
@@ -130,6 +242,7 @@ pub struct AggregatedSourceApp {
     pub source_app: String,
     pub display_name: String,
     pub icon_ref: Option<String>,
+    pub filter: SourceAppFilter,
 }
 
 /// Result of [`EntryRepository::aggregated_source_apps`]. `known`
@@ -370,10 +483,9 @@ impl<'a> EntryRepository<'a> {
     /// The aggregation strategy is deterministic:
     ///
     /// - `source_app` groups rows by the stable identifier;
-    /// - per group, the most recently persisted
-    ///   `source_app_name` / `source_app_icon_ref` win. We pick the
-    ///   freshest non-NULL value via `MAX(updated_at)` so a stale
-    ///   `NULL` cannot leak through after a successful enrichment.
+    /// - rows are considered newest-first by `updated_at`, then `id`;
+    ///   each group keeps its newest explicit display name and newest
+    ///   available icon, while older non-empty values fill missing fields.
     /// - a fallback display name is synthesised from the stable
     ///   identifier when no enriched name has ever been persisted
     ///   for that group; this is metadata-only (it is the same
@@ -391,11 +503,47 @@ impl<'a> EntryRepository<'a> {
         collection_id: Option<i64>,
         tag_ids: &[i64],
     ) -> Result<AggregatedSourceApps, EntryRepositoryError> {
-        let mut sql = String::from(
-            "SELECT source_app,
-                    source_app_name,
-                    source_app_icon_ref
-               FROM clipboard_entries",
+        // Resolve imported presentation in SQL so this query covers every
+        // matching row, including entries beyond the currently loaded rail.
+        // Peer-bound collections use only that peer's provenance; history and
+        // ordinary collections use the latest deterministic provenance.
+        let bound_peer = collection_id
+            .map(|id| {
+                self.conn
+                    .query_row(
+                        "SELECT peer_id FROM peer_collection_bindings WHERE collection_id = ?1",
+                        params![id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+            })
+            .transpose()?
+            .flatten();
+        let peer_clause = if bound_peer.is_some() {
+            " AND ri.peer_id = ?"
+        } else {
+            ""
+        };
+        let imported_name_sql = format!(
+            "(SELECT ri.source_app_name FROM remote_imports ri
+               WHERE ri.local_entry_id = clipboard_entries.id
+                 AND ri.source_app_name IS NOT NULL AND ri.source_app_name <> ''
+                 {peer_clause}
+               ORDER BY ri.imported_at DESC, ri.remote_entry_id ASC, ri.peer_id ASC
+               LIMIT 1)"
+        );
+        let imported_icon_sql = format!(
+            "(SELECT ri.source_app_icon_ref FROM remote_imports ri
+               WHERE ri.local_entry_id = clipboard_entries.id
+                 AND ri.source_app_icon_ref IS NOT NULL AND ri.source_app_icon_ref <> ''
+                 {peer_clause}
+               ORDER BY ri.imported_at DESC, ri.remote_entry_id ASC, ri.peer_id ASC
+               LIMIT 1)"
+        );
+        let mut sql = format!(
+            "SELECT source_app, source_app_name, source_app_icon_ref,
+                    {imported_name_sql}, {imported_icon_sql}
+               FROM clipboard_entries"
         );
         let mut first_clause = true;
         let mut params_dyn: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -424,9 +572,15 @@ impl<'a> EntryRepository<'a> {
             }
             params_dyn.push(Box::new(tag_ids.len() as i64));
         }
+        // Groups with the same stable source-app identifier keep the
+        // presentation from the most recently updated entry. The id tie-break
+        // makes equal timestamps deterministic across SQLite query plans.
+        sql.push_str(" ORDER BY updated_at DESC, id DESC");
 
         let mut stmt = self.conn.prepare(&sql)?;
         let row_to_tuple = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(
+            Option<String>,
+            Option<String>,
             Option<String>,
             Option<String>,
             Option<String>,
@@ -434,54 +588,134 @@ impl<'a> EntryRepository<'a> {
             let source_app: Option<String> = row.get(0)?;
             let display_name: Option<String> = row.get(1)?;
             let icon_ref: Option<String> = row.get(2)?;
-            Ok((source_app, display_name, icon_ref))
+            let imported_name: Option<String> = row.get(3)?;
+            let imported_icon: Option<String> = row.get(4)?;
+            Ok((
+                source_app,
+                display_name,
+                icon_ref,
+                imported_name,
+                imported_icon,
+            ))
         };
-        let rows = if params_dyn.is_empty() {
-            stmt.query_map([], row_to_tuple)?
-        } else {
-            let bound: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|b| &**b).collect();
-            stmt.query_map(bound.as_slice(), row_to_tuple)?
-        };
+        let mut all_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(peer_id) = bound_peer.as_ref() {
+            all_params.push(Box::new(peer_id.clone()));
+            all_params.push(Box::new(peer_id.clone()));
+        }
+        all_params.extend(params_dyn);
+        let bound: Vec<&dyn rusqlite::ToSql> = all_params.iter().map(|b| &**b).collect();
+        let rows = stmt.query_map(bound.as_slice(), row_to_tuple)?;
 
         let mut known_groups: std::collections::BTreeMap<String, AggregatedSourceApp> =
             std::collections::BTreeMap::new();
+        let mut groups_with_explicit_names = std::collections::BTreeSet::new();
         let mut has_unknown = false;
         for row in rows {
-            let (source_app, display_name, icon_ref) = row?;
+            let (source_app, display_name, icon_ref, imported_name, imported_icon) = row?;
+            if bound_peer.is_some() {
+                if let Some(imported_name) = imported_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                {
+                    let key = format!("imported:{imported_name}");
+                    known_groups
+                        .entry(key)
+                        .or_insert_with(|| AggregatedSourceApp {
+                            source_app: String::new(),
+                            display_name: imported_name.to_string(),
+                            icon_ref: imported_icon.filter(|s| !s.is_empty()),
+                            filter: SourceAppFilter::Imported {
+                                display_name: imported_name.to_string(),
+                            },
+                        });
+                } else {
+                    has_unknown = true;
+                }
+                continue;
+            }
             match source_app {
-                Some(value) if !value.is_empty() => {
+                Some(value) if !value.trim().is_empty() => {
                     let trimmed = value.trim();
-                    if trimmed.is_empty() {
-                        has_unknown = true;
-                        continue;
-                    }
-                    let display_name = display_name
+                    let local_name = display_name
                         .as_deref()
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                        .unwrap_or_else(|| trimmed.to_string());
-                    let entry = known_groups.entry(trimmed.to_string()).or_insert_with(|| {
+                        .map(str::to_string);
+                    let local_icon = icon_ref.clone().filter(|s| !s.is_empty());
+                    let local_presentation_exists = local_name.is_some() || local_icon.is_some();
+                    let effective_icon = if local_presentation_exists {
+                        local_icon.clone()
+                    } else {
+                        imported_icon.clone().filter(|s| !s.is_empty())
+                    };
+                    let display_name = if local_presentation_exists {
+                        local_name.clone().unwrap_or_else(|| trimmed.to_string())
+                    } else {
+                        imported_name
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| trimmed.to_string())
+                    };
+                    let explicit_display_name = local_name.clone().or_else(|| {
+                        (!local_presentation_exists)
+                            .then(|| imported_name.as_deref())
+                            .flatten()
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_string)
+                    });
+                    let group_key = trimmed.to_string();
+                    let entry = known_groups.entry(group_key.clone()).or_insert_with(|| {
                         AggregatedSourceApp {
                             source_app: trimmed.to_string(),
                             display_name: display_name.clone(),
-                            icon_ref: icon_ref.clone().filter(|s| !s.is_empty()),
+                            icon_ref: effective_icon.clone(),
+                            filter: SourceAppFilter::Known {
+                                source_app: trimmed.to_string(),
+                            },
                         }
                     });
-                    // Refresh the name/icon_ref when the row carries
-                    // newer metadata. The first non-empty value wins
-                    // by construction; subsequent rows only override
-                    // the previous value when they actually carry a
-                    // non-empty string.
-                    if entry.display_name.is_empty() && !display_name.is_empty() {
-                        entry.display_name = display_name;
+                    if let Some(explicit_display_name) = explicit_display_name {
+                        if groups_with_explicit_names.insert(group_key) {
+                            entry.display_name = explicit_display_name;
+                        }
                     }
                     if entry.icon_ref.is_none() {
-                        entry.icon_ref = icon_ref.filter(|s| !s.is_empty());
+                        entry.icon_ref = effective_icon;
                     }
                 }
                 _ => {
-                    has_unknown = true;
+                    if let Some(effective_name) = display_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .or_else(|| {
+                            imported_name
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|name| !name.is_empty())
+                        })
+                    {
+                        let key = format!("imported:{effective_name}");
+                        known_groups
+                            .entry(key)
+                            .or_insert_with(|| AggregatedSourceApp {
+                                source_app: String::new(),
+                                display_name: effective_name.to_string(),
+                                icon_ref: icon_ref
+                                    .filter(|s| !s.is_empty())
+                                    .or_else(|| imported_icon.filter(|s| !s.is_empty())),
+                                filter: SourceAppFilter::Imported {
+                                    display_name: effective_name.to_string(),
+                                },
+                            });
+                    } else {
+                        has_unknown = true;
+                    }
                 }
             }
         }
@@ -836,7 +1070,12 @@ impl<'a> EntryRepository<'a> {
                 )"
             ));
         }
-        if let Some(predicate) = source_app_predicate(source_app) {
+        let peer_bound = collection_id
+            .map(|id| collection_has_peer_binding(self.conn, id))
+            .transpose()?
+            .unwrap_or(false);
+        let scoped_source = scoped_source_app_predicate(source_app, collection_id, peer_bound);
+        if let Some(predicate) = &scoped_source {
             sql.push_str(&format!(" AND ({})", predicate.sql));
         }
         sql.push_str(" ORDER BY created_at DESC, id DESC");
@@ -853,12 +1092,11 @@ impl<'a> EntryRepository<'a> {
         if !tag_ids.is_empty() {
             params_dyn.push(Box::new(tag_ids.len() as i64));
         }
-        if let Some(predicate) = source_app_predicate(source_app) {
-            for param in &predicate.params {
-                match param {
-                    SourceAppParam::Text(text) => params_dyn.push(Box::new(text.clone())),
-                }
-            }
+        if let Some(predicate) = scoped_source {
+            params_dyn.extend(predicate.params.into_iter().map(|param| match param {
+                ScopedSourceAppParam::Text(text) => Box::new(text) as Box<dyn rusqlite::ToSql>,
+                ScopedSourceAppParam::Integer(value) => Box::new(value) as Box<dyn rusqlite::ToSql>,
+            }));
         }
         let bound: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|b| &**b).collect();
         let mut stmt = self.conn.prepare(&sql)?;
@@ -914,7 +1152,12 @@ impl<'a> EntryRepository<'a> {
             ));
             first_clause = false;
         }
-        if let Some(predicate) = source_app_predicate(source_app) {
+        let peer_bound = collection_id
+            .map(|id| collection_has_peer_binding(self.conn, id))
+            .transpose()?
+            .unwrap_or(false);
+        let scoped_source = scoped_source_app_predicate(source_app, collection_id, peer_bound);
+        if let Some(predicate) = &scoped_source {
             sql.push_str(if first_clause { " WHERE " } else { " AND " });
             sql.push_str(&format!("({})", predicate.sql));
         }
@@ -930,12 +1173,11 @@ impl<'a> EntryRepository<'a> {
         if !tag_ids.is_empty() {
             params_dyn.push(Box::new(tag_ids.len() as i64));
         }
-        if let Some(predicate) = source_app_predicate(source_app) {
-            for param in &predicate.params {
-                match param {
-                    SourceAppParam::Text(text) => params_dyn.push(Box::new(text.clone())),
-                }
-            }
+        if let Some(predicate) = scoped_source {
+            params_dyn.extend(predicate.params.into_iter().map(|param| match param {
+                ScopedSourceAppParam::Text(text) => Box::new(text) as Box<dyn rusqlite::ToSql>,
+                ScopedSourceAppParam::Integer(value) => Box::new(value) as Box<dyn rusqlite::ToSql>,
+            }));
         }
         let bound: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|b| &**b).collect();
         let mut stmt = self.conn.prepare(&sql)?;

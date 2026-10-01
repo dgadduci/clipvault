@@ -93,6 +93,10 @@ const TXT_CAPS_EXTRA: &str = "caps_extra";
 /// entirely.
 const TXT_CAPS_EXTRA_V2: &str = "caps_extra_v2";
 
+/// Third-tier additive capability tokens. This keeps new capability tokens
+/// from making strict consumers of the v2 token set reject a peer.
+const TXT_CAPS_EXTRA_V3: &str = "caps_extra_v3";
+
 /// Background adapter the production shell wires into the
 /// runtime on macOS / Linux. The adapter is owned by the
 /// runtime via [`std::sync::Arc`]; it owns its own
@@ -817,6 +821,12 @@ fn translate_resolved(info: &mdns_sd::ServiceInfo) -> Option<TxtRecord> {
     record.pairing_fingerprint = pairing_fingerprint;
     record.caps_extra = caps_extra;
     record.caps_extra_v2 = read_optional_caps_extra(properties, TXT_CAPS_EXTRA_V2);
+    // Merge recognised v3 tokens into the runtime capability set. The
+    // separate TXT key is the compatibility boundary; persisted peer state
+    // continues using the existing metadata column.
+    record
+        .caps_extra_v2
+        .extend(read_optional_caps_extra(properties, TXT_CAPS_EXTRA_V3));
     Some(record)
 }
 
@@ -846,8 +856,8 @@ fn read_optional_caps_extra(properties: &mdns_sd::TxtProperties, key: &str) -> V
         .collect()
 }
 
-fn build_txt_properties(advertisement: &DiscoveryAdvertisement) -> [(String, String); 8] {
-    // The TXT record carries eight keys: the six legacy fields
+fn build_txt_properties(advertisement: &DiscoveryAdvertisement) -> [(String, String); 9] {
+    // The TXT record carries nine keys: the six legacy fields
     // (peer_id, fingerprint, display_name, protocol_major,
     // capability, pairing_fingerprint) plus the additive
     // `caps_extra` field and the second-tier `caps_extra_v2`
@@ -901,6 +911,10 @@ fn build_txt_properties(advertisement: &DiscoveryAdvertisement) -> [(String, Str
         (
             TXT_CAPS_EXTRA_V2.to_string(),
             advertisement.caps_extra_v2.join(","),
+        ),
+        (
+            TXT_CAPS_EXTRA_V3.to_string(),
+            advertisement.caps_extra_v3.join(","),
         ),
     ];
     if advertisement.pairing_fingerprint.is_none() {
@@ -1005,6 +1019,10 @@ mod tests {
             refreshed.get_property_val_str(TXT_CAPS_EXTRA_V2),
             Some("source_app_presentation"),
         );
+        assert_eq!(
+            refreshed.get_property_val_str(TXT_CAPS_EXTRA_V3),
+            Some("capture_note_sharing"),
+        );
     }
 
     #[test]
@@ -1027,6 +1045,7 @@ mod tests {
         // the wire; an older client that does not recognise the
         // key never sees it.
         assert_eq!(map[TXT_CAPS_EXTRA_V2], "");
+        assert_eq!(map[TXT_CAPS_EXTRA_V3], "");
     }
 
     /// translate_resolved must ignore the address set / hostname /
@@ -1043,6 +1062,10 @@ mod tests {
         properties.insert("name".to_string(), "Studio".to_string());
         properties.insert("pmajor".to_string(), "1".to_string());
         properties.insert("cap".to_string(), "discovery_only".to_string());
+        properties.insert(
+            TXT_CAPS_EXTRA_V3.to_string(),
+            "capture_note_sharing".to_string(),
+        );
         let info = mdns_sd::ServiceInfo::new(
             SERVICE_TYPE,
             "Studio",
@@ -1058,6 +1081,10 @@ mod tests {
         assert_eq!(translated.display_name, "Studio");
         assert_eq!(translated.protocol_major, 1);
         assert_eq!(translated.capability, "discovery_only");
+        assert_eq!(
+            translated.caps_extra_v2,
+            vec!["capture_note_sharing".to_string()]
+        );
         // The translated record MUST NOT carry host / port /
         // address — the runtime never sees an endpoint.
         let debug = format!("{translated:?}");

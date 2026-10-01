@@ -148,6 +148,10 @@ pub const FETCH_TEXT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// remote text is fetched only for explicit import").
 pub const FETCH_TEXT_MAX_BODY_BYTES: usize = 1024 * 1024;
 
+/// Maximum UTF-8 size of an optional attached capture note in an explicit
+/// fetch acknowledgement. Larger notes are omitted without failing import.
+pub const FETCH_CAPTURE_NOTE_MAX_BYTES: usize = 16 * 1024;
+
 /// Wire-protocol major the `peer-image-import` change ships. The
 /// pairing runtime keeps the legacy constant for backwards
 /// compatibility with the pairing surface, but the image wire
@@ -596,6 +600,9 @@ pub enum HostImageFetchResponse {
         /// import acknowledgement.
         source_app_name: Option<String>,
         source_app_icon_bytes: Option<Vec<u8>>,
+        /// Optional attached note sent only after local consent and peer
+        /// capability checks pass.
+        capture_note: Option<String>,
     },
     /// The entry disappeared between the listing and the fetch,
     /// or it has been edited into a non-transferable shape.
@@ -791,6 +798,7 @@ pub enum HostFetchResponse {
         /// fields without affecting the body import.
         source_app_name: Option<String>,
         source_app_icon_bytes: Option<Vec<u8>>,
+        capture_note: Option<String>,
     },
     /// The entry disappeared between the listing and the fetch,
     /// or it has been edited into a non-transferable shape. The
@@ -1360,6 +1368,8 @@ pub struct PeerFetchSnapshot {
     /// commit; the caller MUST stage them through the local
     /// application-icons writer before persisting any reference.
     pub source_app_icon_bytes: Option<Vec<u8>>,
+    /// Optional note delivered only through explicit fetch.
+    pub capture_note: Option<String>,
 }
 
 /// Metadata-only response the transport returns from
@@ -1408,6 +1418,8 @@ pub struct PeerImageFetchSnapshot {
     /// commit; the caller MUST stage them through the local
     /// application-icons writer before persisting any reference.
     pub source_app_icon_bytes: Option<Vec<u8>>,
+    /// Optional note delivered only through explicit fetch.
+    pub capture_note: Option<String>,
 }
 
 /// Bounded response the transport returns from
@@ -2599,6 +2611,10 @@ pub mod wire {
             source_app_name: Option<String>,
             #[serde(default)]
             source_app_icon_b64: Option<String>,
+            /// Optional note carried only by explicit fetch responses.
+            #[serde(default)]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            capture_note: Option<String>,
         },
         /// Typed rejection the listener pushes back when the
         /// caller asked for a body that no longer exists, is no
@@ -2728,6 +2744,10 @@ pub mod wire {
             source_app_name: Option<String>,
             #[serde(default)]
             source_app_icon_b64: Option<String>,
+            /// Optional note carried only by explicit fetch responses.
+            #[serde(default)]
+            #[serde(skip_serializing_if = "Option::is_none")]
+            capture_note: Option<String>,
         },
         /// Typed rejection the listener pushes back when the
         /// caller asked for an image that no longer exists, is
@@ -3423,8 +3443,13 @@ mod tests {
             body: "hello".to_string(),
             source_app_name: Some("Terminal".to_string()),
             source_app_icon_b64: Some("iVBORw==".to_string()),
+            capture_note: None,
         };
         let serialised = serde_json::to_string(&ack).expect("serialise");
+        assert!(
+            !serialised.contains("capture_note"),
+            "an absent note must preserve the legacy wire shape"
+        );
         let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
         assert_eq!(parsed, ack);
     }
@@ -3438,6 +3463,7 @@ mod tests {
             PairingMessage::FetchTextAck {
                 source_app_name: None,
                 source_app_icon_b64: None,
+                capture_note: None,
                 ..
             }
         ));
@@ -3456,6 +3482,7 @@ mod tests {
             body,
             source_app_name: Some("A".repeat(128)),
             source_app_icon_b64: Some("A".repeat(icon_b64_len)),
+            capture_note: None,
         };
         let serialized = serde_json::to_vec(&ack).expect("serialize bounded ack");
         assert!(serialized.len() <= FETCH_TEXT_MAX_RESPONSE_BYTES);
@@ -3504,6 +3531,7 @@ mod tests {
             body: "hello".to_string(),
             source_app_name: None,
             source_app_icon_b64: None,
+            capture_note: None,
         };
         assert_eq!(ack.public_key_fingerprint(), "");
     }
@@ -3631,8 +3659,13 @@ mod tests {
             bytes_b64: "iVBORw==".to_string(),
             source_app_name: Some("Editor".to_string()),
             source_app_icon_b64: Some("iVBORw==".to_string()),
+            capture_note: None,
         };
         let serialised = serde_json::to_string(&ack).expect("serialise");
+        assert!(
+            !serialised.contains("capture_note"),
+            "an absent note must preserve the legacy wire shape"
+        );
         let parsed: PairingMessage = serde_json::from_str(&serialised).expect("parse");
         assert_eq!(parsed, ack);
     }
@@ -3646,6 +3679,7 @@ mod tests {
             PairingMessage::FetchImageAck {
                 source_app_name: None,
                 source_app_icon_b64: None,
+                capture_note: None,
                 ..
             }
         ));
@@ -3726,6 +3760,7 @@ mod tests {
             bytes_b64: String::new(),
             source_app_name: None,
             source_app_icon_b64: None,
+            capture_note: None,
         };
         assert_eq!(ack.public_key_fingerprint(), "");
     }

@@ -36,8 +36,8 @@
   pairing; correr formato, checks afectados y validación estricta de OpenSpec.
 - [x] 4.2 Revisar diff y confirmar que un cambio de nombre no modifica
   peer_id/huellas, trust, certificados fijados ni contenido local.
-- [ ] 4.3 Prueba manual multi-equipo: renombrar un equipo mientras comparte y
+- [x] 4.3 Prueba manual multi-equipo: renombrar un equipo mientras comparte y
   confirmar que los pares descubiertos/emparejados ven el nombre nuevo sin
   reinicio ni nuevo pairing; repetir con un par que vuelve a la red.
-- [ ] 4.4 Confirmar que un anuncio con otra huella sigue rechazándose y no
+- [x] 4.4 Confirmar que un anuncio con otra huella sigue rechazándose y no
   sobrescribe el peer confiable.

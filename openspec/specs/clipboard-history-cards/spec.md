@@ -1090,3 +1090,106 @@ entry, title, draft or baseline.
   element still retains focus
 - **AND** the WebView's native focus ring does not replace that outline with a
   second red or otherwise non-selection marker
+
+### Requirement: KDE Wayland source metadata uses the Linux application provider
+
+For a permitted capture with a valid KWin application identifier, ClipVault
+SHALL reuse `LinuxApplicationMetadataProvider` and the existing
+`source_app_name` and `source_app_icon_ref` fields. It MUST NOT add a parallel
+`.desktop` parser or persist an absolute KWin-reported path. Missing local
+application metadata MUST NOT block clipboard capture.
+
+#### Scenario: KDE application name and icon are resolved locally
+
+- **GIVEN** a permitted KDE Plasma Wayland capture has a valid KWin
+  application identifier matching a local `.desktop` entry
+- **AND** the entry has a resolvable display name and icon
+- **WHEN** the existing metadata-enrichment step runs
+- **THEN** the history entry receives the local application name and
+  controlled `application-icons/` reference
+- **AND** the existing card presentation renders that name and icon
+
+#### Scenario: KDE application metadata cannot be resolved
+
+- **GIVEN** a permitted KDE Plasma Wayland capture has no matching local
+  `.desktop` entry or usable icon
+- **WHEN** metadata enrichment completes
+- **THEN** the valid clipboard payload remains in history
+- **AND** the current unknown-source or missing-icon fallback is shown
+
+#### Scenario: Blacklisted KDE application has no metadata side effect
+
+- **GIVEN** KWin reports an application identifier matched by the ignored-app
+  list
+- **WHEN** a clipboard payload is captured
+- **THEN** `PrivacyGate` rejects the payload before metadata lookup
+- **AND** no new application icon asset is written
+
+### Requirement: Card deletion from a user collection asks for its scope
+
+The card `Eliminar` action inside a user collection SHALL present distinct
+choices to remove the entry only from the active collection or to delete it
+from all local history. The prompt SHALL identify the active collection and
+explain that the global choice removes the entry from `Historial` and every
+other collection. The `Eliminar` action in `Historial` SHALL keep its existing
+confirmed global-delete flow. The prompt SHALL NOT expose clipboard content,
+hashes, asset references, paths or peer identifiers.
+
+#### Scenario: Card offers collection-only and global deletion
+
+- **GIVEN** a card is displayed inside a user collection
+- **WHEN** the user activates `Eliminar`
+- **THEN** the card opens an accessible scope-choice prompt
+- **AND** the prompt offers collection-only removal, global history deletion
+  and cancellation
+- **AND** no entry is changed before the user chooses an action
+
+#### Scenario: Card is displayed in Historial
+
+- **GIVEN** a card is displayed in `Historial`
+- **WHEN** the user activates `Eliminar`
+- **THEN** the existing confirmed global-delete flow runs without a
+  collection-only choice
+
+#### Scenario: Scoped delete prompt is private and accessible
+
+- **WHEN** the scoped delete prompt is rendered or dismissed
+- **THEN** it exposes only the safe collection label and action/count metadata
+- **AND** cancel, Escape and focus restoration follow the existing modal
+  behavior
+
+### Requirement: Show and open capture notes from history cards
+
+Each history card SHALL show an accessible note icon when its text, rich-text
+or image entry has a saved note. Activating the icon SHALL open the shared
+multiline note editor for that entry. A card without a note SHALL offer an
+Agregar nota action in its existing action menu. The note control SHALL remain
+independent from pin, title, collection, delete, paste and drag actions and
+SHALL NOT change the card's fixed dimensions, image rendering or drag payload.
+
+#### Scenario: Card with a saved note
+
+- **WHEN** a history card represents an entry with a saved note
+- **THEN** the card shows a note icon with an accessible name
+- **AND** activating it opens the note editor without starting paste or drag
+
+#### Scenario: Add a note from the card menu
+
+- **GIVEN** a card represents an entry without a note
+- **WHEN** the user chooses Agregar nota from the card action menu and saves
+  a note
+- **THEN** the card displays the note icon after a successful refresh
+
+#### Scenario: Edit or remove a note from the card
+
+- **GIVEN** a card represents an entry with a note
+- **WHEN** the user opens its note editor, changes the note or saves it empty
+- **THEN** the card indicator reflects the persisted note state
+- **AND** its captured content and other card metadata remain unchanged
+
+#### Scenario: Note icon preserves card interactions
+
+- **WHEN** the note icon is activated or focused by keyboard
+- **THEN** the note action does not become a drag source and the existing
+  pointer/mouse drag controller, pin, title, menu and collection actions
+  continue to work

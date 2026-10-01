@@ -42,6 +42,8 @@ use clipvault_db::{Collection, CollectionKind, ContentType, EntryRecord, Organiz
 /// surfaces as a typed `BodyTooLarge` outcome without persisting
 /// anything.
 pub const IMPORT_MAX_BODY_BYTES: usize = 1024 * 1024;
+pub const IMPORT_MAX_CAPTURE_NOTE_BYTES: usize =
+    clipvault_platform::peer_transport::FETCH_CAPTURE_NOTE_MAX_BYTES;
 
 /// Outcome the runtime returns to the bridge / Tauri shell after a
 /// single import call. Every variant is metadata-only; the body
@@ -183,6 +185,8 @@ pub struct PeerFetchResponse {
     pub body: String,
     pub source_app_name: Option<String>,
     pub source_app_icon_bytes: Option<Vec<u8>>,
+    /// Optional note attached to the capture, present only on explicit fetch.
+    pub capture_note: Option<String>,
 }
 
 /// A locally staged icon and the writer outcome needed to release it
@@ -329,6 +333,20 @@ pub trait PeerImportPersistence: Send + Sync {
         _asset_ref: &str,
     ) -> Result<Option<Vec<u8>>, PeerImportPersistenceError> {
         Ok(None)
+    }
+    fn capture_note_for_entry(
+        &self,
+        _entry_id: i64,
+    ) -> Result<Option<String>, PeerImportPersistenceError> {
+        Ok(None)
+    }
+    fn save_imported_capture_note_if_absent(
+        &self,
+        _entry_id: i64,
+        _body: &str,
+        _now: OffsetDateTime,
+    ) -> Result<bool, PeerImportPersistenceError> {
+        Ok(false)
     }
     /// Look up the binding row the importer needs to attach the
     /// imported entry to the peer collection. `None` when the
@@ -482,6 +500,8 @@ struct InMemoryImportState {
     /// tests and in-memory projections.
     imported_source_app_by_entry: HashMap<i64, PeerImportedSourceAppPresentation>,
     source_app_icons: HashMap<String, Vec<u8>>,
+    capture_notes: HashMap<i64, String>,
+    fail_capture_note_write: bool,
 }
 
 impl Default for InMemoryImportPersistence {
@@ -498,6 +518,8 @@ impl Default for InMemoryImportPersistence {
                 provenance_source_app: HashMap::new(),
                 imported_source_app_by_entry: HashMap::new(),
                 source_app_icons: HashMap::new(),
+                capture_notes: HashMap::new(),
+                fail_capture_note_write: false,
             })),
         }
     }
@@ -544,6 +566,11 @@ impl InMemoryImportPersistence {
                 source_app_icon_ref,
             },
         );
+    }
+
+    #[cfg(test)]
+    fn fail_capture_note_writes(&self) {
+        self.state.lock().fail_capture_note_write = true;
     }
 }
 
@@ -628,6 +655,32 @@ impl PeerImportPersistence for InMemoryImportPersistence {
         entry_id: i64,
     ) -> Result<Option<EntryRecord>, PeerImportPersistenceError> {
         Ok(self.state.lock().entries.get(&entry_id).cloned())
+    }
+
+    fn capture_note_for_entry(
+        &self,
+        entry_id: i64,
+    ) -> Result<Option<String>, PeerImportPersistenceError> {
+        Ok(self.state.lock().capture_notes.get(&entry_id).cloned())
+    }
+
+    fn save_imported_capture_note_if_absent(
+        &self,
+        entry_id: i64,
+        body: &str,
+        _now: OffsetDateTime,
+    ) -> Result<bool, PeerImportPersistenceError> {
+        let mut state = self.state.lock();
+        if state.fail_capture_note_write {
+            return Err(PeerImportPersistenceError::Sqlite(
+                "capture-note write failed".to_string(),
+            ));
+        }
+        if state.capture_notes.contains_key(&entry_id) || body.is_empty() {
+            return Ok(false);
+        }
+        state.capture_notes.insert(entry_id, body.to_string());
+        Ok(true)
     }
 
     fn imported_source_app_for_entry(
@@ -813,6 +866,7 @@ pub struct PeerImportService {
     persistence: Arc<dyn PeerImportPersistence>,
     clock: Arc<dyn ImportClock>,
     trust_state: Arc<Mutex<std::collections::HashMap<String, PeerImportTrustState>>>,
+    capture_note_capability_resolver: Arc<dyn Fn(&str) -> bool + Send + Sync>,
 }
 
 impl PeerImportService {
@@ -831,7 +885,16 @@ impl PeerImportService {
             persistence,
             clock,
             trust_state: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            capture_note_capability_resolver: Arc::new(|_| false),
         }
+    }
+
+    pub fn with_capture_note_capability_resolver(
+        mut self,
+        resolver: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    ) -> Self {
+        self.capture_note_capability_resolver = resolver;
+        self
     }
 
     /// Update the cached trust / active state for a single peer.
@@ -913,7 +976,12 @@ impl PeerImportService {
             remote_entry_id: remote_entry_id.to_string(),
         };
         match self.transport.fetch_text(request) {
-            Ok(response) => self.commit(peer_id, display_name, response),
+            Ok(mut response) => {
+                if !(self.capture_note_capability_resolver)(peer_id) {
+                    response.capture_note = None;
+                }
+                self.commit(peer_id, display_name, response)
+            }
             Err(error) => match error {
                 PeerFetchTransportError::Revoked
                 | PeerFetchTransportError::Blocked
@@ -1099,6 +1167,15 @@ impl PeerImportService {
         if record_result.is_err() {
             return PeerImportOutcome::PersistenceError { reason: "sqlite" };
         }
+        if let Some(note) = response
+            .capture_note
+            .as_deref()
+            .filter(|note| !note.is_empty() && note.len() <= IMPORT_MAX_CAPTURE_NOTE_BYTES)
+        {
+            let _ = self
+                .persistence
+                .save_imported_capture_note_if_absent(entry_id, note, now);
+        }
         PeerImportOutcome::Imported {
             entry_id,
             collection_id: binding_collection_id,
@@ -1233,6 +1310,7 @@ impl PeerFetchTransport for PeerPairingFetchTransportAdapter {
                     body: snapshot.body,
                     source_app_name: snapshot.source_app_name,
                     source_app_icon_bytes: snapshot.source_app_icon_bytes,
+                    capture_note: snapshot.capture_note,
                 })
             }
             Err(error) => Err(map_pairing_transport_error(error)),
@@ -1297,12 +1375,28 @@ fn map_pairing_transport_error(
 #[cfg(feature = "local-peer-pairing-tls")]
 pub struct PeerTextImportHostHandlerAdapter {
     persistence: Arc<dyn PeerImportPersistence>,
+    sharing_enabled: Arc<dyn Fn() -> bool + Send + Sync>,
+    requesting_peer_supports_notes: Arc<dyn Fn(&str) -> bool + Send + Sync>,
 }
 
 #[cfg(feature = "local-peer-pairing-tls")]
 impl PeerTextImportHostHandlerAdapter {
     pub fn new(persistence: Arc<dyn PeerImportPersistence>) -> Self {
-        Self { persistence }
+        Self {
+            persistence,
+            sharing_enabled: Arc::new(|| false),
+            requesting_peer_supports_notes: Arc::new(|_| false),
+        }
+    }
+
+    pub fn with_note_sharing_resolvers(
+        mut self,
+        sharing_enabled: Arc<dyn Fn() -> bool + Send + Sync>,
+        requesting_peer_supports_notes: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    ) -> Self {
+        self.sharing_enabled = sharing_enabled;
+        self.requesting_peer_supports_notes = requesting_peer_supports_notes;
+        self
     }
 }
 
@@ -1310,7 +1404,7 @@ impl PeerTextImportHostHandlerAdapter {
 impl clipvault_platform::peer_transport::FetchTextHostHandler for PeerTextImportHostHandlerAdapter {
     fn fetch_text(
         &self,
-        _peer_id: &str,
+        peer_id: &str,
         remote_entry_id: &str,
     ) -> clipvault_platform::peer_transport::HostFetchResponse {
         // Decode the opaque remote entry id back into the local
@@ -1366,6 +1460,16 @@ impl clipvault_platform::peer_transport::FetchTextHostHandler for PeerTextImport
             .filter(|bytes| {
                 crate::peer_source_app_presentation::validate_source_app_icon(bytes).is_ok()
             });
+        let capture_note =
+            if (self.sharing_enabled)() && (self.requesting_peer_supports_notes)(peer_id) {
+                self.persistence
+                    .capture_note_for_entry(local_id)
+                    .ok()
+                    .flatten()
+                    .filter(|note| !note.is_empty() && note.len() <= IMPORT_MAX_CAPTURE_NOTE_BYTES)
+            } else {
+                None
+            };
         let body = entry.content;
         clipvault_platform::peer_transport::HostFetchResponse::Ok {
             title,
@@ -1373,6 +1477,7 @@ impl clipvault_platform::peer_transport::FetchTextHostHandler for PeerTextImport
             body,
             source_app_name: source_app.name,
             source_app_icon_bytes,
+            capture_note,
         }
     }
 }
@@ -1494,6 +1599,7 @@ mod tests {
             body: body.to_string(),
             source_app_name: None,
             source_app_icon_bytes: None,
+            capture_note: None,
         }
     }
 
@@ -1655,6 +1761,147 @@ mod tests {
         };
         assert_eq!(first_entry, second_entry);
         assert!(second_dedup, "second import must reuse the first row");
+    }
+
+    #[test]
+    fn explicit_import_stores_a_supported_capture_note_separately() {
+        let now = OffsetDateTime::now_utc();
+        let persistence = StdArc::new(InMemoryImportPersistence::new());
+        let mut response = ok_response("body without note bytes");
+        response.capture_note = Some("first line\nsecond line".to_string());
+        let transport = StdArc::new(ScriptedFetchTransport::new(Ok(response)));
+        let service = PeerImportService::new(transport, persistence.clone(), fixed_clock(now))
+            .with_capture_note_capability_resolver(StdArc::new(|_| true));
+        service.record_peer_state(
+            "peer-a",
+            PeerImportTrustState {
+                trusted: true,
+                active: true,
+            },
+        );
+
+        let PeerImportOutcome::Imported { entry_id, .. } =
+            service.import("peer-a", "fingerprint", "entry-1", "Equipo A")
+        else {
+            panic!("expected successful import");
+        };
+        assert_eq!(
+            persistence.capture_note_for_entry(entry_id).expect("note"),
+            Some("first line\nsecond line".to_string())
+        );
+        assert_eq!(
+            persistence
+                .fetch_entry(entry_id)
+                .expect("entry")
+                .unwrap()
+                .content,
+            "body without note bytes"
+        );
+    }
+
+    #[test]
+    fn oversized_capture_note_is_omitted_without_failing_text_import() {
+        let now = OffsetDateTime::now_utc();
+        let persistence = StdArc::new(InMemoryImportPersistence::new());
+        let mut response = ok_response("valid body");
+        response.capture_note = Some("n".repeat(IMPORT_MAX_CAPTURE_NOTE_BYTES + 1));
+        let transport = StdArc::new(ScriptedFetchTransport::new(Ok(response)));
+        let service = PeerImportService::new(transport, persistence.clone(), fixed_clock(now))
+            .with_capture_note_capability_resolver(StdArc::new(|_| true));
+        service.record_peer_state(
+            "peer-a",
+            PeerImportTrustState {
+                trusted: true,
+                active: true,
+            },
+        );
+
+        let PeerImportOutcome::Imported { entry_id, .. } =
+            service.import("peer-a", "fingerprint", "entry-1", "Equipo A")
+        else {
+            panic!("an oversized optional note must not fail capture import");
+        };
+        assert_eq!(
+            persistence.capture_note_for_entry(entry_id).expect("note"),
+            None
+        );
+    }
+
+    #[test]
+    fn capture_note_persistence_failure_does_not_fail_text_import() {
+        let now = OffsetDateTime::now_utc();
+        let persistence = StdArc::new(InMemoryImportPersistence::new());
+        persistence.fail_capture_note_writes();
+        let mut response = ok_response("valid body");
+        response.capture_note = Some("optional note".to_string());
+        let transport = StdArc::new(ScriptedFetchTransport::new(Ok(response)));
+        let service = PeerImportService::new(transport, persistence.clone(), fixed_clock(now))
+            .with_capture_note_capability_resolver(StdArc::new(|_| true));
+        service.record_peer_state(
+            "peer-a",
+            PeerImportTrustState {
+                trusted: true,
+                active: true,
+            },
+        );
+
+        let PeerImportOutcome::Imported { entry_id, .. } =
+            service.import("peer-a", "fingerprint", "entry-1", "Equipo A")
+        else {
+            panic!("optional note persistence errors must not fail capture import");
+        };
+        assert_eq!(
+            persistence
+                .fetch_entry(entry_id)
+                .expect("entry")
+                .unwrap()
+                .content,
+            "valid body"
+        );
+        assert_eq!(
+            persistence.capture_note_for_entry(entry_id).expect("note"),
+            None
+        );
+    }
+
+    #[test]
+    fn import_note_respects_peer_capability_and_preserves_an_existing_local_note() {
+        let now = OffsetDateTime::now_utc();
+        let persistence = StdArc::new(InMemoryImportPersistence::new());
+        let content = "duplicate body";
+        let hash = crate::history::hash_content(content);
+        let mut existing = entry_record(77, ContentType::Text, content);
+        existing.content_hash = hash;
+        persistence.seed_entries(vec![existing]);
+        persistence
+            .save_imported_capture_note_if_absent(77, "local note", now)
+            .expect("seed local note");
+        let mut response = ok_response(content);
+        response.capture_note = Some("remote replacement".to_string());
+        let transport = StdArc::new(ScriptedFetchTransport::new(Ok(response)));
+        let service = PeerImportService::new(transport, persistence.clone(), fixed_clock(now));
+        service.record_peer_state(
+            "peer-a",
+            PeerImportTrustState {
+                trusted: true,
+                active: true,
+            },
+        );
+
+        let PeerImportOutcome::Imported {
+            entry_id,
+            deduplicated,
+            ..
+        } = service.import("peer-a", "fingerprint", "entry-1", "Equipo A")
+        else {
+            panic!("expected successful import");
+        };
+        assert!(deduplicated);
+        assert_eq!(entry_id, 77);
+        assert_eq!(
+            persistence.capture_note_for_entry(entry_id).expect("note"),
+            Some("local note".to_string())
+        );
     }
 
     #[test]
@@ -2076,5 +2323,62 @@ mod tests {
         };
         assert_eq!(source_app_name.as_deref(), Some("Original Editor"));
         assert_eq!(source_app_icon_bytes, Some(icon));
+    }
+
+    #[test]
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn host_shares_text_note_only_after_local_and_peer_opt_in() {
+        use clipvault_platform::peer_transport::FetchTextHostHandler as _;
+
+        let concrete = StdArc::new(InMemoryImportPersistence::new());
+        concrete.seed_entries(vec![entry_record(99, ContentType::Text, "plain body")]);
+        concrete
+            .save_imported_capture_note_if_absent(99, "private note", OffsetDateTime::now_utc())
+            .expect("seed note");
+        let persistence: StdArc<dyn PeerImportPersistence> = concrete;
+        let sharing_enabled: StdArc<dyn Fn() -> bool + Send + Sync> = StdArc::new(|| true);
+        let adapter = PeerTextImportHostHandlerAdapter::new(persistence.clone())
+            .with_note_sharing_resolvers(sharing_enabled.clone(), StdArc::new(|_| true));
+        let unsupported = PeerTextImportHostHandlerAdapter::new(persistence)
+            .with_note_sharing_resolvers(sharing_enabled, StdArc::new(|_| false));
+
+        let clipvault_platform::peer_transport::HostFetchResponse::Ok { capture_note, .. } =
+            adapter.fetch_text("peer-a", "entry-99")
+        else {
+            panic!("expected successful text fetch");
+        };
+        assert_eq!(capture_note.as_deref(), Some("private note"));
+        let clipvault_platform::peer_transport::HostFetchResponse::Ok { capture_note, .. } =
+            unsupported.fetch_text("peer-b", "entry-99")
+        else {
+            panic!("expected successful legacy-compatible fetch");
+        };
+        assert!(capture_note.is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "local-peer-pairing-tls")]
+    fn host_omits_oversized_text_note_from_explicit_fetch() {
+        use clipvault_platform::peer_transport::FetchTextHostHandler as _;
+
+        let concrete = StdArc::new(InMemoryImportPersistence::new());
+        concrete.seed_entries(vec![entry_record(100, ContentType::Text, "plain body")]);
+        concrete
+            .save_imported_capture_note_if_absent(
+                100,
+                &"n".repeat(IMPORT_MAX_CAPTURE_NOTE_BYTES + 1),
+                OffsetDateTime::now_utc(),
+            )
+            .expect("seed oversized note");
+        let persistence: StdArc<dyn PeerImportPersistence> = concrete;
+        let adapter = PeerTextImportHostHandlerAdapter::new(persistence)
+            .with_note_sharing_resolvers(StdArc::new(|| true), StdArc::new(|_| true));
+
+        let clipvault_platform::peer_transport::HostFetchResponse::Ok { capture_note, .. } =
+            adapter.fetch_text("peer-a", "entry-100")
+        else {
+            panic!("expected successful text fetch");
+        };
+        assert!(capture_note.is_none());
     }
 }

@@ -51,6 +51,8 @@ use clipvault_db::{Collection, CollectionKind, ContentType, EntryRecord};
 /// larger than the threshold) and the caller (which never trusts
 /// the listener's word alone).
 pub const IMPORT_MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+pub const IMPORT_MAX_CAPTURE_NOTE_BYTES: usize =
+    clipvault_platform::peer_transport::FETCH_CAPTURE_NOTE_MAX_BYTES;
 
 /// Outcome the runtime returns to the bridge / Tauri shell after a
 /// single image import call. Every variant is metadata-only; the
@@ -184,6 +186,7 @@ pub struct PeerFetchImageResponse {
     /// provenance. `None` when the host did not opt into the
     /// additive contract or when validation refused the bytes.
     pub source_app_icon_bytes: Option<Vec<u8>>,
+    pub capture_note: Option<String>,
 }
 
 /// Metadata-only transport façade the import facade uses. The
@@ -296,6 +299,20 @@ pub trait PeerImageImportPersistence: Send + Sync {
         PeerImageImportPersistenceError,
     > {
         Ok(None)
+    }
+    fn capture_note_for_entry(
+        &self,
+        _entry_id: i64,
+    ) -> Result<Option<String>, PeerImageImportPersistenceError> {
+        Ok(None)
+    }
+    fn save_imported_capture_note_if_absent(
+        &self,
+        _entry_id: i64,
+        _body: &str,
+        _now: OffsetDateTime,
+    ) -> Result<bool, PeerImageImportPersistenceError> {
+        Ok(false)
     }
     /// Look up the binding row the importer needs to attach the
     /// imported entry to the peer collection.
@@ -612,6 +629,8 @@ struct InMemoryImageImportState {
     /// deletes the file once the counter hits zero AND no
     /// entry references it.
     staged_leases: HashMap<String, usize>,
+    capture_notes: HashMap<i64, String>,
+    fail_capture_note_write: bool,
 }
 
 impl Default for InMemoryImageImportPersistence {
@@ -630,6 +649,8 @@ impl Default for InMemoryImageImportPersistence {
                 staged_kinds: HashMap::new(),
                 asset_bytes: HashMap::new(),
                 staged_leases: HashMap::new(),
+                capture_notes: HashMap::new(),
+                fail_capture_note_write: false,
             })),
         }
     }
@@ -697,6 +718,11 @@ impl InMemoryImageImportPersistence {
                 imported_content_hash.to_string(),
             ))
             .cloned()
+    }
+
+    #[cfg(test)]
+    fn fail_capture_note_writes(&self) {
+        self.state.lock().fail_capture_note_write = true;
     }
 }
 
@@ -799,6 +825,32 @@ impl PeerImageImportPersistence for InMemoryImageImportPersistence {
         entry_id: i64,
     ) -> Result<Option<EntryRecord>, PeerImageImportPersistenceError> {
         Ok(self.state.lock().entries.get(&entry_id).cloned())
+    }
+
+    fn capture_note_for_entry(
+        &self,
+        entry_id: i64,
+    ) -> Result<Option<String>, PeerImageImportPersistenceError> {
+        Ok(self.state.lock().capture_notes.get(&entry_id).cloned())
+    }
+
+    fn save_imported_capture_note_if_absent(
+        &self,
+        entry_id: i64,
+        body: &str,
+        _now: OffsetDateTime,
+    ) -> Result<bool, PeerImageImportPersistenceError> {
+        let mut state = self.state.lock();
+        if state.fail_capture_note_write {
+            return Err(PeerImageImportPersistenceError::Sqlite(
+                "capture-note write failed".to_string(),
+            ));
+        }
+        if state.capture_notes.contains_key(&entry_id) || body.is_empty() {
+            return Ok(false);
+        }
+        state.capture_notes.insert(entry_id, body.to_string());
+        Ok(true)
     }
 
     fn imported_source_app_for_entry(
@@ -1313,6 +1365,7 @@ pub struct PeerImageImportTrustState {
 /// resolver; tests inject deterministic accept / reject
 /// closures.
 pub type PeerImageCapabilityResolver = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+pub type PeerCaptureNoteCapabilityResolver = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 fn default_image_capability_resolver() -> PeerImageCapabilityResolver {
     Arc::new(|_| true)
@@ -1326,6 +1379,7 @@ pub struct PeerImageImportService {
     clock: Arc<dyn ImageImportClock>,
     trust_state: Arc<Mutex<HashMap<String, PeerImageImportTrustState>>>,
     capability_resolver: PeerImageCapabilityResolver,
+    capture_note_capability_resolver: PeerCaptureNoteCapabilityResolver,
 }
 
 impl PeerImageImportService {
@@ -1340,6 +1394,7 @@ impl PeerImageImportService {
             clock,
             trust_state: Arc::new(Mutex::new(HashMap::new())),
             capability_resolver: default_image_capability_resolver(),
+            capture_note_capability_resolver: Arc::new(|_| false),
         }
     }
 
@@ -1352,6 +1407,14 @@ impl PeerImageImportService {
     /// the import request over the wire.
     pub fn with_capability_resolver(mut self, resolver: PeerImageCapabilityResolver) -> Self {
         self.capability_resolver = resolver;
+        self
+    }
+
+    pub fn with_capture_note_capability_resolver(
+        mut self,
+        resolver: PeerCaptureNoteCapabilityResolver,
+    ) -> Self {
+        self.capture_note_capability_resolver = resolver;
         self
     }
 
@@ -1404,7 +1467,12 @@ impl PeerImageImportService {
             remote_entry_id: remote_entry_id.to_string(),
         };
         match self.transport.fetch_image(request) {
-            Ok(response) => self.commit(peer_id, display_name, response),
+            Ok(mut response) => {
+                if !(self.capture_note_capability_resolver)(peer_id) {
+                    response.capture_note = None;
+                }
+                self.commit(peer_id, display_name, response)
+            }
             Err(error) => match error {
                 PeerFetchImageTransportError::Revoked
                 | PeerFetchImageTransportError::Blocked
@@ -1535,6 +1603,18 @@ impl PeerImageImportService {
             }
         }
 
+        if let PeerImageImportOutcome::Imported { entry_id, .. } = &result {
+            if let Some(note) = response
+                .capture_note
+                .as_deref()
+                .filter(|note| !note.is_empty() && note.len() <= IMPORT_MAX_CAPTURE_NOTE_BYTES)
+            {
+                let _ = self
+                    .persistence
+                    .save_imported_capture_note_if_absent(*entry_id, note, now);
+            }
+        }
+
         result
     }
 
@@ -1638,6 +1718,7 @@ impl PeerFetchImageTransport for PeerPairingFetchImageTransportAdapter {
                     bytes: snapshot.bytes,
                     source_app_name: snapshot.source_app_name,
                     source_app_icon_bytes: snapshot.source_app_icon_bytes,
+                    capture_note: snapshot.capture_note,
                 })
             }
             Err(error) => Err(map_pairing_image_fetch_transport_error(error)),
@@ -1697,6 +1778,8 @@ impl PeerFetchImageTransport for NoopPeerFetchImageTransport {
 pub struct PeerImageImportHostHandlerAdapter {
     persistence: Arc<dyn PeerImageImportPersistence>,
     capability_resolver: PeerImageCapabilityResolver,
+    sharing_enabled: Arc<dyn Fn() -> bool + Send + Sync>,
+    requesting_peer_supports_notes: PeerCaptureNoteCapabilityResolver,
 }
 
 #[cfg(feature = "local-peer-pairing-tls")]
@@ -1705,6 +1788,8 @@ impl PeerImageImportHostHandlerAdapter {
         Self {
             persistence,
             capability_resolver: default_image_capability_resolver(),
+            sharing_enabled: Arc::new(|| false),
+            requesting_peer_supports_notes: Arc::new(|_| false),
         }
     }
 
@@ -1716,6 +1801,16 @@ impl PeerImageImportHostHandlerAdapter {
     /// [`PeerImageImportService::import`] façade applies.
     pub fn with_capability_resolver(mut self, resolver: PeerImageCapabilityResolver) -> Self {
         self.capability_resolver = resolver;
+        self
+    }
+
+    pub fn with_note_sharing_resolvers(
+        mut self,
+        sharing_enabled: Arc<dyn Fn() -> bool + Send + Sync>,
+        requesting_peer_supports_notes: PeerCaptureNoteCapabilityResolver,
+    ) -> Self {
+        self.sharing_enabled = sharing_enabled;
+        self.requesting_peer_supports_notes = requesting_peer_supports_notes;
         self
     }
 }
@@ -1807,11 +1902,24 @@ impl clipvault_platform::peer_transport::FetchImageHostHandler
                     .filter(|icon| {
                         crate::peer_source_app_presentation::validate_source_app_icon(icon).is_ok()
                     });
+                let capture_note =
+                    if (self.sharing_enabled)() && (self.requesting_peer_supports_notes)(peer_id) {
+                        self.persistence
+                            .capture_note_for_entry(local_id)
+                            .ok()
+                            .flatten()
+                            .filter(|note| {
+                                !note.is_empty() && note.len() <= IMPORT_MAX_CAPTURE_NOTE_BYTES
+                            })
+                    } else {
+                        None
+                    };
                 clipvault_platform::peer_transport::HostImageFetchResponse::Ok {
                     title: entry.title,
                     bytes,
                     source_app_name: source_app.name,
                     source_app_icon_bytes,
+                    capture_note,
                 }
             }
             Err(_) => clipvault_platform::peer_transport::HostImageFetchResponse::NotTransferable,
@@ -1911,7 +2019,7 @@ mod tests {
     fn host_handler_forwards_imported_source_app_name_and_icon() {
         use clipvault_platform::peer_transport::FetchImageHostHandler as _;
 
-        let concrete = InMemoryImageImportPersistence::new();
+        let concrete = StdArc::new(InMemoryImageImportPersistence::new());
         let image_bytes = build_png(8, 4);
         let image_asset_ref = asset_ref_for_bytes(&image_bytes);
         let mut entry = entry_record(99, "image-hash", None);
@@ -1919,6 +2027,9 @@ mod tests {
         entry.content_size = image_bytes.len() as i64;
         concrete.seed_entries(vec![entry]);
         concrete.seed_image_asset_bytes(image_asset_ref, image_bytes.clone());
+        concrete
+            .save_imported_capture_note_if_absent(99, "image note", OffsetDateTime::now_utc())
+            .expect("seed note");
 
         let icon_bytes = build_png(16, 16);
         concrete.seed_imported_source_app_for_entry(
@@ -1927,13 +2038,15 @@ mod tests {
             Some("application-icons/screenshot.png".to_string()),
             Some(icon_bytes.clone()),
         );
-        let persistence: StdArc<dyn PeerImageImportPersistence> = StdArc::new(concrete);
-        let adapter = PeerImageImportHostHandlerAdapter::new(persistence);
+        let persistence: StdArc<dyn PeerImageImportPersistence> = concrete;
+        let adapter = PeerImageImportHostHandlerAdapter::new(persistence)
+            .with_note_sharing_resolvers(StdArc::new(|| true), StdArc::new(|_| true));
 
         let outcome = adapter.fetch_image("peer-c", "entry-99");
         let clipvault_platform::peer_transport::HostImageFetchResponse::Ok {
             source_app_name,
             source_app_icon_bytes,
+            capture_note,
             bytes,
             ..
         } = outcome
@@ -1942,6 +2055,7 @@ mod tests {
         };
         assert_eq!(source_app_name.as_deref(), Some("Screenshot App"));
         assert_eq!(source_app_icon_bytes, Some(icon_bytes));
+        assert_eq!(capture_note.as_deref(), Some("image note"));
         assert_eq!(bytes, image_bytes);
     }
 
@@ -1953,6 +2067,7 @@ mod tests {
             bytes,
             source_app_name: None,
             source_app_icon_bytes: None,
+            capture_note: None,
         }
     }
 
@@ -2004,12 +2119,14 @@ mod tests {
         let mut response = ok_response(bytes, "entry-1");
         response.source_app_name = Some("  Screenshot App  ".to_string());
         response.source_app_icon_bytes = Some(build_png(24, 24));
+        response.capture_note = Some("image note".to_string());
         let transport = StdArc::new(ScriptedFetchImageTransport::new(Ok(response)));
         let service = PeerImageImportService::new(
             transport,
             persistence.clone(),
             fixed_clock(OffsetDateTime::now_utc()),
-        );
+        )
+        .with_capture_note_capability_resolver(StdArc::new(|_| true));
         service.record_peer_state(
             "peer-a",
             PeerImageImportTrustState {
@@ -2047,6 +2164,77 @@ mod tests {
             .1
             .as_deref()
             .is_some_and(|icon_ref| icon_ref.starts_with("application-icons/")));
+        assert_eq!(
+            persistence.capture_note_for_entry(entry_id).expect("note"),
+            Some("image note".to_string())
+        );
+    }
+
+    #[test]
+    fn oversized_capture_note_is_omitted_without_failing_image_import() {
+        let persistence = StdArc::new(InMemoryImageImportPersistence::new());
+        let mut response = ok_response(build_png(8, 8), "entry-oversized-note");
+        response.capture_note = Some("n".repeat(IMPORT_MAX_CAPTURE_NOTE_BYTES + 1));
+        let transport = StdArc::new(ScriptedFetchImageTransport::new(Ok(response)));
+        let service = PeerImageImportService::new(
+            transport,
+            persistence.clone(),
+            fixed_clock(OffsetDateTime::now_utc()),
+        )
+        .with_capture_note_capability_resolver(StdArc::new(|_| true));
+        service.record_peer_state(
+            "peer-a",
+            PeerImageImportTrustState {
+                trusted: true,
+                active: true,
+            },
+        );
+
+        let PeerImageImportOutcome::Imported { entry_id, .. } =
+            service.import("peer-a", "fingerprint", "entry-oversized-note", "Equipo A")
+        else {
+            panic!("an oversized optional note must not fail image import");
+        };
+        assert_eq!(
+            persistence.capture_note_for_entry(entry_id).expect("note"),
+            None
+        );
+    }
+
+    #[test]
+    fn capture_note_persistence_failure_does_not_fail_image_import() {
+        let persistence = StdArc::new(InMemoryImageImportPersistence::new());
+        persistence.fail_capture_note_writes();
+        let mut response = ok_response(build_png(8, 8), "entry-note-write-error");
+        response.capture_note = Some("optional note".to_string());
+        let transport = StdArc::new(ScriptedFetchImageTransport::new(Ok(response)));
+        let service = PeerImageImportService::new(
+            transport,
+            persistence.clone(),
+            fixed_clock(OffsetDateTime::now_utc()),
+        )
+        .with_capture_note_capability_resolver(StdArc::new(|_| true));
+        service.record_peer_state(
+            "peer-a",
+            PeerImageImportTrustState {
+                trusted: true,
+                active: true,
+            },
+        );
+
+        let PeerImageImportOutcome::Imported { entry_id, .. } = service.import(
+            "peer-a",
+            "fingerprint",
+            "entry-note-write-error",
+            "Equipo A",
+        ) else {
+            panic!("optional note persistence errors must not fail image import");
+        };
+        assert!(persistence.fetch_entry(entry_id).expect("entry").is_some());
+        assert_eq!(
+            persistence.capture_note_for_entry(entry_id).expect("note"),
+            None
+        );
     }
 
     #[test]
@@ -2442,6 +2630,7 @@ mod tests {
                 bytes: vec![0u8; 16],
                 source_app_name: None,
                 source_app_icon_bytes: None,
+                capture_note: None,
             },
         )));
         let service = PeerImageImportService::new(
@@ -2643,6 +2832,7 @@ mod tests {
                 bytes,
                 source_app_name: None,
                 source_app_icon_bytes: None,
+                capture_note: None,
             },
         )));
         let service = PeerImageImportService::new(
@@ -2672,6 +2862,7 @@ mod tests {
                 bytes: vec![],
                 source_app_name: None,
                 source_app_icon_bytes: None,
+                capture_note: None,
             },
         )));
         let service = PeerImageImportService::new(
@@ -2710,6 +2901,7 @@ mod tests {
                 bytes,
                 source_app_name: None,
                 source_app_icon_bytes: None,
+                capture_note: None,
             },
         )));
         let service = PeerImageImportService::new(

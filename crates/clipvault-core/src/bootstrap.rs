@@ -1330,6 +1330,35 @@ impl AppBootstrap {
                     })
                 }
             });
+        let capture_note_sharing_capability_resolver: Arc<dyn Fn(&str) -> bool + Send + Sync> =
+            Arc::new({
+                let database_for_resolver = Arc::clone(&database_handle);
+                move |peer_id: &str| {
+                    let mut db = database_for_resolver.lock();
+                    let repo = clipvault_db::KnownPeerRepository::new(db.connection_mut());
+                    repo.get(peer_id).ok().flatten().is_some_and(|row| {
+                        row.trust_state == clipvault_db::TrustState::Trusted
+                            && crate::peer_discovery::decode_capabilities(&row.caps_extra_v2)
+                                .iter()
+                                .any(|token| {
+                                    token == crate::peer_discovery::CAPTURE_NOTE_SHARING_CAPABILITY
+                                })
+                    })
+                }
+            });
+        #[cfg(feature = "local-peer-pairing-tls")]
+        let capture_note_sharing_enabled: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new({
+            let database_for_setting = Arc::clone(&database_handle);
+            move || {
+                let mut db = database_for_setting.lock();
+                let raw = clipvault_db::AppSettingsRepository::new(db.connection_mut())
+                    .get(crate::settings::CAPTURE_NOTES_SHARING_ENABLED_KEY)
+                    .ok()
+                    .flatten()
+                    .map(|setting| setting.value);
+                crate::settings::parse_capture_notes_sharing_enabled(raw.as_deref())
+            }
+        });
         // Build the productive host-side history handler the
         // listener drives when an authenticated peer asks for
         // `list_recent_text`. The bootstrap installs the adapter
@@ -1389,6 +1418,10 @@ impl AppBootstrap {
                 Arc::new(
                     crate::peer_text_import::PeerTextImportHostHandlerAdapter::new(
                         fetch_persistence,
+                    )
+                    .with_note_sharing_resolvers(
+                        Arc::clone(&capture_note_sharing_enabled),
+                        Arc::clone(&capture_note_sharing_capability_resolver),
                     ),
                 );
             if let Err(error) = peer_pairing.install_fetch_handler_inner(fetch_handler) {
@@ -1422,7 +1455,10 @@ impl AppBootstrap {
             peer_text_import_transport,
             peer_text_import_persistence,
             Arc::new(crate::peer_text_import::SystemImportClock),
-        );
+        )
+        .with_capture_note_capability_resolver(Arc::clone(
+            &capture_note_sharing_capability_resolver,
+        ));
         // ----------------------------------------------------------------
         // `peer-image-import` wiring.
         //
@@ -1546,7 +1582,10 @@ impl AppBootstrap {
             peer_image_import_persistence,
             Arc::new(crate::peer_image_import::SystemImageImportClock),
         )
-        .with_capability_resolver(Arc::clone(&peer_image_import_capability_resolver));
+        .with_capability_resolver(Arc::clone(&peer_image_import_capability_resolver))
+        .with_capture_note_capability_resolver(Arc::clone(
+            &capture_note_sharing_capability_resolver,
+        ));
         // Install the host-side image history + image fetch
         // handlers the listener drives when a peer asks for
         // `list_recent_images` or `fetch_image`. The bootstrap
@@ -1611,7 +1650,11 @@ impl AppBootstrap {
                 crate::peer_image_import::PeerImageImportHostHandlerAdapter::new(
                     image_fetch_persistence,
                 )
-                .with_capability_resolver(Arc::clone(&peer_image_import_capability_resolver)),
+                .with_capability_resolver(Arc::clone(&peer_image_import_capability_resolver))
+                .with_note_sharing_resolvers(
+                    Arc::clone(&capture_note_sharing_enabled),
+                    Arc::clone(&capture_note_sharing_capability_resolver),
+                ),
             );
             if let Err(error) = peer_pairing.install_image_fetch_handler_inner(image_fetch_handler)
             {

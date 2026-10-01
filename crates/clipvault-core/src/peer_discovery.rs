@@ -151,6 +151,11 @@ pub const IMAGE_PREVIEW_THUMBNAIL_CAPABILITY: &str = "image_preview_thumbnail";
 /// capabilities they already know.
 pub const SOURCE_APP_PRESENTATION_CAPABILITY: &str = "source_app_presentation";
 
+/// Additive opt-in note transfer capability. It is advertised separately
+/// from capture-sharing consent, which remains a local setting checked on
+/// every explicit fetch.
+pub const CAPTURE_NOTE_SHARING_CAPABILITY: &str = "capture_note_sharing";
+
 /// Decode the comma-separated `capability` field into a
 /// normalised `Vec<String>`. Empty / whitespace-only tokens
 /// are dropped so a TXT record with `pairing,` decodes the
@@ -398,7 +403,9 @@ impl PeerObservationRecord {
         // also collapses to `UnsupportedCapability` so a future
         // additive addition cannot silently bypass the gate.
         for token in &raw.caps_extra_v2 {
-            if token != SOURCE_APP_PRESENTATION_CAPABILITY {
+            if token != SOURCE_APP_PRESENTATION_CAPABILITY
+                && token != CAPTURE_NOTE_SHARING_CAPABILITY
+            {
                 return Err(PeerRecordValidationError::UnsupportedCapability {
                     capability: format!("caps_extra_v2:{}", token),
                 });
@@ -1688,6 +1695,25 @@ mod tests {
             .expect("source_app_presentation must validate");
         assert!(validated.has_source_app_presentation_capability());
         assert!(validated.has_image_import_capability());
+    }
+
+    #[test]
+    fn validation_accepts_capture_note_capability_from_additive_v3_field() {
+        let raw = TxtRecord {
+            capability: PAIRING_CAPABILITY.to_string(),
+            caps_extra_v2: vec![CAPTURE_NOTE_SHARING_CAPABILITY.to_string()],
+            pairing_fingerprint: Some("f".repeat(64)),
+            ..txt(
+                "0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+                "Studio",
+            )
+        };
+        let validated = PeerObservationRecord::from_txt_record(&raw)
+            .expect("capture-note capability must validate");
+        assert!(validated
+            .caps_extra_v2
+            .contains(&CAPTURE_NOTE_SHARING_CAPABILITY.to_string()));
     }
 
     #[test]

@@ -6,17 +6,29 @@ Garantizar que cada entrada importada desde un par vinculado permanezca visible 
 
 ### Requirement: Imported entries remain discoverable by remote origin
 
-ClipVault SHALL keep every imported entry in the protected `Historial`
-collection and SHALL also attach it to the collection bound to its source
-`peer_id`. The bound collection SHALL be visible in the local collection
-projection after the import succeeds.
+ClipVault SHALL keep every successfully imported entry in the protected
+`Historial` collection and SHALL also attach it to the collection bound to its
+source `peer_id`. This invariant SHALL hold for text and image imports, both
+new and deduplicated local entries, and SHALL be committed atomically with the
+import provenance. The bound collection SHALL be visible in the local
+collection projection after the import succeeds.
 
 #### Scenario: First import from a peer
 
 - **WHEN** a user successfully imports a transferable entry from peer X
-- **THEN** the entry remains in `Historial`
+- **THEN** the entry belongs to `Historial`
 - **AND** the entry is visible in one collection bound to X
 - **AND** the collection appears in the sidebar after the organization refresh
+
+#### Scenario: Deduplicated import repairs History membership
+
+- **GIVEN** an imported payload resolves to an existing local entry that is
+  missing its `Historial` membership
+- **WHEN** the import transaction commits
+- **THEN** the existing entry belongs to both `Historial` and the collection
+  bound to the importing peer
+- **AND** its existing content, title, favorite state and other memberships
+  remain unchanged
 
 #### Scenario: Import failure
 
@@ -50,9 +62,13 @@ raw `peer_id`.
 
 Each peer SHALL have at most one active collection binding. Bindings SHALL be
 resolved by `peer_id`, not by case-insensitive collection name. Restarting the
-application SHALL reconstruct the same binding, and deleting the collection
-SHALL preserve imported entries and provenance while allowing a later import
-to create a new binding.
+application SHALL reconstruct the same binding. Deleting a peer-bound
+collection SHALL require an explicit choice: preserve its imported entries,
+`Historial` memberships and provenance, or delete its current entries from all
+local history and their dependent provenance. Either choice SHALL remove the
+old binding so a later import creates a new binding. Deleting entries SHALL
+NOT delete the peer record, alter pairing trust or affect another peer's
+unrelated entries.
 
 #### Scenario: Multiple peers with equal visible names
 
@@ -69,10 +85,23 @@ to create a new binding.
 
 #### Scenario: Collection is deleted
 
-- **WHEN** the user deletes X's peer collection
-- **THEN** imported entries, `Historial` membership and provenance remain
+- **WHEN** the user deletes X's peer collection and chooses to preserve its
+  entries
+- **THEN** the collection and binding are removed
+- **AND** imported entries, `Historial` membership, provenance and other
+  collection memberships remain
 - **AND** a later import from X creates a new binding instead of selecting a
   collection only by its old name
+
+#### Scenario: Delete a peer collection and its entries
+
+- **WHEN** the user deletes X's peer collection and explicitly chooses to
+  delete its entries from history
+- **THEN** every current entry in that collection is removed from local history
+  and all collection memberships, including favorites
+- **AND** its local import provenance is removed with each entry
+- **AND** X remains a known peer with its existing trust state
+- **AND** a later import from X creates a new collection binding
 
 ### Requirement: Collection projection and refresh remain metadata-only
 

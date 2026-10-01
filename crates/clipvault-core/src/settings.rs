@@ -40,6 +40,18 @@ pub const LOCAL_PEER_SHARING_ENABLED_KEY: &str = "local_peer_sharing_enabled";
 /// Missing values keep the existing capture-on behavior.
 pub const LOCAL_CLIPBOARD_CAPTURE_ENABLED_KEY: &str = "local_clipboard_capture_enabled";
 
+/// Local opt-in for including an attached capture note in explicit peer
+/// fetch responses. Missing or malformed values stay disabled.
+pub const CAPTURE_NOTES_SHARING_ENABLED_KEY: &str = "capture_notes_sharing_enabled";
+
+pub fn parse_capture_notes_sharing_enabled(raw: Option<&str>) -> bool {
+    parse_local_peer_sharing_enabled(raw)
+}
+
+pub fn capture_notes_sharing_enabled_value(enabled: bool) -> &'static str {
+    local_peer_sharing_enabled_value(enabled)
+}
+
 /// Parse the local capture preference. Missing and malformed values default
 /// to enabled so databases created before this setting retain their existing
 /// behavior.
@@ -95,6 +107,10 @@ pub struct Settings {
     /// on requires a reachable peer identity (the secure store
     /// must report `Ok`).
     pub local_peer_sharing_enabled: bool,
+    /// Consent to share capture notes during explicit peer imports. Disabled
+    /// by default and independent of whether this device accepts notes.
+    #[serde(default)]
+    pub capture_notes_sharing_enabled: bool,
 }
 
 impl Settings {
@@ -110,6 +126,7 @@ impl Settings {
             // toggle so the very first launch never announces
             // itself on the LAN.
             local_peer_sharing_enabled: false,
+            capture_notes_sharing_enabled: false,
         }
     }
 }
@@ -237,6 +254,8 @@ pub struct SettingsUpdate {
     /// exists; the typed [`ValidationCode`] lets the shell render
     /// the matching copy without parsing free-form strings.
     pub local_peer_sharing_enabled: Option<bool>,
+    /// Whether explicitly fetched captures may include their attached note.
+    pub capture_notes_sharing_enabled: Option<bool>,
 }
 
 impl SettingsUpdate {
@@ -251,6 +270,7 @@ impl SettingsUpdate {
             && self.quick_paste_hotkey.is_none()
             && self.local_peer_display_name.is_none()
             && self.local_peer_sharing_enabled.is_none()
+            && self.capture_notes_sharing_enabled.is_none()
     }
 
     /// Validate the update against the current [`Settings`]. Returns
@@ -262,6 +282,7 @@ impl SettingsUpdate {
             && self.ignored_apps_remove.is_empty()
             && self.local_peer_display_name.is_none()
             && self.local_peer_sharing_enabled.is_none()
+            && self.capture_notes_sharing_enabled.is_none()
         {
             return Err(ValidationError::empty());
         }
@@ -306,6 +327,9 @@ impl SettingsUpdate {
 
         if let Some(enabled) = self.local_peer_sharing_enabled {
             next.local_peer_sharing_enabled = enabled;
+        }
+        if let Some(enabled) = self.capture_notes_sharing_enabled {
+            next.capture_notes_sharing_enabled = enabled;
         }
 
         Ok(next)
@@ -649,6 +673,7 @@ mod tests {
             quick_paste_hotkey: None,
             local_peer_display_name: None,
             local_peer_sharing_enabled: false,
+            capture_notes_sharing_enabled: false,
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains("\"retention\":\"days_90\""), "got {json}");
@@ -681,6 +706,7 @@ mod tests {
             quick_paste_hotkey: None,
             local_peer_display_name: Some(Some("Studio".to_string())),
             local_peer_sharing_enabled: Some(true),
+            capture_notes_sharing_enabled: Some(true),
         };
         let json = serde_json::to_string(&update).unwrap();
         let parsed: SettingsUpdate = serde_json::from_str(&json).expect("round-trip");

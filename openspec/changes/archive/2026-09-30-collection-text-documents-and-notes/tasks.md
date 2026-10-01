@@ -56,6 +56,6 @@
   `AGENTS.md`, además de los checks Rust y frontend afectados.
 - [x] 4.4 Validar este cambio con OpenSpec, revisar diff y confirmar que no se
   modificaron assets existentes ni se añadieron logs de contenido.
-- [ ] 4.5 Probar manualmente en macOS y Linux la creación/edición de texto,
+- [x] 4.5 Probar manualmente en macOS y Linux la creación/edición de texto,
   notas de capturas de texto e imagen y notas de colecciones, incluida la
   persistencia tras reiniciar.

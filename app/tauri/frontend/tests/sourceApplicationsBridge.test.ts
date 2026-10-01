@@ -77,6 +77,24 @@ test("recentEntriesFilteredCommand forwards the source-app filter", async () => 
   );
 });
 
+test("recentEntriesFilteredCommand forwards imported application filters", async () => {
+  let observed: Record<string, unknown> | undefined;
+  installTauriMock(async (_cmd, args) => {
+    observed = args;
+    return [];
+  });
+  await recentEntriesFilteredCommand({
+    limit: 25,
+    collectionId: null,
+    tagIds: [],
+    sourceApp: { kind: "imported", display_name: "Screenshot App" },
+  });
+  assert.deepEqual(observed?.sourceApp, {
+    kind: "imported",
+    display_name: "Screenshot App",
+  });
+});
+
 test("recentEntriesFilteredCommand passes null when the filter is absent", async () => {
   let observed: Record<string, unknown> | undefined;
   installTauriMock(async (_cmd, args) => {

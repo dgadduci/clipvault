@@ -29,14 +29,15 @@ unexpected backend errors visible.
 - **THEN** the adapter continues to use native Wayland clipboard access
 - **AND** it does not select the X11 fallback
 
-#### Scenario: Clipboard connection must be recreated
+#### Scenario: Backend recovers after a transient disconnection
 
 - **GIVEN** a previously initialized clipboard connection becomes unusable
-- **WHEN** the adapter attempts the documented recovery path
-- **THEN** it may recreate the client and recover clipboard access
-- **AND** after successful recreation it reuses that client for subsequent
-  operations
-- **AND** unrelated initialization and operation errors remain observable
+- **WHEN** a clipboard operation returns an unexpected backend error and
+  subsequent polls run
+- **THEN** ClipVault keeps the error visible to the caller
+- **AND** it keeps polling through the initialized adapter so the backend can
+  recover clipboard access
+- **AND** it does not force client reinitialization on every poll
 
 #### Scenario: Existing platform behavior is preserved
 

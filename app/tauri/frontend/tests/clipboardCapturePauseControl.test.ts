@@ -28,6 +28,15 @@ test("General Settings uses persisted commands and reflects external toggles", (
   assert.match(modal, /catch \(saveError\)/);
 });
 
+test("General Settings loads and persists the capture-note export preference", () => {
+  const modal = source("src/GeneralSettingsModal.svelte");
+  assert.match(modal, /settingsGetCommand\(\)/);
+  assert.match(modal, /capture_notes_sharing_enabled/);
+  assert.match(modal, /settingsSetCommand\(\{ capture_notes_sharing_enabled: next \}\)/);
+  assert.match(modal, /capture-note-sharing-toggle/);
+  assert.match(modal, /shareNotesEnabled = previous/);
+});
+
 test("General Settings is reachable from the toolbar overflow menu", () => {
   const toolbar = source("src/DesktopToolbar.svelte");
   const app = source("src/App.svelte");

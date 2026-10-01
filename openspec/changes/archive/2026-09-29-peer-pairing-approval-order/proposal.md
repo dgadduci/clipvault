@@ -1,6 +1,6 @@
 # Propuesta: aprobación de vínculo independiente del orden
 
-## Problema
+## Why
 
 El modal deshabilita **Aceptar** tanto cuando esta instancia ya aprobó como
 cuando recibió la aprobación remota. Si un equipo acepta primero, el otro
@@ -14,13 +14,11 @@ transporte. El modal prioriza el estado de sesión y no interpreta de forma
 consistente una respuesta tipada `Failed`, de modo que un error puede verse
 como una espera indefinida.
 
-## Objetivo
-
 Completar el vínculo cuando ambos usuarios aprueban el mismo SAS en cualquier
 orden, y presentar los fallos locales de aprobación como errores recuperables
 sin marcar el vínculo como confiable.
 
-## Alcance
+## What Changes
 
 - Mantener **Aceptar** disponible mientras la instancia local no haya aprobado,
   aunque ya haya llegado la aprobación remota.

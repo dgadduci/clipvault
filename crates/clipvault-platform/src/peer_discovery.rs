@@ -85,6 +85,10 @@ pub struct DiscoveryAdvertisement {
     /// TXT key and continue to use the capabilities they already
     /// know.
     pub caps_extra_v2: Vec<String>,
+    /// Third-tier additive capabilities. This field lets newer peers
+    /// advertise note transfer without making builds that strictly validate
+    /// the existing `caps_extra_v2` token set reject their discovery record.
+    pub caps_extra_v3: Vec<String>,
 }
 
 impl DiscoveryAdvertisement {
@@ -109,6 +113,7 @@ impl DiscoveryAdvertisement {
             capability: capability.into(),
             caps_extra: Vec::new(),
             caps_extra_v2: Vec::new(),
+            caps_extra_v3: Vec::new(),
         }
     }
 
@@ -145,6 +150,7 @@ impl DiscoveryAdvertisement {
                 IMAGE_PREVIEW_THUMBNAIL_CAPABILITY.to_string(),
             ],
             caps_extra_v2: vec![SOURCE_APP_PRESENTATION_CAPABILITY.to_string()],
+            caps_extra_v3: vec![CAPTURE_NOTE_SHARING_CAPABILITY.to_string()],
         }
     }
 }
@@ -176,6 +182,9 @@ pub const IMAGE_PREVIEW_THUMBNAIL_CAPABILITY: &str = "image_preview_thumbnail";
 /// token. Mirrored from
 /// [`clipvault_core::peer_discovery::SOURCE_APP_PRESENTATION_CAPABILITY`].
 pub const SOURCE_APP_PRESENTATION_CAPABILITY: &str = "source_app_presentation";
+
+/// Additive capability for optional notes on explicit fetch responses.
+pub const CAPTURE_NOTE_SHARING_CAPABILITY: &str = "capture_note_sharing";
 
 /// Platform-neutral callback the production adapter uses to
 /// surface browse / removal events to the runtime.
@@ -618,10 +627,12 @@ mod tests {
         // the dedicated `caps_extra_v2` field so a strict
         // legacy parser that only knows the canonical surface
         // keeps pairing without seeing the new token.
-        assert_eq!(
-            ad.caps_extra_v2,
-            vec![SOURCE_APP_PRESENTATION_CAPABILITY.to_string()]
-        );
+        assert!(ad
+            .caps_extra_v2
+            .contains(&SOURCE_APP_PRESENTATION_CAPABILITY.to_string()));
+        assert!(ad
+            .caps_extra_v3
+            .contains(&CAPTURE_NOTE_SHARING_CAPABILITY.to_string()));
     }
 
     #[test]
@@ -638,6 +649,7 @@ mod tests {
         );
         assert!(ad.caps_extra.is_empty());
         assert!(ad.caps_extra_v2.is_empty());
+        assert!(ad.caps_extra_v3.is_empty());
     }
 
     #[test]

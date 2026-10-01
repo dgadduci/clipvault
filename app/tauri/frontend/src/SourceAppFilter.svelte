@@ -69,8 +69,8 @@
   $: triggerLabel = labelForSelected(selected);
   $: triggerAriaExpanded = open ? "true" : "false";
   $: triggerAriaActiveDescendant = open && activeKey ? `${testId}-option-${activeKey}` : null;
-  $: selectedOptionIconUrl = selected.kind === "known"
-    ? iconUrls.get(`known:${selected.source_app}`) ?? null
+  $: selectedOptionIconUrl = selected.kind === "known" || selected.kind === "imported"
+    ? iconUrls.get(filterKey(selected)) ?? null
     : null;
 
   /**
@@ -80,10 +80,16 @@
    * the identifier to keep every row addressable.
    */
   function optionKey(option: SourceApplicationOption): string {
-    if (option.source_app === null) {
-      return option.display_name === "Todas" ? "all" : "unknown";
+    return filterKey(option.filter);
+  }
+
+  function filterKey(filter: SourceAppFilter): string {
+    switch (filter.kind) {
+      case "all": return "all";
+      case "unknown": return "unknown";
+      case "known": return `known:${filter.source_app}`;
+      case "imported": return `imported:${encodeURIComponent(filter.display_name)}`;
     }
-    return `known:${option.source_app}`;
   }
 
   function labelForSelected(value: SourceAppFilter): string {
@@ -93,6 +99,8 @@
       case "known":
         return options.find((option) => option.source_app === value.source_app)?.display_name ??
           "Aplicación";
+      case "imported":
+        return value.display_name;
       case "unknown":
         return "Aplicación desconocida";
     }
@@ -109,16 +117,14 @@
         return option.display_name === "Aplicación desconocida";
       case "known":
         return option.source_app === value.source_app;
+      case "imported":
+        return option.filter.kind === "imported" &&
+          option.filter.display_name === value.display_name;
     }
   }
 
   function filterForKey(key: string): SourceAppFilter | null {
-    if (key === "all") return { kind: "all" };
-    if (key === "unknown") return { kind: "unknown" };
-    if (key.startsWith("known:")) {
-      return { kind: "known", source_app: key.slice("known:".length) };
-    }
-    return null;
+    return options.find((option) => optionKey(option) === key)?.filter ?? null;
   }
 
   /**
@@ -137,6 +143,9 @@
           return option.display_name === "Aplicación desconocida";
         case "known":
           return option.source_app === value.source_app;
+        case "imported":
+          return option.filter.kind === "imported" &&
+            option.filter.display_name === value.display_name;
       }
     });
   }
@@ -302,12 +311,13 @@
    * the user picks a different option before the previous bridge
    * call completes.
    */
-  let iconRefreshToken = 0;
+  let iconRefreshTokens = new Map<string, number>();
 
   async function refreshIcon(key: string, ref: string | null): Promise<void> {
-    const token = ++iconRefreshToken;
+    const token = (iconRefreshTokens.get(key) ?? 0) + 1;
+    iconRefreshTokens.set(key, token);
     if (!ref) {
-      if (token === iconRefreshToken) {
+      if (iconRefreshTokens.get(key) === token) {
         const next = new Map(iconUrls);
         next.set(key, null);
         iconUrls = next;
@@ -315,7 +325,7 @@
       return;
     }
     const resolution = await iconResolver.resolve(ref);
-    if (token !== iconRefreshToken) {
+    if (iconRefreshTokens.get(key) !== token) {
       return;
     }
     const next = new Map(iconUrls);
@@ -378,7 +388,7 @@
     data-source-app-selected={selected.kind}
   >
     <span class="trigger-icon" aria-hidden="true" data-testid={`${testId}-trigger-icon`}>
-      {#if selected.kind === "known" && selectedOptionIconUrl}
+      {#if (selected.kind === "known" || selected.kind === "imported") && selectedOptionIconUrl}
         <img
           src={selectedOptionIconUrl}
           alt=""

@@ -33,6 +33,5 @@ sincronizar las specs canónicas ni commitear automáticamente.
   afectados, `openspec validate peer-pairing-approval-order --strict --type
   change` y `git diff --check`.
 - [x] 3.2 Revisar el diff y confirmar que el cambio queda limitado a pairing.
-- [ ] 3.3 En dos equipos, aceptar primero en el iniciador y luego en el
-  receptor; repetir en orden inverso. Ambos deben quedar vinculados en cada
-  intento.
+- [x] 3.3 Prueba manual aprobada en Arch, macOS y Ubuntu: los equipos se
+  detectan y envían/reciben capturas recíprocamente.

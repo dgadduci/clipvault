@@ -13,7 +13,10 @@ use clipvault_core::{
     AppBootstrap, AppContext, Clock, SearchFilter, SourceAppFilter, SourceApplicationsQuery,
     SourceApplicationsScope,
 };
-use clipvault_db::{ContentType, EntryRepository, NewEntry, OrganizationRepository};
+use clipvault_db::{
+    ContentType, EntryRepository, KnownPeerRepository, NewEntry, OrganizationRepository,
+    PeerImportRepository, PeerObservation,
+};
 use tempfile::TempDir;
 use time::macros::datetime;
 
@@ -180,6 +183,198 @@ fn source_applications_query_respects_collection_scope() {
         Some("com.example.Editor")
     );
     assert_eq!(snapshot.scope.collection_id, Some(trabajo_id));
+}
+
+#[test]
+fn imported_source_app_filter_uses_effective_provenance_in_history_and_collections() {
+    let (_dir, context) = bootstrap_with_clock(datetime!(2026-05-01 08:00:00 UTC));
+    let now = datetime!(2026-05-01 08:00:00 UTC);
+    let (peer_collection_id, local_collection_id) = {
+        let mut db = context.database().lock();
+        let mut org = OrganizationRepository::new(db.connection_mut());
+        let peer_collection = org
+            .create_user_collection("Equipo remoto", "#1565c0", now)
+            .expect("peer collection");
+        let local_collection = org
+            .create_user_collection("Local", "#008577", now)
+            .expect("local collection");
+        let mut peers = KnownPeerRepository::new(db.connection_mut());
+        peers
+            .upsert_observation(&PeerObservation {
+                peer_id: "peer-a".to_string(),
+                public_key_fingerprint: "0123456789abcdef".to_string(),
+                full_public_key_fingerprint: None,
+                display_name: "Equipo remoto".to_string(),
+                protocol_major: 1,
+                capability: "discovery_only".to_string(),
+                caps_extra: String::new(),
+                caps_extra_v2: String::new(),
+                observed_at: now,
+            })
+            .expect("seed peer");
+        let mut imports = PeerImportRepository::new(db.connection_mut());
+        imports
+            .upsert_binding("peer-a", peer_collection.id, now)
+            .expect("bind peer collection");
+        (peer_collection.id, local_collection.id)
+    };
+    let entry_id = insert_entry_with(&context, "imported entry", None, None, None, now);
+    {
+        let mut db = context.database().lock();
+        let mut org = OrganizationRepository::new(db.connection_mut());
+        org.replace_entry_collections(entry_id, &[local_collection_id], now)
+            .expect("attach local collection");
+        let mut imports = PeerImportRepository::new(db.connection_mut());
+        imports
+            .attach_entry_to_binding(entry_id, peer_collection_id, now)
+            .expect("attach peer collection");
+        imports
+            .record_import_with_source_app(
+                "peer-a",
+                "entry-1",
+                "imported-hash",
+                entry_id,
+                now,
+                Some("Screenshot App"),
+                Some("application-icons/screenshot-app.png"),
+            )
+            .expect("record source provenance");
+    }
+
+    let local_metadata_entry = insert_entry_with(
+        &context,
+        "entry with local attribution",
+        Some("com.local.Editor"),
+        Some("Local Editor"),
+        Some("application-icons/local-editor.png"),
+        now,
+    );
+    {
+        let mut db = context.database().lock();
+        let mut org = OrganizationRepository::new(db.connection_mut());
+        org.replace_entry_collections(local_metadata_entry, &[local_collection_id], now)
+            .expect("attach local metadata entry");
+        let mut imports = PeerImportRepository::new(db.connection_mut());
+        imports
+            .attach_entry_to_binding(local_metadata_entry, peer_collection_id, now)
+            .expect("attach peer metadata entry");
+        imports
+            .record_import_with_source_app(
+                "peer-a",
+                "entry-2",
+                "local-metadata-hash",
+                local_metadata_entry,
+                now,
+                Some("Remote Editor"),
+                Some("application-icons/remote-editor.png"),
+            )
+            .expect("record alternate provenance");
+    }
+
+    let history_options = SourceApplicationsQuery::new()
+        .load(&context, &SourceApplicationsScope::new(None, &[]))
+        .expect("history options");
+    let imported_option = history_options
+        .options
+        .iter()
+        .find(|option| option.display_name == "Screenshot App")
+        .expect("imported application option");
+    assert_eq!(
+        imported_option.filter,
+        SourceAppFilter::Imported {
+            display_name: "Screenshot App".to_string(),
+        }
+    );
+    assert_eq!(
+        imported_option.icon_ref.as_deref(),
+        Some("application-icons/screenshot-app.png")
+    );
+
+    let peer_options = SourceApplicationsQuery::new()
+        .load(
+            &context,
+            &SourceApplicationsScope::new(Some(peer_collection_id), &[]),
+        )
+        .expect("peer collection options");
+    assert!(peer_options
+        .options
+        .iter()
+        .any(|option| option.display_name == "Remote Editor"));
+    assert!(!peer_options
+        .options
+        .iter()
+        .any(|option| option.display_name == "Local Editor"));
+
+    let local_options = SourceApplicationsQuery::new()
+        .load(
+            &context,
+            &SourceApplicationsScope::new(Some(local_collection_id), &[]),
+        )
+        .expect("local collection options");
+    assert!(
+        local_options
+            .options
+            .iter()
+            .any(|option| option.display_name == "Local Editor"),
+        "local options: {:?}",
+        local_options.options
+    );
+    assert!(!local_options
+        .options
+        .iter()
+        .any(|option| option.display_name == "Remote Editor"));
+
+    for collection_id in [None, Some(peer_collection_id), Some(local_collection_id)] {
+        let filtered = context
+            .history()
+            .recent_entries_with_filter(
+                &context,
+                collection_id,
+                &[],
+                &SourceAppFilter::Imported {
+                    display_name: "Screenshot App".to_string(),
+                },
+                50,
+            )
+            .expect("filter imported app");
+        assert_eq!(
+            filtered.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            vec![entry_id]
+        );
+    }
+
+    let remote_peer_filter = context
+        .history()
+        .recent_entries_with_filter(
+            &context,
+            Some(peer_collection_id),
+            &[],
+            &SourceAppFilter::Imported {
+                display_name: "Remote Editor".to_string(),
+            },
+            50,
+        )
+        .expect("peer provenance filter");
+    assert_eq!(
+        remote_peer_filter
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        vec![local_metadata_entry]
+    );
+    let local_filter = context
+        .history()
+        .recent_entries_with_filter(
+            &context,
+            Some(local_collection_id),
+            &[],
+            &SourceAppFilter::Imported {
+                display_name: "Remote Editor".to_string(),
+            },
+            50,
+        )
+        .expect("local attribution filter");
+    assert!(local_filter.is_empty());
 }
 
 #[test]

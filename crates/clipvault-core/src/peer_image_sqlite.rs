@@ -585,6 +585,29 @@ impl PeerImageImportPersistence for SqliteImageImportPersistence {
         Ok(self.application_icons.read_bytes(asset_ref).ok())
     }
 
+    fn capture_note_for_entry(
+        &self,
+        entry_id: i64,
+    ) -> Result<Option<String>, PeerImageImportPersistenceError> {
+        let mut db = self.database.lock();
+        let note = clipvault_db::NoteRepository::new(db.connection_mut())
+            .get_entry_note(entry_id)
+            .map_err(|error| PeerImageImportPersistenceError::Sqlite(format!("{error}")))?;
+        Ok(note.map(|note| note.body))
+    }
+
+    fn save_imported_capture_note_if_absent(
+        &self,
+        entry_id: i64,
+        body: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, PeerImageImportPersistenceError> {
+        let mut db = self.database.lock();
+        clipvault_db::NoteRepository::new(db.connection_mut())
+            .set_entry_note_if_absent(entry_id, body, now)
+            .map_err(|error| PeerImageImportPersistenceError::Sqlite(format!("{error}")))
+    }
+
     fn validate_image_metadata(
         &self,
         width: u32,

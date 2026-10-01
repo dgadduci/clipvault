@@ -3,6 +3,8 @@
   import {
     captureControlGetCommand,
     captureControlSetCommand,
+    settingsGetCommand,
+    settingsSetCommand,
   } from "./lib/tauri.ts";
   import {
     listenCaptureControlChanged,
@@ -15,6 +17,7 @@
   export let displayServer: string | null = null;
 
   let captureEnabled: boolean | null = null;
+  let shareNotesEnabled: boolean | null = null;
   let loading = false;
   let saving = false;
   let error: string | null = null;
@@ -24,21 +27,45 @@
   let unlistenError: (() => void) | null = null;
 
   $: shortcut = captureToggleShortcutLabel(platformOs);
-  $: if (open) void loadCaptureState();
+  $: if (open) void loadSettings();
 
-  async function loadCaptureState(): Promise<void> {
+  async function loadSettings(): Promise<void> {
     const currentRequest = ++requestId;
     loading = true;
     error = null;
     try {
-      const enabled = await captureControlGetCommand();
-      if (currentRequest === requestId) captureEnabled = enabled;
+      const [enabled, settings] = await Promise.all([
+        captureControlGetCommand(),
+        settingsGetCommand(),
+      ]);
+      if (currentRequest === requestId) {
+        captureEnabled = enabled;
+        shareNotesEnabled = settings.capture_notes_sharing_enabled ?? false;
+      }
     } catch (loadError) {
       if (currentRequest === requestId) {
         error = loadError instanceof Error ? loadError.message : String(loadError);
       }
     } finally {
       if (currentRequest === requestId) loading = false;
+    }
+  }
+
+  async function toggleShareNotes(): Promise<void> {
+    if (shareNotesEnabled === null || saving) return;
+    const previous = shareNotesEnabled;
+    const next = !previous;
+    shareNotesEnabled = next;
+    saving = true;
+    error = null;
+    try {
+      const settings = await settingsSetCommand({ capture_notes_sharing_enabled: next });
+      shareNotesEnabled = settings.capture_notes_sharing_enabled ?? false;
+    } catch (saveError) {
+      shareNotesEnabled = previous;
+      error = saveError instanceof Error ? saveError.message : String(saveError);
+    } finally {
+      saving = false;
     }
   }
 
@@ -141,12 +168,33 @@
       {/if}
     {/if}
 
-    {#if error}
-      <p class="error" role="alert" data-testid="capture-control-error">
-        No se pudo actualizar la captura: {error}
-      </p>
+  </article>
+  <article data-testid="capture-note-sharing-setting">
+    <h3>Compartir notas de capturas</h3>
+    <p class="muted">
+      Permite incluir notas al importar explícitamente capturas desde este equipo.
+      Solo se comparten con equipos compatibles; recibir notas no requiere activar esta opción.
+    </p>
+    {#if shareNotesEnabled === null}
+      <p class="muted" role="status" data-testid="capture-note-sharing-loading">Cargando estado…</p>
+    {:else}
+      <label class="note-sharing-control">
+        <input
+          type="checkbox"
+          checked={shareNotesEnabled}
+          disabled={saving}
+          on:change={toggleShareNotes}
+          data-testid="capture-note-sharing-toggle"
+        />
+        Incluir notas en capturas compartidas
+      </label>
     {/if}
   </article>
+  {#if error}
+    <p class="error" role="alert" data-testid="general-settings-error">
+      No se pudo guardar o cargar la configuración: {error}
+    </p>
+  {/if}
 </section>
 
 <style>

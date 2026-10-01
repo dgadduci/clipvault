@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-29
+status: in_progress
+summary: Codificar la semilla local como texto versionado para que Secret Service la preserve en KWallet.

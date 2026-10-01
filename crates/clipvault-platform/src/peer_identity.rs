@@ -22,6 +22,12 @@ use sha2::{Digest, Sha256};
 const ED25519_PUBLIC_KEY_LEN: usize = 32;
 const PEER_ID_HEX_CHARS: usize = 32;
 const FINGERPRINT_HEX_CHARS: usize = 16;
+#[cfg(feature = "local-peer-identity-keychain")]
+const PEER_SEED_V1_PREFIX: &[u8] = b"clipvault-peer-seed-v1:";
+#[cfg(feature = "local-peer-identity-keychain")]
+const PEER_SEED_LEN: usize = 32;
+#[cfg(feature = "local-peer-identity-keychain")]
+const PEER_SEED_HEX_LEN: usize = PEER_SEED_LEN * 2;
 
 /// Stable service identifier the platform secure store uses to scope
 /// the local peer identity entry. Bumping it forces a migration and
@@ -382,19 +388,88 @@ pub trait PeerIdentityStore: Send + Sync {
     fn load_or_create(&self) -> Result<LocalPeerIdentity, PeerIdentityError>;
 }
 
-/// Decode the secret bytes returned by `keyring::Entry::get_secret`
-/// into the 32-byte Ed25519 seed. The secure store is expected to
-/// return exactly the bytes the bootstrap previously wrote; a
-/// different length is treated as a stable failure rather than a
-/// panic so a corrupted keychain entry cannot crash the shell.
+/// Decode a value returned by `keyring::Entry::get_secret` into the
+/// 32-byte Ed25519 seed. The versioned printable representation is
+/// used for new entries; exactly 32 raw bytes remain accepted for
+/// migration from older versions.
 #[cfg(feature = "local-peer-identity-keychain")]
 fn seed_from_secret_bytes(bytes: &[u8]) -> Result<[u8; 32], PeerIdentityError> {
-    if bytes.len() != 32 {
+    if bytes.len() == PEER_SEED_LEN {
+        let mut out = [0u8; PEER_SEED_LEN];
+        out.copy_from_slice(bytes);
+        return Ok(out);
+    }
+
+    let hex = bytes
+        .strip_prefix(PEER_SEED_V1_PREFIX)
+        .ok_or(PeerIdentityError::SecureStoreFailed)?;
+    if hex.len() != PEER_SEED_HEX_LEN {
         return Err(PeerIdentityError::SecureStoreFailed);
     }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(bytes);
+
+    let mut out = [0u8; PEER_SEED_LEN];
+    for (index, pair) in hex.chunks_exact(2).enumerate() {
+        let high = lowercase_hex_nibble(pair[0]).ok_or(PeerIdentityError::SecureStoreFailed)?;
+        let low = lowercase_hex_nibble(pair[1]).ok_or(PeerIdentityError::SecureStoreFailed)?;
+        out[index] = (high << 4) | low;
+    }
     Ok(out)
+}
+
+#[cfg(feature = "local-peer-identity-keychain")]
+fn lowercase_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "local-peer-identity-keychain")]
+fn secret_bytes_from_seed(seed: &[u8; PEER_SEED_LEN]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut encoded = Vec::with_capacity(PEER_SEED_V1_PREFIX.len() + PEER_SEED_HEX_LEN);
+    encoded.extend_from_slice(PEER_SEED_V1_PREFIX);
+    for byte in seed {
+        encoded.push(HEX[(byte >> 4) as usize]);
+        encoded.push(HEX[(byte & 0x0f) as usize]);
+    }
+    encoded
+}
+
+/// Narrow interface used to test secure-store seed handling without
+/// opening the platform keyring in unit tests.
+#[cfg(feature = "local-peer-identity-keychain")]
+trait PeerSeedSecretStore {
+    fn get_secret(&mut self) -> Result<Option<Vec<u8>>, PeerIdentityError>;
+    fn set_secret(&mut self, secret: &[u8]) -> Result<(), PeerIdentityError>;
+}
+
+#[cfg(feature = "local-peer-identity-keychain")]
+fn load_or_create_seed(
+    store: &mut impl PeerSeedSecretStore,
+) -> Result<[u8; PEER_SEED_LEN], PeerIdentityError> {
+    match store.get_secret()? {
+        None => create_and_store_seed(store),
+        Some(bytes) if bytes.is_empty() => create_and_store_seed(store),
+        Some(bytes) if bytes.len() == PEER_SEED_LEN => {
+            let seed = seed_from_secret_bytes(&bytes)?;
+            store.set_secret(&secret_bytes_from_seed(&seed))?;
+            Ok(seed)
+        }
+        Some(bytes) => seed_from_secret_bytes(&bytes),
+    }
+}
+
+#[cfg(feature = "local-peer-identity-keychain")]
+fn create_and_store_seed(
+    store: &mut impl PeerSeedSecretStore,
+) -> Result<[u8; PEER_SEED_LEN], PeerIdentityError> {
+    let mut seed = [0u8; PEER_SEED_LEN];
+    fill_random(&mut seed)?;
+    store.set_secret(&secret_bytes_from_seed(&seed))?;
+    Ok(seed)
 }
 
 #[cfg(test)]
@@ -429,23 +504,6 @@ mod tests {
         let fp = PeerFingerprint::from_public_key(&public_key);
         assert!(id_a.as_str().starts_with(fp.as_str()));
         assert_eq!(fp.as_str().len(), FINGERPRINT_HEX_CHARS);
-    }
-
-    #[cfg(feature = "local-peer-identity-keychain")]
-    #[test]
-    fn seed_from_secret_bytes_round_trips_thirty_two_bytes() {
-        let key = [9u8; 32];
-        let decoded = seed_from_secret_bytes(&key).expect("decode");
-        assert_eq!(decoded, key);
-    }
-
-    #[cfg(feature = "local-peer-identity-keychain")]
-    #[test]
-    fn seed_from_secret_bytes_rejects_wrong_length() {
-        let err = seed_from_secret_bytes(&[0u8; 31]).expect_err("must reject");
-        assert!(matches!(err, PeerIdentityError::SecureStoreFailed));
-        let err = seed_from_secret_bytes(&[0u8; 33]).expect_err("must reject");
-        assert!(matches!(err, PeerIdentityError::SecureStoreFailed));
     }
 }
 
@@ -513,8 +571,16 @@ impl KeychainPeerIdentityStore {
             .map_err(|_| PeerIdentityError::SecureStoreUnavailable)
     }
 
-    /// Load the persisted seed (32 raw bytes) from the secure
-    /// store and derive both the [`LocalPeerIdentity`] and the
+    fn load_seed_from_entry(
+        &self,
+        entry: &keyring::Entry,
+    ) -> Result<[u8; PEER_SEED_LEN], PeerIdentityError> {
+        let mut store = KeyringPeerSeedSecretStore { entry };
+        load_or_create_seed(&mut store)
+    }
+
+    /// Load the persisted seed from the secure store and derive both
+    /// the [`LocalPeerIdentity`] and the
     /// TLS material the pairing transport needs. The seed never
     /// crosses the platform crate boundary: callers receive an
     /// opaque [`LocalIdentityMaterial`] that carries the cert +
@@ -528,19 +594,7 @@ impl KeychainPeerIdentityStore {
     pub fn load_or_create_material(&self) -> Result<LocalIdentityMaterial, PeerIdentityError> {
         let _guard = loader_lock().lock();
         let entry = self.entry()?;
-        let seed_bytes = match entry.get_secret() {
-            Ok(bytes) => bytes,
-            Err(keyring::Error::NoEntry) => {
-                let mut seed = [0u8; 32];
-                fill_random(&mut seed)?;
-                if let Err(error) = entry.set_secret(&seed) {
-                    return Err(map_keyring_error(error));
-                }
-                seed.to_vec()
-            }
-            Err(error) => return Err(map_keyring_error(error)),
-        };
-        let seed = seed_from_secret_bytes(&seed_bytes)?;
+        let seed = self.load_seed_from_entry(&entry)?;
         LocalIdentityMaterial::from_seed(seed)
     }
 
@@ -554,6 +608,26 @@ impl KeychainPeerIdentityStore {
             fingerprint: PeerFingerprint::from_public_key(&public_key),
             public_key,
         }
+    }
+}
+
+#[cfg(feature = "local-peer-identity-keychain")]
+struct KeyringPeerSeedSecretStore<'a> {
+    entry: &'a keyring::Entry,
+}
+
+#[cfg(feature = "local-peer-identity-keychain")]
+impl PeerSeedSecretStore for KeyringPeerSeedSecretStore<'_> {
+    fn get_secret(&mut self) -> Result<Option<Vec<u8>>, PeerIdentityError> {
+        match self.entry.get_secret() {
+            Ok(secret) => Ok(Some(secret)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(map_keyring_error(error)),
+        }
+    }
+
+    fn set_secret(&mut self, secret: &[u8]) -> Result<(), PeerIdentityError> {
+        self.entry.set_secret(secret).map_err(map_keyring_error)
     }
 }
 
@@ -574,21 +648,8 @@ impl PeerIdentityStore for KeychainPeerIdentityStore {
         // targets the canonical service / username pair.
         let _guard = loader_lock().lock();
         let entry = self.entry()?;
-        match entry.get_secret() {
-            Ok(bytes) => {
-                let seed = seed_from_secret_bytes(&bytes)?;
-                Ok(Self::derive_identity(seed))
-            }
-            Err(keyring::Error::NoEntry) => {
-                let mut seed = [0u8; 32];
-                fill_random(&mut seed)?;
-                if let Err(error) = entry.set_secret(&seed) {
-                    return Err(map_keyring_error(error));
-                }
-                Ok(Self::derive_identity(seed))
-            }
-            Err(error) => Err(map_keyring_error(error)),
-        }
+        let seed = self.load_seed_from_entry(&entry)?;
+        Ok(Self::derive_identity(seed))
     }
 }
 
@@ -617,6 +678,124 @@ fn map_keyring_error(error: keyring::Error) -> PeerIdentityError {
 #[cfg(all(test, feature = "local-peer-identity-keychain"))]
 mod keychain_tests {
     use super::*;
+
+    #[derive(Default)]
+    struct MemorySeedStore {
+        secret: Option<Vec<u8>>,
+        writes: usize,
+    }
+
+    impl PeerSeedSecretStore for MemorySeedStore {
+        fn get_secret(&mut self) -> Result<Option<Vec<u8>>, PeerIdentityError> {
+            Ok(self.secret.clone())
+        }
+
+        fn set_secret(&mut self, secret: &[u8]) -> Result<(), PeerIdentityError> {
+            self.secret = Some(secret.to_vec());
+            self.writes += 1;
+            Ok(())
+        }
+    }
+
+    fn assert_is_v1_secret(secret: &[u8]) {
+        assert_eq!(secret.len(), 87);
+        assert!(secret.starts_with(PEER_SEED_V1_PREFIX));
+        assert!(secret[PEER_SEED_V1_PREFIX.len()..]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)));
+    }
+
+    #[test]
+    fn versioned_secret_round_trips_using_lowercase_hex() {
+        let seed = [0x6du8; PEER_SEED_LEN];
+        let encoded = secret_bytes_from_seed(&seed);
+
+        assert_is_v1_secret(&encoded);
+        assert!(seed_from_secret_bytes(&encoded).is_ok_and(|decoded| decoded == seed));
+    }
+
+    #[test]
+    fn legacy_seed_migrates_without_changing_identity() {
+        let seed = [0x39u8; PEER_SEED_LEN];
+        let expected_identity = KeychainPeerIdentityStore::derive_identity(seed);
+        let mut store = MemorySeedStore {
+            secret: Some(seed.to_vec()),
+            writes: 0,
+        };
+
+        let migrated_seed = load_or_create_seed(&mut store).expect("legacy seed should migrate");
+        let migrated_identity = KeychainPeerIdentityStore::derive_identity(migrated_seed);
+
+        assert_eq!(migrated_identity.peer_id, expected_identity.peer_id);
+        assert_eq!(migrated_identity.fingerprint, expected_identity.fingerprint);
+        assert_eq!(store.writes, 1);
+        assert_is_v1_secret(store.secret.as_deref().expect("migrated value"));
+        assert!(store
+            .secret
+            .as_deref()
+            .and_then(|bytes| seed_from_secret_bytes(bytes).ok())
+            .is_some_and(|stored_seed| stored_seed == seed));
+    }
+
+    #[test]
+    fn missing_or_empty_secret_creates_a_persisted_stable_identity() {
+        for initial in [None, Some(Vec::new())] {
+            let mut store = MemorySeedStore {
+                secret: initial,
+                writes: 0,
+            };
+
+            let first_seed = load_or_create_seed(&mut store).expect("create seed");
+            let first_identity = KeychainPeerIdentityStore::derive_identity(first_seed);
+            assert_eq!(store.writes, 1);
+            assert_is_v1_secret(store.secret.as_deref().expect("stored value"));
+
+            let second_seed = load_or_create_seed(&mut store).expect("load created seed");
+            let second_identity = KeychainPeerIdentityStore::derive_identity(second_seed);
+            assert_eq!(second_identity.peer_id, first_identity.peer_id);
+            assert_eq!(second_identity.fingerprint, first_identity.fingerprint);
+            assert_eq!(store.writes, 1);
+        }
+    }
+
+    #[test]
+    fn malformed_nonempty_values_fail_without_overwriting() {
+        let seed = [0x2au8; PEER_SEED_LEN];
+        let mut invalid_hex = secret_bytes_from_seed(&seed);
+        invalid_hex[PEER_SEED_V1_PREFIX.len()] = b'F';
+        let mut invalid_length = secret_bytes_from_seed(&seed);
+        invalid_length.pop();
+        let malformed_values = [
+            vec![0x41; PEER_SEED_LEN - 1],
+            b"clipvault-peer-seed-v2:invalid".to_vec(),
+            invalid_hex,
+            invalid_length,
+        ];
+
+        for malformed in malformed_values {
+            let original = malformed.clone();
+            let mut store = MemorySeedStore {
+                secret: Some(malformed),
+                writes: 0,
+            };
+
+            let result = load_or_create_seed(&mut store);
+
+            assert!(matches!(result, Err(PeerIdentityError::SecureStoreFailed)));
+            assert_eq!(store.writes, 0);
+            assert!(store.secret.as_deref() == Some(original.as_slice()));
+        }
+    }
+
+    #[test]
+    fn legacy_seed_with_invalid_length_is_rejected() {
+        for malformed in [vec![0x17; PEER_SEED_LEN - 1], vec![0x17; PEER_SEED_LEN + 1]] {
+            assert!(matches!(
+                seed_from_secret_bytes(&malformed),
+                Err(PeerIdentityError::SecureStoreFailed)
+            ));
+        }
+    }
 
     #[test]
     fn derive_identity_is_deterministic() {
