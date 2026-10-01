@@ -51,6 +51,7 @@ function defaultSettings(): Settings {
     quick_paste_hotkey: null,
     local_peer_display_name: null,
     local_peer_sharing_enabled: false,
+    capture_notes_sharing_enabled: false,
   };
 }
 
@@ -78,6 +79,23 @@ test("settingsSetCommand forwards the partial update and returns the new state",
   const result = await settingsSetCommand({ retention: "days_7" });
   assert.equal(observed?.update?.retention, "days_7");
   assert.equal(result.retention, "days_7");
+});
+
+test("settingsSetCommand sends the capture-note preference as a partial update", async () => {
+  let observedUpdate: Record<string, unknown> | undefined;
+  installTauriMock(async (cmd, args) => {
+    assert.equal(cmd, "clipvault_settings_set");
+    observedUpdate = args?.update as Record<string, unknown>;
+    return {
+      ...defaultSettings(),
+      capture_notes_sharing_enabled: observedUpdate.capture_notes_sharing_enabled as boolean,
+    };
+  });
+
+  const result = await settingsSetCommand({ capture_notes_sharing_enabled: true });
+
+  assert.deepEqual(observedUpdate, { capture_notes_sharing_enabled: true });
+  assert.equal(result.capture_notes_sharing_enabled, true);
 });
 
 test("ignoredAppsAddCommand sends the identifier through and receives the new aggregate", async () => {

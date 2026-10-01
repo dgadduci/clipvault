@@ -35,3 +35,10 @@ notes or whether the user can receive a note that its sender chose to share.
 - **WHEN** ClipVault cannot persist the requested setting
 - **THEN** the last successfully saved preference remains effective
 - **AND** the user receives an actionable settings error
+
+#### Scenario: Saving the preference omits unrelated settings fields
+
+- **GIVEN** the user changes only the capture-note sharing checkbox
+- **WHEN** General Settings submits that partial update
+- **THEN** the settings command accepts the payload without ignored-app lists
+- **AND** unrelated settings retain their persisted values

@@ -48,6 +48,12 @@ notas. El modal existente de Configuración general la cargará y actualizará
 mediante los comandos tipados actuales de settings. El menu ya contiene el
 item `Configuración general` y seguirá abriendo ese modal.
 
+`SettingsUpdate` conserva el contrato de parche parcial: General Settings
+envía sólo el campo que cambia. La deserialización de Rust usa los valores
+predeterminados del update para los campos omitidos, incluidas las listas de
+aplicaciones ignoradas, sin interpretarlos como una solicitud para vaciar
+datos persistidos.
+
 La preferencia sólo controla lo que este equipo envía. No impide que el usuario
 importe una nota que otro dueño decidió compartir. El receptor guarda una nota
 recibida como su nota local separada del contenido de la captura. Al importar

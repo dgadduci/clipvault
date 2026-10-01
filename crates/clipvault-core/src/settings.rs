@@ -233,7 +233,7 @@ pub const HOTKEY_SETTING_STORAGE_KEY: &str = "quick_paste_hotkey";
 /// Update payload submitted by the UI. Each field is optional so a
 /// partial update does not need to round-trip through every key.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case")]
 pub struct SettingsUpdate {
     pub retention: Option<RetentionPolicy>,
     pub ignored_apps_add: Vec<String>,
@@ -695,6 +695,20 @@ mod tests {
         let raw = r#"{"retention":"forever","ignored_apps_add":[],"ignored_apps_remove":[]}"#;
         let update: SettingsUpdate = serde_json::from_str(raw).expect("parse");
         assert_eq!(update.retention, Some(RetentionPolicy::Forever));
+    }
+
+    #[test]
+    fn settings_update_accepts_capture_note_preference_as_a_partial_payload() {
+        // General Settings submits only the changed field. In particular,
+        // it must not be required to include unrelated ignored-app lists.
+        let update: SettingsUpdate =
+            serde_json::from_str(r#"{"capture_notes_sharing_enabled":true}"#)
+                .expect("partial capture-note preference update should deserialize");
+
+        assert_eq!(update.capture_notes_sharing_enabled, Some(true));
+        assert!(update.ignored_apps_add.is_empty());
+        assert!(update.ignored_apps_remove.is_empty());
+        assert_eq!(update.retention, None);
     }
 
     #[test]

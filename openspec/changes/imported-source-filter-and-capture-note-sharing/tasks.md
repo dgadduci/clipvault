@@ -48,6 +48,9 @@
   cuando se deduplica el contenido.
 - [x] 3.7 Cubrir preferencias ausentes, pares antiguos, notas ausentes,
   contenido duplicado, errores de persistencia y límites del transporte.
+- [x] 3.8 Cubrir la deserialización de una actualización parcial que sólo
+  envía `capture_notes_sharing_enabled`, omitiendo las listas de aplicaciones
+  ignoradas sin alterar sus valores persistidos.
 
 ## 4. Verificación
 
