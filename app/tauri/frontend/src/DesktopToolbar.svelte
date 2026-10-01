@@ -21,6 +21,7 @@
    * `App.svelte` keeps the single source of truth.
    */
   import { onDestroy, tick } from "svelte";
+  import { anchorPopupToViewport } from "./lib/anchorPopupToViewport.ts";
   import SourceAppFilter from "./SourceAppFilter.svelte";
   import TagFilter from "./TagFilter.svelte";
   import type { SourceApplicationOption } from "./types.ts";
@@ -124,6 +125,7 @@
   let menuOpen = false;
   let menuEl: HTMLDivElement | null = null;
   let ellipsisEl: HTMLButtonElement | null = null;
+  let textEntryEl: HTMLButtonElement | null = null;
 
   function handleInput(event: Event): void {
     const value = (event.currentTarget as HTMLInputElement).value;
@@ -153,11 +155,6 @@
   function selectItem(invoke: (event: MouseEvent) => void, event: MouseEvent): void {
     menuOpen = false;
     invoke(event);
-  }
-
-  function selectCreateManualText(event: MouseEvent): void {
-    menuOpen = false;
-    onCreateManualText(event, ellipsisEl);
   }
 
   function toggleMenu(): void {
@@ -240,7 +237,14 @@
 </script>
 
 <div class="toolbar" data-testid="desktop-toolbar">
-  <div class="toolbar-row">
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -- the scrollport must be focusable to support keyboard scrolling. -->
+  <div
+    class="toolbar-row"
+    role="group"
+    aria-label="Filtros y acciones de capturas"
+    tabindex="0"
+    data-testid="toolbar-scrollview"
+  >
     <div class="search-shell" data-testid="search-shell">
       <input
         type="search"
@@ -271,6 +275,34 @@
       options={tagFilterOptions}
       onChange={onTagFilterChange}
     />
+    {#if canCreateManualText}
+      <button
+        type="button"
+        class="text-entry"
+        bind:this={textEntryEl}
+        aria-label="Nueva captura de texto"
+        title="Nueva captura de texto"
+        data-testid="create-manual-text-entry"
+        on:click={(event) => onCreateManualText(event, textEntryEl)}
+      >
+        <svg
+          aria-hidden="true"
+          focusable="false"
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-9z" />
+          <path d="M13 3v7h7M12 14v5m-2.5-2.5h5" />
+        </svg>
+        <span>Texto</span>
+      </button>
+    {/if}
     <div class="actions" role="toolbar" aria-label="Configuración y limpieza">
       <div class="menu-wrapper" data-testid="overflow-menu-wrapper">
         <button
@@ -303,22 +335,13 @@
             class="menu"
             id="desktop-overflow-menu"
             role="menu"
+            tabindex="-1"
             aria-label="Más acciones del escritorio"
             data-testid="overflow-menu"
             bind:this={menuEl}
+            use:anchorPopupToViewport={{ anchor: () => ellipsisEl, align: "end" }}
             on:keydown={onMenuKeydown}
           >
-            {#if canCreateManualText}
-              <button
-                type="button"
-                role="menuitem"
-                class="menu-item"
-                data-testid="create-manual-text-entry"
-                on:click={selectCreateManualText}
-              >
-                Nueva captura de texto
-              </button>
-            {/if}
             <button
               type="button"
               role="menuitem"
@@ -452,12 +475,23 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    width: 100%;
+    height: fit-content;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    scrollbar-color: var(--cv-border, #30363d) transparent;
+  }
+
+  .toolbar-row:focus-visible {
+    outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.45));
+    outline-offset: -2px;
   }
 
   .search-shell {
     position: relative;
-    flex: 1 1 240px;
+    flex: 1 0 240px;
     min-width: 12rem;
     display: flex;
     align-items: center;
@@ -499,17 +533,14 @@
     display: flex;
     align-items: center;
     gap: 0.35rem;
-    flex-wrap: wrap;
-    margin-left: auto;
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
   }
 
   /*
-   * The menu wrapper anchors the overflow menu so the menu panel can
-   * absolutely position itself against the wrapper without escaping
-   * the right column's bounds (the parent already carries
-   * `overflow: visible` by default; the menu stays within the
-   * column because `position: absolute` resolves against this
-   * relatively-positioned wrapper).
+   * Keep the trigger and its popup logically grouped. The popup is
+   * moved to the document body and positioned against this trigger
+   * so the toolbar's horizontal scroll viewport cannot clip it.
    */
   .menu-wrapper {
     position: relative;
@@ -530,6 +561,33 @@
     justify-content: center;
     cursor: pointer;
     font: inherit;
+    white-space: nowrap;
+  }
+
+  .text-entry {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    flex: 0 0 auto;
+    min-height: 2rem;
+    padding: 0.35rem 0.55rem;
+    background: var(--cv-bg-elevated, #161b22);
+    color: var(--cv-fg, #f0f4f8);
+    border: 1px solid var(--cv-border, #30363d);
+    border-radius: var(--cv-radius-sm, 6px);
+    font: inherit;
+    font-size: var(--cv-control, 0.85rem);
+    cursor: pointer;
+  }
+
+  .text-entry:hover {
+    background: var(--cv-bg-hover, rgba(255, 255, 255, 0.06));
+  }
+
+  .text-entry:focus-visible {
+    outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.45));
+    outline-offset: 2px;
   }
 
   .menu-trigger:hover {
@@ -555,9 +613,10 @@
    * only the visual surface changed.
    */
   .menu {
-    position: absolute;
-    top: calc(100% + 0.35rem);
-    right: 0;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: auto;
     z-index: 30;
     min-width: 14rem;
     background: var(--cv-bg-elevated, #161b22);
@@ -629,16 +688,4 @@
     cursor: progress;
   }
 
-  @media (max-width: 640px) {
-    .toolbar-row {
-      align-items: stretch;
-    }
-    .actions {
-      width: 100%;
-      justify-content: flex-start;
-    }
-    .menu-wrapper {
-      margin-left: auto;
-    }
-  }
 </style>

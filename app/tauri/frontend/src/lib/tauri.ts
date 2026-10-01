@@ -59,6 +59,7 @@ import type {
   UpdateTextEntryResponse,
   WatchTickResponse,
 } from "../types.ts";
+import type { ContentTypeValue } from "./contentType.ts";
 
 declare global {
   interface Window {
@@ -121,6 +122,7 @@ export const recentEntriesFilteredCommand: ClipvaultCommandArg<
     collectionId?: number | null;
     tagIds?: number[];
     sourceApp?: SourceAppFilter | null;
+    contentType?: ContentTypeValue | null;
   }
 > = (args) =>
   invoke<EntryRecord[]>("clipvault_recent_entries_filtered", {
@@ -128,6 +130,7 @@ export const recentEntriesFilteredCommand: ClipvaultCommandArg<
     collectionId: args.collectionId ?? null,
     tagIds: args.tagIds ?? [],
     sourceApp: args.sourceApp ?? null,
+    contentType: args.contentType ?? null,
   });
 
 export const searchEntriesCommand: ClipvaultCommandArg<
@@ -138,6 +141,7 @@ export const searchEntriesCommand: ClipvaultCommandArg<
     collectionId?: number | null;
     tagIds?: number[];
     sourceApp?: SourceAppFilter | null;
+    contentType?: ContentTypeValue | null;
   }
 > = (args) =>
   invoke<SearchResponse>("clipvault_search_entries", {
@@ -146,6 +150,7 @@ export const searchEntriesCommand: ClipvaultCommandArg<
     collectionId: args.collectionId ?? null,
     tagIds: args.tagIds ?? [],
     sourceApp: args.sourceApp ?? null,
+    contentType: args.contentType ?? null,
   });
 
 /**

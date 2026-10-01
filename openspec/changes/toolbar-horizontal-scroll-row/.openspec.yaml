@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-09-30
+goal: >-
+  Mantener los controles de filtros y acciones de la barra en una única fila
+  horizontal desplazable cuando no caben en la ventana.

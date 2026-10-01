@@ -26,6 +26,7 @@
    * single source of truth for the reset-on-scope-change branch.
    */
   import { onDestroy, tick } from "svelte";
+  import { anchorPopupToViewport } from "./lib/anchorPopupToViewport.ts";
   import type { TagFilter, TagFilterOption } from "./types.ts";
   import { filterComboboxStyles } from "./lib/filterTokens.ts";
 
@@ -331,6 +332,10 @@
       id={`${testId}-listbox`}
       aria-label={ariaLabel}
       bind:this={listEl}
+      use:anchorPopupToViewport={{
+        anchor: () => triggerEl,
+        matchAnchorWidth: true,
+      }}
       on:keydown={onListboxKeydown}
       data-testid={`${testId}-listbox`}
     >
@@ -425,10 +430,10 @@
   }
 
   .listbox {
-    position: absolute;
-    top: calc(100% + 0.35rem);
+    position: fixed;
+    top: 0;
     left: 0;
-    right: 0;
+    right: auto;
     z-index: 30;
     list-style: none;
     margin: 0;
@@ -470,9 +475,4 @@
     white-space: nowrap;
   }
 
-  @media (max-width: 640px) {
-    .tag-filter {
-      flex: 1 1 100%;
-    }
-  }
 </style>

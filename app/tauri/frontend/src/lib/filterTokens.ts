@@ -34,7 +34,7 @@ export const FILTER_MIN_WIDTH_REM = "11rem";
  * scoped CSS gymnastics.
  */
 export const filterComboboxStyles = `
-  flex: 0 1 ${FILTER_WIDTH_PX}px;
+  flex: 0 0 ${FILTER_WIDTH_PX}px;
   min-width: ${FILTER_MIN_WIDTH_REM};
   max-width: ${FILTER_WIDTH_PX}px;
   width: ${FILTER_WIDTH_PX}px;

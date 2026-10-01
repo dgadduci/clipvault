@@ -510,6 +510,7 @@ pub fn clipvault_recent_entries_filtered(
     collection_id: Option<i64>,
     tag_ids: Option<Vec<i64>>,
     source_app: Option<clipvault_core::SourceAppFilter>,
+    content_type: Option<clipvault_db::ContentType>,
 ) -> Result<Vec<clipvault_db::EntryRecord>, CommandError> {
     let limit = limit.unwrap_or(50).min(500);
     let tag_ids = tag_ids.unwrap_or_default();
@@ -517,7 +518,14 @@ pub fn clipvault_recent_entries_filtered(
     let records = state
         .context()
         .history()
-        .recent_entries_with_filter(state.context(), collection_id, &tag_ids, &source_app, limit)
+        .recent_entries_with_content_type_filter(
+            state.context(),
+            collection_id,
+            &tag_ids,
+            &source_app,
+            content_type,
+            limit,
+        )
         .map_err(|err| CommandError::new("history_error", err.to_string()))?;
     Ok(records)
 }
@@ -549,6 +557,7 @@ pub fn clipvault_search_entries(
     collection_id: Option<i64>,
     tag_ids: Option<Vec<i64>>,
     source_app: Option<clipvault_core::SourceAppFilter>,
+    content_type: Option<clipvault_db::ContentType>,
 ) -> Result<SearchResponse, CommandError> {
     let limit = limit.unwrap_or(clipvault_core::SEARCH_DEFAULT_LIMIT);
     let engine_query = clipvault_core::SearchQuery { text: query, limit };
@@ -560,7 +569,7 @@ pub fn clipvault_search_entries(
     let outcome = state
         .context()
         .search()
-        .search_with_filter(state.context(), &engine_query, &filter)
+        .search_with_content_type_filter(state.context(), &engine_query, &filter, content_type)
         .map_err(|err| CommandError::new("history_error", err.to_string()))?;
     Ok(SearchResponse {
         note: outcome.note,

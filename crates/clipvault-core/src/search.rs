@@ -8,7 +8,9 @@
 //! re-use directly (e.g. when the future `quick-paste` change wires
 //! the action).
 
-use clipvault_db::{EntryRecord, EntryRepository, EntryRepositoryError, SourceAppFilter};
+use clipvault_db::{
+    ContentType, EntryRecord, EntryRepository, EntryRepositoryError, SourceAppFilter,
+};
 use clipvault_search::{
     LocalSearchEngine, SearchDocument, SearchEngine, SearchHit, SearchQuery, SearchResults,
 };
@@ -69,7 +71,9 @@ pub struct SearchServiceOutcome {
 /// facet: `All` is the absence of a restriction, `Known` pins the
 /// candidate set to a single stable identifier, and `Unknown` keeps
 /// the rows whose `source_app` is `NULL` or empty. All three facets
-/// are AND-combined and applied before the ranking engine runs.
+/// are AND-combined and applied before the ranking engine runs. The optional
+/// capture type is accepted separately by `search_with_content_type_filter`
+/// so callers that use the original filter struct remain source-compatible.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SearchFilter {
     pub collection_id: Option<i64>,
@@ -115,6 +119,19 @@ impl SearchService {
         query: &SearchQuery,
         filter: &SearchFilter,
     ) -> Result<SearchServiceOutcome, SearchServiceError> {
+        self.search_with_content_type_filter(context, query, filter, None)
+    }
+
+    /// Same as [`Self::search_with_filter`] with an optional capture-type
+    /// facet. This additive entry point preserves the existing `SearchFilter`
+    /// struct contract for callers that do not use the desktop toolbar.
+    pub fn search_with_content_type_filter(
+        &self,
+        context: &AppContext,
+        query: &SearchQuery,
+        filter: &SearchFilter,
+        content_type: Option<ContentType>,
+    ) -> Result<SearchServiceOutcome, SearchServiceError> {
         let limit = clamp_limit(query.limit);
         let clamped_query = SearchQuery {
             text: query.text.clone(),
@@ -131,7 +148,12 @@ impl SearchService {
         let records = {
             let mut db = context.database().lock();
             let repo = EntryRepository::new(db.connection_mut());
-            repo.entries_filtered(filter.collection_id, &filter.tag_ids, &filter.source_app)?
+            repo.entries_filtered_by_content_type(
+                filter.collection_id,
+                &filter.tag_ids,
+                &filter.source_app,
+                content_type,
+            )?
         };
 
         // Build SearchDocuments borrowing from the records we already
@@ -283,6 +305,43 @@ mod tests {
         let mut repo = EntryRepository::new(db.connection_mut());
         let outcome = repo.insert_or_touch(new).expect("insert");
         outcome.record().id
+    }
+
+    #[test]
+    fn search_content_type_filter_restricts_candidates_before_ranking() {
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let context = bootstrap_with(vec![when]);
+        let text_id = insert_entry(&context, "sharedmatch text", when);
+        let url_id = {
+            let new = NewEntry::text(
+                "sharedmatch url".to_string(),
+                ContentType::Url,
+                17,
+                "url-hash".to_string(),
+                Some("test".to_string()),
+                when,
+                when,
+            );
+            let mut db = context.database().lock();
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new).expect("url entry").record().id
+        };
+
+        let outcome = SearchService::new()
+            .search_with_content_type_filter(
+                &context,
+                &SearchQuery {
+                    text: "sharedmatch".to_string(),
+                    limit: 10,
+                },
+                &SearchFilter::default(),
+                Some(ContentType::Url),
+            )
+            .expect("filtered search");
+
+        let ids: Vec<i64> = outcome.hits.iter().map(|hit| hit.entry_id).collect();
+        assert_eq!(ids, vec![url_id]);
+        assert!(!ids.contains(&text_id));
     }
 
     fn insert_text_with_source(

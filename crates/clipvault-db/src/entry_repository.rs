@@ -1126,6 +1126,19 @@ impl<'a> EntryRepository<'a> {
         tag_ids: &[i64],
         source_app: &SourceAppFilter,
     ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
+        self.entries_filtered_by_content_type(collection_id, tag_ids, source_app, None)
+    }
+
+    /// Variant of [`Self::entries_filtered`] that also restricts rows to one
+    /// content type when supplied. The type is bound as a parameter so the
+    /// query remains safe and the existing no-type call retains its behavior.
+    pub fn entries_filtered_by_content_type(
+        &self,
+        collection_id: Option<i64>,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+    ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
         let mut sql = format!(
             "SELECT {ENTRY_COLUMNS}
              FROM clipboard_entries"
@@ -1152,6 +1165,11 @@ impl<'a> EntryRepository<'a> {
             ));
             first_clause = false;
         }
+        if content_type.is_some() {
+            sql.push_str(if first_clause { " WHERE " } else { " AND " });
+            sql.push_str("content_type = ?");
+            first_clause = false;
+        }
         let peer_bound = collection_id
             .map(|id| collection_has_peer_binding(self.conn, id))
             .transpose()?
@@ -1172,6 +1190,9 @@ impl<'a> EntryRepository<'a> {
         }
         if !tag_ids.is_empty() {
             params_dyn.push(Box::new(tag_ids.len() as i64));
+        }
+        if let Some(content_type) = content_type {
+            params_dyn.push(Box::new(content_type.as_str().to_owned()));
         }
         if let Some(predicate) = scoped_source {
             params_dyn.extend(predicate.params.into_iter().map(|param| match param {
@@ -3193,6 +3214,44 @@ mod tests {
         assert!(ids.contains(&text_id), "text entry must surface");
         assert!(ids.contains(&image_id), "image entry must surface");
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn entries_filtered_by_content_type_returns_only_the_selected_type() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (text_id, url_id) = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let text_id = repo
+                .insert_or_touch(new_entry_with_type("same needle", ContentType::Text, when))
+                .expect("text")
+                .record()
+                .id;
+            let url_id = repo
+                .insert_or_touch(new_entry_with_type(
+                    "same needle url",
+                    ContentType::Url,
+                    when,
+                ))
+                .expect("url")
+                .record()
+                .id;
+            (text_id, url_id)
+        };
+
+        let repo = EntryRepository::new(db.connection_mut());
+        let filtered = repo
+            .entries_filtered_by_content_type(
+                None,
+                &[],
+                &SourceAppFilter::default(),
+                Some(ContentType::Url),
+            )
+            .expect("content-type filtered entries");
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, url_id);
+        assert_ne!(filtered[0].id, text_id);
     }
 
     #[test]

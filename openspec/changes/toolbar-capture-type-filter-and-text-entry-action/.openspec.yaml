@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-09-30
+goal: >-
+  Hacer funcional el filtro por tipo de captura en todas las colecciones y
+  ofrecer la creación de capturas de texto directamente desde la barra de
+  filtros.

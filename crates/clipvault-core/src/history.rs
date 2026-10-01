@@ -16,7 +16,7 @@ use thiserror::Error;
 use tracing::warn;
 
 use clipvault_db::{
-    EntryOutcome, EntryRepository, EntryRepositoryError, NewEntry, SourceAppFilter,
+    ContentType, EntryOutcome, EntryRepository, EntryRepositoryError, NewEntry, SourceAppFilter,
     UpdateTextOutcome, IMAGE_CONTENT_SENTINEL, IMAGE_MIME_PNG,
 };
 use clipvault_platform::{
@@ -775,10 +775,31 @@ impl TextHistoryService {
         source_app: &SourceAppFilter,
         limit: usize,
     ) -> Result<Vec<clipvault_db::EntryRecord>, HistoryServiceError> {
+        self.recent_entries_with_content_type_filter(
+            context,
+            collection_id,
+            tag_ids,
+            source_app,
+            None,
+            limit,
+        )
+    }
+
+    /// Same as [`Self::recent_entries_with_filter`] with an optional
+    /// content-type facet for the desktop rail.
+    pub fn recent_entries_with_content_type_filter(
+        &self,
+        context: &AppContext,
+        collection_id: Option<i64>,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+        limit: usize,
+    ) -> Result<Vec<clipvault_db::EntryRecord>, HistoryServiceError> {
         let records = {
             let mut db = context.database().lock();
             let repo = EntryRepository::new(db.connection_mut());
-            repo.entries_filtered(collection_id, tag_ids, source_app)?
+            repo.entries_filtered_by_content_type(collection_id, tag_ids, source_app, content_type)?
         };
         // `entries_filtered` already enforces the ordering contract.
         // Truncate to the requested limit so the rail stays

@@ -147,6 +147,30 @@ test("DesktopToolbar renders a single ellipsis trigger with accessible semantics
   );
 });
 
+test("text-entry action follows the existing filter controls and precedes the overflow menu", () => {
+  const source = stripComments(loadSource("src/DesktopToolbar.svelte"));
+  const tagFilter = source.indexOf("<TagFilter");
+  const textAction = source.indexOf('data-testid="create-manual-text-entry"');
+  const overflow = source.indexOf('data-testid="open-overflow-menu"');
+  assert.ok(tagFilter >= 0, "toolbar keeps its existing filter controls");
+  assert.ok(textAction > tagFilter, "text action follows the existing filters");
+  assert.ok(overflow > textAction, "overflow menu follows the text action");
+  assert.equal(
+    source.includes("<CaptureTypeFilter"),
+    false,
+    "toolbar must not render the duplicate type-filter select",
+  );
+  assert.match(source, /aria-label="Nueva captura de texto"/);
+  assert.match(source, /<span>Texto<\/span>/);
+  const menuStart = source.indexOf('data-testid="overflow-menu"');
+  const menuEnd = source.indexOf("{/if}", menuStart);
+  assert.equal(
+    source.slice(menuStart, menuEnd).includes('data-testid="create-manual-text-entry"'),
+    false,
+    "manual text action is not part of the overflow menu",
+  );
+});
+
 test("DesktopToolbar menu exposes its configured actions through the existing callbacks", () => {
   const source = stripComments(loadSource("src/DesktopToolbar.svelte"));
   // The menu container must use `role="menu"` so screen readers
@@ -390,23 +414,37 @@ test("OrganizationSidebar stretches to the workspace height and keeps its scroll
 });
 
 // ---------------------------------------------------------------------------
-// Responsive: the overflow menu stays usable in narrow windows.
+// Responsive: keep the toolbar on one horizontally scrollable line.
 // ---------------------------------------------------------------------------
 
-test("DesktopToolbar keeps the search, menu and trash usable in narrow windows", () => {
+test("DesktopToolbar keeps all controls in a single horizontal scroll row", () => {
   const source = stripComments(loadSource("src/DesktopToolbar.svelte"));
-  // The toolbar still wraps onto multiple rows below the
-  // documented breakpoint so the search, menu and trash remain
-  // reachable on narrow windows.
-  assert.match(source, /@media \(max-width: 640px\)/);
-  // The menu must position itself relative to a stable wrapper
-  // so it cannot be clipped by the toolbar's own overflow. The
-  // wrapper is `position: relative` and the menu is
-  // `position: absolute` anchored to it.
-  assert.match(source, /\.menu-wrapper\s*\{[^}]*position:\s*relative/);
-  assert.match(source, /\.menu\s*\{[^}]*position:\s*absolute/);
-  // The menu must carry a z-index above the toolbar surface so it
-  // does not get hidden behind the rail / cards.
+  assert.match(source, /data-testid="toolbar-scrollview"/);
+  assert.match(source, /aria-label="Filtros y acciones de capturas"/);
+  assert.match(source, /tabindex="0"/);
+  assert.match(source, /\.toolbar-row\s*\{[^}]*flex-wrap:\s*nowrap/);
+  assert.match(source, /\.toolbar-row\s*\{[^}]*overflow-x:\s*auto/);
+  assert.match(source, /\.toolbar-row\s*\{[^}]*height:\s*fit-content/);
+  assert.match(source, /\.search-shell\s*\{[^}]*flex:\s*1 0 240px/);
+  assert.match(source, /\.actions\s*\{[^}]*flex-wrap:\s*nowrap/);
+  const filterTokens = loadSource("src/lib/filterTokens.ts");
+  assert.match(filterTokens, /flex:\s*0 0 \$\{FILTER_WIDTH_PX\}px/);
+
+  // The menu and filters escape the scroll viewport and follow their
+  // triggers, so their option surfaces remain visible and interactive.
+  assert.match(source, /use:anchorPopupToViewport=/);
+  for (const filterSource of [
+    loadSource("src/SourceAppFilter.svelte"),
+    loadSource("src/TagFilter.svelte"),
+  ]) {
+    assert.match(filterSource, /use:anchorPopupToViewport=/);
+    assert.match(filterSource, /\.listbox\s*\{[^}]*position:\s*fixed/);
+  }
+  const popupHelper = stripComments(loadSource("src/lib/anchorPopupToViewport.ts"));
+  assert.match(popupHelper, /document\.body\.appendChild\(node\)/);
+  assert.match(popupHelper, /window\.addEventListener\("scroll", positionPopup, true\)/);
+  assert.match(source, /\.menu\s*\{[^}]*position:\s*fixed/);
+  // Popups remain above the rail and cards.
   assert.match(source, /\.menu\s*\{[^}]*z-index:\s*30/);
 });
 

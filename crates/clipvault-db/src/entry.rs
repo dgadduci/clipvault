@@ -3,7 +3,7 @@
 //! The struct is intentionally small and serialisable so the Tauri shell
 //! can hand it to the frontend without leaking the SQLite row layout.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -20,7 +20,7 @@ use time::OffsetDateTime;
 /// [`ContentType::Ipv4`] -> `"ipv4"`, [`ContentType::Image`] ->
 /// `"image"`). The string form is the authoritative wire format used
 /// by SQLite and the Tauri shell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentType {
     /// Free-form text or any payload the detector could not classify
@@ -425,6 +425,9 @@ mod tests {
         for (variant, expected) in cases {
             let serialised = serde_json::to_string(&variant).expect("serialise");
             assert_eq!(serialised, expected, "variant = {variant:?}");
+            let deserialised: ContentType =
+                serde_json::from_str(expected).expect("deserialize content type");
+            assert_eq!(deserialised, variant, "wire value = {expected}");
         }
     }
 
