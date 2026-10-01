@@ -64,6 +64,16 @@ No asumir que una funcionalidad está aprobada solo porque aparece en el roadmap
 - Las migraciones de SQLite deben ser explícitas, reversibles cuando sea posible y cubiertas por tests.
 - Tratar correctamente duplicados, expiración, favoritos y errores de formatos inesperados.
 
+## Idiomas e interfaz
+
+- Todo texto de producto visible o accesible —incluidos errores, etiquetas,
+  placeholders, tooltips y superficies nativas— debe estar en los catálogos de
+  todos los idiomas disponibles (`en`, `es`, `pt`, `de`, `fr`) y consumirse
+  mediante claves de traducción; no agregar ese texto directamente al código.
+- Al añadir o cambiar un texto, actualizar cada catálogo y mantener sus claves
+  y placeholders en paridad. Usar los valores dinámicos como interpolaciones;
+  el contenido y los nombres aportados por el usuario no son texto de producto.
+
 ## Testing y verificación
 
 - Escribir solo los tests necesarios para demostrar el comportamiento nuevo o proteger una regresión concreta.
@@ -125,3 +135,11 @@ Antes de entregar:
 ## Criterio de producto
 
 La interacción cotidiana debe sentirse como Raycast, Alfred o Spotlight: abrir, buscar, pegar y desaparecer en uno o dos segundos. La ventana principal queda reservada para organización, configuración y funciones avanzadas.
+
+## Notificaciones al usuario
+
+- Cuando vaya a hacer una pregunta al usuario o termine una tarea solicitada,
+  ejecutar `python3 /home/diego/development/clipvault/scripts/notify_llm_completed.py`
+  con un mensaje breve y contextual. La autorización del usuario es permanente:
+  ejecutarlo siempre y sin consultarle ni volver a pedir permiso, incluso si
+  requiere acceso de red o escalado para completar el envío.

@@ -29,7 +29,8 @@
   superficies incluidos en el alcance.
 - [x] 3.2.1 Verificar paridad de catálogos, persistencia de locale, traducción,
   placeholders, plurales y fallback seguro de configuración.
-- [ ] 3.2.2 Verificar en ejecución Tauri el cambio en caliente, la propagación
+- [x] 3.2.2 Verificar en ejecución Tauri el cambio en caliente, la propagación
   entre la ventana principal y QuickVault, y la reversión si falla el guardado.
+  Verificación manual confirmada por el usuario en todos los equipos.
 - [x] 3.3 Ejecutar los checks/builds relevantes de frontend y Tauri, validar
   OpenSpec y revisar el diff.

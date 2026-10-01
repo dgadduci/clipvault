@@ -1,12 +1,12 @@
 # Propuesta: interfaz multilenguaje
 
-## Por qué
+## Why
 
 La interfaz de ClipVault mezcla textos fijos en distintos componentes y
 superficies. Esto dificulta ofrecer una experiencia coherente en otros idiomas
 y hace que cada cambio de texto tenga que resolverse de forma aislada.
 
-## Qué cambia
+## What Changes
 
 - Centralizar los textos visibles propios de la aplicación en catálogos JSON
   para inglés, español, portugués, alemán y francés.
