@@ -29,6 +29,7 @@
    */
   import { createEventDispatcher } from "svelte";
   import type { PeerSnapshot, PeerSnapshotEntry } from "./types";
+  import { t } from "./lib/localization.ts";
 
   /**
    * Props the parent supplies. The component is a pure adapter
@@ -89,10 +90,13 @@
     return entry.trust_state === "trusted" && !entry.is_present;
   }
 
-  function shortDisplayName(entry: PeerSnapshotEntry): string {
+  function shortDisplayName(
+    entry: PeerSnapshotEntry,
+    translateText: (key: string, params?: Record<string, string | number | Date>) => string,
+  ): string {
     const value = entry.display_name?.trim();
     if (value && value.length > 0) return value;
-    return `peer ${shortPeerId(entry.peer_id)}`;
+    return translateText("peers.peer", { id: shortPeerId(entry.peer_id) });
   }
 
   function shortPeerId(peerId: string): string {
@@ -108,16 +112,16 @@
 <section
   class="linked-peers"
   data-testid="linked-peers-section"
-  aria-label="Equipos vinculados"
+  aria-label={$t("peers.linked.title")}
 >
-  <h2>Equipos vinculados</h2>
+  <h2>{$t("peers.linked.title")}</h2>
   {#if !snapshot}
     <p class="linked-peers-empty" data-testid="linked-peers-empty">
-      Activando la red local…
+      {$t("peers.linked.activating")}
     </p>
   {:else if linkedPeers.length === 0}
     <p class="linked-peers-empty" data-testid="linked-peers-empty">
-      Sin pares vinculados. Vincula uno desde el panel Compartir.
+      {$t("peers.linked.empty")}
     </p>
   {:else}
     <ul
@@ -149,13 +153,13 @@
               aria-hidden="true"
             ></span>
             <span class="linked-peers-name" data-testid="linked-peers-name">
-              {shortDisplayName(entry)}
+              {shortDisplayName(entry, $t)}
             </span>
             <span class="linked-peers-status" data-testid="linked-peers-status">
               {#if isActive(entry)}
-                Activo
+                {$t("peers.status.active")}
               {:else if isTrustedUnavailable(entry)}
-                No disponible
+                {$t("peers.status.unavailable")}
               {:else}
                 —
               {/if}

@@ -12,6 +12,8 @@ const DAY_MS = 24 * HOUR_MS;
 const DAYS_PER_MONTH = 30;
 /** Average number of days in a calendar year (365). */
 const DAYS_PER_YEAR = 365;
+import { translate } from "./localization.ts";
+import type { Locale } from "./localization.ts";
 
 /**
  * Parse an RFC 3339 / ISO 8601 UTC timestamp. Returns `null` when the
@@ -57,60 +59,58 @@ export interface ElapsedTime {
 export function formatElapsedTime(
   createdAt: unknown,
   now: Date,
+  locale: Locale = "es",
 ): ElapsedTime {
   const capturedAt = parseTimestamp(createdAt);
   if (capturedAt === null) {
+    const unknown = translate("time.unknown", {}, locale);
     return {
-      visual: "Reciente",
-      accessible: "Fecha de captura desconocida",
+      visual: unknown,
+      accessible: unknown,
     };
   }
   const delta = capturedAt.getTime() - now.getTime();
+  const short = new Intl.RelativeTimeFormat(locale, {
+    numeric: "auto",
+    style: "short",
+  });
+  const long = new Intl.RelativeTimeFormat(locale, {
+    numeric: "auto",
+    style: "long",
+  });
   if (delta > MINUTE_MS) {
     // Tolerate small clock skew (≤1 min in the future) but anything
     // larger means the row was inserted with a `created_at` ahead of
     // the current clock — the helper labels it as "Recién capturado"
     // instead of producing a negative counter.
     return {
-      visual: "Recién capturado",
-      accessible: "Recién capturado",
+      visual: short.format(0, "second"),
+      accessible: long.format(0, "second"),
     };
   }
   const elapsed = Math.max(0, now.getTime() - capturedAt.getTime());
   if (elapsed < MINUTE_MS) {
-    return { visual: "Ahora", accessible: "Capturado hace menos de un minuto" };
+    return {
+      visual: short.format(0, "second"),
+      accessible: long.format(0, "second"),
+    };
   }
   if (elapsed < HOUR_MS) {
     const minutes = Math.floor(elapsed / MINUTE_MS);
-    return {
-      visual: `Hace ${minutes} min`,
-      accessible: `Capturado hace ${minutes} minutos`,
-    };
+    return { visual: short.format(-minutes, "minute"), accessible: long.format(-minutes, "minute") };
   }
   if (elapsed < DAY_MS) {
     const hours = Math.floor(elapsed / HOUR_MS);
-    return {
-      visual: `Hace ${hours} h`,
-      accessible: `Capturado hace ${hours} horas`,
-    };
+    return { visual: short.format(-hours, "hour"), accessible: long.format(-hours, "hour") };
   }
   if (elapsed < DAYS_PER_MONTH * DAY_MS) {
     const days = Math.floor(elapsed / DAY_MS);
-    return {
-      visual: `Hace ${days} días`,
-      accessible: `Capturado hace ${days} días`,
-    };
+    return { visual: short.format(-days, "day"), accessible: long.format(-days, "day") };
   }
   if (elapsed < DAYS_PER_YEAR * DAY_MS) {
     const months = Math.floor(elapsed / (DAYS_PER_MONTH * DAY_MS));
-    return {
-      visual: `Hace ${months} meses`,
-      accessible: `Capturado hace ${months} meses`,
-    };
+    return { visual: short.format(-months, "month"), accessible: long.format(-months, "month") };
   }
   const years = Math.floor(elapsed / (DAYS_PER_YEAR * DAY_MS));
-  return {
-    visual: `Hace ${years} años`,
-    accessible: `Capturado hace ${years} años`,
-  };
+  return { visual: short.format(-years, "year"), accessible: long.format(-years, "year") };
 }

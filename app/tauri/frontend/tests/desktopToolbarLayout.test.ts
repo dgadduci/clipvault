@@ -160,8 +160,8 @@ test("text-entry action follows the existing filter controls and precedes the ov
     false,
     "toolbar must not render the duplicate type-filter select",
   );
-  assert.match(source, /aria-label="Nueva captura de texto"/);
-  assert.match(source, /<span>Texto<\/span>/);
+  assert.match(source, /aria-label=\{\$t\("toolbar\.text_capture\.aria"\)\}/);
+  assert.match(source, /<span>\{\$t\("toolbar\.text_capture\.label"\)\}<\/span>/);
   const menuStart = source.indexOf('data-testid="overflow-menu"');
   const menuEnd = source.indexOf("{/if}", menuStart);
   assert.equal(
@@ -225,27 +225,16 @@ test("DesktopToolbar menu exposes its configured actions through the existing ca
       `${callback} must still flow through the menuitem click`,
     );
   }
-  // Each label must surface exactly once as the visible content of
-  // a `<button>` element — i.e. the four secondary desktop actions
-  // are accessible only through the menu, never as standalone
-  // text buttons beside the search input. The regex matches a
-  // `<button` opener, any markup, then the label as the text
-  // content, then the closing `</button>`.
-  for (const literal of [
-    "Development",
-    "Configuración general",
-    "Privacidad",
-    "Retención",
-    "Atajo de pegado rápido",
+  // Each menu label must resolve from the shared catalog exactly
+  // once, while the menu structure keeps it away from the toolbar row.
+  for (const key of [
+    "toolbar.menu.development",
+    "toolbar.menu.settings",
+    "toolbar.menu.privacy",
+    "toolbar.menu.retention",
+    "toolbar.menu.shortcut",
   ]) {
-    const labelMatches = source.match(
-      new RegExp(`<button[\\s\\S]*?>\\s*${literal}\\s*</button>`, "g"),
-    ) ?? [];
-    assert.equal(
-      labelMatches.length,
-      1,
-      `${literal} must appear exactly once as the text content of a <button>`,
-    );
+    assert.equal(source.split(`$t("${key}")`).length - 1, 1, `${key} must appear once`);
   }
 });
 
@@ -420,7 +409,7 @@ test("OrganizationSidebar stretches to the workspace height and keeps its scroll
 test("DesktopToolbar keeps all controls in a single horizontal scroll row", () => {
   const source = stripComments(loadSource("src/DesktopToolbar.svelte"));
   assert.match(source, /data-testid="toolbar-scrollview"/);
-  assert.match(source, /aria-label="Filtros y acciones de capturas"/);
+  assert.match(source, /aria-label=\{\$t\("toolbar\.filters\.aria"\)\}/);
   assert.match(source, /tabindex="0"/);
   assert.match(source, /\.toolbar-row\s*\{[^}]*flex-wrap:\s*nowrap/);
   assert.match(source, /\.toolbar-row\s*\{[^}]*overflow-x:\s*auto/);

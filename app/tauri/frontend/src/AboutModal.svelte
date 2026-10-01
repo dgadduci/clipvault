@@ -19,6 +19,7 @@
    * opens.
    */
   import type { Diagnostics } from "./types";
+  import { t } from "./lib/localization.ts";
 
   export let diagnostics: Diagnostics | null = null;
   export let onClose: () => void;
@@ -43,25 +44,16 @@
 <section class="about-section" data-testid="about-modal">
   <article class="card-block">
     <h3 class="block-title">ClipVault</h3>
-    <p class="muted">
-      ClipVault es un workspace local para el portapapeles, snippets y
-      utilidades de productividad en macOS y Linux. La información
-      permanece en tu equipo, sin cuentas ni telemetría obligatoria.
-    </p>
+    <p class="muted">{$t("about.description")}</p>
     <dl class="meta-list">
-      <dt>Producto</dt>
+      <dt>{$t("about.product")}</dt>
       <dd>ClipVault</dd>
-      <dt>Versión</dt>
+      <dt>{$t("about.version")}</dt>
       <dd>
         <code data-testid="about-version">{displayVersion}</code>
       </dd>
     </dl>
-    <p class="muted small">
-      La versión se lee desde el manifiesto canónico de la
-      aplicación (Cargo workspace + Tauri config). El cierre del
-      modal con <kbd>Esc</kbd>, el botón de cierre o un click sobre
-      el fondo regresa el foco al menú de puntos suspensivos.
-    </p>
+    <p class="muted small">{$t("about.version_details")}</p>
   </article>
   <div class="row" data-testid="about-actions">
     <button
@@ -70,7 +62,7 @@
       data-testid="about-close"
       on:click={onClose}
     >
-      Cerrar
+      {$t("common.close")}
     </button>
   </div>
 </section>

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
+  import { get } from "svelte/store";
   import {
     captureControlGetCommand,
     captureControlSetCommand,
@@ -11,6 +12,12 @@
     listenCaptureControlError,
   } from "./lib/captureControlUpdates.ts";
   import { captureToggleShortcutLabel } from "./lib/clipboardCaptureControl.ts";
+  import {
+    localeStore,
+    setLocale,
+    t,
+    type Locale,
+  } from "./lib/localization.ts";
 
   export let open = false;
   export let platformOs: string | null = null;
@@ -18,9 +25,10 @@
 
   let captureEnabled: boolean | null = null;
   let shareNotesEnabled: boolean | null = null;
+  let language: Locale = "en";
   let loading = false;
   let saving = false;
-  let error: string | null = null;
+  let errorKey: string | null = null;
   let requestId = 0;
   let disposed = false;
   let unlisten: (() => void) | null = null;
@@ -32,7 +40,7 @@
   async function loadSettings(): Promise<void> {
     const currentRequest = ++requestId;
     loading = true;
-    error = null;
+    errorKey = null;
     try {
       const [enabled, settings] = await Promise.all([
         captureControlGetCommand(),
@@ -41,10 +49,11 @@
       if (currentRequest === requestId) {
         captureEnabled = enabled;
         shareNotesEnabled = settings.capture_notes_sharing_enabled ?? false;
+        language = settings.language;
       }
     } catch (loadError) {
       if (currentRequest === requestId) {
-        error = loadError instanceof Error ? loadError.message : String(loadError);
+        errorKey = "settings.error.loading";
       }
     } finally {
       if (currentRequest === requestId) loading = false;
@@ -57,13 +66,13 @@
     const next = !previous;
     shareNotesEnabled = next;
     saving = true;
-    error = null;
+    errorKey = null;
     try {
       const settings = await settingsSetCommand({ capture_notes_sharing_enabled: next });
       shareNotesEnabled = settings.capture_notes_sharing_enabled ?? false;
     } catch (saveError) {
       shareNotesEnabled = previous;
-      error = saveError instanceof Error ? saveError.message : String(saveError);
+      errorKey = "settings.error.saving";
     } finally {
       saving = false;
     }
@@ -77,7 +86,7 @@
         enabled: !captureEnabled,
       });
     } catch (saveError) {
-      error = saveError instanceof Error ? saveError.message : String(saveError);
+      errorKey = "settings.error.capture_toggle";
     } finally {
       saving = false;
     }
@@ -86,24 +95,24 @@
   onMount(() => {
     listenCaptureControlChanged((enabled) => {
       captureEnabled = enabled;
-      error = null;
+      errorKey = null;
     })
       .then((stop) => {
         if (disposed) stop();
         else unlisten = stop;
       })
-      .catch((listenError) => {
-        error = listenError instanceof Error ? listenError.message : String(listenError);
+      .catch(() => {
+        errorKey = "settings.error.capture_toggle";
       });
     listenCaptureControlError(() => {
-      error = "No se pudo guardar el cambio. El estado anterior sigue vigente.";
+      errorKey = "settings.error.capture_toggle";
     })
       .then((stop) => {
         if (disposed) stop();
         else unlistenError = stop;
       })
-      .catch((listenError) => {
-        error = listenError instanceof Error ? listenError.message : String(listenError);
+      .catch(() => {
+        errorKey = "settings.error.capture_toggle";
       });
     return () => {
       disposed = true;
@@ -113,6 +122,24 @@
       unlistenError = null;
     };
   });
+
+  async function saveLanguage(event: Event): Promise<void> {
+    const requested = (event.currentTarget as HTMLSelectElement).value as Locale;
+    const previous = get(localeStore);
+    language = requested;
+    saving = true;
+    errorKey = null;
+    try {
+      const settings = await settingsSetCommand({ language: requested });
+      language = settings.language;
+      setLocale(settings.language);
+    } catch {
+      language = previous;
+      errorKey = "settings.language.save_error";
+    } finally {
+      saving = false;
+    }
+  }
 
   onDestroy(() => {
     disposed = true;
@@ -124,20 +151,42 @@
 </script>
 
 <section class="general-settings" data-testid="general-settings-modal">
+  <article data-testid="language-setting">
+    <h3>{$t("settings.language.title")}</h3>
+    <p class="muted">{$t("settings.language.description")}</p>
+    <label for="clipvault-language">{$t("settings.language.label")}</label>
+    <select
+      id="clipvault-language"
+      bind:value={language}
+      on:change={saveLanguage}
+      disabled={saving}
+      data-testid="language-selector"
+      aria-label={$t("settings.language.label")}
+    >
+      <option value="en">{$t("language.name.en")}</option>
+      <option value="es">{$t("language.name.es")}</option>
+      <option value="pt">{$t("language.name.pt")}</option>
+      <option value="de">{$t("language.name.de")}</option>
+      <option value="fr">{$t("language.name.fr")}</option>
+    </select>
+  </article>
   <article data-testid="clipboard-capture-setting">
-    <h3>Captura del portapapeles</h3>
+    <h3>{$t("settings.capture.title")}</h3>
     <p class="muted">
-      Controla si ClipVault guarda nuevas capturas locales. El historial existente
-      se conserva; las capturas recibidas de equipos vinculados no se pausan.
+      {$t("settings.capture.description")}
     </p>
 
     {#if loading && captureEnabled === null}
       <p class="muted" role="status" data-testid="capture-control-loading">
-        Cargando estado…
+        {$t("settings.loading")}
       </p>
     {:else if captureEnabled !== null}
       <p class="state" data-testid="capture-control-state" aria-live="polite">
-        Estado: {captureEnabled ? "Activa" : "Pausada"}
+        {$t("settings.state", {
+          state: captureEnabled
+            ? $t("settings.state.active")
+            : $t("settings.state.paused"),
+        })}
       </p>
       <div class="controls">
         <button
@@ -150,33 +199,30 @@
           data-testid="capture-control-toggle"
         >
           {saving
-            ? "Guardando…"
+            ? $t("settings.saving")
             : captureEnabled
-              ? "Pausar capturas"
-              : "Reanudar capturas"}
+              ? $t("settings.capture.pause")
+              : $t("settings.capture.resume")}
         </button>
         <span class="shortcut" data-testid="capture-control-shortcut">
-          Atajo global: {shortcut}
+          {$t("settings.capture.shortcut", { shortcut })}
         </span>
       </div>
       {#if platformOs === "linux" && displayServer === "wayland"}
         <p class="muted" data-testid="capture-control-wayland-note">
-          En Wayland, el atajo requiere que la integración de GNOME o KDE esté
-          habilitada en Development. También puedes cambiar este estado desde el
-          menú del icono del sistema.
+          {$t("settings.capture.wayland")}
         </p>
       {/if}
     {/if}
 
   </article>
   <article data-testid="capture-note-sharing-setting">
-    <h3>Compartir notas de capturas</h3>
+    <h3>{$t("settings.notes.title")}</h3>
     <p class="muted">
-      Permite incluir notas al importar explícitamente capturas desde este equipo.
-      Solo se comparten con equipos compatibles; recibir notas no requiere activar esta opción.
+      {$t("settings.notes.description")}
     </p>
     {#if shareNotesEnabled === null}
-      <p class="muted" role="status" data-testid="capture-note-sharing-loading">Cargando estado…</p>
+      <p class="muted" role="status" data-testid="capture-note-sharing-loading">{$t("settings.loading")}</p>
     {:else}
       <label class="note-sharing-control">
         <input
@@ -186,13 +232,13 @@
           on:change={toggleShareNotes}
           data-testid="capture-note-sharing-toggle"
         />
-        Incluir notas en capturas compartidas
+        {$t("settings.notes.include")}
       </label>
     {/if}
   </article>
-  {#if error}
+  {#if errorKey}
     <p class="error" role="alert" data-testid="general-settings-error">
-      No se pudo guardar o cargar la configuración: {error}
+      {$t(errorKey)}
     </p>
   {/if}
 </section>

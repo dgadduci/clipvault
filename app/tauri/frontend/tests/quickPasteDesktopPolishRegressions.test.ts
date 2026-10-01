@@ -1267,10 +1267,9 @@ test("renderPreview never re-introduces the search snippet fallback for the row"
 
 test("renderPreview keeps the image dimensions label", () => {
   // The row preview MUST keep the type + dimensions label for
-  // image rows (`Imagen 1280×720` or the `Imagen` fallback when
-  // dimensions are unknown). The image branch MUST stay on the
-  // documented `entryPreviewText(entry)` helper (no `80`
-  // argument — the dimension label is always short).
+  // image rows (a localized image label plus dimensions when
+  // known). The image branch MUST stay on `entryPreviewText` and
+  // pass the active translator so the label follows the UI locale.
   const renderPreviewBody = extractFunctionBody(
     cleanQuickPasteSource,
     "renderPreview",
@@ -1281,7 +1280,7 @@ test("renderPreview keeps the image dimensions label", () => {
     "renderPreview must branch on isImageEntry before selecting the helper",
   );
   assert.ok(
-    /entryPreviewText\(entry\)/.test(renderPreviewBody),
+    /entryPreviewText\(entry,\s*120,\s*translateText\)/.test(renderPreviewBody),
     "image rows must consume entryPreviewText(entry) so the type + dimensions label survives",
   );
 });
@@ -1406,33 +1405,28 @@ test("search ranking is preserved (no alteration of SearchService)", () => {
   );
 });
 
-test("image row preview keeps the documented type + dimensions label", () => {
-  // The image branch MUST keep the same `entryPreviewText(entry)`
-  // call the previous round used for the placeholder. The new
-  // contract documents that the dimension label must survive the
-  // clamp; `entryPreviewText` (without `80`) is the documented
-  // helper because the label is always short and the helper
-  // returns `"Imagen 1280×720"` / `"Imagen"` / `"(vacío)"` for
-  // image rows.
+test("image row preview keeps the localized type and dimensions label", () => {
+  // The image branch uses the catalog-backed label with a bounded
+  // helper length; the dimension label remains shorter than the cap.
   const renderPreviewBody = extractFunctionBody(
     cleanQuickPasteSource,
     "renderPreview",
   );
   assert.ok(renderPreviewBody, "renderPreview must be declared");
-  // The image branch must consult `entryPreviewText(entry)` —
-  // no `80` argument, so the helper never slices the label.
+  // The image branch must pass the active translator and keep the
+  // existing preview length instead of truncating the dimension label.
   const imageBranch = renderPreviewBody.match(
     /if\s*\(\s*isImageEntry\(entry\)\s*\)\s*\{[\s\S]*?\}/,
   );
   assert.ok(imageBranch, "renderPreview must keep the isImageEntry branch");
   assert.ok(
-    /entryPreviewText\(entry\)/.test(imageBranch![0]),
+    /entryPreviewText\(entry,\s*120,\s*translateText\)/.test(imageBranch![0]),
     "image rows must call entryPreviewText(entry) (no 80) so the dimension label is never sliced",
   );
   assert.equal(
     /entryPreviewText\([^)]*,\s*80/.test(imageBranch![0]),
     false,
-    "image rows must NOT pass an 80-char limit to entryPreviewText — the dimension label would be sliced",
+    "image rows must NOT pass the text-preview limit to entryPreviewText",
   );
 });
 

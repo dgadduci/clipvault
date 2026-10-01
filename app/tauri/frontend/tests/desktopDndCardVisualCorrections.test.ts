@@ -468,10 +468,13 @@ test("HistoryCard pin control renders a minimalist local pushpin SVG", () => {
 test("HistoryCard pin control keeps aria-pressed, Anclar/Desanclar, focus-visible and the busy hook", () => {
   const source = stripComments(loadSource("src/HistoryCard.svelte"));
   assert.match(source, /aria-pressed=\{entry\.is_pinned\}/);
-  assert.match(source, /title=\{entry\.is_pinned \? "Desanclar" : "Anclar"\}/);
   assert.match(
     source,
-    /aria-label=\{entry\.is_pinned \? `Desanclar entrada \$\{displayTitle\}` : `Anclar entrada \$\{displayTitle\}`\}/,
+    /title=\{entry\.is_pinned \? \$t\("history\.card\.unpin"\) : \$t\("history\.card\.pin"\)\}/,
+  );
+  assert.match(
+    source,
+    /aria-label=\{entry\.is_pinned\s+\? \$t\("history\.card\.unpin_entry", \{ title: displayTitle \}\)\s+: \$t\("history\.card\.pin_entry", \{ title: displayTitle \}\)\}/,
   );
   assert.match(source, /data-pinned=\{entry\.is_pinned \? "true" : "false"\}/);
   assert.match(source, /on:click=\{handlePinClick\}/);
@@ -498,7 +501,7 @@ test("HistoryCard source-app icon visual size is exactly 50% larger than the 1.1
   // local-or-imported source-app presentation helper.
   assert.match(
     source,
-    /sourceAppLabel\s*=\s*sourceAppPresentationAccessibleLabel\(\s*entry,\s*peerImportedSourceApp,\s*\)/,
+    /sourceAppLabel\s*=\s*sourceAppPresentationAccessibleLabel\(\s*entry,\s*peerImportedSourceApp,\s*\$t,\s*\)/,
   );
   assert.match(source, /aria-label=\{sourceAppLabel\}/);
   assert.match(source, /title=\{sourceAppLabel\}/);
@@ -1236,7 +1239,7 @@ test("OrganizationSidebar renders the collection delete icon at 18x18 (≈130% o
   assert.match(source, /sidebar-collection-delete/);
   assert.match(
     source,
-    /aria-label=\{`Eliminar \$\{collection\.name\}`\}/,
+    /aria-label=\{\$t\("collections\.delete", \{ name: collection\.name \}\)\}/,
   );
   assert.match(source, /\.icon-only\.danger\.delete-icon\s*\{[^}]*color:/s);
 });

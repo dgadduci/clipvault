@@ -1,6 +1,7 @@
 <script lang="ts">
-  import type { PlatformGuidance } from "./types";
+  import type { PlatformGuidance, PlatformGuidanceId } from "./types";
   import { openPlatformSettingsCommand, type SettingsOpenResponse } from "./lib/tauri";
+  import { t } from "./lib/localization";
 
   export let guidance: PlatformGuidance;
   export let retryNotice: string | null;
@@ -9,10 +10,34 @@
   export let onRetry: () => Promise<void> | void;
 
   let opening = false;
-  let fallbackSteps: string[] | null = null;
+  let fallbackMessageId: PlatformGuidanceId | null = null;
   let openError: string | null = null;
   let retrying = false;
   let titleEl: HTMLHeadingElement | undefined;
+
+  function copyFor(messageId: PlatformGuidanceId) {
+    const prefix = `guidance.copy.${messageId}`;
+    const stepCount: Record<PlatformGuidanceId, number> = {
+      macos_accessibility: 4,
+      linux_x11_backend_unavailable: 4,
+      linux_wayland_unsupported: 3,
+      linux_unknown_session: 3,
+      backend_unavailable: 2,
+      unknown: 2,
+      linux_settings_fallback: 7,
+      generic_settings_fallback: 2,
+    };
+    return {
+      title: `${prefix}.title`,
+      summary: `${prefix}.summary`,
+      steps: Array.from({ length: stepCount[messageId] }, (_, index) =>
+        `${prefix}.step_${index + 1}`,
+      ),
+    };
+  }
+
+  $: activeCopy = copyFor(guidance.message_id);
+  $: fallbackCopy = fallbackMessageId ? copyFor(fallbackMessageId) : null;
 
   function close(): void {
     onClose();
@@ -23,14 +48,14 @@
       return;
     }
     opening = true;
-    fallbackSteps = null;
+    fallbackMessageId = null;
     openError = null;
     try {
       const result: SettingsOpenResponse = await openPlatformSettingsCommand({
         target: guidance.settings_target,
       });
       if (result.kind === "fallback_required") {
-        fallbackSteps = result.manual_steps;
+        fallbackMessageId = result.message_id;
       } else if (result.kind === "failed") {
         openError = result.reason;
       }
@@ -78,38 +103,38 @@
     aria-describedby="guidance-summary"
   >
     <h2 id="guidance-title" class="title" bind:this={titleEl} tabindex="-1">
-      {guidance.title}
+      {$t(activeCopy.title)}
     </h2>
-    <p id="guidance-summary" class="summary">{guidance.summary}</p>
+    <p id="guidance-summary" class="summary">{$t(activeCopy.summary)}</p>
 
     {#if retryNotice}
-      <p class="status" role="status">{retryNotice}</p>
+      <p class="status" role="status">{$t(retryNotice)}</p>
     {/if}
 
     {#if retryError}
       <p class="error" role="alert">
-        Reintentar could not refresh the capabilities: {retryError}
+        {$t("guidance.retry_error", { error: retryError })}
       </p>
     {/if}
 
     <section aria-labelledby="guidance-steps-title">
-      <h3 id="guidance-steps-title" class="section-title">Pasos a seguir</h3>
+      <h3 id="guidance-steps-title" class="section-title">{$t("guidance.steps.title")}</h3>
       <ol class="steps">
-        {#each guidance.steps as step, index (index)}
-          <li>{step}</li>
+        {#each activeCopy.steps as step (step)}
+          <li>{$t(step)}</li>
         {/each}
       </ol>
     </section>
 
-    {#if fallbackSteps && fallbackSteps.length > 0}
+    {#if fallbackCopy}
       <section class="fallback" aria-live="polite">
-        <h3 class="section-title">Pasos manuales</h3>
+        <h3 class="section-title">{$t("guidance.steps.manual_title")}</h3>
         <p class="muted">
-          ClipVault no pudo abrir la configuración automáticamente. Sigue estos pasos:
+          {$t("guidance.steps.manual_description")}
         </p>
         <ol class="steps">
-          {#each fallbackSteps as step, index (index)}
-            <li>{step}</li>
+          {#each fallbackCopy.steps as step (step)}
+            <li>{$t(step)}</li>
           {/each}
         </ol>
       </section>
@@ -117,7 +142,7 @@
 
     {#if openError}
       <p class="error" role="alert">
-        No se pudo abrir la configuración del sistema: {openError}
+        {$t("guidance.open_error", { error: openError })}
       </p>
     {/if}
 
@@ -129,15 +154,15 @@
           on:click={openSettings}
           disabled={opening || retrying}
         >
-          {opening ? "Abriendo…" : "Abrir configuración"}
+          {opening ? $t("guidance.opening_settings") : $t("guidance.open_settings")}
         </button>
       {/if}
       {#if guidance.retryable}
         <button type="button" on:click={retry} disabled={retrying}>
-          {retrying ? "Reintentando…" : "Reintentar"}
+          {retrying ? $t("guidance.retrying") : $t("guidance.retry")}
         </button>
       {/if}
-      <button type="button" on:click={close}>Cerrar</button>
+      <button type="button" on:click={close}>{$t("common.close")}</button>
     </div>
   </div>
 </div>

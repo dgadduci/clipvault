@@ -76,7 +76,7 @@
     APP_FALLBACK_ICON_SVG,
     CONTENT_TYPE_ICON_SPRITE,
     contentTypeIconId,
-    contentTypeIconLabel,
+    contentTypeTranslationKey,
   } from "./lib/contentTypeIcons";
   import {
     createIconResolver,
@@ -119,6 +119,7 @@
   import EntryTextEditorModal from "./EntryTextEditorModal.svelte";
   import TextNoteModal from "./TextNoteModal.svelte";
   import { isEditableTextEntry } from "./types";
+  import { localeStore, t } from "./lib/localization.ts";
 
   export let entry: EntryRecord;
   /** Present only while rendering the matching peer-bound import collection. */
@@ -312,6 +313,7 @@
   $: sourceAppLabel = sourceAppPresentationAccessibleLabel(
     entry,
     peerImportedSourceApp,
+    $t,
   );
   /** Mirror of `iconRef` we update synchronously so the
    * `onDestroy` cleanup can release the cached blob URL of the
@@ -381,7 +383,7 @@
    * DOM. The placeholder is only rendered by the accessible fallback
    * (the thumbnail replaces it when the bytes load).
    */
-  $: previewText = entryPreviewText(entry);
+  $: previewText = entryPreviewText(entry, 120, $t);
   /**
    * Highlighted preview HTML the card renders when the entry has a
    * canonical, allowlist-accepted `code_language`. The computation
@@ -437,9 +439,10 @@
     }
   });
 
-  $: elapsed = formatElapsedTime(entry.created_at, new Date(nowAnchor));
+  $: elapsed = formatElapsedTime(entry.created_at, new Date(nowAnchor), $localeStore);
   $: characterCount = unicodeCount(entry.content);
-  $: byteSizeInfo = formatByteSize(entry.content_size);
+  $: byteSizeInfo = formatByteSize(entry.content_size, $localeStore);
+  $: typeLabel = $t(contentTypeTranslationKey(entry.content_type));
 
   $: ageLabel = (() => {
     const e: ElapsedTime = elapsed;
@@ -670,7 +673,7 @@
   $: pasteMenuActions = pasteMenuActionsFor(entry, displayTitle, {
     richPasteEnabled,
     pasteBusy,
-  });
+  }, $t);
 
   function closeMenuAfterAction(): void {
     // The rail owns the canonical menu state (`openCardId`). The
@@ -703,20 +706,20 @@
       closeMenuAfterAction();
       if (response.kind === "failed") {
         pasteError = {
-          title: "No se pudo pegar la entrada",
+          title: "history.card.error.paste_title",
           body: describePasteFailure(response),
         };
       } else if (response.kind === "capability_unavailable") {
         pasteError = {
-          title: "Función no disponible",
+          title: "history.card.error.capability_title",
           body: describeCapabilityFailure(response),
         };
       }
-    } catch (error) {
+    } catch {
       closeMenuAfterAction();
       pasteError = {
-        title: "No se pudo pegar la entrada",
-        body: error instanceof Error ? error.message : String(error),
+        title: "history.card.error.paste_title",
+        body: "history.card.error.try_again",
       };
     } finally {
       pasteBusy = false;
@@ -725,24 +728,23 @@
 
   function describePasteFailure(response: {
     error_kind: string | null;
-    message: string | null;
   }): string {
     switch (response.error_kind) {
       case "asset_read":
       case "asset_decode":
       case "asset_missing":
-        return "No se pudo leer el contenido almacenado.";
+        return "history.card.error.content_read";
       case "clipboard":
       case "clipboard_rich":
-        return "El portapapeles rechazó la escritura.";
+        return "history.card.error.clipboard_write_failed";
       case "paste":
-        return "El pegado sintético no se pudo iniciar.";
+        return "history.card.error.synthetic_paste_failed";
       case "repository":
-        return "La base de datos local no respondió.";
+        return "history.card.error.database_unavailable";
       case "not_found":
-        return "La entrada ya no está disponible.";
+        return "history.card.error.entry_missing";
       default:
-        return response.message ?? "Inténtalo de nuevo.";
+        return "history.card.error.try_again";
     }
   }
 
@@ -751,14 +753,14 @@
   }): string {
     switch (response.capability) {
       case "clipboard_write_rich_text":
-        return "Esta sesión no puede escribir texto enriquecido.";
+        return "history.card.error.rich_paste_unsupported";
       case "clipboard_write":
       case "clipboard_write_image":
-        return "Esta sesión no puede escribir en el portapapeles.";
+        return "history.card.error.clipboard_write_unsupported";
       case "synthetic_paste":
-        return "El pegado sintético no está disponible.";
+        return "history.card.error.synthetic_paste_unavailable";
       default:
-        return "La plataforma no soporta esta acción.";
+        return "history.card.error.action_unsupported";
     }
   }
 
@@ -819,8 +821,8 @@
     if (!result.ok) {
       titleError =
         result.reason === "too_long"
-          ? "El título supera el máximo permitido."
-          : "Título inválido.";
+          ? "history.card.error.title_too_long"
+          : "history.card.error.title_invalid";
       return;
     }
     titleBusy = true;
@@ -841,9 +843,8 @@
         editingTitle = false;
         titleDraft = "";
       }
-    } catch (error) {
-      titleError =
-        error instanceof Error ? error.message : String(error);
+    } catch {
+      titleError = "history.card.error.title_save";
     } finally {
       titleBusy = false;
     }
@@ -862,8 +863,8 @@
         entry = response.entry;
         onAfterMutation(entry);
       }
-    } catch (error) {
-      titleError = error instanceof Error ? error.message : String(error);
+    } catch {
+      titleError = "history.card.error.title_save";
     } finally {
       titleBusy = false;
     }
@@ -1332,6 +1333,7 @@
   );
   $: editTextShortcutAccessibleText = editTextShortcutAccessibleLabel(
     editTextShortcutCardPlatform,
+    $t,
   );
   function matchesEditTextShortcut(event: KeyboardEvent): boolean {
     return matchesEditTextShortcutHelper(event, editTextShortcutCardPlatform);
@@ -1374,8 +1376,8 @@
       // the modal only on resolution. A second click is a no-op
       // because `orgBusy` blocks the early return.
       await onAssignTags(entry, tagIds);
-    } catch (error) {
-      orgError = error instanceof Error ? error.message : String(error);
+    } catch {
+      orgError = "history.card.error.organization_save";
     } finally {
       orgBusy = false;
     }
@@ -1389,8 +1391,8 @@
     orgError = null;
     try {
       await onAssignCollections(entry, collectionIds);
-    } catch (error) {
-      orgError = error instanceof Error ? error.message : String(error);
+    } catch {
+      orgError = "history.card.error.organization_save";
     } finally {
       orgBusy = false;
     }
@@ -1403,8 +1405,8 @@
     try {
       await onRemoveFromCollection(entry, activeCollectionContext.id);
       closeMenuAfterAction();
-    } catch (error) {
-      orgError = error instanceof Error ? error.message : String(error);
+    } catch {
+      orgError = "history.card.error.organization_save";
     } finally {
       orgBusy = false;
     }
@@ -1737,8 +1739,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       class="type"
       data-testid="history-card-type"
       data-content-type={entry.content_type}
-      title={`Tipo: ${contentTypeIconLabel(entry.content_type)}`}
-      aria-label={`Tipo: ${contentTypeIconLabel(entry.content_type)}`}
+      title={$t("history.card.content_type", { type: typeLabel })}
+      aria-label={$t("history.card.content_type", { type: typeLabel })}
     >
       <svg
         aria-hidden="true"
@@ -1748,7 +1750,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       >
         <use href="#{contentTypeIconId(entry.content_type)}" />
       </svg>
-      <span class="visually-hidden">{contentTypeIconLabel(entry.content_type)}</span>
+      <span class="visually-hidden">{typeLabel}</span>
     </span>
     <div
       class="title"
@@ -1759,8 +1761,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       aria-disabled={editingTitle}
       aria-label={
         editingTitle
-          ? "Editar título"
-          : `Editar título ${displayTitle} (doble clic, Enter o F2)`
+          ? $t("history.card.edit_title")
+          : $t("history.card.edit_title_accessible", { title: displayTitle })
       }
       on:keydown={onTitleContainerKeydown}
       on:dblclick={() => startEditTitle()}
@@ -1771,7 +1773,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           class="title-input"
           bind:this={titleInputEl}
           bind:value={titleDraft}
-          aria-label="Editar título"
+          aria-label={$t("history.card.edit_title")}
           maxlength="120"
           on:keydown={onTitleKeydown}
         />
@@ -1779,8 +1781,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           type="button"
           class="icon-inline title-confirm"
           on:click={() => void confirmEditTitle()}
-          aria-label="Confirmar título"
-          title="Confirmar (Enter)"
+          aria-label={$t("history.card.title.confirm")}
+          title={$t("history.card.title.confirm_enter")}
           data-testid="history-card-title-confirm"
           disabled={titleBusy}
         >
@@ -1805,8 +1807,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           type="button"
           class="icon-inline title-cancel"
           on:click={cancelEditTitle}
-          aria-label="Cancelar título"
-          title="Cancelar (Escape)"
+          aria-label={$t("history.card.title.cancel")}
+          title={$t("history.card.title.cancel_escape")}
           data-testid="history-card-title-cancel"
         >
           <svg
@@ -1826,7 +1828,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           </svg>
         </button>
         {#if titleError}
-          <span class="title-error" role="alert">{titleError}</span>
+          <span class="title-error" role="alert">{$t(titleError)}</span>
         {/if}
       {:else}
         {displayTitle}
@@ -1902,9 +1904,11 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       data-testid="history-card-size"
       data-content-size={entry.content_size}
       aria-label={isImage
-        ? `Tamaño del payload: ${byteSizeInfo.accessible}`
-        : `Carácteres totales: ${characterCount}`}
-      title={isImage ? byteSizeInfo.accessible : `Carácteres: ${characterCount}`}
+        ? $t("history.card.payload_size", { size: byteSizeInfo.accessible })
+        : $t("history.card.character_count_total", { count: characterCount })}
+      title={isImage
+        ? byteSizeInfo.accessible
+        : $t("history.card.character_count", { count: characterCount })}
     >
       {#if isImage}
         <svg
@@ -1955,7 +1959,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           data-testid="history-card-character-count"
           data-character-count={characterCount}
         >
-          {characterCount} car.
+          {characterCount} {$t("history.card.characters_short")}
         </span>
       {/if}
     </span>
@@ -1974,8 +1978,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           class="thumbnail"
           data-testid="history-card-thumbnail"
           alt={imageDimensions
-            ? `Imagen capturada de ${imageDimensions} píxeles`
-            : "Imagen capturada"}
+            ? $t("history.card.image_captured_dimensions", { dimensions: imageDimensions })
+            : $t("history.card.image_captured")}
           on:error={onThumbnailError}
         />
       {:else if thumbnailState === "loading"}
@@ -1992,8 +1996,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           class="thumbnail-loading"
           role="img"
           aria-label={imageDimensions
-            ? `Cargando imagen (${imageDimensions})`
-            : "Cargando imagen"}
+            ? $t("history.card.image_loading_dimensions", { dimensions: imageDimensions })
+            : $t("history.card.image_loading")}
           aria-live="polite"
           data-testid="history-card-thumbnail-loading"
         >
@@ -2017,14 +2021,14 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           class="thumbnail-fallback"
           role="img"
           aria-label={imageDimensions
-            ? `Imagen no disponible (${imageDimensions})`
-            : "Imagen no disponible"}
+            ? `${$t("history.card.image_unavailable")} (${imageDimensions})`
+            : $t("history.card.image_unavailable")}
           data-testid="history-card-thumbnail-fallback"
         >
           <svg aria-hidden="true" focusable="false" width="32" height="32">
             <use href="#{contentTypeIconId('image')}" />
           </svg>
-          <span class="thumbnail-fallback-text">Imagen no disponible</span>
+          <span class="thumbnail-fallback-text">{$t("history.card.image_unavailable")}</span>
         </div>
       {/if}
     </div>
@@ -2036,14 +2040,14 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
         data-content-type={entry.content_type}
         data-code-language={entry.code_language ?? ""}
         data-preview-kind="code"
-        aria-label="Contenido capturado"
+        aria-label={$t("history.card.captured_content")}
       >{@html highlightedPreviewHtml}</pre>
     {:else}
       <pre
         class="preview"
         data-testid="history-card-preview"
         data-content-type={isRich ? "rich_text" : "text"}
-        aria-label="Contenido capturado"
+        aria-label={$t("history.card.captured_content")}
       >{previewText}</pre>
     {/if}
   {/if}
@@ -2054,7 +2058,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       data-testid="history-card-code-language"
       data-code-language={entry.code_language}
     >
-      Código · {canonicalCodeLanguageLabel(entry.code_language)}
+      {$t("preview.code_language", { language: canonicalCodeLanguageLabel(entry.code_language) })}
     </p>
   {/if}
 
@@ -2064,13 +2068,13 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       role="alert"
       data-testid="history-card-paste-error"
     >
-      <strong>{pasteError.title}</strong>
-      <span>{pasteError.body}</span>
+      <strong>{$t(pasteError.title)}</strong>
+      <span>{$t(pasteError.body)}</span>
       <button
         type="button"
         class="paste-error-dismiss"
         data-testid="history-card-paste-error-dismiss"
-        aria-label="Cerrar aviso"
+        aria-label={$t("history.card.close_notice")}
         on:click={dismissPasteError}
       >
         ×
@@ -2084,7 +2088,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       data-testid="history-card-tag-organization-pending"
       aria-live="polite"
     >
-      Cargando tags…
+      {$t("history.card.tags_loading")}
     </p>
   {:else if entryOrganizationState === "error"}
     <p
@@ -2092,13 +2096,13 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       role="status"
       data-testid="history-card-tag-organization-error"
     >
-      No se pudieron cargar los tags de esta entrada.
+      {$t("history.card.tags_error")}
     </p>
   {:else if assignedTags.length > 0}
     <ul
       class="tag-chips"
       data-testid="history-card-tag-chips"
-      aria-label="Tags de la entrada"
+      aria-label={$t("history.card.tags_accessible")}
     >
       {#each assignedTags.slice(0, 2) as tag (tag.id)}
         <li
@@ -2113,7 +2117,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
         <li
           class="tag-chip more"
           data-testid="history-card-tag-more"
-          aria-label={`${assignedTags.length - 2} tags adicionales`}
+          aria-label={$t("history.card.extra_tags", { count: assignedTags.length - 2 })}
         >
           +{assignedTags.length - 2}
         </li>
@@ -2214,9 +2218,9 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           data-entry-id={entry.id}
           data-overflow-count={collectionOverflowCount}
           aria-haspopup="dialog"
-          aria-label={`Ver las ${assignedCollections.length} colecciones de la captura`}
+          aria-label={$t("history.card.collections_accessible", { count: assignedCollections.length })}
           aria-expanded={membershipModalOpen}
-          title="Ver todas las colecciones"
+          title={$t("history.card.collections_all")}
           bind:this={collectionOverflowEl}
           on:click={openMembershipModal}
         >
@@ -2232,7 +2236,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       role="alert"
       data-testid="history-card-org-error"
     >
-      {orgError}
+        {$t(orgError)}
     </p>
   {/if}
 
@@ -2242,13 +2246,13 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
         class="preview-hint"
         data-testid="history-card-preview-hint"
         data-preview-platform={previewPlatform}
-        title={previewShortcutAccessibleLabel(previewPlatform)}
-        aria-label={previewShortcutAccessibleLabel(previewPlatform)}
+        title={previewShortcutAccessibleLabel(previewPlatform, $t)}
+        aria-label={previewShortcutAccessibleLabel(previewPlatform, $t)}
         aria-keyshortcuts={previewPlatform === "macos"
           ? "Meta+Enter"
           : "Control+Enter"}
       >
-        <span class="preview-hint-label">Preview</span>
+        <span class="preview-hint-label">{$t("history.card.preview")}</span>
         <span class="preview-hint-keys" aria-hidden="true">
           {previewShortcutLabel(previewPlatform)}
         </span>
@@ -2258,10 +2262,10 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       <button
         type="button"
         class="note-trigger"
-        aria-label={`Editar nota de ${displayTitle}`}
+        aria-label={$t("history.card.note_edit_for", { title: displayTitle })}
         aria-haspopup="dialog"
         aria-expanded={noteModalOpen}
-        title="Editar nota"
+        title={$t("history.card.note_edit")}
         data-testid="history-card-note"
         data-entry-id={entry.id}
         on:click={(event) => openNote(event)}
@@ -2276,8 +2280,10 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       type="button"
       class="pin"
       aria-pressed={entry.is_pinned}
-      title={entry.is_pinned ? "Desanclar" : "Anclar"}
-      aria-label={entry.is_pinned ? `Desanclar entrada ${displayTitle}` : `Anclar entrada ${displayTitle}`}
+      title={entry.is_pinned ? $t("history.card.unpin") : $t("history.card.pin")}
+      aria-label={entry.is_pinned
+        ? $t("history.card.unpin_entry", { title: displayTitle })
+        : $t("history.card.pin_entry", { title: displayTitle })}
       data-testid="history-card-pin"
       data-pinned={entry.is_pinned ? "true" : "false"}
       on:click={handlePinClick}
@@ -2352,8 +2358,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       class="menu-trigger"
       aria-haspopup="menu"
       aria-expanded={menuOpen}
-      aria-label={`Más acciones para ${displayTitle}`}
-      title="Más acciones"
+      aria-label={$t("history.card.more_actions_for", { title: displayTitle })}
+      title={$t("history.card.more_actions")}
       data-testid="history-card-menu-trigger"
       bind:this={menuTriggerEl}
       on:click={toggleMenu}
@@ -2367,7 +2373,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
         class:menu-scrollable={menuScrollable}
         role="menu"
         id={menuId}
-        aria-label={`Acciones de ${displayTitle}`}
+        aria-label={$t("history.card.menu_for", { title: displayTitle })}
         data-testid="history-card-menu"
         data-menu-flip={menuFlippedAbove ? "above" : "below"}
         data-menu-scrollable={menuScrollable ? "true" : "false"}
@@ -2383,7 +2389,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           on:click={() => startEditTitle()}
           disabled={titleBusy}
         >
-          Editar título
+          {$t("history.card.edit_title")}
         </button>
 <button
         type="button"
@@ -2393,7 +2399,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
         on:click={() => void restoreDefaultTitle()}
         disabled={titleBusy || (entry.title ?? "") === ""}
       >
-        Restaurar título
+        {$t("history.card.restore_title")}
       </button>
       {#if canEditText}
         <button
@@ -2401,13 +2407,13 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           role="menuitem"
           class="menu-item"
           data-testid="history-card-edit-text"
-          aria-label={`Editar captura ${displayTitle}`}
+          aria-label={$t("history.card.edit_capture_for", { title: displayTitle })}
           aria-keyshortcuts={editTextShortcutKeyAttributeText}
           title={editTextShortcutAccessibleText}
           on:click={openTextEditor}
           disabled={titleBusy}
         >
-          <span class="menu-item-label">Editar captura</span>
+          <span class="menu-item-label">{$t("history.card.edit_capture")}</span>
           <span
             class="menu-item-shortcut"
             data-testid={EDIT_TEXT_SHORTCUT_TESTID}
@@ -2424,7 +2430,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
         data-testid="history-card-note-action"
         on:click={(event) => openNote(event)}
       >
-        {hasNote ? "Editar nota" : "Agregar nota"}
+        {hasNote ? $t("history.card.note_edit") : $t("history.card.note_add")}
       </button>
       <button
         type="button"
@@ -2433,10 +2439,10 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
         data-testid="history-card-preview"
         data-shortcut-platform={previewPlatform}
         aria-keyshortcuts={cardMenuPreviewShortcutKeyAttribute(previewPlatform)}
-        title={cardMenuPreviewShortcutAccessibleLabel(previewPlatform)}
+        title={cardMenuPreviewShortcutAccessibleLabel(previewPlatform, $t)}
         on:click={requestPreview}
       >
-        <span class="menu-item-label">Previsualizar</span>
+        <span class="menu-item-label">{$t("history.card.preview_capture")}</span>
         <span
           class="menu-item-shortcut"
           data-testid="history-card-preview-shortcut"
@@ -2452,7 +2458,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
         data-testid="history-card-add-tags"
         on:click={openTagSelector}
       >
-        {assignedTags.length > 0 ? "Editar tags" : "Agregar tag"}
+        {assignedTags.length > 0 ? $t("history.card.tags_edit") : $t("history.card.tags_add")}
       </button>
         <button
           type="button"
@@ -2462,8 +2468,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           on:click={openCollectionSelector}
         >
           {assignedCollections.length > 0
-            ? "Editar colecciones"
-            : "Agregar a colección"}
+            ? $t("history.card.collections_edit")
+            : $t("history.card.collections_add")}
         </button>
         {#if activeCollectionContext !== null}
           <button
@@ -2473,7 +2479,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
             data-testid="history-card-remove-from-collection"
             on:click={() => void removeFromActiveCollection()}
           >
-            Quitar de esta colección
+            {$t("history.card.remove_from_collection")}
           </button>
         {/if}
         {#each pasteMenuActions as pasteAction (pasteAction.testId)}
@@ -2495,8 +2501,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           role="menuitem"
           class="menu-item danger delete-action"
           data-testid="history-card-delete"
-          aria-label={`Eliminar ${displayTitle}`}
-          title={`Eliminar entrada · ${displayTitle}`}
+          aria-label={$t("history.card.delete_for", { title: displayTitle })}
+          title={$t("history.card.delete_entry_for", { title: displayTitle })}
           data-cv-danger="card-delete"
           on:click={handleDeleteClick}
         >
@@ -2518,7 +2524,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
             <path d="M10 11.5v5" />
             <path d="M14 11.5v5" />
           </svg>
-          <span class="visually-hidden">{`Eliminar ${displayTitle}`}</span>
+          <span class="visually-hidden">{$t("history.card.delete_for", { title: displayTitle })}</span>
         </button>
       </div>
     {/if}

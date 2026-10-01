@@ -28,6 +28,7 @@
   import CollectionColorModal from "./CollectionColorModal.svelte";
   import TextNoteModal from "./TextNoteModal.svelte";
   import LinkedPeers from "./LinkedPeers.svelte";
+  import { t } from "./lib/localization.ts";
 
   export let collections: Collection[] = [];
   export let activeCollectionId: number | null = null;
@@ -239,15 +240,18 @@
    * that forwards the binding key cannot leak through this
    * surface.
    */
-  function remoteOriginLabel(collection: Collection): string {
+  function remoteOriginLabel(
+    collection: Collection,
+    translateText: (key: string, params?: Record<string, string | number | Date>) => string,
+  ): string {
     if (!collection.is_peer_bound) {
       return "";
     }
     const peerName = (collection.peer_display_name ?? "").trim();
     if (peerName.length > 0) {
-      return `Importadas de ${peerName}`;
+      return translateText("collections.imported_from", { peer: peerName });
     }
-    return "Importadas de equipo remoto";
+    return translateText("collections.imported_remote");
   }
 
   function hasRemoteOrigin(collection: Collection): boolean {
@@ -423,14 +427,14 @@
   data-cv-card-rail-height="true"
 >
   <header class="sidebar-header">
-    <h2>Colecciones</h2>
+    <h2>{$t("collections.title")}</h2>
     <button
       type="button"
       class="icon-only new-icon"
       on:click={startCreate}
       data-testid="sidebar-new-collection"
-      aria-label="Nueva colección"
-      title="Nueva colección (Enter para confirmar)"
+      aria-label={$t("collections.create")}
+      title={$t("collections.create_hint")}
     >
       <svg
         aria-hidden="true"
@@ -459,16 +463,16 @@
         type="text"
         bind:value={newCollectionName}
         on:keydown={onCreateKeydown}
-        placeholder="Nombre de la colección"
+        placeholder={$t("collections.name")}
         maxlength="80"
-        aria-label="Nombre de la colección"
+        aria-label={$t("collections.name")}
         data-testid="sidebar-create-input"
       />
       <button
         type="submit"
         class="icon-only confirm-icon"
-        aria-label="Confirmar nueva colección"
-        title="Confirmar (Enter)"
+        aria-label={$t("collections.confirm_create")}
+        title={$t("common.confirm_enter")}
         data-testid="sidebar-create-save"
         disabled={newCollectionName.trim().length === 0}
       >
@@ -493,8 +497,8 @@
         type="button"
         class="icon-only cancel-icon"
         on:click={cancelCreate}
-        aria-label="Cancelar nueva colección"
-        title="Cancelar (Escape)"
+        aria-label={$t("collections.cancel_create")}
+        title={$t("common.cancel_escape")}
         data-testid="sidebar-create-cancel"
       >
         <svg
@@ -557,15 +561,15 @@
               bind:value={renameDraft}
               on:keydown={onRenameKeydown}
               maxlength="80"
-              aria-label="Renombrar colección"
+              aria-label={$t("collections.rename")}
               class="rename-input"
               data-testid="sidebar-rename-input"
             />
             <button
               type="submit"
               class="icon-only confirm-icon"
-              aria-label="Confirmar renombrado"
-              title="Confirmar (Enter)"
+              aria-label={$t("collections.confirm_rename")}
+              title={$t("common.confirm_enter")}
               data-testid="sidebar-rename-save"
               disabled={renameDraft.trim().length === 0}
             >
@@ -590,8 +594,8 @@
               type="button"
               class="icon-only cancel-icon"
               on:click={cancelRename}
-              aria-label="Cancelar renombrado"
-              title="Cancelar (Escape)"
+              aria-label={$t("collections.cancel_rename")}
+              title={$t("common.cancel_escape")}
               data-testid="sidebar-rename-cancel"
             >
               <svg
@@ -620,39 +624,39 @@
             on:dblclick={() => startRename(collection)}
             aria-pressed={isActive(collection.id)}
             aria-label={isHistory(collection)
-              ? "Activar colección del sistema"
-              : `Activar y renombrar ${collection.name} (doble clic o F2)`}
+              ? $t("collections.select_system")
+              : $t("collections.rename_hint", { name: collection.name })}
             title={isHistory(collection)
-              ? collection.name
-              : `Doble clic o F2 para renombrar ${collection.name}`}
+              ? $t("collections.history")
+              : $t("collections.rename_hint", { name: collection.name })}
             data-testid="sidebar-collection-button"
             data-collection-id={collection.id}
           >
-            <span class="collection-name">{collection.name}</span>
+            <span class="collection-name">{isHistory(collection) ? $t("collections.history") : collection.name}</span>
             {#if isHistory(collection)}
               <span
                 class="badge system"
-                aria-label="Colección de sistema protegida"
+                aria-label={$t("collections.system_protected")}
               >
-                sistema
+                {$t("collections.system_badge")}
               </span>
             {:else if hasRemoteOrigin(collection)}
               <span
                 class="badge remote"
                 data-testid="sidebar-collection-remote-origin"
                 data-peer-bound="true"
-                aria-label={remoteOriginLabel(collection)}
-                title={remoteOriginLabel(collection)}
+                aria-label={remoteOriginLabel(collection, $t)}
+                title={remoteOriginLabel(collection, $t)}
               >
-                importadas
+                {$t("collections.imported_badge")}
               </span>
             {/if}
           </button>
           <button
             type="button"
             class="color-square"
-            aria-label={`Cambiar color de ${collection.name}`}
-            title={`Cambiar color de ${collection.name} (doble clic o Enter)`}
+            aria-label={$t("collections.change_color", { name: collection.name })}
+            title={$t("collections.change_color_hint", { name: collection.name })}
             data-testid="sidebar-collection-color"
             data-collection-id={collection.id}
             data-color={collection.color_hex}
@@ -665,11 +669,11 @@
             type="button"
             class="icon-only note-icon"
             aria-label={collection.has_note
-              ? `Editar nota de ${collection.name}`
-              : `Agregar nota a ${collection.name}`}
+              ? $t("collections.edit_note_for", { name: collection.name })
+              : $t("collections.add_note_for", { name: collection.name })}
             aria-haspopup="dialog"
             aria-expanded={pendingNoteCollection?.id === collection.id}
-            title={collection.has_note ? "Editar nota" : "Agregar nota"}
+            title={collection.has_note ? $t("collections.edit_note") : $t("collections.add_note")}
             data-testid="sidebar-collection-note"
             data-has-note={collection.has_note ? "true" : "false"}
             on:click={(event) => openCollectionNote(collection, event)}
@@ -689,8 +693,8 @@
               type="button"
               class="icon-only danger delete-icon"
               on:click={(event) => askDelete(collection, event)}
-              aria-label={`Eliminar ${collection.name}`}
-              title={`Eliminar ${collection.name}`}
+              aria-label={$t("collections.delete", { name: collection.name })}
+              title={$t("collections.delete", { name: collection.name })}
               data-testid="sidebar-collection-delete"
               data-collection-id={collection.id}
               data-cv-danger="collection-delete"

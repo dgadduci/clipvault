@@ -36,6 +36,8 @@
     peerImageThumbnailFetchCommand,
   } from "./lib/tauri";
   import { formatElapsedTime, type ElapsedTime } from "./lib/elapsedTime";
+  import { localeStore, t } from "./lib/localization.ts";
+  import { contentTypeTranslationKey } from "./lib/contentTypeIcons.ts";
   import {
     isCurrentThumbnailRequest,
     remoteImageThumbnailCardIdentity,
@@ -164,47 +166,10 @@
    * label is the only metadata the renderer needs to render the
    * badge.
    */
-  function describeContentType(value: string): string {
-    switch (value) {
-      case "text":
-        return "Texto";
-      case "url":
-        return "URL";
-      case "email":
-        return "Email";
-      case "json":
-        return "JSON";
-      case "jwt":
-        return "JWT";
-      case "uuid":
-        return "UUID";
-      case "ipv4":
-        return "IPv4";
-      case "ipv6":
-        return "IPv6";
-      case "hex_color":
-        return "Color";
-      case "html":
-        return "HTML";
-      case "file_path":
-        return "Ruta";
-      case "shell_command":
-        return "Shell";
-      case "sql":
-        return "SQL";
-      case "code":
-        return "Código";
-      case "image":
-        return "Imagen";
-      default:
-        return value;
-    }
-  }
-
   function describeImageOutcome(outcome: PeerImageImportResponse): string {
     switch (outcome.kind) {
       case "imported":
-        return outcome.deduplicated ? "Importado (ya existía)" : "Importado";
+        return outcome.deduplicated ? "remote.import.duplicate" : "remote.import.success";
       case "peer_unavailable":
         // The host surfaces `reason = not_available` when the
         // peer did not advertise `image_import`. The card
@@ -212,21 +177,21 @@
         // gate is a peer-version mismatch, not a transient
         // transport failure.
         if (outcome.reason === "not_available") {
-          return "Este equipo no admite la importación de imágenes.";
+          return "remote.import.image_unsupported";
         }
-        return `No disponible (${outcome.reason})`;
+        return "remote.import.unavailable";
       case "transport_unavailable":
-        return `No disponible (${outcome.reason})`;
+        return "remote.import.unavailable";
       case "body_too_large":
-        return "Imagen demasiado grande";
+        return "remote.import.image_too_large";
       case "invalid_image":
-        return "Imagen no válida";
+        return "remote.import.image_invalid";
       case "not_transferable":
-        return "No transferible";
+        return "remote.import.not_transferable";
       case "title_invalid":
-        return "Título no válido";
+        return "remote.import.title_invalid";
       case "persistence_error":
-        return `Error al guardar (${outcome.reason})`;
+        return "remote.import.save_error";
     }
   }
 
@@ -238,7 +203,7 @@
    * discriminated union the bridge returns — the renderer
    * never has to inspect free-form strings or content bytes.
    */
-  let lastResult: { kind: "ok" | "error"; summary: string } | null = null;
+  let lastResult: { kind: "ok" | "error"; summaryKey: string } | null = null;
 
   /**
    * Thumbnail request state the `peer-image-preview-thumbnails`
@@ -291,7 +256,7 @@
   const METADATA_REFRESH_MS = 30_000;
   let nowAnchor = Date.now();
   let metadataTimer: ReturnType<typeof setInterval> | null = null;
-  $: elapsed = formatElapsedTime(row.created_at, new Date(nowAnchor));
+  $: elapsed = formatElapsedTime(row.created_at, new Date(nowAnchor), $localeStore);
   $: elapsedLabel = (() => {
     const value: ElapsedTime = elapsed;
     return { aria: value.accessible, visual: value.visual };
@@ -355,25 +320,23 @@
   function describeOutcome(outcome: PeerImportResponse): string {
     switch (outcome.kind) {
       case "imported":
-        return outcome.deduplicated
-          ? "Importado (ya existía)"
-          : "Importado";
+        return outcome.deduplicated ? "remote.import.duplicate" : "remote.import.success";
       case "peer_unavailable":
-        return `No disponible (${outcome.reason})`;
+        return "remote.import.unavailable";
       case "transport_unavailable":
-        return `No disponible (${outcome.reason})`;
+        return "remote.import.unavailable";
       case "body_too_large":
-        return "Cuerpo demasiado grande";
+        return "remote.import.body_too_large";
       case "invalid_utf8":
-        return "Cuerpo no válido";
+        return "remote.import.body_invalid";
       case "not_transferable":
-        return "No transferible";
+        return "remote.import.not_transferable";
       case "empty_content":
-        return "Contenido vacío";
+        return "remote.import.empty";
       case "title_invalid":
-        return "Título no válido";
+        return "remote.import.title_invalid";
       case "persistence_error":
-        return "Error al guardar";
+        return "remote.import.save_error";
     }
   }
   async function importEntry(): Promise<void> {
@@ -387,7 +350,7 @@
     if (isImageRow && !peerSupportsImageImport) {
       lastResult = {
         kind: "error",
-        summary: "Este equipo no admite la importación de imágenes.",
+        summaryKey: "remote.import.image_unsupported",
       };
       return;
     }
@@ -403,7 +366,7 @@
         });
         lastResult = {
           kind: outcome.kind === "imported" ? "ok" : "error",
-          summary: describeImageOutcome(outcome),
+          summaryKey: describeImageOutcome(outcome),
         };
       } else {
         const outcome = await peerImportFetchCommand({
@@ -413,13 +376,13 @@
         });
         lastResult = {
           kind: outcome.kind === "imported" ? "ok" : "error",
-          summary: describeOutcome(outcome),
+          summaryKey: describeOutcome(outcome),
         };
       }
     } catch (err) {
       lastResult = {
         kind: "error",
-        summary: err instanceof Error ? err.message : String(err),
+        summaryKey: "remote.import.error",
       };
     } finally {
       busy = false;
@@ -655,7 +618,7 @@
   data-row-test-id={rowTestId}
   draggable="false"
   bind:this={cardElement}
-  aria-label={row.title ?? "Vista previa remota"}
+  aria-label={row.title ?? $t("remote.preview.title")}
   aria-selected={selected ? "true" : "false"}
   data-selected={selected ? "true" : "false"}
   on:click={handleCardSurfaceClick}
@@ -670,7 +633,7 @@
       </h3>
     {:else}
       <span class="remote-preview-card-title muted" data-testid="remote-preview-card-title">
-        {describeContentType(row.content_type)}
+        {$t(contentTypeTranslationKey(row.content_type))}
       </span>
     {/if}
     <span
@@ -678,20 +641,20 @@
       data-testid="remote-preview-card-type"
       data-content-type={row.content_type}
     >
-      {describeContentType(row.content_type)}
+      {$t(contentTypeTranslationKey(row.content_type))}
     </span>
   </header>
   <div
     class="remote-preview-card-source-app"
     data-testid="remote-preview-card-source-app"
-    aria-label={`Aplicación fuente: ${sourceAppName ?? "desconocida"}`}
-    title={sourceAppName ?? "Aplicación fuente desconocida"}
+    aria-label={sourceAppName ? $t("source_app.label", { name: sourceAppName }) : $t("source_app.unknown")}
+    title={sourceAppName ?? $t("source_app.unknown")}
   >
     <span
       class="remote-preview-card-source-app-name"
       data-testid="remote-preview-card-source-app-name"
     >
-      {sourceAppName ?? "Aplicación desconocida"}
+      {sourceAppName ?? $t("source_app.unknown")}
     </span>
   </div>
   <p
@@ -712,7 +675,7 @@
           class="remote-preview-card-image-thumbnail"
           data-testid="remote-preview-card-image-thumbnail"
           src={thumbnailUrl}
-          alt={row.title ?? "Miniatura remota"}
+          alt={row.title ?? $t("remote.preview.thumbnail")}
           draggable="false"
         />
       {:else}
@@ -721,7 +684,7 @@
           viewBox="0 0 64 64"
           xmlns="http://www.w3.org/2000/svg"
           role="img"
-          aria-label="Marcador estático de imagen remota"
+          aria-label={$t("remote.preview.image_placeholder")}
         >
           <rect
             x="2"
@@ -783,10 +746,10 @@
               on:click={importEntry}
             >
               {busy
-                ? "Importando…"
+                ? $t("remote.import.loading")
                 : isImageRow && !peerSupportsImageImport
-                  ? "No disponible"
-                  : "Importar"}
+                  ? $t("peers.status.unavailable")
+                  : $t("remote.import.action")}
             </button>
           </li>
         </ul>
@@ -798,7 +761,7 @@
           data-result-kind={lastResult.kind}
           role={lastResult.kind === "error" ? "alert" : "status"}
         >
-          {lastResult.summary}
+          {$t(lastResult.summaryKey)}
         </p>
       {/if}
     </div>

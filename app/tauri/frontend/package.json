@@ -6,7 +6,8 @@
   "description": "Svelte + TypeScript frontend for the ClipVault desktop shell",
   "scripts": {
     "dev": "vite",
-    "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
+    "build": "npm run locales:check && svelte-check --tsconfig ./tsconfig.json && vite build",
+    "locales:check": "node scripts/validate-locales.mjs",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "tsc --noCheck -p tsconfig.test.json && node --test --test-reporter=spec node_modules/.cache/clipvault-test-build/tests/"

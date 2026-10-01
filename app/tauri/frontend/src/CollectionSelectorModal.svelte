@@ -11,6 +11,7 @@
    * by name so the picker is deterministic.
    */
   import { createEventDispatcher, tick } from "svelte";
+  import { t } from "./lib/localization.ts";
   import type { Collection } from "./types";
 
   export let open: boolean;
@@ -116,10 +117,9 @@
       data-testid="collection-selector"
     >
       <header class="selector-header">
-        <h2 id="collection-selector-title">Agregar a colección</h2>
+        <h2 id="collection-selector-title">{$t("collections.selector.title")}</h2>
         <p class="muted">
-          Cada captura ya pertenece a <strong>Historial</strong>;
-          selecciona aquí colecciones adicionales.
+          {$t("collections.selector.history_note", { history: $t("collections.history") })}
         </p>
       </header>
       {#if !loaded}
@@ -128,16 +128,15 @@
           role="status"
           data-testid="collection-selector-loading"
         >
-          Cargando colecciones guardadas… Guardar se habilitará cuando
-          termine la carga para no sobrescribir la selección persistida.
+          {$t("collections.selector.loading")}
         </p>
       {/if}
       <input
         type="search"
         bind:value={search}
         bind:this={searchInputEl}
-        placeholder="Buscar colección"
-        aria-label="Buscar colección"
+        placeholder={$t("collections.selector.search")}
+        aria-label={$t("collections.selector.search")}
         class="selector-search"
         data-testid="collection-selector-search"
       />
@@ -162,10 +161,9 @@
         {:else}
           <li class="empty" data-testid="collection-selector-empty">
             {#if search.trim().length > 0}
-              No hay colecciones que coincidan con “{search.trim()}”.
+              {$t("collections.selector.no_match", { query: search.trim() })}
             {:else}
-              Aún no has creado colecciones. Usa el sidebar para
-              crear la primera.
+              {$t("collections.selector.empty")}
             {/if}
           </li>
         {/each}
@@ -177,7 +175,7 @@
           on:click={onCancel}
           data-testid="collection-selector-cancel"
         >
-          Cancelar
+          {$t("common.cancel")}
         </button>
         <button
           type="button"
@@ -186,7 +184,7 @@
           disabled={!loaded}
           data-testid="collection-selector-save"
         >
-          Guardar
+          {$t("common.save")}
         </button>
       </footer>
     </div>

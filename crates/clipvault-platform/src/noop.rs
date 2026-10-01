@@ -120,10 +120,7 @@ pub struct NoopSettingsNavigator;
 impl SettingsNavigator for NoopSettingsNavigator {
     fn open(&self, _target: crate::guidance::PlatformSettingsTarget) -> SettingsOpenOutcome {
         SettingsOpenOutcome::FallbackRequired {
-            manual_steps: vec![
-                "Open the operating system settings manually.".into(),
-                "Refer to ClipVault documentation for the precise pane.".into(),
-            ],
+            message_id: crate::guidance::PlatformGuidanceId::GenericSettingsFallback,
         }
     }
 

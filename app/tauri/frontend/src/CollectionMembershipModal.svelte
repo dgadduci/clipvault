@@ -42,6 +42,7 @@
   import type { Collection } from "./types";
   import { collectionColor } from "./lib/collectionColor";
   import Modal from "./Modal.svelte";
+  import { t } from "./lib/localization.ts";
 
   export let open: boolean;
   export let entryId: number;
@@ -77,7 +78,7 @@
 <Modal
   {open}
   {titleId}
-  title={`Colecciones de la captura`}
+  title={$t("collections.membership.title")}
   busy={false}
   {returnFocusTo}
   onClose={closeModal}
@@ -94,15 +95,15 @@
       data-testid="collection-membership-modal-summary"
     >
       {assignedCollections.length > 0
-        ? `Esta captura pertenece a ${assignedCollections.length} ${assignedCollections.length === 1 ? "colección" : "colecciones"}.`
-        : "Esta captura no está incluida en ninguna colección adicional."}
+        ? $t("collections.membership.count", { count: assignedCollections.length })
+        : $t("collections.membership.empty")}
     </p>
 
     {#if orderedCollections.length > 0}
       <ul
         class="collection-membership-list"
         data-testid="collection-membership-list"
-        aria-label={`Colecciones de ${displayTitle}`}
+        aria-label={$t("collections.membership.for_capture", { title: displayTitle })}
       >
         {#each orderedCollections as collection (collection.id)}
           {@const colour = collectionColor(collection.color_hex)}
@@ -119,13 +120,13 @@
               aria-hidden="true"
               style="background-color: {colour};"
             ></span>
-            <span class="collection-membership-chip-name">{collection.name}</span>
+            <span class="collection-membership-chip-name">{collection.kind === "system" ? $t("collections.history") : collection.name}</span>
             {#if collection.kind === "system"}
               <span
                 class="collection-membership-chip-badge"
-                aria-label="Colección de sistema protegida"
+                aria-label={$t("collections.system_protected")}
               >
-                sistema
+                {$t("collections.system_badge")}
               </span>
             {/if}
           </li>
@@ -136,7 +137,7 @@
         class="collection-membership-empty"
         data-testid="collection-membership-empty"
       >
-        No hay colecciones asignadas a esta captura.
+        {$t("collections.membership.no_assignments")}
       </p>
     {/if}
   </div>

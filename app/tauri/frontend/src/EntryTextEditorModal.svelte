@@ -47,6 +47,7 @@
   import { isEditableTextEntry } from "./types";
   import Modal from "./Modal.svelte";
   import { updateTextEntryCommand } from "./lib/tauri";
+  import { t } from "./lib/localization.ts";
 
   export let open: boolean;
   export let entry: EntryRecord;
@@ -111,7 +112,7 @@
    */
   let baselineEntry: EntryRecord | null = null;
   let saving = false;
-  let errorMessage: string | null = null;
+  let errorKey: string | null = null;
   let textareaEl: HTMLTextAreaElement | null = null;
 
   $: isEligible = isEditableTextEntry(entry);
@@ -137,7 +138,7 @@
   $: if (open && entry && lastOpenedEntryId !== entry.id) {
     draft = entry.content;
     baselineEntry = entry;
-    errorMessage = null;
+    errorKey = null;
     saving = false;
     lastOpenedEntryId = entry.id;
     void focusEditor();
@@ -180,17 +181,17 @@
   function describeError(kind: string | null): string {
     switch (kind) {
       case "not_found":
-        return "La entrada ya no está disponible.";
+        return "text_capture.edit.error.not_found";
       case "not_editable":
-        return "Esta entrada no se puede editar.";
+        return "text_capture.edit.error.not_editable";
       case "empty_content":
-        return "El texto no puede estar vacío.";
+        return "text_capture.edit.error.empty";
       case "duplicate_content":
-        return "Otra captura ya tiene ese contenido.";
+        return "text_capture.edit.error.duplicate";
       case "history_error":
-        return "No se pudo guardar la edición.";
+        return "text_capture.edit.error.save";
       default:
-        return "No se pudo guardar la edición.";
+        return "text_capture.edit.error.save";
     }
   }
 
@@ -203,7 +204,7 @@
   async function save(): Promise<void> {
     if (saving || !canSave) return;
     saving = true;
-    errorMessage = null;
+    errorKey = null;
     try {
       const response = await updateTextEntryCommand({
         id: entry.id,
@@ -225,20 +226,20 @@
           dispatch("close");
           break;
         case "not_found":
-          errorMessage = describeError("not_found");
+          errorKey = describeError("not_found");
           break;
         case "not_editable":
-          errorMessage = describeError("not_editable");
+          errorKey = describeError("not_editable");
           break;
         case "empty_content":
-          errorMessage = describeError("empty_content");
+          errorKey = describeError("empty_content");
           break;
         case "duplicate_content":
-          errorMessage = describeError("duplicate_content");
+          errorKey = describeError("duplicate_content");
           break;
       }
     } catch (caught) {
-      errorMessage = describeError(null);
+      errorKey = describeError(null);
       console.error("clipvault_update_text_entry failed", caught);
     } finally {
       saving = false;
@@ -253,7 +254,7 @@
   function resetDraft(): void {
     if (!baselineEntry) return;
     draft = baselineEntry.content;
-    errorMessage = null;
+    errorKey = null;
   }
 
   /**
@@ -304,7 +305,7 @@
     data-entry-id={entry.id}
   >
     <label class="visually-hidden" id={editorId} for={`${editorId}-textarea`}>
-      Contenido editable de la captura
+      {$t("text_capture.edit.label")}
     </label>
     <textarea
       id={`${editorId}-textarea`}
@@ -318,13 +319,13 @@
       spellcheck="false"
       on:keydown={onKeydown}
     ></textarea>
-    {#if errorMessage}
+    {#if errorKey}
       <p
         class="entry-text-editor-error"
         role="alert"
         data-testid="entry-text-editor-error"
       >
-        {errorMessage}
+        {$t(errorKey)}
       </p>
     {/if}
     <div class="entry-text-editor-actions">
@@ -335,7 +336,7 @@
         on:click={cancel}
         disabled={saving}
       >
-        Cancelar
+        {$t("common.cancel")}
       </button>
       <button
         type="button"
@@ -344,7 +345,7 @@
         on:click={resetDraft}
         disabled={saving || draft === (baselineEntry?.content ?? "")}
       >
-        Restablecer
+        {$t("common.reset")}
       </button>
       <button
         type="button"
@@ -353,7 +354,7 @@
         on:click={() => void save()}
         disabled={!canSave}
       >
-        {saving ? "Guardando" : "Guardar"}
+        {saving ? $t("settings.saving") : $t("common.save")}
       </button>
     </div>
   </div>

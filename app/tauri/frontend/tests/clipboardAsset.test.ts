@@ -692,14 +692,14 @@ test("image card menu exposes a single Paste action with a null mode", () => {
   assert.equal(actions.length, 1, "image rows render exactly one paste action");
   const [only] = actions;
   assert.equal(only.kind, "image-paste");
-  assert.equal(only.label, "Paste");
+  assert.equal(only.label, "Paste image");
   assert.equal(only.testId, "history-card-paste");
   // The legacy quick-paste contract: `mode = null` lets the Rust
   // paste service run the default mode, which is the documented path
   // for image rows (the bitmap write ignores the textual mode).
   assert.equal(only.mode, null);
   assert.equal(only.disabled, false);
-  assert.equal(only.ariaLabel, "Pegar imagen de Captura de imagen");
+  assert.equal(only.ariaLabel, "Paste image Captura de imagen");
   // The helper MUST NOT leak the asset reference or the content hash
   // into any user-visible string.
   assert.equal(only.tooltip.includes(SHA), false);
@@ -714,12 +714,12 @@ test("image card menu never exposes Paste de texto enriquecido or Paste de texto
   });
   const labels = actions.map((action) => action.label);
   assert.equal(
-    labels.includes("Paste de texto enriquecido"),
+    labels.includes("Paste rich text"),
     false,
     "the image card must not render the rich-text action",
   );
   assert.equal(
-    labels.includes("Paste de texto plano"),
+    labels.includes("Paste plain text"),
     false,
     "the image card must not render the plain-text action",
   );
@@ -739,12 +739,12 @@ test("rich-text card menu keeps both paste actions when rich metadata is availab
   assert.equal(actions.length, 2);
   const [rich, plain] = actions;
   assert.equal(rich.kind, "text-rich-paste");
-  assert.equal(rich.label, "Paste de texto enriquecido");
+  assert.equal(rich.label, "Paste rich text");
   assert.equal(rich.testId, "history-card-paste-rich");
   assert.equal(rich.mode, "rich");
   assert.equal(rich.disabled, false);
   assert.equal(plain.kind, "text-plain-paste");
-  assert.equal(plain.label, "Paste de texto plano");
+  assert.equal(plain.label, "Paste plain text");
   assert.equal(plain.testId, "history-card-paste-plain");
   assert.equal(plain.mode, "plain");
   assert.equal(plain.disabled, false);
@@ -768,7 +768,7 @@ test("plain-text card menu disables the rich action but keeps the plain action e
   assert.equal(plain.mode, "plain");
   // The tooltip for the disabled rich action explains why without
   // revealing clipboard content.
-  assert.equal(rich.tooltip, "Esta entrada no tiene texto enriquecido.");
+  assert.equal(rich.tooltip, "This entry has no rich text.");
 });
 
 test("pasteBusy disables both text paste actions and never the image paste action", () => {

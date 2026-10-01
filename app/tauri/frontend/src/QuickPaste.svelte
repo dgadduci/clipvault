@@ -38,12 +38,11 @@
     type QuickPasteMenuAction,
   } from "./lib/quickPasteActions";
   import { listen } from "@tauri-apps/api/event";
-  import { contentTypeLabel } from "./lib/contentType";
   import {
     APP_FALLBACK_ICON_SVG,
     CONTENT_TYPE_ICON_SPRITE,
     contentTypeIconId,
-    contentTypeIconLabel,
+    contentTypeTranslationKey,
   } from "./lib/contentTypeIcons";
   import {
     IMPORTED_SOURCE_APP_FALLBACK_ICON_SVG,
@@ -51,6 +50,7 @@
     sourceAppPresentationIconRef,
   } from "./lib/sourceAppFallback";
   import { formatElapsedTime } from "./lib/elapsedTime";
+  import { localeStore, t } from "./lib/localization.ts";
   import {
     createClipboardAssetResolver,
     entryFullPreviewText,
@@ -1138,12 +1138,13 @@
     recents: EntryRecord[],
     searchHits: SearchHit[],
     id: number,
+    translateText: (key: string, params?: Record<string, string | number | Date>) => string,
   ): string {
     const entry = findEntry(currentMode, recents, searchHits, id);
     if (!entry) return "";
     const explicit = entry.title?.trim();
     if (explicit) return explicit;
-    return contentTypeLabel(entry.content_type);
+    return translateText(contentTypeTranslationKey(entry.content_type));
   }
 
   function renderPreview(
@@ -1151,11 +1152,12 @@
     recents: EntryRecord[],
     searchHits: SearchHit[],
     id: number,
+    translateText: (key: string, params?: Record<string, string | number | Date>) => string,
   ): string {
     const entry = findEntry(currentMode, recents, searchHits, id);
     if (!entry) return "";
     if (isImageEntry(entry)) {
-      return entryPreviewText(entry);
+      return entryPreviewText(entry, 120, translateText);
     }
     // The row preview MUST keep the captured whitespace byte-for-byte
     // (LF / CRLF / tabs / indentation / blank lines / significant
@@ -1821,12 +1823,15 @@
    * still reads the platform-aware wording even though the visible
    * hint is hidden from the accessibility tree.
    */
-  function actionShortcutAccessibleLabel(action: QuickPasteMenuAction): string {
+  function actionShortcutAccessibleLabel(
+    action: QuickPasteMenuAction,
+    translateText: (key: string, params?: Record<string, string | number | Date>) => string,
+  ): string {
     if (action.kind === "edit") {
-      return editTextShortcutAccessibleLabel(shortcutPlatform);
+      return editTextShortcutAccessibleLabel(shortcutPlatform, translateText);
     }
     if (action.kind === "preview") {
-      return previewShortcutAccessibleLabel(shortcutPlatform);
+      return previewShortcutAccessibleLabel(shortcutPlatform, translateText);
     }
     return "";
   }
@@ -2615,6 +2620,7 @@
   $: shortcutLabelText = quickPasteSearchShortcutLabel(shortcutPlatform);
   $: shortcutAccessibleLabel = quickPasteSearchShortcutAccessibleLabel(
     shortcutPlatform,
+    $t,
   );
 
   /**
@@ -2740,11 +2746,11 @@
       <input
         type="search"
         class="qp-search"
-        placeholder="Buscar en el historial del portapapeles"
+        placeholder={$t("quickpaste.search.placeholder")}
         value={query}
         on:input={onInput}
         on:keydown={onSearchInputKeydown}
-        aria-label="Buscar en el historial del portapapeles"
+        aria-label={$t("quickpaste.search.aria")}
         data-testid="quick-paste-input"
         bind:this={searchInputEl}
       />
@@ -2768,7 +2774,7 @@
         role="status"
         aria-live="polite"
       >
-        Cargando historial…
+        {$t("quickpaste.loading")}
       </p>
     {:else if searchError}
       <p
@@ -2805,8 +2811,8 @@
         {#each resultIds as id, index (id)}
           {@const entry = findEntry(mode, recent, hits, id)}
           {@const contentType = resolveContentType(mode, recent, hits, id)}
-          {@const title = renderTitle(mode, recent, hits, id)}
-          {@const preview = renderPreview(mode, recent, hits, id)}
+          {@const title = renderTitle(mode, recent, hits, id, $t)}
+          {@const preview = renderPreview(mode, recent, hits, id, $t)}
           {@const isImage = entry ? isImageEntry(entry) : false}
           {@const thumbState = thumbnailStates[id] ?? (isImage ? "loading" : "error")}
           {@const importedSourceApp = peerImportedSourceApps.get(id) ?? null}
@@ -2814,10 +2820,10 @@
             ? sourceAppPresentationIconRef(entry, importedSourceApp)
             : null}
           {@const sourceAppLabel = entry
-            ? sourceAppPresentationAccessibleLabel(entry, importedSourceApp)
-            : "Aplicación fuente desconocida"}
+            ? sourceAppPresentationAccessibleLabel(entry, importedSourceApp, $t)
+            : $t("source_app.unknown")}
           {@const typeIconId = contentTypeIconId(contentType)}
-          {@const typeLabel = contentTypeIconLabel(contentType)}
+          {@const typeLabel = $t(contentTypeTranslationKey(contentType))}
           {@const isPinned = entry ? entry.is_pinned : false}
           {@const menuOpen = openMenuEntryId === id}
           {@const tagsProjection = tagsForEntry(id, entryTagsCache, entryTagsHydration)}
@@ -2849,7 +2855,7 @@
                 data-testid="quick-paste-type"
                 data-content-type={contentType}
                 aria-hidden="true"
-                title={`Tipo: ${typeLabel}`}
+                title={$t("history.card.content_type", { type: typeLabel })}
               >
                 <svg
                   aria-hidden="true"
@@ -2860,7 +2866,7 @@
                   <use href="#{typeIconId}" />
                 </svg>
                 <span class="qp-visually-hidden">
-                  Tipo: {typeLabel}
+                  {$t("history.card.content_type", { type: typeLabel })}
                 </span>
               </span>
               <span
@@ -2875,7 +2881,7 @@
                   class="qp-tags"
                   data-testid="quick-paste-tags"
                   data-tags-state={entryTagsHydration.get(id) ?? "loaded"}
-                  aria-label="Tags de la entrada"
+                  aria-label={$t("quickpaste.tags.aria")}
                 >
                   {#each tagsProjection.chips as chip (chip.key)}
                     <span
@@ -2890,7 +2896,7 @@
                     <span
                       class="qp-tag-chip qp-tag-chip-more"
                       data-testid="quick-paste-tag-more"
-                      aria-label={`${tagsProjection.overflow} tags adicionales`}
+                      aria-label={$t("quickpaste.tags.more", { count: tagsProjection.overflow })}
                     >
                       +{tagsProjection.overflow}
                     </span>
@@ -2902,11 +2908,11 @@
                   class="qp-preview-hint"
                   data-testid="quick-paste-preview-hint"
                   data-preview-platform={shortcutPlatform}
-                  title={previewShortcutAccessibleLabel(shortcutPlatform)}
-                  aria-label={previewShortcutAccessibleLabel(shortcutPlatform)}
+                  title={previewShortcutAccessibleLabel(shortcutPlatform, $t)}
+                  aria-label={previewShortcutAccessibleLabel(shortcutPlatform, $t)}
                   aria-keyshortcuts={previewShortcutKeyAttribute(shortcutPlatform)}
                 >
-                  <span class="qp-preview-hint-label">Preview</span>
+                  <span class="qp-preview-hint-label">{$t("history.card.preview")}</span>
                   <span
                     class="qp-preview-hint-keys"
                     aria-hidden="true"
@@ -2923,9 +2929,9 @@
                 data-busy={pinInFlight.has(id) ? "true" : "false"}
                 aria-pressed={isPinned}
                 aria-label={isPinned
-                  ? `Quitar favorito de ${title}`
-                  : `Marcar ${title} como favorito`}
-                title={isPinned ? "Quitar favorito" : "Marcar como favorito"}
+                  ? $t("quickpaste.favorite.remove_from", { title })
+                  : $t("quickpaste.favorite.mark_for", { title })}
+                title={isPinned ? $t("quickpaste.favorite.remove") : $t("quickpaste.favorite.mark")}
                 on:click|stopPropagation={() => void togglePin(id)}
               >
                 <svg
@@ -2947,7 +2953,7 @@
                   <path d="M9 10.76V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v5.76l3.13 1.88a1 1 0 0 1 .44 1.34l-2.34 4.42a1 1 0 0 1-.87.5h-4.72a1 1 0 0 1-.87-.5L7.43 13.98a1 1 0 0 1 .44-1.34L11 10.76Z" />
                 </svg>
                 <span class="qp-visually-hidden">
-                  {isPinned ? "Quitar favorito" : "Marcar como favorito"}
+                  {isPinned ? $t("quickpaste.favorite.remove") : $t("quickpaste.favorite.mark")}
                 </span>
               </button>
               <span
@@ -2973,7 +2979,7 @@
                   <span
                     class="qp-source-app-placeholder"
                     data-testid="quick-paste-source-app-loading"
-                    aria-label="Cargando icono"
+                    aria-label={$t("quickpaste.loading_icon")}
                   >
                     <svg
                       aria-hidden="true"
@@ -3026,7 +3032,7 @@
                     <span
                       class="qp-thumb-placeholder"
                       data-testid="quick-paste-thumbnail-loading"
-                      aria-label="Cargando imagen"
+                      aria-label={$t("quickpaste.loading_image")}
                     >
                       <svg
                         aria-hidden="true"
@@ -3041,7 +3047,7 @@
                     <span
                       class="qp-thumb-placeholder qp-thumb-placeholder-error"
                       data-testid="quick-paste-thumbnail-error"
-                      aria-label="Imagen no disponible"
+                      aria-label={$t("history.card.image_unavailable")}
                     >
                       <svg
                         aria-hidden="true"
@@ -3091,20 +3097,20 @@
                   class="qp-code-language"
                   data-testid="quick-paste-code-language"
                   data-code-language={entry.code_language ?? ""}
-                  title={`Lenguaje: ${canonicalCodeLanguageLabel(entry.code_language)}`}
+                  title={$t("quickpaste.code_language", { language: canonicalCodeLanguageLabel(entry.code_language) })}
                 >
-                  Código · {canonicalCodeLanguageLabel(entry.code_language)}
+                  {$t("preview.code_language", { language: canonicalCodeLanguageLabel(entry.code_language) })}
                 </span>
               {/if}
               <span
                 class="qp-elapsed"
                 data-testid="quick-paste-elapsed"
                 aria-label={entry
-                  ? formatElapsedTime(entry.created_at, new Date()).accessible
+                  ? formatElapsedTime(entry.created_at, new Date(), $localeStore).accessible
                   : ""}
               >
                 {entry
-                  ? formatElapsedTime(entry.created_at, new Date()).visual
+                  ? formatElapsedTime(entry.created_at, new Date(), $localeStore).visual
                   : ""}
               </span>
               {#if entry}
@@ -3114,8 +3120,8 @@
                   data-testid="quick-paste-menu-trigger"
                   aria-haspopup="menu"
                   aria-expanded={menuOpen}
-                  aria-label={`Más acciones para ${title}`}
-                  title="Más acciones"
+                  aria-label={$t("quickpaste.more_for", { title })}
+                  title={$t("quickpaste.actions")}
                   on:click|stopPropagation={() => toggleMenuFor(id)}
                 >
                   <svg
@@ -3130,7 +3136,7 @@
                     <circle cx="12" cy="12" r="1.6" />
                     <circle cx="12" cy="19" r="1.6" />
                   </svg>
-                  <span class="qp-visually-hidden">Más acciones</span>
+                  <span class="qp-visually-hidden">{$t("quickpaste.actions")}</span>
                 </button>
               {/if}
             </div>
@@ -3154,12 +3160,13 @@
         {#if anchorEntry}
           {@const anchorActions = quickPasteMenuActions(
             anchorEntry,
-            renderTitle(mode, recent, hits, openMenuEntryId),
+            renderTitle(mode, recent, hits, openMenuEntryId, $t),
             {
               copyBusy:
                 pasteInFlight.has(openMenuEntryId) ||
                 pinInFlight.has(openMenuEntryId),
             },
+            $t,
           )}
           <ul
             class="qp-menu"
@@ -3172,7 +3179,7 @@
           >
             {#each anchorActions as action (action.testId)}
               {@const shortcutLabel = actionShortcutLabel(action)}
-              {@const shortcutAccessible = actionShortcutAccessibleLabel(action)}
+              {@const shortcutAccessible = actionShortcutAccessibleLabel(action, $t)}
               {@const shortcutKey = actionShortcutKeyAttribute(action)}
               <li role="none">
                 <button
@@ -3234,7 +3241,7 @@
     <ClipboardPreview
       entry={previewRecord}
       testIdPrefix="quick-paste-preview"
-      accessibleLabel={`Previsualización de ${renderTitle(mode, recent, hits, previewEntryId)}`}
+      accessibleLabel={$t("preview.accessible", { title: renderTitle(mode, recent, hits, previewEntryId, $t) })}
       onClose={closePreview}
     />
   {/if}
@@ -3258,6 +3265,7 @@
     recent,
     hits,
     quickPasteEditorEntry.id,
+    $t,
   )}
   {@const editorFocusTarget = resolveQuickPasteEditorFocusTarget(
     quickPasteEditorEntry.id,

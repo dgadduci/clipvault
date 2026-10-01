@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher, tick } from "svelte";
+  import { t } from "./lib/localization.ts";
   import Modal from "./Modal.svelte";
   import {
     collectionNoteCommand,
@@ -18,7 +19,7 @@
   let draft = "";
   let loading = false;
   let saving = false;
-  let errorMessage: string | null = null;
+  let errorKey: string | null = null;
   let textareaEl: HTMLTextAreaElement | null = null;
   let requestToken = 0;
   let openedTarget = "";
@@ -37,7 +38,7 @@
     const token = ++requestToken;
     loading = true;
     saving = false;
-    errorMessage = null;
+    errorKey = null;
     draft = "";
     try {
       const note = targetKind === "entry"
@@ -49,7 +50,7 @@
       textareaEl?.focus();
     } catch {
       if (token === requestToken) {
-        errorMessage = "No se pudo cargar la nota. Inténtalo de nuevo.";
+        errorKey = "notes.error.load";
       }
     } finally {
       if (token === requestToken) loading = false;
@@ -59,7 +60,7 @@
   async function save(): Promise<void> {
     if (busy) return;
     saving = true;
-    errorMessage = null;
+    errorKey = null;
     try {
       if (targetKind === "entry") {
         await setEntryNoteCommand({ entryId: targetId, body: draft });
@@ -68,7 +69,7 @@
       }
       dispatch("close");
     } catch {
-      errorMessage = "No se pudo guardar la nota. Inténtalo de nuevo.";
+      errorKey = "notes.error.save";
     } finally {
       saving = false;
     }
@@ -89,13 +90,13 @@
 <Modal
   {open}
   {titleId}
-  title={`Nota · ${targetLabel}`}
+  title={$t("notes.modal.title", { target: targetLabel })}
   busy={busy}
   {returnFocusTo}
   onClose={cancel}
 >
   <div class="text-note-modal" data-testid="text-note-modal" data-target-kind={targetKind} data-target-id={targetId}>
-    <label class="visually-hidden" for={`${titleId}-textarea`}>Nota de {targetLabel}</label>
+    <label class="visually-hidden" for={`${titleId}-textarea`}>{$t("notes.modal.label", { target: targetLabel })}</label>
     <textarea
       id={`${titleId}-textarea`}
       bind:this={textareaEl}
@@ -104,20 +105,20 @@
       class="text-note-textarea"
       data-testid="text-note-textarea"
       disabled={busy}
-      aria-label={`Nota de ${targetLabel}`}
-      placeholder="Escribe una nota…"
+      aria-label={$t("notes.modal.label", { target: targetLabel })}
+      placeholder={$t("notes.modal.placeholder")}
       on:keydown={onKeydown}
     ></textarea>
     {#if loading}
-      <p class="text-note-status" data-testid="text-note-loading">Cargando nota…</p>
+      <p class="text-note-status" data-testid="text-note-loading">{$t("notes.loading")}</p>
     {/if}
-    {#if errorMessage}
-      <p class="text-note-error" role="alert" data-testid="text-note-error">{errorMessage}</p>
+    {#if errorKey}
+      <p class="text-note-error" role="alert" data-testid="text-note-error">{$t(errorKey)}</p>
     {/if}
     <div class="text-note-actions">
-      <button type="button" class="text-note-cancel" on:click={cancel} disabled={busy}>Cancelar</button>
+      <button type="button" class="text-note-cancel" on:click={cancel} disabled={busy}>{$t("common.cancel")}</button>
       <button type="button" class="text-note-save" data-testid="text-note-save" on:click={() => void save()} disabled={busy}>
-        {saving ? "Guardando…" : "Guardar"}
+        {saving ? $t("settings.saving") : $t("common.save")}
       </button>
     </div>
   </div>

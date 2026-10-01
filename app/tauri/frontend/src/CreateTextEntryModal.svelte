@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher, tick } from "svelte";
+  import { t } from "./lib/localization.ts";
   import Modal from "./Modal.svelte";
   import { createManualTextCommand } from "./lib/tauri";
 
@@ -12,13 +13,13 @@
   const titleId = "create-text-entry-title";
   let draft = "";
   let saving = false;
-  let errorMessage: string | null = null;
+  let errorKey: string | null = null;
   let textareaEl: HTMLTextAreaElement | null = null;
   let previousOpen = false;
 
   $: if (open && !previousOpen) {
     draft = "";
-    errorMessage = null;
+    errorKey = null;
     void focusEditor();
   }
   $: previousOpen = open;
@@ -31,25 +32,25 @@
   async function save(): Promise<void> {
     if (saving) return;
     if (draft.length === 0) {
-      errorMessage = "Escribe algún texto antes de guardar.";
+      errorKey = "text_capture.error.empty";
       return;
     }
     saving = true;
-    errorMessage = null;
+    errorKey = null;
     try {
       const result = await createManualTextCommand({ collectionId, content: draft });
       if (result.kind === "stored" || result.kind === "duplicate") {
         dispatch("created", { id: result.id });
         dispatch("close");
       } else if (result.kind === "empty_content") {
-        errorMessage = "Escribe algún texto antes de guardar.";
+        errorKey = "text_capture.error.empty";
       } else if (result.kind === "invalid_collection_target") {
-        errorMessage = "No se pueden crear capturas en esta colección.";
+        errorKey = "text_capture.error.invalid_collection";
       } else {
-        errorMessage = "La colección ya no está disponible.";
+        errorKey = "text_capture.error.collection_unavailable";
       }
     } catch {
-      errorMessage = "No se pudo guardar la captura. Inténtalo de nuevo.";
+      errorKey = "text_capture.error.save";
     } finally {
       saving = false;
     }
@@ -70,13 +71,13 @@
 <Modal
   {open}
   {titleId}
-  title={`Nueva captura · ${collectionName}`}
+  title={$t("text_capture.modal.title", { collection: collectionName })}
   busy={saving}
   {returnFocusTo}
   onClose={cancel}
 >
   <div class="create-text-entry-modal" data-testid="create-text-entry-modal">
-    <label class="visually-hidden" for="create-text-entry-textarea">Texto de la nueva captura</label>
+    <label class="visually-hidden" for="create-text-entry-textarea">{$t("text_capture.modal.label")}</label>
     <textarea
       id="create-text-entry-textarea"
       bind:this={textareaEl}
@@ -85,18 +86,18 @@
       class="create-text-entry-textarea"
       data-testid="create-text-entry-textarea"
       disabled={saving}
-      aria-label="Texto de la nueva captura"
-      placeholder="Escribe el texto de la captura…"
+      aria-label={$t("text_capture.modal.label")}
+      placeholder={$t("text_capture.modal.placeholder")}
       on:keydown={onKeydown}
     ></textarea>
-    <p class="create-text-entry-hint">⌘/Ctrl + Enter para guardar</p>
-    {#if errorMessage}
-      <p class="create-text-entry-error" role="alert" data-testid="create-text-entry-error">{errorMessage}</p>
+    <p class="create-text-entry-hint">{$t("text_capture.modal.shortcut_hint")}</p>
+    {#if errorKey}
+      <p class="create-text-entry-error" role="alert" data-testid="create-text-entry-error">{$t(errorKey)}</p>
     {/if}
     <div class="create-text-entry-actions">
-      <button type="button" on:click={cancel} disabled={saving}>Cancelar</button>
+      <button type="button" on:click={cancel} disabled={saving}>{$t("common.cancel")}</button>
       <button type="button" data-testid="create-text-entry-save" on:click={() => void save()} disabled={saving}>
-        {saving ? "Guardando…" : "Guardar captura"}
+        {saving ? $t("settings.saving") : $t("text_capture.modal.save")}
       </button>
     </div>
   </div>

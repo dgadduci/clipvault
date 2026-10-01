@@ -10,6 +10,7 @@ mod commands;
 mod gnome_integration;
 #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
 mod kde_kwin_integration;
+mod localization;
 mod main_window_layout;
 mod metadata_scheduler;
 mod state;
@@ -118,6 +119,7 @@ fn main() {
             match TauriTrayController::install(
                 app.handle(),
                 state.watcher.is_capture_enabled(),
+                &state.context.settings().load(&state.context).language,
                 menu_handler,
                 tray_handler,
             ) {

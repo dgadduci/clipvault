@@ -40,10 +40,14 @@ export function searchShortcutLabel(
 /** Long-form accessible label matching the visible hint. */
 export function searchShortcutAccessibleLabel(
   platform: SearchShortcutPlatform,
+  translateText?: (key: string, params?: Record<string, string | number | Date>) => string,
 ): string {
-  return platform === "macos"
-    ? "Buscar (Comando F)"
-    : "Buscar (Control F)";
+  const modifier = platform === "macos" ? "shortcut.command" : "shortcut.control";
+  return translateText
+    ? translateText("shortcut.search", { modifier: translateText(modifier) })
+    : platform === "macos"
+      ? "Buscar (Comando F)"
+      : "Buscar (Control F)";
 }
 
 /** Letter the platform shortcut triggers (matches the matcher
@@ -77,10 +81,14 @@ export function quickPasteSearchShortcutLabel(
 /** Long-form accessible label matching the visible hint. */
 export function quickPasteSearchShortcutAccessibleLabel(
   platform: SearchShortcutPlatform,
+  translateText?: (key: string, params?: Record<string, string | number | Date>) => string,
 ): string {
-  return platform === "macos"
-    ? "Buscar pegado rápido (Comando K)"
-    : "Buscar pegado rápido (Control K)";
+  const modifier = platform === "macos" ? "shortcut.command" : "shortcut.control";
+  return translateText
+    ? translateText("shortcut.quickpaste_search", { modifier: translateText(modifier) })
+    : platform === "macos"
+      ? "Buscar pegado rápido (Comando K)"
+      : "Buscar pegado rápido (Control K)";
 }
 
 /**

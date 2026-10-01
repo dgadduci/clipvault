@@ -103,10 +103,14 @@ export function previewShortcutLabel(
 /** Long-form accessible label matching the visible hint. */
 export function previewShortcutAccessibleLabel(
   platform: PreviewShortcutPlatform,
+  translateText?: (key: string, params?: Record<string, string | number | Date>) => string,
 ): string {
-  return platform === "macos"
-    ? "Previsualizar (Comando Enter)"
-    : "Previsualizar (Control Enter)";
+  const modifier = platform === "macos" ? "shortcut.command" : "shortcut.control";
+  return translateText
+    ? translateText("shortcut.preview", { modifier: translateText(modifier) })
+    : platform === "macos"
+      ? "Previsualizar (Comando Enter)"
+      : "Previsualizar (Control Enter)";
 }
 
 /**

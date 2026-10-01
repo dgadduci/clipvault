@@ -29,10 +29,11 @@
   import { anchorPopupToViewport } from "./lib/anchorPopupToViewport.ts";
   import type { TagFilter, TagFilterOption } from "./types.ts";
   import { filterComboboxStyles } from "./lib/filterTokens.ts";
+  import { t } from "./lib/localization.ts";
 
   export let selected: TagFilter;
   export let options: TagFilterOption[];
-  export let ariaLabel: string = "Filtrar por tag";
+  export let ariaLabel: string = "";
   /**
    * Stable id used to wire `aria-controls` to the listbox. Kept on
    * the parent so the rest of the desktop (toolbar regression
@@ -68,7 +69,10 @@
   $: activeKey = activeIndex >= 0 && activeIndex < optionKeys.length
     ? optionKeys[activeIndex]
     : null;
-  $: triggerLabel = labelForSelected(selected);
+  $: triggerLabel = selected.kind === "all"
+    ? $t("filter.all")
+    : options.find((option) => option.id === selected.tagId)?.display_name ??
+      $t("filter.tag");
   $: triggerAriaExpanded = open ? "true" : "false";
   $: triggerAriaActiveDescendant = open && activeKey
     ? `${testId}-option-${activeKey}`
@@ -78,7 +82,7 @@
     raw: readonly TagFilterOption[],
   ): ComboboxOption[] {
     const result: ComboboxOption[] = [
-      { kind: "all", key: "all", display_name: "Todas" },
+      { kind: "all", key: "all", display_name: "" },
     ];
     for (const option of raw) {
       result.push({
@@ -88,12 +92,6 @@
       });
     }
     return result;
-  }
-
-  function labelForSelected(value: TagFilter): string {
-    if (value.kind === "all") return "Todas";
-    return options.find((option) => option.id === value.tagId)?.display_name ??
-      "Tag";
   }
 
   function matchSelected(
@@ -284,7 +282,7 @@
     aria-haspopup="listbox"
     aria-expanded={triggerAriaExpanded as "true" | "false"}
     aria-controls={`${testId}-listbox`}
-    aria-label={ariaLabel}
+    aria-label={ariaLabel || $t("filter.tag")}
     aria-activedescendant={triggerAriaActiveDescendant}
     bind:this={triggerEl}
     on:click={toggle}
@@ -330,7 +328,7 @@
       class="listbox"
       role="listbox"
       id={`${testId}-listbox`}
-      aria-label={ariaLabel}
+      aria-label={ariaLabel || $t("filter.tag")}
       bind:this={listEl}
       use:anchorPopupToViewport={{
         anchor: () => triggerEl,
@@ -355,9 +353,7 @@
           on:mouseenter={() => (activeIndex = index)}
         >
           <span class="option-label">
-            {option.kind === "all"
-              ? option.display_name
-              : option.option.display_name}
+            {option.kind === "all" ? $t("filter.all") : option.option.display_name}
           </span>
         </li>
       {/each}

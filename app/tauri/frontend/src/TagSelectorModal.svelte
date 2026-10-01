@@ -25,6 +25,7 @@
    * resulting tag ids — never user-supplied names.
    */
   import { createEventDispatcher, tick } from "svelte";
+  import { t } from "./lib/localization.ts";
   import type { Tag } from "./types";
   import { tagsCreateCommand } from "./lib/tauri";
 
@@ -69,7 +70,7 @@
   let searchInputEl: HTMLInputElement | null = null;
   let adding = false;
   let saving = false;
-  let addError: string | null = null;
+  let addErrorKey: string | null = null;
   /** Last visible character count the modal observed. */
   const MAX_NAME_CHARS = 80;
 
@@ -164,7 +165,7 @@
     selection = new Set(initial);
     search = "";
     locallyCreated = new Map();
-    addError = null;
+    addErrorKey = null;
     adding = false;
     saving = false;
   }
@@ -203,11 +204,11 @@
    * is merged by id and the backend itself is idempotent.
    */
   async function onAdd(): Promise<void> {
-    addError = null;
+    addErrorKey = null;
     const trimmed = trimmedInput;
     if (!trimmed || adding) return;
     if (trimmed.length > MAX_NAME_CHARS) {
-      addError = `El nombre supera los ${MAX_NAME_CHARS} caracteres.`;
+      addErrorKey = "tags.error.name_too_long";
       return;
     }
     // Path 2: match an existing tag case-insensitively. No
@@ -233,7 +234,7 @@
       selection = nextSelection;
       search = "";
     } catch (error) {
-      addError = error instanceof Error ? error.message : String(error);
+      addErrorKey = "tags.error.add";
     } finally {
       adding = false;
     }
@@ -260,7 +261,7 @@
         event.preventDefault();
         event.stopPropagation();
         search = "";
-        addError = null;
+        addErrorKey = null;
       }
     }
   }
@@ -285,9 +286,9 @@
   async function onSave(): Promise<void> {
     if (!saveEnabled) return;
     if (trimmedInput.length > 0) {
-      addError = null;
+      addErrorKey = null;
       await onAdd();
-      if (addError !== null) {
+      if (addErrorKey !== null) {
         // Surface the inline error; the modal stays open so the
         // user can fix the typed name without losing their
         // selection.
@@ -326,9 +327,9 @@
       data-testid="tag-selector"
     >
       <header class="selector-header">
-        <h2 id="tag-selector-title">Agregar tags</h2>
+        <h2 id="tag-selector-title">{$t("tags.selector.title")}</h2>
         <p class="muted">
-          Busca o crea un tag. La asociación se guarda atómicamente.
+          {$t("tags.selector.description")}
         </p>
       </header>
       <div class="selector-input-row">
@@ -336,8 +337,8 @@
           type="search"
           bind:value={search}
           bind:this={searchInputEl}
-          placeholder="Buscar o crear tag…"
-          aria-label="Buscar o crear tag"
+          placeholder={$t("tags.selector.search_create")}
+          aria-label={$t("tags.selector.search_create")}
           maxlength={MAX_NAME_CHARS}
           on:keydown={onInputKeydown}
           class="selector-search"
@@ -346,21 +347,21 @@
         <button
           type="button"
           class="secondary small"
-          aria-label="Añadir tag a la selección"
+          aria-label={$t("tags.selector.add")}
           disabled={!addEnabled}
           on:click={() => void onAdd()}
           data-testid="tag-selector-create-add"
         >
-          {adding ? "Añadiendo…" : "Añadir"}
+          {adding ? $t("tags.selector.adding") : $t("tags.selector.add")}
         </button>
       </div>
-{#if addError}
+{#if addErrorKey}
     <p
       class="selector-error"
       role="alert"
       data-testid="tag-selector-create-error"
     >
-      {addError}
+      {$t(addErrorKey)}
     </p>
   {/if}
   {#if !loaded}
@@ -369,8 +370,7 @@
       role="status"
       data-testid="tag-selector-loading"
     >
-      Cargando tags guardados… Guardar se habilitará cuando termine la
-      carga para no sobrescribir la selección persistida.
+      {$t("tags.selector.loading")}
     </p>
   {/if}
       <ul class="selector-list" role="listbox" aria-multiselectable="true">
@@ -395,12 +395,12 @@
           <li class="empty" data-testid="tag-selector-empty">
             {#if search.trim().length > 0}
               {#if matchingExistingTag}
-                Pulsa **Añadir** para usar “{matchingExistingTag.display_name}”.
+                {$t("tags.selector.use_existing", { name: matchingExistingTag.display_name, action: $t("tags.selector.add") })}
               {:else}
-                Sin coincidencias. Pulsa **Añadir** para crear “{trimmedInput}”.
+                {$t("tags.selector.create_new", { action: $t("tags.selector.add"), name: trimmedInput })}
               {/if}
             {:else}
-              Aún no has creado tags. Escribe un nombre para empezar.
+              {$t("tags.selector.empty")}
             {/if}
           </li>
         {/each}
@@ -412,7 +412,7 @@
           on:click={onCancel}
           data-testid="tag-selector-cancel"
         >
-          Cancelar
+          {$t("common.cancel")}
         </button>
         <button
           type="button"
@@ -421,7 +421,7 @@
           disabled={!saveEnabled}
           data-testid="tag-selector-save"
         >
-          {saving ? "Guardando…" : "Guardar"}
+          {saving ? $t("settings.saving") : $t("common.save")}
         </button>
       </footer>
     </div>

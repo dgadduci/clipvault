@@ -43,6 +43,18 @@ pub const LOCAL_CLIPBOARD_CAPTURE_ENABLED_KEY: &str = "local_clipboard_capture_e
 /// Local opt-in for including an attached capture note in explicit peer
 /// fetch responses. Missing or malformed values stay disabled.
 pub const CAPTURE_NOTES_SHARING_ENABLED_KEY: &str = "capture_notes_sharing_enabled";
+pub const LANGUAGE_SETTING_KEY: &str = "language";
+pub const SUPPORTED_LANGUAGES: [&str; 5] = ["en", "es", "pt", "de", "fr"];
+
+pub fn parse_language(raw: Option<&str>) -> &'static str {
+    match raw.map(str::trim) {
+        Some("es") => "es",
+        Some("pt") => "pt",
+        Some("de") => "de",
+        Some("fr") => "fr",
+        _ => "en",
+    }
+}
 
 pub fn parse_capture_notes_sharing_enabled(raw: Option<&str>) -> bool {
     parse_local_peer_sharing_enabled(raw)
@@ -93,6 +105,10 @@ pub fn local_peer_sharing_enabled_value(enabled: bool) -> &'static str {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Settings {
+    /// Manually selected interface language. Missing or unsupported persisted
+    /// values resolve to English when settings are loaded.
+    #[serde(default = "default_language")]
+    pub language: String,
     pub retention: RetentionPolicy,
     pub ignored_apps: Vec<String>,
     pub quick_paste_hotkey: Option<HotkeySpec>,
@@ -117,6 +133,7 @@ impl Settings {
     /// Defaults applied when no persisted value exists.
     pub fn defaults() -> Self {
         Self {
+            language: "en".to_string(),
             retention: RetentionPolicy::Days30,
             ignored_apps: Vec::new(),
             quick_paste_hotkey: None,
@@ -129,6 +146,10 @@ impl Settings {
             capture_notes_sharing_enabled: false,
         }
     }
+}
+
+fn default_language() -> String {
+    "en".to_string()
 }
 
 /// Hotkey specification stored in `app_settings`. Mirrors
@@ -235,6 +256,7 @@ pub const HOTKEY_SETTING_STORAGE_KEY: &str = "quick_paste_hotkey";
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct SettingsUpdate {
+    pub language: Option<String>,
     pub retention: Option<RetentionPolicy>,
     pub ignored_apps_add: Vec<String>,
     pub ignored_apps_remove: Vec<String>,
@@ -265,6 +287,7 @@ impl SettingsUpdate {
 
     pub fn is_empty(&self) -> bool {
         self.retention.is_none()
+            && self.language.is_none()
             && self.ignored_apps_add.is_empty()
             && self.ignored_apps_remove.is_empty()
             && self.quick_paste_hotkey.is_none()
@@ -277,6 +300,7 @@ impl SettingsUpdate {
     /// either the merged settings or a typed [`ValidationError`].
     pub fn validate(&self, current: &Settings) -> Result<Settings, ValidationError> {
         if self.quick_paste_hotkey.is_none()
+            && self.language.is_none()
             && self.retention.is_none()
             && self.ignored_apps_add.is_empty()
             && self.ignored_apps_remove.is_empty()
@@ -299,6 +323,12 @@ impl SettingsUpdate {
         }
 
         let mut next = current.clone();
+        if let Some(language) = self.language.as_deref() {
+            if !SUPPORTED_LANGUAGES.contains(&language) {
+                return Err(ValidationError::invalid_language());
+            }
+            next.language = language.to_string();
+        }
         if let Some(policy) = self.retention {
             next.retention = policy;
         }
@@ -449,6 +479,14 @@ impl ValidationError {
             ),
         }
     }
+
+    pub fn invalid_language() -> Self {
+        Self {
+            code: ValidationCode::InvalidLanguage,
+            field: "language",
+            message: "language is not supported".to_string(),
+        }
+    }
 }
 
 impl fmt::Display for ValidationError {
@@ -468,6 +506,7 @@ pub enum ValidationCode {
     IdentifierTooLong,
     InvalidPeerDisplayName,
     PeerDisplayNameTooLong,
+    InvalidLanguage,
 }
 
 impl ValidationCode {
@@ -480,6 +519,7 @@ impl ValidationCode {
             ValidationCode::IdentifierTooLong => "identifier_too_long",
             ValidationCode::InvalidPeerDisplayName => "invalid_peer_display_name",
             ValidationCode::PeerDisplayNameTooLong => "peer_display_name_too_long",
+            ValidationCode::InvalidLanguage => "invalid_language",
         }
     }
 }
@@ -668,6 +708,7 @@ mod tests {
         // "TypeError: … is not assignable to RetentionPolicy" in the
         // Svelte panel.
         let settings = Settings {
+            language: "fr".to_string(),
             retention: RetentionPolicy::Days90,
             ignored_apps: vec!["com.apple.Terminal".to_string()],
             quick_paste_hotkey: None,
@@ -712,9 +753,37 @@ mod tests {
     }
 
     #[test]
+    fn language_defaults_to_english_and_rejects_unsupported_updates() {
+        assert_eq!(Settings::defaults().language, "en");
+        assert_eq!(parse_language(None), "en");
+        assert_eq!(parse_language(Some("unsupported")), "en");
+        assert_eq!(parse_language(Some(" fr ")), "fr");
+
+        let error = SettingsUpdate {
+            language: Some("it".to_string()),
+            ..SettingsUpdate::default()
+        }
+        .validate(&Settings::defaults())
+        .expect_err("unsupported language must be rejected");
+        assert_eq!(error.code, ValidationCode::InvalidLanguage);
+    }
+
+    #[test]
+    fn language_setting_is_a_valid_partial_update() {
+        let next = SettingsUpdate {
+            language: Some("pt".to_string()),
+            ..SettingsUpdate::default()
+        }
+        .validate(&Settings::defaults())
+        .expect("supported language");
+        assert_eq!(next.language, "pt");
+    }
+
+    #[test]
     fn settings_update_round_trips_through_serde() {
         let update = SettingsUpdate {
             retention: Some(RetentionPolicy::Days7),
+            language: Some("es".to_string()),
             ignored_apps_add: vec!["com.apple.Terminal".to_string()],
             ignored_apps_remove: vec![],
             quick_paste_hotkey: None,

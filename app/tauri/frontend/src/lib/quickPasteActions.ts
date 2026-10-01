@@ -304,46 +304,52 @@ export function quickPasteMenuActions(
   >,
   title: string,
   options: { copyBusy: boolean },
+  translateText?: (key: string, params?: Record<string, string | number | Date>) => string,
 ): QuickPasteMenuAction[] {
   const actions: QuickPasteMenuAction[] = [];
   const hasRich = hasRenderableRichText(entry);
+  const copyLabel = translateText?.("quickpaste.menu.copy") ?? QUICK_PASTE_COPY_LABEL;
+  const richLabel = translateText?.("quickpaste.menu.copy_rich") ?? QUICK_PASTE_COPY_RICH_LABEL;
+  const plainLabel = translateText?.("quickpaste.menu.copy_plain") ?? QUICK_PASTE_COPY_PLAIN_LABEL;
+  const previewLabel = translateText?.("history.card.preview") ?? QUICK_PASTE_PREVIEW_LABEL;
+  const editLabel = translateText?.("history.card.edit_capture") ?? QUICK_PASTE_EDIT_LABEL;
   if (isImageEntry(entry)) {
     actions.push({
       kind: "copy",
-      label: QUICK_PASTE_COPY_LABEL,
+      label: copyLabel,
       testId: "quick-paste-menu-copy",
       mode: null,
-      ariaLabel: `Copiar ${title}`,
-      tooltip: "Copiar la imagen capturada.",
+      ariaLabel: translateText?.("quickpaste.menu.copy_image_from", { title }) ?? `Copiar ${title}`,
+      tooltip: translateText?.("quickpaste.menu.copy_image_tooltip") ?? "Copiar la imagen capturada.",
       disabled: options.copyBusy,
     });
   } else if (hasRich) {
     actions.push({
       kind: "copy-rich",
-      label: QUICK_PASTE_COPY_RICH_LABEL,
+      label: richLabel,
       testId: "quick-paste-menu-copy-rich",
       mode: "rich",
-      ariaLabel: `${QUICK_PASTE_COPY_RICH_LABEL} de ${title}`,
-      tooltip: "Copiar la entrada conservando el formato.",
+      ariaLabel: translateText?.("quickpaste.menu.copy_rich_from", { title }) ?? `${QUICK_PASTE_COPY_RICH_LABEL} de ${title}`,
+      tooltip: translateText?.("quickpaste.menu.copy_rich_tooltip") ?? "Copiar la entrada conservando el formato.",
       disabled: options.copyBusy,
     });
     actions.push({
       kind: "copy-plain",
-      label: QUICK_PASTE_COPY_PLAIN_LABEL,
+      label: plainLabel,
       testId: "quick-paste-menu-copy-plain",
       mode: "plain",
-      ariaLabel: `${QUICK_PASTE_COPY_PLAIN_LABEL} de ${title}`,
-      tooltip: "Copiar únicamente el texto plano.",
+      ariaLabel: translateText?.("quickpaste.menu.copy_plain_from", { title }) ?? `${QUICK_PASTE_COPY_PLAIN_LABEL} de ${title}`,
+      tooltip: translateText?.("quickpaste.menu.copy_plain_tooltip") ?? "Copiar únicamente el texto plano.",
       disabled: options.copyBusy,
     });
   } else {
     actions.push({
       kind: "copy",
-      label: QUICK_PASTE_COPY_LABEL,
+      label: copyLabel,
       testId: "quick-paste-menu-copy",
       mode: "plain",
-      ariaLabel: `Copiar ${title}`,
-      tooltip: "Copiar la entrada como texto plano.",
+      ariaLabel: translateText?.("quickpaste.menu.copy_from", { title }) ?? `Copiar ${title}`,
+      tooltip: translateText?.("quickpaste.menu.copy_tooltip") ?? "Copiar la entrada como texto plano.",
       disabled: options.copyBusy,
     });
     // `Editar captura` is only added for the non-rich branch the user
@@ -356,20 +362,20 @@ export function quickPasteMenuActions(
     if (isEditableTextEntry(entry as EntryRecord)) {
       actions.push({
         kind: "edit",
-        label: QUICK_PASTE_EDIT_LABEL,
+        label: editLabel,
         testId: QUICK_PASTE_EDIT_TEST_ID,
-        ariaLabel: `${QUICK_PASTE_EDIT_LABEL} ${title}`,
-        tooltip: "Abrir el editor persistente para esta captura.",
+        ariaLabel: translateText?.("quickpaste.menu.edit_from", { title }) ?? `${QUICK_PASTE_EDIT_LABEL} ${title}`,
+        tooltip: translateText?.("quickpaste.menu.edit_tooltip") ?? "Abrir el editor persistente para esta captura.",
         disabled: options.copyBusy,
       });
     }
   }
   actions.push({
     kind: "preview",
-    label: QUICK_PASTE_PREVIEW_LABEL,
+    label: previewLabel,
     testId: "quick-paste-menu-preview",
-    ariaLabel: `${QUICK_PASTE_PREVIEW_LABEL} ${title}`,
-    tooltip: "Mostrar la captura sin pegarla.",
+    ariaLabel: translateText?.("quickpaste.menu.preview_from", { title }) ?? `${QUICK_PASTE_PREVIEW_LABEL} ${title}`,
+    tooltip: translateText?.("quickpaste.menu.preview_tooltip") ?? "Mostrar la captura sin pegarla.",
     disabled: options.copyBusy,
   });
   return actions;

@@ -86,7 +86,6 @@
   } from "./lib/codeLanguageProjections";
   import {
     matchesSearchShortcut,
-    searchShortcutAccessibleLabel,
     searchShortcutLabel,
     searchShortcutPlatform,
   } from "./lib/searchShortcut";
@@ -104,6 +103,7 @@
   } from "./lib/editTextShortcut";
   import { isEditableTextEntry } from "./types";
   import { visualTokenCss } from "./lib/visualTokens";
+  import { t, tPlural } from "./lib/localization.ts";
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
   import HistoryCardRail from "./HistoryCardRail.svelte";
   import OrganizationSidebar from "./OrganizationSidebar.svelte";
@@ -163,7 +163,7 @@
   let entryNoteIds: Set<number> = new Set();
   let createTextEntryOpen = false;
   let createTextCollectionId: number | null = null;
-  let createTextCollectionName = "Historial";
+  let createTextCollectionName = "";
   let createTextReturnFocus: HTMLElement | null = null;
   let searching = false;
   let searchError: string | null = null;
@@ -411,8 +411,6 @@
     editTextShortcut = editTextShortcutPlatform(diagnostics.platform_os);
   }
   $: searchShortcutLabelText = searchShortcutLabel(shortcutPlatform);
-  $: searchShortcutAccessibleText =
-    searchShortcutAccessibleLabel(shortcutPlatform);
 
   /**
    * Open the shared preview overlay for the supplied entry. The
@@ -707,8 +705,7 @@
         failed.set(entry.id, "error");
       }
       entryOrganizationHydration = failed;
-      organizationError =
-        "organization snapshot unavailable; tag associations cannot be hydrated";
+      organizationError = "app.error.generic";
       return;
     }
 
@@ -727,7 +724,7 @@
     entryOrganizationHydration = applied.nextHydration;
     for (const result of results) {
       if (!result.ok) {
-        organizationError = `Failed to hydrate tags for entry #${result.id}: ${result.error}`;
+        organizationError = "app.error.generic";
       }
     }
   }
@@ -760,10 +757,10 @@
         visibleEntries = patched.nextVisibleEntries;
         await refreshUnorganizedClearableCount();
       } else {
-        organizationError = `Entry #${entry.id} is no longer available.`;
+        organizationError = "app.error.generic";
       }
     } catch (err) {
-      organizationError = err instanceof Error ? err.message : String(err);
+      organizationError = "app.error.generic";
     }
   }
 
@@ -811,8 +808,7 @@
       await refreshUnorganizedClearableCount();
       cancelScopedEntryDeletion();
     } catch (err) {
-      scopedEntryDeletionError =
-        err instanceof Error ? err.message : String(err);
+      scopedEntryDeletionError = "app.error.generic";
       scopedEntryDeletionBusy = false;
     }
   }
@@ -828,8 +824,7 @@
         confirm: true,
       });
       if (response.kind === "confirmation_required") {
-        scopedEntryDeletionError =
-          "El sistema requiere una nueva confirmación para eliminar la captura.";
+        scopedEntryDeletionError = "app.error.generic";
         scopedEntryDeletionBusy = false;
         return;
       }
@@ -837,8 +832,7 @@
       await refreshOrganizationForAllEntries();
       cancelScopedEntryDeletion();
     } catch (err) {
-      scopedEntryDeletionError =
-        err instanceof Error ? err.message : String(err);
+      scopedEntryDeletionError = "app.error.generic";
       scopedEntryDeletionBusy = false;
     }
   }
@@ -861,13 +855,13 @@
     );
     pendingConfirmation = null;
     if (outcome.kind === "confirmation_required") {
-      organizationError = "The backend requested confirmation. Please retry.";
+      organizationError = "app.error.generic";
       return;
     }
     try {
       await refreshEntries();
     } catch (err) {
-      organizationError = err instanceof Error ? err.message : String(err);
+      organizationError = "app.error.generic";
     }
   }
 
@@ -883,14 +877,14 @@
     );
     pendingConfirmation = null;
     if (outcome.kind === "confirmation_required") {
-      organizationError = "The backend requested confirmation. Please retry.";
+      organizationError = "app.error.generic";
       return;
     }
     try {
       await refreshEntries();
       await refreshUnorganizedClearableCount();
     } catch (err) {
-      organizationError = err instanceof Error ? err.message : String(err);
+      organizationError = "app.error.generic";
     }
   }
 
@@ -999,8 +993,7 @@
     } catch (err) {
       unorganizedClearableCount = null;
       unorganizedClearableCountLoaded = false;
-      organizationError =
-        err instanceof Error ? err.message : String(err);
+      organizationError = "app.error.generic";
     } finally {
       unorganizedClearableCountLoading = false;
     }
@@ -1010,8 +1003,7 @@
     try {
       organization = await organizationSnapshotCommand();
     } catch (err) {
-      organizationError =
-        err instanceof Error ? err.message : String(err);
+      organizationError = "app.error.generic";
     }
   }
 
@@ -1046,9 +1038,7 @@
       sourceAppOptions = snapshot.options;
     } catch (err) {
       if (token === sourceAppOptionsToken) {
-        organizationError = `Source-app options unavailable: ${
-          err instanceof Error ? err.message : String(err)
-        }`;
+        organizationError = "app.error.generic";
       }
     }
   }
@@ -1079,8 +1069,7 @@
       loadedNext.set(entryId, "loaded");
       entryOrganizationHydration = loadedNext;
     } catch (err) {
-      organizationError =
-        err instanceof Error ? err.message : String(err);
+      organizationError = "app.error.generic";
       const errorNext = new Map(entryOrganizationHydration);
       errorNext.set(entryId, "error");
       entryOrganizationHydration = errorNext;
@@ -1138,8 +1127,7 @@
       await collectionsCreateCommand({ name: event.detail.name });
       await refreshOrganization();
     } catch (err) {
-      organizationError =
-        err instanceof Error ? err.message : String(err);
+      organizationError = "app.error.generic";
     }
   }
 
@@ -1153,8 +1141,7 @@
       });
       await refreshOrganization();
     } catch (err) {
-      organizationError =
-        err instanceof Error ? err.message : String(err);
+      organizationError = "app.error.generic";
     }
   }
 
@@ -1182,8 +1169,7 @@
         collectionId: collection.id,
       });
     } catch (err) {
-      collectionDeletionError =
-        err instanceof Error ? err.message : String(err);
+      collectionDeletionError = "app.error.generic";
     } finally {
       collectionDeletionBusy = false;
     }
@@ -1209,8 +1195,7 @@
       });
       collectionDeletionPreviewChanged = false;
     } catch (err) {
-      collectionDeletionError =
-        err instanceof Error ? err.message : String(err);
+      collectionDeletionError = "app.error.generic";
     } finally {
       collectionDeletionBusy = false;
     }
@@ -1232,8 +1217,7 @@
         confirm: true,
       });
       if (outcome.kind === "confirmation_required") {
-        collectionDeletionError =
-          "El sistema requiere una nueva confirmación. Revisa las cantidades y vuelve a intentarlo.";
+        collectionDeletionError = "app.collection.delete.changed";
         return;
       }
       if (outcome.kind === "preview_changed") {
@@ -1249,8 +1233,7 @@
       await refreshEntries();
       await refreshUnorganizedClearableCount();
     } catch (err) {
-      collectionDeletionError =
-        err instanceof Error ? err.message : String(err);
+      collectionDeletionError = "app.error.generic";
     } finally {
       collectionDeletionBusy = false;
     }
@@ -1275,8 +1258,7 @@
       });
       await refreshOrganization();
     } catch (err) {
-      organizationError =
-        err instanceof Error ? err.message : String(err);
+      organizationError = "app.error.generic";
     }
   }
 
@@ -1383,8 +1365,7 @@
           entryId,
         });
       } catch (error) {
-        organizationError =
-          error instanceof Error ? error.message : String(error);
+        organizationError = "app.error.generic";
         const reduced = new Set(dropInFlight);
         reduced.delete(dropKey);
         dropInFlight = reduced;
@@ -1425,8 +1406,7 @@
       await refreshEntryOrganization(entryId);
       await refreshUnorganizedClearableCount();
     } catch (error) {
-      organizationError =
-        error instanceof Error ? error.message : String(error);
+      organizationError = "app.error.generic";
     } finally {
       const reduced = new Set(dropInFlight);
       reduced.delete(dropKey);
@@ -1485,14 +1465,14 @@
       onResolved: (caps) => {
         capabilities = caps;
         guidance = null;
-        retryNotice = "Capability refreshed. Press Paste latest to continue.";
+        retryNotice = "guidance.retry.resolved";
       },
       onStillUnavailable: (caps) => {
         capabilities = caps;
-        retryNotice = "The platform still reports the capability as unavailable.";
+        retryNotice = "guidance.retry.unavailable";
       },
       onRefreshError: (message) => {
-        retryError = `Could not refresh capabilities: ${message}`;
+        retryError = message;
       },
     });
   }
@@ -1807,7 +1787,7 @@
       searchStatus = records.length === 0 ? "no_matches" : "ok";
     } catch (err) {
       if (token !== searchToken) return;
-      searchError = err instanceof Error ? err.message : String(err);
+      searchError = "app.search.failed";
       searchStatus = "empty";
     } finally {
       if (token === searchToken) {
@@ -2082,12 +2062,8 @@
 
   const registerQuickSearch = createQuickSearchRegistrar(
     defaultQuickPasteBridge,
-    (activationError) => {
-      quickSearchError = `Quick paste could not open: ${
-        activationError instanceof Error
-          ? activationError.message
-          : String(activationError)
-      }`;
+    () => {
+      quickSearchError = "quickpaste.activation_error";
     },
   );
   let unlistenQuickSearch: (() => void) | null = null;
@@ -2199,7 +2175,7 @@
       .catch((error) => {
         console.error("failed to register quick-search listener", error);
         quickSearchListenerStatus = "error";
-        quickSearchError = `Quick-search listener unavailable: ${error instanceof Error ? error.message : String(error)}`;
+        quickSearchError = "quickpaste.listener_unavailable";
       });
     registerHistoryUpdated(handleHistoryUpdated)
       .then((unlisten) => {
@@ -2277,17 +2253,17 @@
 <main>
   {#if organizationError}
     <p class="status error" role="alert" data-testid="organization-error">
-      {organizationError}
+      {$t(organizationError)}
     </p>
   {/if}
 
   {#if loading}
-    <p class="status">Conectando con el backend…</p>
+    <p class="status">{$t("app.backend.connecting")}</p>
   {:else if error}
     <p class="status error" role="alert">
-      No se pudo conectar con el core de ClipVault: {error}
+      {$t("app.backend.connection_error")}
     </p>
-    <button type="button" on:click={() => void refresh()}>Reintentar</button>
+    <button type="button" on:click={() => void refresh()}>{$t("common.retry")}</button>
   {:else if diagnostics}
     <div class="layout" data-testid="desktop-workspace">
       <OrganizationSidebar
@@ -2321,7 +2297,6 @@
             searchQuery={searchQuery}
             searching={searching}
             searchShortcut={searchShortcutLabelText}
-            searchShortcutAccessible={searchShortcutAccessibleText}
             showClearHistory={activeCollectionIsHistory}
             canCreateManualText={canCreateManualText}
             sourceAppFilter={sourceAppFilter}
@@ -2349,17 +2324,17 @@
           >
             {#if searchError}
               <span class="error" data-testid="search-status-error">
-                Búsqueda fallida: {searchError}
+                {$t("app.search.failed")}
               </span>
             {:else if isFiltering && searching}
-              <span data-testid="search-status-loading">Buscando…</span>
+              <span data-testid="search-status-loading">{$t("app.search.loading")}</span>
             {:else if isFiltering && searchStatus === "no_matches"}
               <span data-testid="search-status-no-matches">
-                Sin coincidencias para "{searchQuery}".
+                {$t("app.search.no_matches", { query: searchQuery })}
               </span>
             {:else if isFiltering}
               <span data-testid="search-status-results">
-                {visibleEntries.length} resultado{visibleEntries.length === 1 ? "" : "s"} para "{searchQuery}".
+                {$tPlural("app.search.results", visibleEntries.length, { query: searchQuery })}
               </span>
             {/if}
           </p>
@@ -2420,7 +2395,7 @@
 <Modal
   open={pendingCollectionDeletion !== null}
   titleId="collection-delete-modal-title"
-  title="Eliminar colección"
+  title={$t("app.collection.delete.title")}
   busy={collectionDeletionBusy}
   returnFocusTo={collectionDeletionTrigger}
   onClose={cancelCollectionDeletion}
@@ -2428,21 +2403,22 @@
   {#if pendingCollectionDeletion}
     <div data-testid="collection-delete-modal">
       <p data-testid="collection-delete-summary">
-        ¿Eliminar “{pendingCollectionDeletion.name}”?
+        {$t("app.collection.delete.question", { name: pendingCollectionDeletion.name })}
         {#if collectionDeletionPreview}
-          Tiene {collectionDeletionPreview.entries} captura{collectionDeletionPreview.entries === 1 ? "" : "s"}, incluidas {collectionDeletionPreview.favorites} favorita{collectionDeletionPreview.favorites === 1 ? "" : "s"}.
+          {$tPlural("app.collection.delete.captures", collectionDeletionPreview.entries)}
+          {$tPlural("app.collection.delete.favorites", collectionDeletionPreview.favorites)}
         {:else if collectionDeletionBusy}
-          Consultando cantidades…
+          {$t("app.search.loading")}
         {/if}
       </p>
       {#if collectionDeletionPreviewChanged}
         <p role="status" data-testid="collection-delete-preview-changed">
-          Las cantidades cambiaron. Revisa los valores actualizados y confirma otra vez.
+          {$t("app.collection.delete.changed")}
         </p>
       {/if}
       {#if collectionDeletionError}
         <p role="alert" data-testid="collection-delete-error">
-          {collectionDeletionError}
+          {$t(collectionDeletionError)}
         </p>
       {/if}
       <div class="row">
@@ -2453,7 +2429,7 @@
             disabled={collectionDeletionBusy}
             data-testid="collection-delete-retry-preview"
           >
-            Reintentar cantidades
+            {$t("app.collection.delete.retry")}
           </button>
         {:else}
           <button
@@ -2462,7 +2438,7 @@
             disabled={collectionDeletionBusy}
             data-testid="collection-delete-preserve"
           >
-            Eliminar colección y conservar capturas
+            {$t("app.collection.delete.keep")}
           </button>
           <button
             type="button"
@@ -2472,7 +2448,7 @@
             data-testid="collection-delete-entries"
             data-cv-danger="collection-delete-confirm"
           >
-            Eliminar colección y sus capturas
+            {$t("app.collection.delete.with_captures")}
           </button>
         {/if}
         <button
@@ -2481,7 +2457,7 @@
           disabled={collectionDeletionBusy}
           data-testid="collection-delete-cancel"
         >
-          Cancelar
+          {$t("common.cancel")}
         </button>
       </div>
     </div>
@@ -2491,7 +2467,7 @@
 <Modal
   open={pendingScopedEntryDeletion !== null}
   titleId="scoped-entry-delete-modal-title"
-  title="Eliminar captura"
+  title={$t("app.scoped_delete.title")}
   busy={scopedEntryDeletionBusy}
   returnFocusTo={scopedEntryDeletionTrigger}
   onClose={cancelScopedEntryDeletion}
@@ -2499,14 +2475,16 @@
   {#if pendingScopedEntryDeletion}
     <div data-testid="scoped-entry-delete-modal">
       <p>
-        La captura está en “{pendingScopedEntryDeletion.collectionName}”. Elige dónde quitarla.
+        {$t("app.scoped_delete.collection_message", {
+          collection: pendingScopedEntryDeletion.collectionName,
+        })}
       </p>
       <p>
-        Puedes quitarla solo de esta colección y conservarla en Historial y en las demás colecciones, o eliminarla de todo el historial local.
+        {$t("app.scoped_delete.explanation")}
       </p>
       {#if scopedEntryDeletionError}
         <p role="alert" data-testid="scoped-entry-delete-error">
-          {scopedEntryDeletionError}
+          {$t(scopedEntryDeletionError)}
         </p>
       {/if}
       <div class="row">
@@ -2516,7 +2494,7 @@
           disabled={scopedEntryDeletionBusy}
           data-testid="scoped-entry-delete-collection-only"
         >
-          Quitar solo de esta colección
+          {$t("app.scoped_delete.collection_only")}
         </button>
         <button
           type="button"
@@ -2526,7 +2504,7 @@
           data-testid="scoped-entry-delete-global"
           data-cv-danger="card-delete"
         >
-          Eliminar de Historial y todas las colecciones
+          {$t("app.scoped_delete.global")}
         </button>
         <button
           type="button"
@@ -2534,7 +2512,7 @@
           disabled={scopedEntryDeletionBusy}
           data-testid="scoped-entry-delete-cancel"
         >
-          Cancelar
+          {$t("common.cancel")}
         </button>
       </div>
     </div>
@@ -2544,15 +2522,15 @@
 <Modal
   open={nonEditableTextNotice !== null}
   titleId="non-editable-text-notice-title"
-  title="Captura no editable"
+  title={$t("app.noneditable.title")}
   returnFocusTo={nonEditableTextNoticeReturnFocus}
   onClose={closeNonEditableTextNotice}
 >
   <p data-testid="non-editable-text-notice-message">
     {#if nonEditableTextNotice?.contentType === "image"}
-      Esta captura es una imagen y no se puede editar.
+      {$t("app.noneditable.image")}
     {:else}
-      Esta captura es texto enriquecido y no se puede editar.
+      {$t("app.noneditable.rich_text")}
     {/if}
   </p>
   <div class="row">
@@ -2562,7 +2540,7 @@
       data-testid="non-editable-text-notice-close"
       on:click={closeNonEditableTextNotice}
     >
-      Cerrar
+      {$t("common.close")}
     </button>
   </div>
 </Modal>
@@ -2578,12 +2556,12 @@
   >
     <article>
       {#if confirmation.kind === "delete"}
-        <h2 id="confirm-title">Eliminar esta entrada</h2>
+        <h2 id="confirm-title">{$t("app.confirm.delete.title")}</h2>
         <p>
           <code>{confirmation.label}</code>
         </p>
         <p class="muted">
-          Esto elimina la entrada del historial local. La acción no se puede deshacer.
+          {$t("app.confirm.delete.explanation")}
         </p>
         <div class="row">
           <button
@@ -2592,23 +2570,23 @@
             data-testid="confirm-delete"
             on:click={() => runDelete(confirmation.id)}
           >
-            Eliminar entrada
+            {$t("app.confirm.delete.button")}
           </button>
           <button
             type="button"
             data-testid="cancel-delete"
             on:click={cancelConfirmation}
           >
-            Cancelar
+            {$t("common.cancel")}
           </button>
         </div>
       {:else}
-        <h2 id="confirm-title">Eliminar capturas no organizadas</h2>
+        <h2 id="confirm-title">{$t("app.confirm.clear.title")}</h2>
         <p data-testid="confirm-clear-summary">
-          {confirmation.count} captura{confirmation.count === 1 ? "" : "s"} no favorita{confirmation.count === 1 ? "" : "s"} y sin colecciones de usuario se eliminarán.
+          {$tPlural("app.confirm.clear.count", confirmation.count)}
         </p>
         <p class="muted">
-          Las capturas favoritas y las asociadas a una o más colecciones de usuario se conservan.
+          {$t("app.confirm.clear.explanation")}
         </p>
         <div class="row">
           <button
@@ -2618,14 +2596,14 @@
             on:click={() => runClearHistory()}
             disabled={!unorganizedClearableCountLoaded}
           >
-            Eliminar capturas no organizadas
+            {$t("app.confirm.clear.button")}
           </button>
           <button
             type="button"
             data-testid="cancel-clear"
             on:click={cancelConfirmation}
           >
-            Cancelar
+            {$t("common.cancel")}
           </button>
         </div>
       {/if}
@@ -2636,7 +2614,7 @@
 <Modal
   open={openModal === "development"}
   titleId="development-title"
-  title="Development"
+  title={$t("app.modal.development")}
   returnFocusTo={modalReturnFocus}
   onClose={closeModal}
 >
@@ -2656,7 +2634,7 @@
 <Modal
   open={openModal === "gnome_integration"}
   titleId="gnome-integration-title"
-  title="Integración GNOME Wayland"
+  title={$t("app.modal.gnome")}
   returnFocusTo={modalReturnFocus}
   onClose={closeModal}
 >
@@ -2669,7 +2647,7 @@
 <Modal
   open={openModal === "general_settings"}
   titleId="general-settings-title"
-  title="Configuración general"
+  title={$t("app.modal.general_settings")}
   returnFocusTo={modalReturnFocus}
   onClose={closeModal}
 >
@@ -2683,7 +2661,7 @@
 <Modal
   open={openModal === "privacy"}
   titleId="privacy-title"
-  title="Privacidad"
+  title={$t("app.modal.privacy")}
   returnFocusTo={modalReturnFocus}
   onClose={closeModal}
 >
@@ -2693,7 +2671,7 @@
 <Modal
   open={openModal === "peer_sharing"}
   titleId="peer-sharing-title"
-  title="Compartir en red local"
+  title={$t("app.modal.peer_sharing")}
   returnFocusTo={modalReturnFocus}
   onClose={closeModal}
 >
@@ -2710,7 +2688,7 @@
 <Modal
   open={openModal === "retention"}
   titleId="retention-title"
-  title="Retención del historial"
+  title={$t("app.modal.retention")}
   returnFocusTo={modalReturnFocus}
   onClose={closeModal}
 >
@@ -2720,7 +2698,7 @@
 <Modal
   open={openModal === "quick_paste_shortcut"}
   titleId="shortcut-title"
-  title="Atajo de pegado rápido"
+  title={$t("app.modal.shortcut")}
   returnFocusTo={modalReturnFocus}
   onClose={closeModal}
 >
@@ -2745,7 +2723,7 @@
 <Modal
   open={openModal === "about"}
   titleId="about-title"
-  title="Acerca de"
+  title={$t("app.modal.about")}
   returnFocusTo={modalReturnFocus}
   onClose={closeModal}
 >

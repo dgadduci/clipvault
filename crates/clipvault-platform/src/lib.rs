@@ -66,8 +66,8 @@ pub use clipboard_image_png::{
 pub use guidance::{
     backend_unavailable_guidance, linux_unknown_session_guidance,
     linux_wayland_unsupported_guidance, linux_x11_backend_unavailable_guidance,
-    macos_accessibility_guidance, unknown_guidance, PlatformGuidance, PlatformIssueKind,
-    PlatformSettingsTarget, SettingsNavigator, SettingsOpenOutcome,
+    macos_accessibility_guidance, unknown_guidance, PlatformGuidance, PlatformGuidanceId,
+    PlatformIssueKind, PlatformSettingsTarget, SettingsNavigator, SettingsOpenOutcome,
 };
 pub use hotkey::{
     default_linux_binding, default_macos_binding, HotkeyBackendKind, HotkeyBinding, HotkeyError,

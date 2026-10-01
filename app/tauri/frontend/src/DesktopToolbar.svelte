@@ -25,6 +25,7 @@
   import SourceAppFilter from "./SourceAppFilter.svelte";
   import TagFilter from "./TagFilter.svelte";
   import type { SourceApplicationOption } from "./types.ts";
+  import { t } from "./lib/localization.ts";
 
   type SourceAppFilterValue = import("./types.ts").SourceAppFilter;
   type TagFilterValue = import("./types.ts").TagFilter;
@@ -32,8 +33,8 @@
 
   export let searchQuery: string = "";
   export let searching: boolean = false;
-  export let searchPlaceholder: string = "Buscar en el historial";
-  export let searchAriaLabel: string = "Buscar en el historial del portapapeles";
+  export let searchPlaceholder: string = "";
+  export let searchAriaLabel: string = "";
   /**
    * Shortcut label rendered on the right edge of the search input.
    * The parent computes the value from the diagnostics payload so the
@@ -45,14 +46,14 @@
    * screen reader announces the platform-specific binding instead of
    * the cosmetic glyph alone.
    */
-  export let searchShortcutAccessible: string = "Buscar (Control F)";
+  export let searchShortcutAccessible: string = "";
   /**
    * Visible label of the global clear-history trash icon. The
    * accessible name and the `title` tooltip both reuse the same
    * string so the button never surfaces two different wordings for
    * the same destructive shortcut.
    */
-  export let trashLabel: string = "Eliminar capturas no organizadas";
+  export let trashLabel: string = "";
   export let trashConfirming: boolean = false;
   /**
    * Visibility flag for the trash button. The parent owns the
@@ -241,7 +242,7 @@
   <div
     class="toolbar-row"
     role="group"
-    aria-label="Filtros y acciones de capturas"
+    aria-label={$t("toolbar.filters.aria")}
     tabindex="0"
     data-testid="toolbar-scrollview"
   >
@@ -249,8 +250,8 @@
       <input
         type="search"
         class="search"
-        placeholder={searchPlaceholder}
-        aria-label={searchAriaLabel}
+        placeholder={searchPlaceholder || $t("toolbar.search.placeholder")}
+        aria-label={searchAriaLabel || $t("toolbar.search.aria")}
         value={searchQuery}
         on:input={handleInput}
         aria-busy={searching}
@@ -258,8 +259,12 @@
       />
       <span
         class="search-shortcut"
-        aria-label={searchShortcutAccessible}
-        title={searchShortcutAccessible}
+        aria-label={searchShortcutAccessible || $t(searchShortcut.startsWith("⌘")
+          ? "search.shortcut.desktop.mac"
+          : "search.shortcut.desktop.other")}
+        title={searchShortcutAccessible || $t(searchShortcut.startsWith("⌘")
+          ? "search.shortcut.desktop.mac"
+          : "search.shortcut.desktop.other")}
         data-testid="search-shortcut-hint"
       >
         {searchShortcut}
@@ -268,11 +273,13 @@
     <SourceAppFilter
       selected={sourceAppFilter}
       options={sourceAppOptions}
+      ariaLabel={$t("filter.source_app")}
       onChange={onSourceAppFilterChange}
     />
     <TagFilter
       selected={tagFilter}
       options={tagFilterOptions}
+      ariaLabel={$t("filter.tag")}
       onChange={onTagFilterChange}
     />
     {#if canCreateManualText}
@@ -280,8 +287,8 @@
         type="button"
         class="text-entry"
         bind:this={textEntryEl}
-        aria-label="Nueva captura de texto"
-        title="Nueva captura de texto"
+        aria-label={$t("toolbar.text_capture.aria")}
+        title={$t("toolbar.text_capture.aria")}
         data-testid="create-manual-text-entry"
         on:click={(event) => onCreateManualText(event, textEntryEl)}
       >
@@ -300,10 +307,10 @@
           <path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-9z" />
           <path d="M13 3v7h7M12 14v5m-2.5-2.5h5" />
         </svg>
-        <span>Texto</span>
+        <span>{$t("toolbar.text_capture.label")}</span>
       </button>
     {/if}
-    <div class="actions" role="toolbar" aria-label="Configuración y limpieza">
+    <div class="actions" role="toolbar" aria-label={$t("toolbar.config.aria")}>
       <div class="menu-wrapper" data-testid="overflow-menu-wrapper">
         <button
           type="button"
@@ -312,8 +319,8 @@
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           aria-controls="desktop-overflow-menu"
-          aria-label="Más acciones del escritorio"
-          title="Más acciones"
+          aria-label={$t("toolbar.more.aria")}
+          title={$t("toolbar.more.title")}
           data-testid="open-overflow-menu"
           on:click={toggleMenu}
         >
@@ -336,7 +343,7 @@
             id="desktop-overflow-menu"
             role="menu"
             tabindex="-1"
-            aria-label="Más acciones del escritorio"
+            aria-label={$t("toolbar.more.aria")}
             data-testid="overflow-menu"
             bind:this={menuEl}
             use:anchorPopupToViewport={{ anchor: () => ellipsisEl, align: "end" }}
@@ -349,7 +356,7 @@
               data-testid="open-development"
               on:click={(event) => selectItem(onOpenDevelopment, event)}
             >
-              Development
+              {$t("toolbar.menu.development")}
             </button>
             <button
               type="button"
@@ -358,7 +365,7 @@
               data-testid="open-general-settings"
               on:click={(event) => selectItem(onOpenGeneralSettings, event)}
             >
-              Configuración general
+              {$t("toolbar.menu.settings")}
             </button>
             <button
               type="button"
@@ -367,7 +374,7 @@
               data-testid="open-privacy"
               on:click={(event) => selectItem(onOpenPrivacy, event)}
             >
-              Privacidad
+              {$t("toolbar.menu.privacy")}
             </button>
             <button
               type="button"
@@ -376,7 +383,7 @@
               data-testid="open-peer-sharing"
               on:click={(event) => selectItem(onOpenPeerSharing, event)}
             >
-              Compartir en red local
+              {$t("toolbar.menu.peer_sharing")}
             </button>
             <button
               type="button"
@@ -385,7 +392,7 @@
               data-testid="open-retention"
               on:click={(event) => selectItem(onOpenRetention, event)}
             >
-              Retención
+              {$t("toolbar.menu.retention")}
             </button>
             <button
               type="button"
@@ -394,7 +401,7 @@
               data-testid="open-shortcut"
               on:click={(event) => selectItem(onOpenShortcut, event)}
             >
-              Atajo de pegado rápido
+              {$t("toolbar.menu.shortcut")}
             </button>
             <!--
               Single-source "Acerca de" entry: only the global
@@ -412,7 +419,7 @@
               data-testid="open-about"
               on:click={(event) => selectItem(onOpenAbout, event)}
             >
-              Acerca de
+              {$t("toolbar.menu.about")}
             </button>
           </div>
         {/if}
@@ -421,8 +428,8 @@
         <button
           type="button"
           class="trash"
-          aria-label={trashLabel}
-          title={trashLabel}
+          aria-label={trashLabel || $t("toolbar.clear_unorganized")}
+          title={trashLabel || $t("toolbar.clear_unorganized")}
           aria-busy={trashConfirming}
           data-testid="trash-clear-history"
           data-cv-danger="clear-history"

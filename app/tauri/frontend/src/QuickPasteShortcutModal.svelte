@@ -11,6 +11,7 @@
    */
   import { onMount } from "svelte";
   import { settingsGetCommand } from "./lib/tauri";
+  import { t } from "./lib/localization";
   import {
     defaultQuickPasteShortcutLabel,
     platformFromDiagnostics,
@@ -53,66 +54,64 @@
   ): string {
     switch (status) {
       case "ready":
-        return "El atajo global está activo.";
+        return "shortcut.listener.ready";
       case "registering":
-        return "Registrando el atajo global…";
+        return "shortcut.listener.registering";
       case "error":
-        return "No se pudo registrar el atajo global.";
+        return "shortcut.listener.error";
       default:
-        return "Estado del atajo no disponible.";
+        return "shortcut.listener.unknown";
     }
   }
 
   function describeCapability(enabled: boolean): string {
     return enabled
-      ? "La plataforma permite registrar atajos globales."
-      : "La plataforma no permite registrar atajos globales.";
+      ? "shortcut.capability.allowed"
+      : "shortcut.capability.denied";
   }
 
   onMount(async () => {
     try {
       settings = await settingsGetCommand();
     } catch (error) {
-      loadError = error instanceof Error ? error.message : String(error);
+      loadError = "shortcut.load_error";
     }
   });
 </script>
 
 <section class="shortcut" data-testid="shortcut-modal">
   <article>
-    <h3>Atajo efectivo</h3>
+    <h3>{$t("shortcut.effective.title")}</h3>
     <p class="shortcut-display">
       <kbd data-testid="shortcut-label">{hotkeyLabel}</kbd>
     </p>
     <p class="muted">
-      El atajo abre la ventana transient de pegado rápido. Esta versión no
-      permite editarlo: el módulo de teclado del sistema operativo es la
-      fuente de verdad.
+      {$t("shortcut.effective.description")}
     </p>
   </article>
 
   <article>
-    <h3>Estado del listener</h3>
+    <h3>{$t("shortcut.listener.title")}</h3>
     <p class="muted" data-testid="shortcut-listener-status">
-      {describeListener(listenerStatus)}
+      {$t(describeListener(listenerStatus))}
     </p>
     {#if listenerError}
       <p class="error" role="alert" data-testid="shortcut-listener-error">
-        {listenerError}
+        {$t(listenerError)}
       </p>
     {/if}
   </article>
 
   <article>
-    <h3>Capacidad de la plataforma</h3>
+    <h3>{$t("shortcut.capability.title")}</h3>
     <p class="muted" data-testid="shortcut-capability-status">
-      {describeCapability(capabilityEnabled)}
+      {$t(describeCapability(capabilityEnabled))}
     </p>
   </article>
 
   {#if loadError}
     <p class="error" role="alert" data-testid="shortcut-load-error">
-      {loadError}
+      {$t(loadError)}
     </p>
   {/if}
 </section>

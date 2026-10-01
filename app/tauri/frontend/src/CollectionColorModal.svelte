@@ -27,6 +27,7 @@
   import { createEventDispatcher, onMount, tick } from "svelte";
   import type { Collection } from "./types";
   import Modal from "./Modal.svelte";
+  import { t } from "./lib/localization.ts";
 
   export let open: boolean;
   export let collection: Collection | null;
@@ -131,7 +132,7 @@
 <Modal
   {open}
   titleId="collection-color-modal-title"
-  title={`Color de ${collection?.name ?? "colección"}`}
+  title={$t("collections.color.title", { name: collection?.name ?? $t("collections.name") })}
   busy={false}
   onClose={onCancel}
 >
@@ -160,7 +161,7 @@
     <div
       class="color-modal-palette"
       role="group"
-      aria-label="Paleta base"
+      aria-label={$t("colors.palette")}
       data-testid="collection-color-modal-palette"
     >
       {#each PALETTE as swatch (swatch.hex)}
@@ -169,8 +170,8 @@
           class="color-modal-swatch"
           class:active={swatch.hex === draftHex}
           style="background-color: {swatch.hex};"
-          aria-label={`${swatch.name} ${swatch.hex}`}
-          title={`${swatch.name} ${swatch.hex}`}
+          aria-label={`${$t(`colors.${swatch.name.toLowerCase()}`)} ${swatch.hex}`}
+          title={`${$t(`colors.${swatch.name.toLowerCase()}`)} ${swatch.hex}`}
           data-testid="collection-color-modal-swatch"
           data-color={swatch.hex}
           on:click={() => onPaletteClick(swatch.hex)}
@@ -179,7 +180,7 @@
     </div>
 
     <label class="color-modal-picker-label" for="collection-color-modal-picker">
-      Color personalizado
+      {$t("colors.custom")}
       <input
         id="collection-color-modal-picker"
         bind:this={pickerEl}
@@ -187,7 +188,7 @@
         on:input={onPickerInput}
         type="color"
         class="color-modal-picker"
-        aria-label="Selector de color"
+        aria-label={$t("colors.selector")}
         data-testid="collection-color-modal-picker"
       />
     </label>
@@ -202,7 +203,7 @@
         on:input={onHexInput}
         spellcheck="false"
         autocomplete="off"
-        aria-label="Valor hexadecimal del color"
+        aria-label={$t("colors.hex_value")}
         data-testid="collection-color-modal-hex-input"
       />
     </label>
@@ -214,7 +215,7 @@
         on:click={onCancel}
         data-testid="collection-color-modal-cancel"
       >
-        Cancelar
+        {$t("common.cancel")}
       </button>
       <button
         type="button"
@@ -222,7 +223,7 @@
         on:click={onSave}
         data-testid="collection-color-modal-save"
       >
-        Guardar
+        {$t("common.save")}
       </button>
     </footer>
   </div>

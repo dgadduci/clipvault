@@ -21,10 +21,10 @@ use crate::peer_identity::{
 use crate::privacy::PrivacyGate;
 use crate::settings::{
     capture_notes_sharing_enabled_value, local_clipboard_capture_enabled_value,
-    local_peer_sharing_enabled_value, parse_capture_notes_sharing_enabled,
+    local_peer_sharing_enabled_value, parse_capture_notes_sharing_enabled, parse_language,
     parse_local_clipboard_capture_enabled, parse_local_peer_sharing_enabled, HotkeySpec, Settings,
     SettingsUpdate, ValidationError, CAPTURE_NOTES_SHARING_ENABLED_KEY, HOTKEY_SETTING_STORAGE_KEY,
-    LOCAL_CLIPBOARD_CAPTURE_ENABLED_KEY, LOCAL_PEER_DISPLAY_NAME_KEY,
+    LANGUAGE_SETTING_KEY, LOCAL_CLIPBOARD_CAPTURE_ENABLED_KEY, LOCAL_PEER_DISPLAY_NAME_KEY,
     LOCAL_PEER_SHARING_ENABLED_KEY,
 };
 
@@ -128,6 +128,15 @@ impl SettingsService {
         };
         settings.retention = RetentionPolicy::parse(retention_raw.as_deref());
 
+        let language_raw = {
+            let repo = AppSettingsRepository::new(db.connection_mut());
+            repo.get(LANGUAGE_SETTING_KEY)
+                .ok()
+                .flatten()
+                .map(|setting| setting.value)
+        };
+        settings.language = parse_language(language_raw.as_deref()).to_string();
+
         let hotkey_raw = {
             let repo = AppSettingsRepository::new(db.connection_mut());
             repo.get(HOTKEY_SETTING_STORAGE_KEY)
@@ -207,6 +216,14 @@ impl SettingsService {
 
         let now = self.clock.now();
         let mut db = context.database().lock();
+
+        if next.language != current.language {
+            AppSettingsRepository::new(db.connection_mut()).set(
+                LANGUAGE_SETTING_KEY,
+                &next.language,
+                now,
+            )?;
+        }
 
         // Retention.
         let policy_changed = next.retention != current.retention;
@@ -751,6 +768,43 @@ mod tests {
             )
             .expect("unrelated partial setting");
         assert!(service.load(&context).capture_notes_sharing_enabled);
+    }
+
+    #[test]
+    fn selected_language_persists_and_invalid_storage_falls_back_to_english() {
+        use crate::test_support::isolated_harness;
+        use std::sync::Arc;
+
+        let (_dir, context) = isolated_harness();
+        let probe = Arc::new(clipvault_platform::NoopActiveApplicationProbe);
+        let gate = crate::privacy::PrivacyGate::new(
+            crate::privacy::CoreBlacklistMatcher::with_ignored(probe, vec![]),
+        );
+        let service = SettingsService::new(Arc::new(crate::clock::SystemClock), gate);
+
+        assert_eq!(service.load(&context).language, "en");
+        let stored = service
+            .apply(
+                &context,
+                &SettingsUpdate {
+                    language: Some("fr".to_string()),
+                    ..SettingsUpdate::default()
+                },
+            )
+            .expect("save selected language");
+        assert_eq!(stored.language, "fr");
+        assert_eq!(service.load(&context).language, "fr");
+
+        let mut db = context.database().lock();
+        AppSettingsRepository::new(db.connection_mut())
+            .set(
+                LANGUAGE_SETTING_KEY,
+                "unsupported",
+                crate::clock::SystemClock.now(),
+            )
+            .expect("write malformed preference");
+        drop(db);
+        assert_eq!(service.load(&context).language, "en");
     }
 
     #[test]

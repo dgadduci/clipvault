@@ -74,8 +74,9 @@ export function cardMenuPreviewShortcutLabel(
 /** Accessible label the menu item exposes through `aria-label`. */
 export function cardMenuPreviewShortcutAccessibleLabel(
   platform: PreviewShortcutPlatform,
+  translateText?: (key: string, params?: Record<string, string | number | Date>) => string,
 ): string {
-  return previewShortcutAccessibleLabel(platform);
+  return previewShortcutAccessibleLabel(platform, translateText);
 }
 
 /**

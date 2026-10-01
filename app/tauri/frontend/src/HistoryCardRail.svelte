@@ -28,6 +28,7 @@
     Tag,
   } from "./types";
   import HistoryCard from "./HistoryCard.svelte";
+  import { t } from "./lib/localization.ts";
   import {
     horizontalRailNextSelectionIdGeneric,
     type HorizontalRailDirection,
@@ -489,18 +490,18 @@
 {#if entries.length === 0}
   <p class="empty" data-testid="history-rail-empty">
     {#if isFiltering}
-      Sin coincidencias en esta colección.
+      {$t("history.empty.no_search_matches")}
     {:else if activeCollectionId !== null}
-      No hay capturas en esta colección con los filtros actuales.
+      {$t("history.empty.no_filter_matches")}
     {:else}
-      Aún no has capturado nada. Copia texto y aparecerá aquí.
+      {$t("history.empty.no_captures")}
     {/if}
   </p>
 {:else}
   <div
     class="rail"
     role="list"
-    aria-label="Historial reciente"
+    aria-label={$t("history.recent.aria")}
     data-testid="history-rail"
   >
     {#each entries as entry (entry.id)}

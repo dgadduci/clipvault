@@ -136,12 +136,20 @@ export type PlatformSettingsTarget =
   | "macos_accessibility"
   | "linux_desktop_integration";
 
+export type PlatformGuidanceId =
+  | "macos_accessibility"
+  | "linux_x11_backend_unavailable"
+  | "linux_wayland_unsupported"
+  | "linux_unknown_session"
+  | "backend_unavailable"
+  | "unknown"
+  | "linux_settings_fallback"
+  | "generic_settings_fallback";
+
 export interface PlatformGuidance {
+  message_id: PlatformGuidanceId;
   capability: string;
   kind: PlatformIssueKind;
-  title: string;
-  summary: string;
-  steps: string[];
   retryable: boolean;
   can_open_settings: boolean;
   settings_target: PlatformSettingsTarget | null;
@@ -149,7 +157,7 @@ export interface PlatformGuidance {
 
 export type SettingsOpenResponse =
   | { kind: "opened" }
-  | { kind: "fallback_required"; manual_steps: string[] }
+  | { kind: "fallback_required"; message_id: PlatformGuidanceId }
   | { kind: "failed"; reason: string };
 
 export interface ActiveApplicationResponse {
@@ -431,6 +439,7 @@ export interface HotkeySpec {
 }
 
 export interface Settings {
+  language: "en" | "es" | "pt" | "de" | "fr";
   retention: RetentionPolicy;
   ignored_apps: string[];
   quick_paste_hotkey: HotkeySpec | null;
@@ -444,6 +453,7 @@ export interface Settings {
 }
 
 export interface SettingsUpdate {
+  language?: "en" | "es" | "pt" | "de" | "fr";
   retention?: RetentionPolicy;
   ignored_apps_add?: string[];
   ignored_apps_remove?: string[];

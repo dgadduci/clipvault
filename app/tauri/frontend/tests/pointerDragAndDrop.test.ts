@@ -117,11 +117,11 @@ test("pointer drag uses hit-testing for a scrolled collection row and persists t
     );
     assert.equal(
       ghost?.querySelector(".cv-pointer-drag-ghost-body")?.textContent,
-      "Arrastrando…",
+      "Dragging…",
     );
     assert.equal(
       ghost?.querySelector(".cv-pointer-drag-ghost-footer")?.textContent,
-      "Suelta en una colección",
+      "Drop into a collection",
     );
 
     card.dispatchEvent(

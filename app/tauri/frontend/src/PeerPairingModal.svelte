@@ -5,6 +5,7 @@
    * calls, so a late start response cannot re-open a cancelled session.
    */
   import { createEventDispatcher, onDestroy, tick } from "svelte";
+  import { t } from "./lib/localization.ts";
 
   import {
     peerPairingApproveLocalCommand,
@@ -82,7 +83,7 @@
           stopRefresh();
         } else {
           outcome = null;
-          lastError = "El vínculo no se pudo completar. Inténtalo de nuevo.";
+          lastError = "peers.pairing.failed";
           stopRefresh();
         }
       }
@@ -104,7 +105,7 @@
       if (!isCurrentOpen(epoch)) return;
       secondsLeft = computeSecondsLeft();
       if (secondsLeft <= 0 && !session?.remote_approved) {
-        lastError = "La sesión expiró antes de la aprobación remota.";
+        lastError = "peers.pairing.expired_before_approval";
       }
     }, 250);
   }
@@ -151,21 +152,21 @@
     if (response.kind !== "failed") return null;
     switch (response.reason) {
       case "transport_unavailable":
-        return "No se pudo abrir una conexión segura con el otro equipo. Verifica que siga disponible e inténtalo otra vez.";
+        return "peers.pairing.error.transport";
       case "unknown_or_key_mismatch":
-        return "La identidad del otro equipo cambió o ya no coincide con el anuncio de red.";
+        return "peers.pairing.error.identity_changed";
       case "rate_limited":
-        return "Hay demasiados intentos de vínculo. Espera un minuto antes de reintentar.";
+        return "peers.pairing.error.rate_limited";
       case "blocked":
-        return "El otro equipo está bloqueado.";
+        return "peers.pairing.error.blocked";
       case "revoked":
-        return "El vínculo fue revocado. Revisa el estado del equipo antes de reintentar.";
+        return "peers.pairing.error.revoked";
       case "incompatible_protocol":
-        return "El otro equipo usa una versión de vínculo incompatible.";
+        return "peers.pairing.error.incompatible";
       case "session_expired":
-        return "La sesión de vínculo expiró.";
+        return "peers.pairing.error.expired";
       case "cancelled":
-        return "La sesión de vínculo se canceló.";
+        return "peers.pairing.error.cancelled";
     }
   }
 
@@ -208,7 +209,7 @@
         return;
       }
       if (!session && response.kind === "awaiting_remote_approval") {
-        lastError = "La sesión de vínculo no quedó disponible. Cierra e inténtalo otra vez.";
+        lastError = "peers.pairing.error.session_missing";
         return;
       }
       await focusPrimaryAction();
@@ -236,11 +237,8 @@
   }
 
   function describeError(error: unknown): string {
-    if (typeof error === "string") return error;
-    if (error && typeof error === "object" && "message" in error) {
-      return String((error as { message: unknown }).message);
-    }
-    return "Error desconocido";
+    void error;
+    return "peers.error.generic";
   }
 
   function close(): void {
@@ -318,19 +316,14 @@
       <header>
         <h3 id="peer-pairing-title">
           {inboundMode
-            ? `${row.display_name} solicita vincularse`
-            : `Vincular con ${row.display_name}`}
+            ? $t("peers.pairing.requested_by", { name: row.display_name })
+            : $t("peers.pairing.title", { name: row.display_name })}
         </h3>
         <p class="muted">
           {#if inboundMode}
-            El otro equipo inició la solicitud. Compara el siguiente
-            código de seis dígitos con el que aparece en su pantalla.
-            Si coincide y ambos confirman, el vínculo se establece y la
-            comunicación pasa a verificarse por TLS mutuo.
+            {$t("peers.pairing.inbound_help")}
           {:else}
-            Compara el siguiente código de seis dígitos con el que aparece en
-            el otro equipo. Si coincide y ambos confirman, el vínculo se
-            establece y la comunicación pasa a verificarse por TLS mutuo.
+            {$t("peers.pairing.outbound_help")}
           {/if}
         </p>
       </header>
@@ -340,43 +333,43 @@
           {session.sas}
         </div>
         <p class="muted" data-testid="peer-pairing-countdown">
-          Expira en {secondsLeft} s
+          {$t("peers.pairing.expires", { count: secondsLeft })}
         </p>
         <p class="muted">
-          peer_id remoto: <code>{session.remote_peer_id}</code>
+          {$t("peers.pairing.remote_peer_id")}: <code>{session.remote_peer_id}</code>
         </p>
         <p class="muted">
-          Huella remota: <code>{session.remote_fingerprint.slice(0, 8)}</code>
+          {$t("peers.pairing.remote_fingerprint")}: <code>{session.remote_fingerprint.slice(0, 8)}</code>
         </p>
         {#if session.remote_display_name}
           <p class="muted">
-            Nombre remoto: <code>{session.remote_display_name}</code>
+            {$t("peers.pairing.remote_name")}: <code>{session.remote_display_name}</code>
           </p>
         {/if}
         {#if lastError}
           <p class="error" role="alert" data-testid="peer-pairing-error">
-            {lastError}
+            {$t(lastError)}
           </p>
         {:else if session.local_approved && session.remote_approved}
           <p class="ok" role="status" data-testid="peer-pairing-trusted">
-            Vínculo establecido.
+            {$t("peers.pairing.trusted")}
           </p>
         {:else if session.local_approved}
           <p class="muted" role="status">
-            Esperando aprobación del otro equipo…
+            {$t("peers.pairing.waiting_approval")}
           </p>
         {/if}
       {:else if outcome?.kind === "trusted"}
         <p class="ok" role="status" data-testid="peer-pairing-trusted">
-          Vínculo establecido con {outcome.display_name}.
+          {$t("peers.pairing.trusted_with", { name: outcome.display_name })}
         </p>
       {:else if lastError}
         <p class="error" role="alert" data-testid="peer-pairing-error">
-          {lastError}
+          {$t(lastError)}
         </p>
       {:else}
         <p class="muted" data-testid="peer-pairing-loading">
-          Generando código…
+          {$t("peers.pairing.generating")}
         </p>
       {/if}
 
@@ -390,7 +383,7 @@
             approving}
           on:click={approve}
         >
-          {session?.local_approved ? "Aprobado" : "Aceptar"}
+          {session?.local_approved ? $t("peers.pairing.approved") : $t("common.accept")}
         </button>
         <button
           type="button"
@@ -398,7 +391,7 @@
           data-testid="peer-pairing-cancel"
           on:click={close}
         >
-          {session ? "Cancelar" : "Cerrar"}
+          {session ? $t("common.cancel") : $t("common.close")}
         </button>
       </footer>
     </article>

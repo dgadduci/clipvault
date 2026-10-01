@@ -274,7 +274,10 @@ fn paste_service_returns_capability_unavailable_under_wayland() {
             // Wayland guidance must not advertise settings nor mention
             // macOS.
             assert!(!guidance.has_settings_target());
-            assert!(!guidance.title.to_lowercase().contains("macos"));
+            assert_eq!(
+                guidance.message_id,
+                clipvault_core::PlatformGuidanceId::LinuxWaylandUnsupported
+            );
         }
         other => panic!("expected CapabilityUnavailable with guidance, got {other:?}"),
     }
@@ -382,7 +385,10 @@ fn paste_service_classifies_backend_failure_on_linux_x11() {
             assert_eq!(guidance.kind, PlatformIssueKind::BackendUnavailable);
             // X11 guidance must not mention macOS or advertise a
             // settings target without a known safe environment.
-            assert!(!guidance.title.to_lowercase().contains("macos"));
+            assert_eq!(
+                guidance.message_id,
+                clipvault_core::PlatformGuidanceId::LinuxX11BackendUnavailable
+            );
         }
         other => panic!("expected Failed with guidance, got {other:?}"),
     }
@@ -395,7 +401,7 @@ fn settings_navigator_open_returns_programmed_outcome() {
     nav.push_outcome(
         PlatformSettingsTarget::MacosAccessibility,
         SettingsOpenOutcome::FallbackRequired {
-            manual_steps: vec!["open settings manually".into()],
+            message_id: clipvault_core::PlatformGuidanceId::MacosAccessibility,
         },
     );
     let outcome = nav.open(PlatformSettingsTarget::MacosAccessibility);

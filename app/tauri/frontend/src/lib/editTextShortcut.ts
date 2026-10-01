@@ -73,10 +73,14 @@ export function editTextShortcutLabel(
  */
 export function editTextShortcutAccessibleLabel(
   platform: EditTextShortcutPlatform,
+  translateText?: (key: string, params?: Record<string, string | number | Date>) => string,
 ): string {
-  return platform === "macos"
-    ? "Editar captura (Comando E)"
-    : "Editar captura (Control E)";
+  const modifier = platform === "macos" ? "shortcut.command" : "shortcut.control";
+  return translateText
+    ? translateText("shortcut.edit_capture", { modifier: translateText(modifier) })
+    : platform === "macos"
+      ? "Editar captura (Comando E)"
+      : "Editar captura (Control E)";
 }
 
 /**

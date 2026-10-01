@@ -14,6 +14,7 @@
     gnomeIntegrationUninstallCommand,
   } from "./lib/tauri";
   import { describeGnomeIntegrationError } from "./lib/gnomeIntegrationError";
+  import { t } from "./lib/localization";
   import type {
     GnomeConsentDecision,
     GnomeIntegrationPayload,
@@ -121,99 +122,80 @@
 <section
   class="gnome-modal"
   data-testid="gnome-integration-modal"
-  aria-label="Integración con GNOME Wayland"
+  aria-label={$t("gnome.title")}
 >
   <header>
-    <h2>Integración con GNOME Wayland</h2>
+    <h2>{$t("gnome.title")}</h2>
     <p class="muted">
-      Identifica la aplicación origen de cada captura en sesiones GNOME
-      Wayland. Sólo se comunica el identificador de la aplicación.
+      {$t("gnome.description")}
     </p>
   </header>
 
   {#if status?.kind === "not_applicable"}
     <article class="card-block">
       <p class="muted">
-        Esta sesión ({status.session}) no necesita la integración. ClipVault
-        usa los adaptadores nativos disponibles
-        ({status.desktop}).
+        {$t("gnome.not_applicable", { session: status.session, desktop: status.desktop })}
       </p>
     </article>
   {:else if status?.kind === "not_configured"}
     <article class="card-block">
       <p class="muted">
-        La integración no está disponible en esta build
-        ({status.reason}).
+        {$t("gnome.not_available_build", { reason: status.reason })}
       </p>
     </article>
   {:else if status?.kind === "ready" && status.payload.applicable}
 <article class="card-block">
-    <h3>Estado de la integración</h3>
+    <h3>{$t("gnome.status.title")}</h3>
     <dl class="diag-list">
-      <dt>Sesión</dt>
+      <dt>{$t("gnome.status.session")}</dt>
       <dd><code>{status.payload.session}</code></dd>
-      <dt>Backend</dt>
+      <dt>{$t("gnome.status.backend")}</dt>
       <dd><code>{status.payload.backend}</code></dd>
-      <dt>Versión del protocolo</dt>
+      <dt>{$t("gnome.status.protocol_version")}</dt>
       <dd><code>{status.payload.protocol_version}</code></dd>
-      <dt>Estado técnico</dt>
-      <dd><code>{technicalState ?? "unknown"}</code></dd>
-      <dt>Identificador publicado</dt>
-      <dd><code>{identifier ?? "(none)"}</code></dd>
+      <dt>{$t("gnome.status.technical_state")}</dt>
+      <dd><code>{technicalState ?? $t("common.unknown")}</code></dd>
+      <dt>{$t("gnome.status.published_identifier")}</dt>
+      <dd><code>{identifier ?? $t("common.none")}</code></dd>
       {#if status.payload.detail}
-        <dt>Detalle</dt>
+        <dt>{$t("gnome.status.detail")}</dt>
         <dd><code>{status.payload.detail}</code></dd>
       {/if}
     </dl>
     {#if technicalState === "activation_pending"}
       <p class="muted">
-        La extensión está instalada en
-        <code>~/.local/share/gnome-shell/extensions/</code> pero GNOME Shell
-        aún no completó la conexión. Si actualizaste ClipVault, primero elegí
-        <strong>Reinstalar extensión</strong> para copiar el recurso actual.
-        Después cerrá la sesión GNOME y volvé a iniciarla: en GNOME Shell 42,
-        deshabilitar y habilitar una extensión no recarga necesariamente el
-        módulo ya cargado. Al volver, comprobá que ClipVault esté habilitada en
-        <strong>Extensiones</strong> e iniciá ClipVault.
+        {$t("gnome.status.activation_pending")}
       </p>
     {:else if technicalState === "connected"}
       <p class="muted">
-        Integración habilitada y enlace local establecido con la
-        extensión. Esperando el primer identificador de aplicación
-        desde GNOME Shell.
+        {$t("gnome.status.connected")}
       </p>
     {:else if technicalState === "identified" || technicalState === "no_active_application"}
       <p class="muted">
-        Integración conectada y publicando identificadores desde
-        GNOME Shell.
+        {$t("gnome.status.identified")}
       </p>
     {:else if technicalState === "disconnected" || technicalState === "communication_error"}
       <p class="muted">
-        La extensión está instalada pero la conexión local se perdió.
-        El listener reintentará automáticamente; si persiste, abrí
-        <strong>Extensiones</strong> de GNOME y verificá que
-        <code>clipvault@clipvault.app</code> siga habilitada.
+        {$t("gnome.status.disconnected")}
       </p>
     {:else if technicalState === "incompatible"}
       <p class="muted">
-        Esta versión de GNOME Shell no está soportada por la extensión.
-        ClipVault seguirá capturando con el resto de los adaptadores.
+        {$t("gnome.status.incompatible")}
       </p>
     {/if}
   </article>
 
     {#if shouldShowConsent}
       <article class="card-block" data-testid="gnome-consent-card">
-        <h3>Activar integración GNOME</h3>
+        <h3>{$t("gnome.consent.title")}</h3>
         <p>
-          Permite que ClipVault identifique la aplicación nativa enfocada
-          (Firefox, Terminal, Warp, etc.) en GNOME Wayland.
+          {$t("gnome.consent.description")}
         </p>
         <ul>
-          <li>Sólo se comunica el identificador de la aplicación.</li>
-          <li>No se lee el contenido del portapapeles ni el de las ventanas.</li>
-          <li>La decisión queda persistida y no se vuelve a pedir.</li>
-          <li>Puedes revertirla desde este panel o desde Diagnóstico.</li>
+          <li>{$t("gnome.consent.only_identifier")}</li>
+          <li>{$t("gnome.consent.no_content")}</li>
+          <li>{$t("gnome.consent.persisted")}</li>
+          <li>{$t("gnome.consent.reversible")}</li>
         </ul>
         <div class="row">
           <button
@@ -223,7 +205,7 @@
             disabled={busy}
             data-testid="gnome-consent-accept"
           >
-            {busy && lastAction === "accept" ? "Procesando…" : "Activar integración GNOME"}
+            {busy && lastAction === "accept" ? $t("gnome.processing") : $t("gnome.consent.activate")}
           </button>
           <button
             type="button"
@@ -232,19 +214,15 @@
             disabled={busy}
             data-testid="gnome-consent-decline"
           >
-            {busy && lastAction === "decline" ? "Guardando…" : "Ahora no"}
+            {busy && lastAction === "decline" ? $t("gnome.saving") : $t("gnome.consent.not_now")}
           </button>
         </div>
       </article>
     {:else if status.payload.consent === "accepted"}
       <article class="card-block" data-testid="gnome-install-card">
-        <h3>Instalar</h3>
+        <h3>{$t("gnome.install.title")}</h3>
         <p class="muted">
-          ClipVault instala la extensión localmente. La activación en
-          GNOME requiere una acción manual del usuario (ver el panel
-          de estado más abajo): después de instalar o reinstalar, cerrá
-          la sesión GNOME y volvé a iniciarla. Sin descargas externas,
-          sin permisos de administrador.
+          {$t("gnome.install.description")}
         </p>
         <div class="row">
           {#if !isInstalled}
@@ -255,7 +233,7 @@
               disabled={busy}
               data-testid="gnome-install-action"
             >
-              {busy ? "Instalando…" : "Instalar"}
+              {busy ? $t("gnome.install.installing") : $t("gnome.install.action")}
             </button>
           {:else}
             <button
@@ -265,7 +243,7 @@
               disabled={busy}
               data-testid="gnome-reinstall-action"
             >
-              {busy ? "Reinstalando…" : "Reinstalar extensión"}
+              {busy ? $t("gnome.install.reinstalling") : $t("gnome.install.reinstall")}
             </button>
             <button
               type="button"
@@ -274,7 +252,7 @@
               disabled={busy}
               data-testid="gnome-retry"
             >
-              {busy ? "Reintentando…" : "Reintentar conexión"}
+              {busy ? $t("gnome.retrying") : $t("gnome.retry")}
             </button>
             <button
               type="button"
@@ -283,17 +261,16 @@
               disabled={busy}
               data-testid="gnome-uninstall"
             >
-              {busy ? "Desinstalando…" : "Deshabilitar"}
+              {busy ? $t("gnome.uninstalling") : $t("gnome.disable")}
             </button>
           {/if}
         </div>
       </article>
     {:else if status.payload.consent === "disabled"}
       <article class="card-block">
-        <h3>Integración deshabilitada</h3>
+        <h3>{$t("gnome.disabled.title")}</h3>
         <p class="muted">
-          Desactivada manualmente. Puede volver a activarse en cualquier
-          momento.
+          {$t("gnome.disabled.description")}
         </p>
         <div class="row">
           <button
@@ -302,7 +279,7 @@
             on:click={() => applyConsent("accepted")}
             disabled={busy}
           >
-            Reactivar
+            {$t("gnome.reactivate")}
           </button>
         </div>
       </article>
@@ -310,7 +287,7 @@
 
     {#if shouldShowDeclined}
       <article class="card-block" data-testid="gnome-declined-card">
-        <p class="muted">Has rechazado la integración. No volveremos a pedirla.</p>
+        <p class="muted">{$t("gnome.declined.description")}</p>
         <div class="row">
           <button
             type="button"
@@ -318,20 +295,20 @@
             on:click={() => applyConsent("accepted")}
             disabled={busy}
           >
-            Cambiar de opinión
+            {$t("gnome.declined.change_mind")}
           </button>
         </div>
       </article>
     {/if}
 
     {#if lastError}
-      <p class="status error" role="alert" data-testid="gnome-error">{lastError}</p>
+      <p class="status error" role="alert" data-testid="gnome-error">{$t(lastError)}</p>
     {/if}
   {:else}
     <article class="card-block">
-      <p class="muted">Recuperando el estado de la integración…</p>
+      <p class="muted">{$t("gnome.loading")}</p>
       <div class="row">
-        <button type="button" on:click={refresh} data-testid="gnome-refresh">Reintentar</button>
+        <button type="button" on:click={refresh} data-testid="gnome-refresh">{$t("gnome.retry")}</button>
       </div>
     </article>
   {/if}

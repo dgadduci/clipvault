@@ -95,11 +95,11 @@ pub use clipvault_platform::{
     NoopApplicationMetadataProvider, NoopClipboardBackend, NoopHotkeyManager, NoopPasteController,
     NoopSettingsNavigator, NoopTrayController, NoopTrayHandle, OsFamily, PasteBackendKind,
     PasteController, PasteError, PasteboardImageMetadata, PlatformError, PlatformGuidance,
-    PlatformInfo, PlatformIssueKind, PlatformSettingsTarget, PngMetadataSummary, ProbeStage,
-    RichTextClipboardSupport, RichTextPayload, SettingsNavigator, SettingsOpenOutcome,
-    TiffMetadata, TiffResolutionUnit, TrayAction, TrayBackendKind, TrayController, TrayEntry,
-    TrayError, TrayHandle, TrayOutcome, APPLICATION_ICONS_DIR, MAX_CLIPBOARD_IMAGE_DIM,
-    MAX_CLIPBOARD_IMAGE_RGBA_BYTES,
+    PlatformGuidanceId, PlatformInfo, PlatformIssueKind, PlatformSettingsTarget,
+    PngMetadataSummary, ProbeStage, RichTextClipboardSupport, RichTextPayload, SettingsNavigator,
+    SettingsOpenOutcome, TiffMetadata, TiffResolutionUnit, TrayAction, TrayBackendKind,
+    TrayController, TrayEntry, TrayError, TrayHandle, TrayOutcome, APPLICATION_ICONS_DIR,
+    MAX_CLIPBOARD_IMAGE_DIM, MAX_CLIPBOARD_IMAGE_RGBA_BYTES,
 };
 pub use clipvault_search::SearchQuery;
 pub use clock::{Clock, SystemClock};

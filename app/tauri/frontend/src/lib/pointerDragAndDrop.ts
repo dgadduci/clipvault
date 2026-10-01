@@ -16,6 +16,7 @@ import {
   endDragSession,
   getActiveDragSessionEntryId,
 } from "./dragAndDrop.ts";
+import { translate } from "./localization.ts";
 
 export const POINTER_DRAG_OVER_EVENT = "clipvault-pointer-drag-over";
 export const POINTER_DROP_EVENT = "clipvault-pointer-drop";
@@ -171,17 +172,17 @@ function createDragGhost(doc: Document): HTMLElement {
   const marker = doc.createElement("span");
   marker.className = "cv-pointer-drag-ghost-marker";
   const label = doc.createElement("span");
-  label.textContent = "Captura";
+  label.textContent = translate("drag.capture_label");
   header.appendChild(marker);
   header.appendChild(label);
 
   const body = doc.createElement("div");
   body.className = "cv-pointer-drag-ghost-body";
-  body.textContent = "Arrastrando…";
+  body.textContent = translate("drag.in_progress");
 
   const footer = doc.createElement("div");
   footer.className = "cv-pointer-drag-ghost-footer";
-  footer.textContent = "Suelta en una colección";
+  footer.textContent = translate("drag.drop_hint");
 
   ghost.appendChild(header);
   ghost.appendChild(body);

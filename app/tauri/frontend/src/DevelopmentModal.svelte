@@ -30,6 +30,7 @@
   } from "./lib/tauri";
   import { shouldEnablePasteButton } from "./lib/guidance";
   import { describeGnomeIntegrationError } from "./lib/gnomeIntegrationError";
+  import { t } from "./lib/localization";
   import { createEventDispatcher } from "svelte";
   import type {
     ActiveApplicationResponse,
@@ -80,7 +81,7 @@
       activeApp = app;
       dispatch("refresh");
     } catch (err) {
-      refreshError = err instanceof Error ? err.message : String(err);
+      refreshError = "development.error.refresh";
     }
   }
 
@@ -103,7 +104,7 @@
     try {
       kdeKwinStatus = await kdeKwinIntegrationStatusCommand();
     } catch (err) {
-      kdeKwinError = err instanceof Error ? err.message : String(err);
+      kdeKwinError = "development.error.kde";
     } finally {
       kdeKwinBusy = false;
     }
@@ -118,7 +119,7 @@
     try {
       kdeKwinStatus = await action();
     } catch (err) {
-      kdeKwinError = err instanceof Error ? err.message : String(err);
+      kdeKwinError = "development.error.kde";
     } finally {
       kdeKwinBusy = false;
     }
@@ -141,7 +142,7 @@
       capabilities = await refreshCapabilitiesCommand();
       dispatch("capabilitiesChanged", capabilities);
     } catch (err) {
-      refreshError = err instanceof Error ? err.message : String(err);
+      refreshError = "development.error.refresh";
     } finally {
       capRefreshBusy = false;
     }
@@ -153,12 +154,12 @@
     tickResult = null;
     try {
       const result = await captureTickCommand({ sourceApp: null });
-      tickResult = result.kind;
+      tickResult = `development.tick.result.${result.kind}`;
       const next = await recentEntriesCommand({ limit: 10 });
       entries = next;
       dispatch("entriesChanged", next);
     } catch (err) {
-      tickResult = `error: ${err instanceof Error ? err.message : String(err)}`;
+      tickResult = "development.error.tick";
     } finally {
       tickBusy = false;
     }
@@ -170,16 +171,14 @@
     pasteBusy = true;
     try {
       const response = await pasteEntryCommand({ id: entries[0].id });
-      tickResult = `paste: ${response.kind}`;
+      tickResult = `development.paste.result.${response.kind}`;
       if (response.kind !== "pasted") {
         // The parent App owns the guidance surface so the platform
         // modal can render the platform-specific instructions.
         dispatch("pasteFailed", response);
       }
     } catch (err) {
-      tickResult = `paste error: ${
-        err instanceof Error ? err.message : String(err)
-      }`;
+      tickResult = "development.error.paste";
     } finally {
       pasteBusy = false;
     }
@@ -188,35 +187,35 @@
 
 <section class="dev-section" data-testid="development-modal">
   <article class="card-block">
-    <h3 class="block-title">Frontend ↔ Tauri ↔ Rust ↔ SQLite</h3>
+    <h3 class="block-title">{$t("development.architecture")}</h3>
     {#if diagnostics}
       <dl class="diag-list">
-        <dt>Application version</dt>
+        <dt>{$t("development.field.version")}</dt>
         <dd><code>{diagnostics.version}</code></dd>
-        <dt>Database path</dt>
+        <dt>{$t("development.field.database_path")}</dt>
         <dd><code>{diagnostics.database_path}</code></dd>
-        <dt>Migrations applied</dt>
+        <dt>{$t("development.field.migrations")}</dt>
         <dd><code>{diagnostics.migrations_applied}</code></dd>
-        <dt>Bootstrap timestamp (UTC)</dt>
+        <dt>{$t("development.field.started_at")}</dt>
         <dd><code>{diagnostics.started_at}</code></dd>
-        <dt>Host OS</dt>
+        <dt>{$t("development.field.host_os")}</dt>
         <dd><code>{diagnostics.platform_os}</code></dd>
-        <dt>Linux display server</dt>
+        <dt>{$t("development.field.display_server")}</dt>
         <dd><code>{diagnostics.display_server}</code></dd>
-        <dt>History entries</dt>
+        <dt>{$t("development.field.history_entries")}</dt>
         <dd><code>{diagnostics.history_entries}</code></dd>
       </dl>
     {:else}
-      <p class="muted">Diagnostics not available yet.</p>
+      <p class="muted">{$t("development.diagnostics.unavailable")}</p>
     {/if}
     {#if refreshError}
       <p class="status error" role="alert" data-testid="development-refresh-error">
-        {refreshError}
+        {$t(refreshError)}
       </p>
     {/if}
     <div class="row">
       <button type="button" on:click={refreshDiagnostics} data-testid="development-refresh">
-        Refresh
+        {$t("common.refresh")}
       </button>
       <button
         type="button"
@@ -224,32 +223,32 @@
         disabled={capRefreshBusy}
         data-testid="development-refresh-capabilities"
       >
-        {capRefreshBusy ? "Refrescando…" : "Refresh capabilities"}
+        {capRefreshBusy ? $t("development.refreshing") : $t("development.refresh_capabilities")}
       </button>
     </div>
   </article>
 
   {#if capabilities}
     <article class="card-block">
-      <h3 class="block-title">Capabilities</h3>
+      <h3 class="block-title">{$t("development.capabilities")}</h3>
       <ul class="caps">
         <li class:off={!capabilities.clipboard_read}>
-          clipboard_read: {capabilities.clipboard_read ? "yes" : "no"}
+          clipboard_read: {capabilities.clipboard_read ? $t("common.yes") : $t("common.no")}
         </li>
         <li class:off={!capabilities.clipboard_write}>
-          clipboard_write: {capabilities.clipboard_write ? "yes" : "no"}
+          clipboard_write: {capabilities.clipboard_write ? $t("common.yes") : $t("common.no")}
         </li>
         <li class:off={!capabilities.global_hotkey}>
-          global_hotkey: {capabilities.global_hotkey ? "yes" : "no"}
+          global_hotkey: {capabilities.global_hotkey ? $t("common.yes") : $t("common.no")}
         </li>
         <li class:off={!capabilities.synthetic_paste}>
-          synthetic_paste: {capabilities.synthetic_paste ? "yes" : "no"}
+          synthetic_paste: {capabilities.synthetic_paste ? $t("common.yes") : $t("common.no")}
         </li>
         <li class:off={!capabilities.active_application}>
-          active_application: {capabilities.active_application ? "yes" : "no"}
+          active_application: {capabilities.active_application ? $t("common.yes") : $t("common.no")}
         </li>
         <li class:off={!capabilities.tray}>
-          tray: {capabilities.tray ? "yes" : "no"}
+          tray: {capabilities.tray ? $t("common.yes") : $t("common.no")}
         </li>
       </ul>
     </article>
@@ -257,26 +256,24 @@
 
   {#if activeApp}
     <article class="card-block">
-      <h3 class="block-title">Active application</h3>
+      <h3 class="block-title">{$t("development.active_application")}</h3>
       {#if activeApp.available}
         <p>
-          <code>{activeApp.name ?? "(unnamed)"}</code>
+          <code>{activeApp.name ?? $t("development.unnamed")}</code>
           {#if activeApp.identifier}
             <span class="muted">({activeApp.identifier})</span>
           {/if}
         </p>
       {:else}
-        <p class="muted">Active-app probe is unavailable on this session.</p>
+        <p class="muted">{$t("development.active_app_unavailable")}</p>
       {/if}
     </article>
   {/if}
 
   <article class="card-block" data-testid="quick-paste-card">
-    <h3 class="block-title">Quick paste</h3>
+    <h3 class="block-title">{$t("development.quick_paste")}</h3>
     <p class="muted">
-      Trigger a watcher tick (the shell would normally run this on a
-      timer). If the synthetic-paste capability is unavailable the
-      action is reported and a guidance modal explains what to do.
+      {$t("development.quick_paste.description")}
     </p>
     <div class="row">
       <button
@@ -285,7 +282,7 @@
         disabled={tickBusy || !capabilities?.clipboard_read}
         data-testid="tick-capture"
       >
-        {tickBusy ? "Tick…" : "Tick capture"}
+        {tickBusy ? $t("development.tick.running") : $t("development.tick.capture")}
       </button>
       <button
         type="button"
@@ -293,51 +290,49 @@
         disabled={pasteBusy || !shouldEnablePasteButton(entries.length)}
         data-testid="paste-latest"
         title={!capabilities?.synthetic_paste
-          ? "Synthetic paste is unavailable; pressing Paste latest will open the guidance modal."
-          : "Paste the most recent entry."}
+          ? $t("development.paste.unavailable_tooltip")
+          : $t("development.paste.latest_tooltip")}
       >
-        {pasteBusy ? "Pasting…" : "Paste latest"}
+        {pasteBusy ? $t("development.paste.running") : $t("development.paste.latest")}
       </button>
       {#if tickResult}
-        <span class="muted" data-testid="tick-result">{tickResult}</span>
+        <span class="muted" data-testid="tick-result">{$t(tickResult)}</span>
       {/if}
     </div>
   </article>
 
   <article class="card-block" data-testid="gnome-integration-card">
-    <h3 class="block-title">Integración GNOME Wayland</h3>
+    <h3 class="block-title">{$t("gnome.title")}</h3>
     <p class="muted">
-      Estado de la integración opcional con GNOME Shell. Sólo se
-      aplica a sesiones GNOME Wayland y sólo transporta el
-      identificador de la aplicación enfocada.
+      {$t("development.gnome.description")}
     </p>
     {#if gnomeStatus === null}
-      <p class="muted">Recuperar estado bajo demanda.</p>
+      <p class="muted">{$t("development.status.on_demand")}</p>
     {:else if gnomeStatus.kind === "not_applicable"}
-      <p><strong>No aplicable</strong> ({gnomeStatus.session}, {gnomeStatus.desktop}).</p>
+      <p><strong>{$t("development.status.not_applicable")}</strong> ({gnomeStatus.session}, {gnomeStatus.desktop}).</p>
     {:else if gnomeStatus.kind === "not_configured"}
-      <p class="muted">Integración no disponible ({gnomeStatus.reason}).</p>
+      <p class="muted">{$t("development.gnome.not_configured", { reason: gnomeStatus.reason })}</p>
     {:else if gnomeStatus.kind === "ready"}
       <dl class="diag-list">
-        <dt>Sesión</dt>
+        <dt>{$t("gnome.status.session")}</dt>
         <dd><code>{gnomeStatus.payload.session}</code></dd>
-        <dt>Consentimiento</dt>
+        <dt>{$t("development.status.consent")}</dt>
         <dd><code>{gnomeStatus.payload.consent}</code></dd>
-        <dt>Estado técnico</dt>
+        <dt>{$t("gnome.status.technical_state")}</dt>
         <dd><code>{gnomeStatus.payload.technical_state}</code></dd>
-        <dt>Identificador publicado</dt>
+        <dt>{$t("gnome.status.published_identifier")}</dt>
         <dd>
-          <code>{gnomeStatus.payload.identifier ?? "(none)"}</code>
+          <code>{gnomeStatus.payload.identifier ?? $t("common.none")}</code>
         </dd>
         {#if gnomeStatus.payload.detail}
-          <dt>Detalle</dt>
+          <dt>{$t("gnome.status.detail")}</dt>
           <dd><code>{gnomeStatus.payload.detail}</code></dd>
         {/if}
       </dl>
     {/if}
     {#if gnomeError}
       <p class="status error" role="alert" data-testid="gnome-debug-error">
-        {gnomeError}
+        {$t(gnomeError)}
       </p>
     {/if}
     <div class="row">
@@ -347,7 +342,7 @@
         disabled={gnomeBusy}
         data-testid="gnome-debug-refresh"
       >
-        {gnomeBusy ? "Actualizando…" : "Refrescar integración"}
+        {gnomeBusy ? $t("development.refreshing") : $t("development.refresh_gnome")}
       </button>
       {#if gnomeStatus?.kind === "ready" && gnomeStatus.payload.applicable}
         <button
@@ -356,42 +351,40 @@
           disabled={gnomeBusy}
           data-testid="gnome-configure"
         >
-          Configurar integración GNOME
+          {$t("development.configure_gnome")}
         </button>
       {/if}
     </div>
   </article>
 
   <article class="card-block" data-testid="kde-kwin-integration-card">
-    <h3 class="block-title">Integración KDE Plasma Wayland</h3>
+    <h3 class="block-title">{$t("development.kde.title")}</h3>
     <p class="muted">
-      Permite que KWin comunique el identificador de la aplicación enfocada.
-      ClipVault usa ese dato localmente para mostrar el nombre y el icono del
-      origen. No se transmiten títulos de ventanas ni contenido del portapapeles.
+      {$t("development.kde.description")}
     </p>
     {#if kdeKwinStatus}
       <dl class="diag-list">
-        <dt>Sesión</dt>
+        <dt>{$t("gnome.status.session")}</dt>
         <dd><code>{kdeKwinStatus.session}</code></dd>
-        <dt>Consentimiento</dt>
+        <dt>{$t("development.status.consent")}</dt>
         <dd><code>{kdeKwinStatus.consent}</code></dd>
-        <dt>Estado</dt>
+        <dt>{$t("gnome.status.technical_state")}</dt>
         <dd><code>{kdeKwinStatus.technical_state}</code></dd>
-        <dt>Paquete instalado</dt>
-        <dd><code>{kdeKwinStatus.installed ? "sí" : "no"}</code></dd>
-        <dt>Paquete habilitado</dt>
-        <dd><code>{kdeKwinStatus.enabled ? "sí" : "no"}</code></dd>
+        <dt>{$t("development.kde.installed")}</dt>
+        <dd><code>{kdeKwinStatus.installed ? $t("common.yes") : $t("common.no")}</code></dd>
+        <dt>{$t("development.kde.enabled")}</dt>
+        <dd><code>{kdeKwinStatus.enabled ? $t("common.yes") : $t("common.no")}</code></dd>
         {#if kdeKwinStatus.error}
-          <dt>Error</dt>
+          <dt>{$t("development.error.label")}</dt>
           <dd><code>{kdeKwinStatus.error}</code></dd>
         {/if}
       </dl>
     {:else}
-      <p class="muted">Consulta el estado para ver si esta sesión es compatible.</p>
+      <p class="muted">{$t("development.kde.status_hint")}</p>
     {/if}
     {#if kdeKwinError}
       <p class="status error" role="alert" data-testid="kde-kwin-error">
-        {kdeKwinError}
+        {$t(kdeKwinError)}
       </p>
     {/if}
     <div class="row">
@@ -401,7 +394,7 @@
         disabled={kdeKwinBusy}
         data-testid="kde-kwin-refresh"
       >
-        {kdeKwinBusy ? "Actualizando…" : "Consultar estado KWin"}
+        {kdeKwinBusy ? $t("development.refreshing") : $t("development.kde.check")}
       </button>
       {#if kdeKwinStatus?.applicable && (!kdeKwinStatus.enabled || kdeKwinStatus.consent !== "accepted")}
         <button
@@ -411,7 +404,7 @@
           disabled={kdeKwinBusy}
           data-testid="kde-kwin-activate"
         >
-          {kdeKwinBusy ? "Procesando…" : "Dar consentimiento y activar"}
+          {kdeKwinBusy ? $t("development.processing") : $t("development.kde.activate")}
         </button>
       {/if}
       {#if kdeKwinStatus?.applicable && kdeKwinStatus.consent === "unknown"}
@@ -422,7 +415,7 @@
           disabled={kdeKwinBusy}
           data-testid="kde-kwin-decline"
         >
-          No activar
+          {$t("development.kde.decline")}
         </button>
       {/if}
       {#if kdeKwinStatus?.applicable && kdeKwinStatus.installed && kdeKwinStatus.enabled}
@@ -432,7 +425,7 @@
           disabled={kdeKwinBusy}
           data-testid="kde-kwin-disable"
         >
-          Desactivar
+          {$t("development.kde.disable")}
         </button>
         <button
           type="button"
@@ -441,7 +434,7 @@
           disabled={kdeKwinBusy}
           data-testid="kde-kwin-uninstall"
         >
-          Desinstalar
+          {$t("development.kde.uninstall")}
         </button>
       {/if}
       {#if kdeKwinStatus?.applicable && kdeKwinStatus.consent === "accepted" && kdeKwinStatus.installed && kdeKwinStatus.enabled && kdeKwinStatus.technical_state !== "identified"}
@@ -451,7 +444,7 @@
           disabled={kdeKwinBusy}
           data-testid="kde-kwin-retry"
         >
-          Reintentar conexión
+          {$t("development.kde.retry")}
         </button>
       {/if}
     </div>

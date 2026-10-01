@@ -82,18 +82,13 @@ impl PlatformSettingsTarget {
 /// serialised payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlatformGuidance {
+    /// Stable catalog identifier for the user-facing copy.
+    pub message_id: PlatformGuidanceId,
     /// Stable identifier of the capability the failure belongs to
     /// (`synthetic_paste`, `global_hotkey`, ...).
     pub capability: String,
     /// Human-readable machine-friendly issue kind.
     pub kind: PlatformIssueKind,
-    /// Title rendered at the top of the modal.
-    pub title: String,
-    /// One-paragraph explanation of what the user is seeing.
-    pub summary: String,
-    /// Ordered remediation steps. Frontend renders them as a numbered
-    /// list.
-    pub steps: Vec<String>,
     /// Whether the user can retry after applying the remediation.
     pub retryable: bool,
     /// Whether the navigator exposes a known safe destination to open.
@@ -102,27 +97,37 @@ pub struct PlatformGuidance {
     pub settings_target: Option<PlatformSettingsTarget>,
 }
 
+/// Catalog entry used to render remediation copy in every open UI surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformGuidanceId {
+    MacosAccessibility,
+    LinuxX11BackendUnavailable,
+    LinuxWaylandUnsupported,
+    LinuxUnknownSession,
+    BackendUnavailable,
+    Unknown,
+    LinuxSettingsFallback,
+    GenericSettingsFallback,
+}
+
 impl PlatformGuidance {
     /// Construct a guidance object and assert it contains no obvious
     /// payload. The constructor is preferred over struct literals so
     /// tests and runtime code share the same invariants.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        message_id: PlatformGuidanceId,
         capability: impl Into<String>,
         kind: PlatformIssueKind,
-        title: impl Into<String>,
-        summary: impl Into<String>,
-        steps: Vec<String>,
         retryable: bool,
         can_open_settings: bool,
         settings_target: Option<PlatformSettingsTarget>,
     ) -> Self {
         Self {
+            message_id,
             capability: capability.into(),
             kind,
-            title: title.into(),
-            summary: summary.into(),
-            steps,
             retryable,
             can_open_settings,
             settings_target,
@@ -142,10 +147,9 @@ pub enum SettingsOpenOutcome {
     /// The destination was opened (deep link, NSWorkspace launch,
     /// portal call, ...). No further action is required.
     Opened,
-    /// The destination could not be opened directly. The caller should
-    /// keep the manual steps visible. No clipboard content is carried
-    /// in this variant.
-    FallbackRequired { manual_steps: Vec<String> },
+    /// The destination could not be opened directly. The caller renders
+    /// the matching packaged catalog entry. No clipboard content is carried.
+    FallbackRequired { message_id: PlatformGuidanceId },
     /// The navigator refused or the OS rejected the request. The
     /// `reason` field is non-sensitive.
     Failed { reason: String },
@@ -183,16 +187,9 @@ pub trait SettingsNavigator: Send + Sync {
 /// Helper that produces the canonical macOS Accessibility guidance.
 pub fn macos_accessibility_guidance(capability: &str) -> PlatformGuidance {
     PlatformGuidance::new(
+        PlatformGuidanceId::MacosAccessibility,
         capability,
         PlatformIssueKind::PermissionRequired,
-        "ClipVault needs Accessibility permission",
-        "macOS requires ClipVault to be allowed to send keyboard events so it can press Cmd+V in the application you are typing into.",
-        vec![
-            "Open System Settings.".into(),
-            "Go to Privacy & Security → Accessibility.".into(),
-            "Enable ClipVault (or the development binary you are running).".into(),
-            "Come back to ClipVault and press Reintentar.".into(),
-        ],
         true,
         true,
         Some(PlatformSettingsTarget::MacosAccessibility),
@@ -204,16 +201,9 @@ pub fn macos_accessibility_guidance(capability: &str) -> PlatformGuidance {
 /// at runtime whether a known target exists.
 pub fn linux_x11_backend_unavailable_guidance(capability: &str) -> PlatformGuidance {
     PlatformGuidance::new(
+        PlatformGuidanceId::LinuxX11BackendUnavailable,
         capability,
         PlatformIssueKind::BackendUnavailable,
-        "ClipVault could not reach the X11 paste backend",
-        "Synthetic paste needs a working X11 display and the XTEST extension. Verify the session, the display and any sandbox permissions before retrying.",
-        vec![
-            "Confirm that you are running inside the graphical X11 session you intend to paste into.".into(),
-            "Confirm that $DISPLAY is set and that the XTEST extension is enabled.".into(),
-            "If ClipVault is installed via Flatpak, Snap or another sandbox, enable the desktop integration permissions the package declares.".into(),
-            "Return to ClipVault and press Reintentar.".into(),
-        ],
         true,
         false,
         None,
@@ -225,15 +215,9 @@ pub fn linux_x11_backend_unavailable_guidance(capability: &str) -> PlatformGuida
 /// no universal "open settings" destination.
 pub fn linux_wayland_unsupported_guidance(capability: &str) -> PlatformGuidance {
     PlatformGuidance::new(
+        PlatformGuidanceId::LinuxWaylandUnsupported,
         capability,
         PlatformIssueKind::UnsupportedSession,
-        "Wayland has no portable synthetic paste",
-        "ClipVault cannot inject keystrokes under Wayland without a compositor-specific portal. There is no universal settings switch to enable it; it depends on the compositor you are running.",
-        vec![
-            "Open the history and copy entries with your usual keyboard shortcut if your compositor exposes one.".into(),
-            "If you depend on automatic paste, switch to an X11 session or configure a compositor-specific paste portal.".into(),
-            "History, capture and search continue to work without synthetic paste.".into(),
-        ],
         false,
         false,
         None,
@@ -243,15 +227,9 @@ pub fn linux_wayland_unsupported_guidance(capability: &str) -> PlatformGuidance 
 /// Helper that produces the Linux unknown-session guidance.
 pub fn linux_unknown_session_guidance(capability: &str) -> PlatformGuidance {
     PlatformGuidance::new(
+        PlatformGuidanceId::LinuxUnknownSession,
         capability,
         PlatformIssueKind::UnsupportedSession,
-        "ClipVault could not identify a compatible graphical session",
-        "ClipVault did not detect X11 or Wayland on this host. Synthetic paste is unavailable until a recognised session is active.",
-        vec![
-            "Launch ClipVault from a graphical X11 or Wayland session.".into(),
-            "Avoid running ClipVault over a plain SSH connection without a forwarded display.".into(),
-            "Press Reintentar after the session is reachable.".into(),
-        ],
         true,
         false,
         None,
@@ -261,14 +239,9 @@ pub fn linux_unknown_session_guidance(capability: &str) -> PlatformGuidance {
 /// Generic fallback for backends that fail without a more precise cause.
 pub fn backend_unavailable_guidance(capability: &str) -> PlatformGuidance {
     PlatformGuidance::new(
+        PlatformGuidanceId::BackendUnavailable,
         capability,
         PlatformIssueKind::BackendUnavailable,
-        "ClipVault could not complete the operation",
-        "The platform backend refused the request and ClipVault could not classify the cause more precisely. The history entry was not modified.",
-        vec![
-            "Retry the operation.".into(),
-            "If the issue persists, restart ClipVault and check the application logs.".into(),
-        ],
         true,
         false,
         None,
@@ -278,14 +251,9 @@ pub fn backend_unavailable_guidance(capability: &str) -> PlatformGuidance {
 /// Generic fallback for failures that did not fit any other category.
 pub fn unknown_guidance(capability: &str) -> PlatformGuidance {
     PlatformGuidance::new(
+        PlatformGuidanceId::Unknown,
         capability,
         PlatformIssueKind::Unknown,
-        "Unexpected platform failure",
-        "ClipVault encountered an unexpected failure on this platform. No clipboard content was sent to the diagnostic output.",
-        vec![
-            "Retry the operation.".into(),
-            "If the failure keeps happening, open the ClipVault diagnostics to confirm the host platform.".into(),
-        ],
         true,
         false,
         None,
@@ -330,7 +298,7 @@ mod tests {
         assert_eq!(SettingsOpenOutcome::Opened.kind(), "opened");
         assert_eq!(
             SettingsOpenOutcome::FallbackRequired {
-                manual_steps: vec!["x".into()]
+                message_id: PlatformGuidanceId::MacosAccessibility,
             }
             .kind(),
             "fallback_required"
@@ -349,6 +317,7 @@ mod tests {
         assert!(!json.contains("password"));
         assert!(!json.contains("token"));
         assert!(json.contains("\"capability\":\"synthetic_paste\""));
+        assert!(json.contains("\"message_id\":\"macos_accessibility\""));
         assert!(guidance.has_settings_target());
     }
 
@@ -357,10 +326,10 @@ mod tests {
         let guidance = linux_wayland_unsupported_guidance("synthetic_paste");
         assert_eq!(guidance.kind, PlatformIssueKind::UnsupportedSession);
         assert!(!guidance.has_settings_target());
-        let json = serde_json::to_string(&guidance).unwrap();
-        // Must not mention macOS, AX or Accessibility.
-        assert!(!json.to_lowercase().contains("macos"));
-        assert!(!json.to_lowercase().contains("accessibility"));
+        assert_eq!(
+            guidance.message_id,
+            PlatformGuidanceId::LinuxWaylandUnsupported
+        );
     }
 
     #[test]
@@ -368,63 +337,45 @@ mod tests {
         let guidance = linux_x11_backend_unavailable_guidance("synthetic_paste");
         assert_eq!(guidance.kind, PlatformIssueKind::BackendUnavailable);
         assert!(!guidance.has_settings_target());
-        let json = serde_json::to_string(&guidance).unwrap();
-        assert!(!json.to_lowercase().contains("macos"));
+        assert_eq!(
+            guidance.message_id,
+            PlatformGuidanceId::LinuxX11BackendUnavailable
+        );
     }
 
     #[test]
     fn unknown_session_guidance_is_distinct_from_wayland() {
         let unknown = linux_unknown_session_guidance("synthetic_paste");
         let wayland = linux_wayland_unsupported_guidance("synthetic_paste");
-        // Both belong to the same `UnsupportedSession` family by design;
-        // the user-visible distinction must come from the title and the
-        // remediation steps, not from the cause code.
-        assert_ne!(unknown.title, wayland.title);
-        assert_ne!(unknown.summary, wayland.summary);
+        // Both share the unsupported-session cause but have distinct catalog
+        // identifiers so the UI can render their platform-specific guidance.
+        assert_ne!(unknown.message_id, wayland.message_id);
         assert!(unknown.retryable);
         assert!(!wayland.retryable);
     }
 
     #[test]
-    fn wayland_guidance_text_does_not_mention_accessibility() {
+    fn wayland_guidance_has_platform_specific_catalog_identifier() {
         let guidance = linux_wayland_unsupported_guidance("synthetic_paste");
-        let joined = format!(
-            "{} {} {}",
-            guidance.title,
-            guidance.summary,
-            guidance.steps.join(" ")
-        )
-        .to_lowercase();
-        assert!(!joined.contains("accessibility"));
-        assert!(!joined.contains("macos"));
+        assert_eq!(
+            guidance.message_id,
+            PlatformGuidanceId::LinuxWaylandUnsupported
+        );
     }
 
     #[test]
-    fn x11_guidance_mentions_sandbox_and_xtest() {
+    fn x11_guidance_has_platform_specific_catalog_identifier() {
         let guidance = linux_x11_backend_unavailable_guidance("synthetic_paste");
-        let joined = format!(
-            "{} {} {}",
-            guidance.title,
-            guidance.summary,
-            guidance.steps.join(" ")
-        )
-        .to_lowercase();
-        assert!(joined.contains("xtest"));
-        assert!(joined.contains("display"));
+        assert_eq!(
+            guidance.message_id,
+            PlatformGuidanceId::LinuxX11BackendUnavailable
+        );
     }
 
     #[test]
-    fn unknown_session_guidance_recommends_starting_graphical_session() {
+    fn unknown_session_guidance_has_platform_specific_catalog_identifier() {
         let guidance = linux_unknown_session_guidance("synthetic_paste");
-        let joined = format!(
-            "{} {} {}",
-            guidance.title,
-            guidance.summary,
-            guidance.steps.join(" ")
-        )
-        .to_lowercase();
-        assert!(joined.contains("x11") || joined.contains("wayland"));
-        assert!(!joined.contains("macos"));
+        assert_eq!(guidance.message_id, PlatformGuidanceId::LinuxUnknownSession);
     }
 
     #[test]

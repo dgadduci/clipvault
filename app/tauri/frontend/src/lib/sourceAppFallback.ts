@@ -50,12 +50,17 @@ export const IMPORTED_SOURCE_APP_FALLBACK_ICON_SVG =
  * legacy `—` placeholder; the screen-reader experience must match
  * the visual experience.
  */
-export function sourceAppAccessibleLabel(entry: EntryRecord): string {
+type TranslateText = (key: string, params?: Record<string, string | number | Date>) => string;
+
+export function sourceAppAccessibleLabel(
+  entry: EntryRecord,
+  translateText?: TranslateText,
+): string {
   const name = entry.source_app_name?.trim();
-  if (name) return `Aplicación fuente: ${name}`;
+  if (name) return translateText?.("source_app.label", { name }) ?? `Aplicación fuente: ${name}`;
   const id = entry.source_app?.trim();
-  if (id) return `Aplicación fuente: ${id}`;
-  return "Aplicación fuente desconocida";
+  if (id) return translateText?.("source_app.label", { name: id }) ?? `Aplicación fuente: ${id}`;
+  return translateText?.("source_app.unknown") ?? "Aplicación fuente desconocida";
 }
 
 /** Use imported provenance as a separate presentation, never as local entry metadata. */
@@ -72,8 +77,10 @@ export function sourceAppPresentationIconRef(
 export function sourceAppPresentationAccessibleLabel(
   entry: EntryRecord,
   imported: PeerImportedSourceAppPresentation | null,
+  translateText?: TranslateText,
 ): string {
-  if (imported === null) return sourceAppAccessibleLabel(entry);
+  if (imported === null) return sourceAppAccessibleLabel(entry, translateText);
   const name = imported.source_app_name?.trim();
-  return `Aplicación fuente: ${name || "desconocida"}`;
+  if (!name) return translateText?.("source_app.unknown") ?? "Aplicación fuente: desconocida";
+  return translateText?.("source_app.label", { name }) ?? `Aplicación fuente: ${name}`;
 }

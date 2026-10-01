@@ -554,14 +554,17 @@ test("HistoryCard pin control never renders a star glyph or emoji", () => {
 
 test("HistoryCard pin control keeps aria-pressed, the Anclar/Desanclar labels and the busy hook", () => {
   const source = stripComments(loadSource("src/HistoryCard.svelte"));
-  // `aria-pressed` and the Spanish labels are the persistent
+  // `aria-pressed` and the catalog-backed labels are the persistent
   // contract the rest of the spec relies on. A regression that
   // drops them would break every keyboard / screen reader user.
   assert.match(source, /aria-pressed=\{entry\.is_pinned\}/);
-  assert.match(source, /title=\{entry\.is_pinned \? "Desanclar" : "Anclar"\}/);
   assert.match(
     source,
-    /aria-label=\{entry\.is_pinned \? `Desanclar entrada \$\{displayTitle\}` : `Anclar entrada \$\{displayTitle\}`\}/,
+    /title=\{entry\.is_pinned \? \$t\("history\.card\.unpin"\) : \$t\("history\.card\.pin"\)\}/,
+  );
+  assert.match(
+    source,
+    /aria-label=\{entry\.is_pinned\s+\? \$t\("history\.card\.unpin_entry", \{ title: displayTitle \}\)\s+: \$t\("history\.card\.pin_entry", \{ title: displayTitle \}\)\}/,
   );
   // The data-testid hook survives for the regression tests.
   assert.match(source, /data-testid="history-card-pin"/);

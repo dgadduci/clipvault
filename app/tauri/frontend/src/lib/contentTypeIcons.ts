@@ -17,6 +17,7 @@
 // re-renders.
 
 import type { ContentTypeValue } from "./contentType.ts";
+import { translate, type Locale } from "./localization.ts";
 
 export type IconColor =
   | "primary"
@@ -26,27 +27,25 @@ export type IconColor =
 interface IconSpriteEntry {
   /** Stable id the `<use>` element references. */
   id: string;
-  /** Accessible label the renderer mirrors on the icon's `aria-label`. */
-  label: string;
 }
 
 const SPRITE_ENTRIES: Record<ContentTypeValue | "fallback", IconSpriteEntry> = {
-  text: { id: "cv-icon-text", label: "Texto" },
-  url: { id: "cv-icon-url", label: "URL" },
-  email: { id: "cv-icon-email", label: "Email" },
-  json: { id: "cv-icon-json", label: "JSON" },
-  jwt: { id: "cv-icon-jwt", label: "JWT" },
-  uuid: { id: "cv-icon-uuid", label: "UUID" },
-  ipv4: { id: "cv-icon-ipv4", label: "IPv4" },
-  ipv6: { id: "cv-icon-ipv6", label: "IPv6" },
-  hex_color: { id: "cv-icon-hex-color", label: "Color hexadecimal" },
-  html: { id: "cv-icon-html", label: "HTML" },
-  file_path: { id: "cv-icon-file-path", label: "Ruta de archivo" },
-  shell_command: { id: "cv-icon-shell-command", label: "Comando de shell" },
-  sql: { id: "cv-icon-sql", label: "SQL" },
-  code: { id: "cv-icon-code", label: "Código" },
-  image: { id: "cv-icon-image", label: "Imagen" },
-  fallback: { id: "cv-icon-fallback", label: "Texto" },
+  text: { id: "cv-icon-text" },
+  url: { id: "cv-icon-url" },
+  email: { id: "cv-icon-email" },
+  json: { id: "cv-icon-json" },
+  jwt: { id: "cv-icon-jwt" },
+  uuid: { id: "cv-icon-uuid" },
+  ipv4: { id: "cv-icon-ipv4" },
+  ipv6: { id: "cv-icon-ipv6" },
+  hex_color: { id: "cv-icon-hex-color" },
+  html: { id: "cv-icon-html" },
+  file_path: { id: "cv-icon-file-path" },
+  shell_command: { id: "cv-icon-shell-command" },
+  sql: { id: "cv-icon-sql" },
+  code: { id: "cv-icon-code" },
+  image: { id: "cv-icon-image" },
+  fallback: { id: "cv-icon-fallback" },
 };
 
 /**
@@ -67,12 +66,18 @@ export function contentTypeIconId(value: string | null | undefined): string {
  * the same as `contentTypeLabel` so screen readers announce the
  * type consistently with the textual badge the rail also renders.
  */
-export function contentTypeIconLabel(value: string | null | undefined): string {
-  if (typeof value !== "string" || value.length === 0) {
-    return SPRITE_ENTRIES.fallback.label;
-  }
-  const known = (SPRITE_ENTRIES as Record<string, IconSpriteEntry | undefined>)[value];
-  return (known ?? SPRITE_ENTRIES.fallback).label;
+export function contentTypeTranslationKey(value: string | null | undefined): string {
+  const key = typeof value === "string" && value.length > 0 && value in SPRITE_ENTRIES
+    ? value
+    : "text";
+  return `content_type.${key}`;
+}
+
+export function contentTypeIconLabel(
+  value: string | null | undefined,
+  locale?: Locale,
+): string {
+  return translate(contentTypeTranslationKey(value), {}, locale);
 }
 
 /**

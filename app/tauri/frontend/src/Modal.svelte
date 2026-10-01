@@ -25,6 +25,7 @@
    * backdrop / Escape / focus trap stay disabled in that window).
    */
   import { onDestroy, tick } from "svelte";
+  import { t } from "./lib/localization.ts";
 
   export let open: boolean = false;
   export let titleId: string;
@@ -157,8 +158,8 @@
         <button
           type="button"
           class="modal-close"
-          aria-label="Cerrar"
-          title="Cerrar"
+          aria-label={$t("common.close")}
+          title={$t("common.close")}
           data-testid="modal-close"
           on:click={onClose}
           disabled={busy}

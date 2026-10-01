@@ -39,6 +39,7 @@
     PeerSnapshot,
   } from "./types";
   import RemotePreviewCard from "./RemotePreviewCard.svelte";
+  import { t, tPlural } from "./lib/localization.ts";
   import { remoteImageThumbnailCardKey } from "./lib/remoteImageThumbnailState";
   import {
     INITIAL_CURSORS,
@@ -692,7 +693,7 @@
 <section
   class="remote-history-rail"
   data-testid="remote-history-rail"
-  aria-label="Historial remoto"
+  aria-label={$t("remote.history.title")}
 >
   <header class="remote-history-rail-header">
     <h2 data-testid="remote-history-rail-title">
@@ -712,7 +713,7 @@
 
   {#if peerId === null}
     <p class="remote-history-rail-empty" data-testid="remote-history-rail-empty">
-      Selecciona un equipo vinculado para ver su historial.
+      {$t("remote.history.select_peer")}
     </p>
   {:else if railShouldShowUnavailable}
     <div
@@ -721,15 +722,15 @@
     >
       <p>
         {#if !activeIsTrusted}
-          El equipo aún no está vinculado.
+          {$t("remote.history.not_linked")}
         {:else}
-          El equipo no está disponible en este momento.
+          {$t("remote.history.unavailable")}
         {/if}
       </p>
     </div>
   {:else if loading && rows.length === 0}
     <p class="remote-history-rail-loading" data-testid="remote-history-rail-loading">
-      Cargando historial…
+      {$t("quickpaste.loading")}
     </p>
   {:else if error && rows.length === 0}
     <div
@@ -737,19 +738,19 @@
       role="alert"
       data-testid="remote-history-rail-error"
     >
-      <p>No se pudo cargar el historial: {error}.</p>
+      <p>{$t("remote.history.load_error")}</p>
       <button
         type="button"
         class="remote-history-rail-retry"
         data-testid="remote-history-rail-retry"
         on:click={requestFirstPage}
       >
-        Reintentar
+        {$t("common.retry")}
       </button>
     </div>
   {:else if rows.length === 0}
     <p class="remote-history-rail-empty" data-testid="remote-history-rail-empty">
-      Este equipo no tiene capturas transferibles.
+      {$t("remote.history.empty")}
     </p>
   {:else}
     <div
@@ -763,7 +764,7 @@
         on:click={requestPreviousPage}
         disabled={rows.length === 0 || loading}
       >
-        Anterior
+        {$t("remote.history.previous")}
       </button>
       <button
         type="button"
@@ -772,14 +773,14 @@
         on:click={requestNextPage}
         disabled={exhausted || loading}
       >
-        Siguiente
+        {$t("remote.history.next")}
       </button>
       <span
         class="remote-history-rail-snapshot"
         data-testid="remote-history-rail-snapshot"
-        title="Huella estable del historial remoto"
+        title={$t("remote.history.snapshot")}
       >
-        {rows.length} captura{rows.length === 1 ? "" : "s"}
+        {$tPlural("remote.history.capture_count", rows.length)}
       </span>
     </div>
     {#if error}
@@ -788,14 +789,14 @@
         role="alert"
         data-testid="remote-history-rail-error-inline"
       >
-        Error: {error}
+        {$t("remote.history.load_error")}
       </p>
     {/if}
     <div
       class="remote-history-rail-cards"
       data-testid="remote-history-rail-cards"
       role="listbox"
-      aria-label="Capturas del equipo remoto"
+      aria-label={$t("remote.history.captures")}
       aria-orientation="horizontal"
     >
       {#each rows as item, index (remoteImageThumbnailCardKey(peerId, item.row.remote_entry_id))}

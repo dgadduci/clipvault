@@ -44,6 +44,7 @@ import {
 } from "./iconResolver.ts";
 import { clipboardAssetCommand, richTextPreviewCommand } from "./tauri.ts";
 import type { EntryRecord } from "../types.ts";
+import { translate } from "./localization.ts";
 
 /** Stable `content_type` value the backend uses for raster images. */
 export const IMAGE_CONTENT_TYPE = "image";
@@ -257,11 +258,6 @@ export interface PasteMenuOptions {
   pasteBusy: boolean;
 }
 
-/** Accessible label fragments the menu helper reuses verbatim. */
-const PASTE_RICH_LABEL = "Pegar texto enriquecido";
-const PASTE_PLAIN_LABEL = "Pegar texto plano";
-const PASTE_IMAGE_LABEL = "Pegar imagen";
-
 /**
  * Build the list of paste actions the card's ellipsis menu exposes for
  * the given entry.
@@ -269,11 +265,11 @@ const PASTE_IMAGE_LABEL = "Pegar imagen";
  * The contract is documented in the
  * `clipboard-history-cards` spec:
  *
- * - an image row returns **exactly one** action whose label is
- *   `Paste` and whose `mode` is `null` so the Rust paste service
+ * - an image row returns **exactly one** action with a catalog-backed
+ *   image label and `mode = null` so the Rust paste service
  *   takes the image branch regardless of the legacy textual mode;
- * - a rich-text row returns the two textual actions, with `Paste de
- *   texto enriquecido` enabled when the entry carries rich metadata;
+ * - a rich-text row returns the two textual actions, with the rich
+ *   action enabled when the entry carries rich metadata;
  * - a plain-text row returns the two textual actions, with the rich
  *   one visibly disabled because the source never exposed HTML/RTF.
  *
@@ -285,40 +281,41 @@ export function pasteMenuActionsFor(
   entry: Pick<EntryRecord, "content_type">,
   title: string,
   options: PasteMenuOptions,
+  translateText: (key: string, params?: Record<string, string | number | Date>) => string = translate,
 ): PasteMenuAction[] {
   if (isImageEntry(entry)) {
     return [
       {
         kind: "image-paste",
-        label: "Paste",
+        label: translateText("history.card.paste_image"),
         testId: "history-card-paste",
         mode: null,
-        ariaLabel: `${PASTE_IMAGE_LABEL} de ${title}`,
-        tooltip: "Pegar la imagen capturada.",
+        ariaLabel: `${translateText("history.card.paste_image")} ${title}`,
+        tooltip: translateText("history.card.paste_image_tooltip"),
         disabled: false,
       },
     ];
   }
   const richTooltip = options.richPasteEnabled
-    ? "Pegar la entrada conservando el formato."
-    : "Esta entrada no tiene texto enriquecido.";
+    ? translateText("history.card.paste_rich_tooltip")
+    : translateText("history.card.paste_rich_unavailable");
   return [
     {
       kind: "text-rich-paste",
-      label: "Paste de texto enriquecido",
+      label: translateText("history.card.paste_rich"),
       testId: "history-card-paste-rich",
       mode: "rich",
-      ariaLabel: `${PASTE_RICH_LABEL} de ${title}`,
+      ariaLabel: translateText("history.card.paste_rich_from", { title }),
       tooltip: richTooltip,
       disabled: !options.richPasteEnabled || options.pasteBusy,
     },
     {
       kind: "text-plain-paste",
-      label: "Paste de texto plano",
+      label: translateText("history.card.paste_plain"),
       testId: "history-card-paste-plain",
       mode: "plain",
-      ariaLabel: `${PASTE_PLAIN_LABEL} de ${title}`,
-      tooltip: "Pegar únicamente el texto plano.",
+      ariaLabel: translateText("history.card.paste_plain_from", { title }),
+      tooltip: translateText("history.card.paste_plain_tooltip"),
       disabled: options.pasteBusy,
     },
   ];
@@ -346,13 +343,17 @@ export function entryPreviewText(
     | "payload_height"
   >,
   maxLength = 120,
+  translateText?: (key: string, params?: Record<string, string | number | Date>) => string,
 ): string {
   if (isImageEntry(entry)) {
     const dimensions = imageDimensionsLabel(entry);
-    return dimensions ? `Imagen ${dimensions}` : "Imagen";
+    const image = translateText?.("content_type.image") ?? "Imagen";
+    return dimensions
+      ? translateText?.("preview.image_dimensions", { dimensions }) ?? `${image} ${dimensions}`
+      : image;
   }
   const trimmed = (entry.content ?? "").replace(/\s+/g, " ").trim();
-  if (trimmed.length === 0) return "(vacío)";
+  if (trimmed.length === 0) return translateText?.("preview.empty_capture") ?? "(vacío)";
   return trimmed.length > maxLength
     ? `${trimmed.slice(0, maxLength - 3)}…`
     : trimmed;

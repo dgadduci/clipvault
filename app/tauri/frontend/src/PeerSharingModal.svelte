@@ -42,6 +42,7 @@
    * Escape and the two-minute timeout the runtime enforces.
    */
   import { createEventDispatcher, onDestroy, onMount } from "svelte";
+  import { t } from "./lib/localization.ts";
   import {
     peerPairingBlockCommand,
     peerPairingRevokeCommand,
@@ -172,15 +173,13 @@
       // would lie to the user and hide the typed status copy
       // the runtime already surfaces.
       if (!target) {
-        actionMessage = "Compartir en red local desactivado.";
+        actionMessage = "peers.sharing.disabled";
       } else if (response.kind === "active") {
-        actionMessage = "Compartir en red local activado.";
+        actionMessage = "peers.sharing.enabled";
       } else if (response.kind === "identity_unavailable") {
-        actionMessage =
-          "Preferencia guardada, pero la identidad segura no está disponible: el descubrimiento no arrancó. Vuelve a intentarlo cuando el llavero esté accesible.";
+        actionMessage = "peers.sharing.identity_unavailable";
       } else {
-        actionMessage =
-          "Preferencia guardada, pero el descubrimiento no pudo iniciar (multicast bloqueado o ruta no disponible). El estado del runtime se muestra arriba.";
+        actionMessage = "peers.sharing.start_failed";
       }
     } catch (error) {
       errorMessage = describeError(error);
@@ -197,7 +196,7 @@
       const response = await peerSharingRefreshIdentityCommand();
       toggle = response;
       await refreshSnapshot();
-      actionMessage = "Identidad local reintentada.";
+      actionMessage = "peers.sharing.identity_retried";
     } catch (error) {
       errorMessage = describeError(error);
     } finally {
@@ -208,26 +207,26 @@
   function describeBackendKind(kind: PeerSharingToggleResponse["kind"]): string {
     switch (kind) {
       case "active":
-        return "Navegando";
+        return "peers.runtime.active";
       case "identity_unavailable":
-        return "Identidad no disponible";
+        return "peers.runtime.identity_unavailable";
       case "runtime_stopped":
-        return "Sin red local";
+        return "peers.runtime.stopped";
       default:
-        return `Estado desconocido (${kind})`;
+        return "peers.runtime.unknown";
     }
   }
 
   function describePresence(presence: PeerPresence): string {
     switch (presence) {
       case "detected":
-        return "Detectado";
+        return "peers.presence.detected";
       case "not_available":
-        return "No disponible";
+        return "peers.status.unavailable";
       case "unverified":
-        return "No verificado";
+        return "peers.presence.unverified";
       default:
-        return `Estado desconocido (${presence})`;
+        return "peers.presence.unknown";
     }
   }
 
@@ -236,18 +235,8 @@
   }
 
   function describeError(error: unknown): string {
-    if (!error) return "Error desconocido.";
-    if (typeof error === "string") return error;
-    if (typeof error === "object" && error) {
-      const candidate = error as { message?: unknown; kind?: unknown };
-      if (typeof candidate.message === "string") {
-        return candidate.message;
-      }
-      if (typeof candidate.kind === "string") {
-        return candidate.kind;
-      }
-    }
-    return "Error desconocido.";
+    void error;
+    return "peers.error.generic";
   }
 
   function trustStateOf(peerId: string): PeerTrustState {
@@ -274,13 +263,13 @@
   function describeTrustState(state: PeerTrustState): string {
     switch (state) {
       case "trusted":
-        return "Activo";
+        return "peers.trust.trusted";
       case "revoked":
-        return "Desvinculado";
+        return "peers.trust.revoked";
       case "blocked":
-        return "Bloqueado";
+        return "peers.trust.blocked";
       default:
-        return "Sin pareado";
+        return "peers.trust.unverified";
     }
   }
 
@@ -305,7 +294,7 @@
     try {
       await peerPairingRevokeCommand({ peer_id: entry.peer_id });
       trustStates = { ...trustStates, [entry.peer_id]: "revoked" };
-      pairingActionMessage = "Vínculo deshecho.";
+      pairingActionMessage = "peers.action.revoked";
     } catch (error) {
       pairingActionError = describeError(error);
     } finally {
@@ -320,7 +309,7 @@
     try {
       await peerPairingBlockCommand({ peer_id: entry.peer_id });
       trustStates = { ...trustStates, [entry.peer_id]: "blocked" };
-      pairingActionMessage = "Equipo bloqueado.";
+      pairingActionMessage = "peers.action.blocked";
     } catch (error) {
       pairingActionError = describeError(error);
     } finally {
@@ -335,7 +324,7 @@
     try {
       await peerPairingUnblockCommand({ peer_id: entry.peer_id });
       trustStates = { ...trustStates, [entry.peer_id]: "unverified" };
-      pairingActionMessage = "Equipo desbloqueado; el vínculo debe restablecerse manualmente.";
+      pairingActionMessage = "peers.action.unblocked";
     } catch (error) {
       pairingActionError = describeError(error);
     } finally {
@@ -395,15 +384,8 @@
 
 <section class="peer-sharing" data-testid="peer-sharing-modal">
   <article data-testid="peer-sharing-toggle-card">
-    <h3>Compartir en red local</h3>
-    <p class="muted">
-      Activa el descubrimiento opcional de equipos en la misma red.
-      ClipVault solo intercambia metadatos públicos (identificador,
-      huella, nombre visible, versión). Nunca comparte el contenido
-      del portapapeles ni abre una conexión TCP de aplicación; el
-      pareado, la importación y el historial remoto vendrán en
-      próximos cambios.
-    </p>
+      <h3>{$t("peers.sharing.title")}</h3>
+      <p class="muted">{$t("peers.sharing.description")}</p>
     <div class="row">
       <label class="toggle">
         <input
@@ -417,7 +399,7 @@
           }}
         />
         <span data-testid="peer-sharing-toggle-state">
-          {isToggleOn(toggle) ? "Activado" : "Desactivado"}
+          {$t(isToggleOn(toggle) ? "common.enabled" : "common.disabled")}
         </span>
       </label>
       <button
@@ -427,7 +409,7 @@
         on:click={refreshIdentity}
         disabled={refreshingIdentity}
       >
-        {refreshingIdentity ? "Reintentando…" : "Reintentar identidad"}
+        {refreshingIdentity ? $t("common.retrying") : $t("peers.sharing.retry_identity")}
       </button>
     </div>
     {#if toggle}
@@ -436,66 +418,61 @@
         data-testid="peer-sharing-backend"
         data-presence={toggle.kind}
       >
-        Estado del runtime: {describeBackend(toggle.kind)}.
+        {$t("peers.runtime.status", { state: $t(describeBackend(toggle.kind)) })}
       </p>
     {/if}
     {#if errorMessage}
       <p class="error" role="alert" data-testid="peer-sharing-error">
-        {errorMessage}
+        {$t(errorMessage)}
       </p>
     {/if}
     {#if actionMessage}
       <p class="ok" role="status" data-testid="peer-sharing-action">
-        {actionMessage}
+        {$t(actionMessage)}
       </p>
     {/if}
   </article>
 
   <article data-testid="peer-equipos-card">
-    <h3>Equipos</h3>
-    <p class="muted">
-      Lista de solo lectura de los equipos ClipVault observados en
-      este segmento. La vista no ofrece acciones de pareado ni de
-      historial; sólo metadatos públicos.
-    </p>
+      <h3>{$t("peers.observed.title")}</h3>
+    <p class="muted">{$t("peers.observed.description")}</p>
     {#if loading}
-      <p class="muted" data-testid="peer-equipos-loading">Cargando…</p>
+      <p class="muted" data-testid="peer-equipos-loading">{$t("common.loading")}</p>
     {:else if !snapshot}
-      <p class="error">No se pudo cargar la lista.</p>
+      <p class="error">{$t("peers.observed.load_error")}</p>
     {:else if snapshot.entries.length === 0}
       <p class="muted" data-testid="peer-equipos-empty">
-        Aún no se han observado equipos. Activa el descubrimiento y
-        espera a que otra instalación de ClipVault se anuncie.
+        {$t("peers.observed.empty")}
       </p>
     {:else}
       <p class="muted" data-testid="peer-equipos-count">
-        {snapshot.entries.length} pares observados.
+        {$t("peers.observed.count", { count: snapshot.entries.length })}
       </p>
-      <ul class="peer-list" aria-label="Equipos detectados" data-testid="peer-equipos-list">
+      <ul class="peer-list" aria-label={$t("peers.observed.list")} data-testid="peer-equipos-list">
         {#each snapshot.entries as entry (entry.peer_id)}
           <li data-testid="peer-equipos-row">
             <span class="name-cell" data-testid="peer-equipos-name">
               {describeEntry(entry)}
             </span>
             <span class="muted" data-testid="peer-equipos-peer-id">
-              peer_id: {entry.peer_id}
+              {$t("peers.peer_id")}: {entry.peer_id}
             </span>
             <span class="muted" data-testid="peer-equipos-fingerprint">
-              Huella: {shortFingerprint(entry.public_key_fingerprint)}
+              {$t("peers.fingerprint")}: {shortFingerprint(entry.public_key_fingerprint)}
             </span>
             <span
               class="presence"
               data-testid="peer-equipos-presence"
               data-presence={entry.presence}
             >
-              {describePresence(entry.presence)}
+              {$t(describePresence(entry.presence))}
             </span>
             <span
               class="presence"
               data-testid="peer-equipos-trust-state"
               data-trust={trustStateOf(entry.peer_id)}
             >
-              {describeTrustState(trustStateOf(entry.peer_id))}
+              {$t(describeTrustState(trustStateOf(entry.peer_id)))}
             </span>
             <div class="peer-actions" data-testid="peer-equipos-actions">
               {#if trustStateOf(entry.peer_id) === "unverified"}
@@ -505,13 +482,13 @@
                   data-testid="peer-equipos-pair"
                   disabled={pairingBusy || !pairingAdvertisementReady(entry)}
                   title={pairingAdvertisementReady(entry)
-                    ? "Vincular este equipo"
-                    : "Esperando el anuncio seguro de vínculo del equipo"}
+                    ? $t("peers.action.pair_title")
+                    : $t("peers.action.wait_pairing")}
                   on:click={() => openPairingModal(entry)}
                 >
                   {pairingAdvertisementReady(entry)
-                    ? "Vincular"
-                    : "Esperando anuncio seguro…"}
+                    ? $t("peers.action.pair")
+                    : $t("peers.action.wait_pairing_short")}
                 </button>
                 <button
                   type="button"
@@ -520,7 +497,7 @@
                   disabled={pairingBusy}
                   on:click={() => block(entry)}
                 >
-                  Bloquear
+                  {$t("peers.action.block")}
                 </button>
               {:else if trustStateOf(entry.peer_id) === "trusted"}
                 <button
@@ -530,7 +507,7 @@
                   disabled={pairingBusy}
                   on:click={() => revoke(entry)}
                 >
-                  Desvincular
+                  {$t("peers.action.revoke")}
                 </button>
                 <button
                   type="button"
@@ -539,7 +516,7 @@
                   disabled={pairingBusy}
                   on:click={() => block(entry)}
                 >
-                  Bloquear
+                  {$t("peers.action.block")}
                 </button>
               {:else if trustStateOf(entry.peer_id) === "revoked"}
                 <button
@@ -548,13 +525,13 @@
                   data-testid="peer-equipos-pair"
                   disabled={pairingBusy || !pairingAdvertisementReady(entry)}
                   title={pairingAdvertisementReady(entry)
-                    ? "Volver a vincular este equipo"
-                    : "Esperando el anuncio seguro de vínculo del equipo"}
+                    ? $t("peers.action.pair_again_title")
+                    : $t("peers.action.wait_pairing")}
                   on:click={() => openPairingModal(entry)}
                 >
                   {pairingAdvertisementReady(entry)
-                    ? "Volver a parear"
-                    : "Esperando anuncio seguro…"}
+                    ? $t("peers.action.pair_again")
+                    : $t("peers.action.wait_pairing_short")}
                 </button>
                 <button
                   type="button"
@@ -563,7 +540,7 @@
                   disabled={pairingBusy}
                   on:click={() => block(entry)}
                 >
-                  Bloquear
+                  {$t("peers.action.block")}
                 </button>
               {:else if trustStateOf(entry.peer_id) === "blocked"}
                 <button
@@ -573,7 +550,7 @@
                   disabled={pairingBusy}
                   on:click={() => unblock(entry)}
                 >
-                  Desbloquear
+                  {$t("peers.action.unblock")}
                 </button>
               {/if}
             </div>
@@ -582,12 +559,12 @@
       </ul>
       {#if pairingActionMessage}
         <p class="ok" role="status" data-testid="peer-pairing-action">
-          {pairingActionMessage}
+          {$t(pairingActionMessage)}
         </p>
       {/if}
       {#if pairingActionError}
         <p class="error" role="alert" data-testid="peer-pairing-error">
-          {pairingActionError}
+          {$t(pairingActionError)}
         </p>
       {/if}
     {/if}

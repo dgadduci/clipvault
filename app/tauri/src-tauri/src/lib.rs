@@ -16,6 +16,7 @@ pub mod commands;
 pub mod gnome_integration;
 #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
 pub mod kde_kwin_integration;
+mod localization;
 pub mod main_window_layout;
 pub mod metadata_scheduler;
 pub mod quick_paste_window_layout;

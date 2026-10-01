@@ -17,7 +17,7 @@ use objc2_foundation::{MainThreadMarker, NSString, NSURL};
 use tracing::warn;
 
 use crate::guidance::{
-    macos_accessibility_guidance, PlatformSettingsTarget, SettingsNavigator, SettingsOpenOutcome,
+    PlatformGuidanceId, PlatformSettingsTarget, SettingsNavigator, SettingsOpenOutcome,
 };
 
 /// macOS-backed settings navigator.
@@ -40,14 +40,6 @@ impl MacOsSettingsNavigator {
 /// URL the frontend asked for.
 const ACCESSIBILITY_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
-
-fn accessibility_fallback_steps() -> Vec<String> {
-    macos_accessibility_guidance("synthetic_paste")
-        .steps
-        .into_iter()
-        .map(|step| step.to_string())
-        .collect()
-}
 
 impl SettingsNavigator for MacOsSettingsNavigator {
     fn open(&self, target: PlatformSettingsTarget) -> SettingsOpenOutcome {
@@ -74,7 +66,7 @@ fn open_accessibility_pane() -> SettingsOpenOutcome {
     let Some(url) = url else {
         warn!("system preferences URL failed to parse");
         return SettingsOpenOutcome::FallbackRequired {
-            manual_steps: accessibility_fallback_steps(),
+            message_id: PlatformGuidanceId::MacosAccessibility,
         };
     };
 
@@ -97,7 +89,7 @@ fn open_accessibility_pane() -> SettingsOpenOutcome {
 
     warn!("NSWorkspace.openURL returned false");
     SettingsOpenOutcome::FallbackRequired {
-        manual_steps: accessibility_fallback_steps(),
+        message_id: PlatformGuidanceId::MacosAccessibility,
     }
 }
 

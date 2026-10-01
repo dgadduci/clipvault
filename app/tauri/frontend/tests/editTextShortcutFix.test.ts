@@ -332,7 +332,7 @@ test("ineligible shortcut targets are consumed and show a notice instead of reop
   );
   assert.match(
     appSource,
-    /title="Captura no editable"/,
+    /title=\{\$t\("app\.noneditable\.title"\)\}/,
     "the notice must identify the capture as non-editable",
   );
   assert.match(

@@ -17,51 +17,56 @@ export interface ByteSize {
 const KB = 1024;
 const MB = 1024 * KB;
 const GB = 1024 * MB;
+import type { Locale } from "./localization.ts";
+import { translate } from "./localization.ts";
 
 /**
  * Format `bytes` as B / KB / MB / GB using base-1024. Negative or
  * non-finite inputs collapse to a deterministic safe fallback so a
  * legacy / corrupted row never throws the renderer.
  */
-export function formatByteSize(bytes: number): ByteSize {
+export function formatByteSize(bytes: number, locale: Locale = "es"): ByteSize {
   if (!Number.isFinite(bytes) || bytes < 0) {
-    return { visual: "—", accessible: "Tamaño desconocido" };
+    const unknown = translate("size.unknown", {}, locale);
+    return { visual: "—", accessible: unknown };
   }
   if (bytes < KB) {
+    const amount = new Intl.NumberFormat(locale).format(bytes);
     return {
-      visual: `${bytes} B`,
-      accessible: `${bytes} bytes`,
+      visual: `${amount} B`,
+      accessible: new Intl.NumberFormat(locale, {
+        style: "unit",
+        unit: "byte",
+        unitDisplay: "long",
+      }).format(bytes),
     };
   }
   if (bytes < MB) {
     const kb = bytes / KB;
+    const value = formatAmount(kb, locale, kb < 10 ? 2 : kb < 100 ? 1 : 0);
     return {
-      visual: `${kb.toFixed(kb < 10 ? 2 : kb < 100 ? 1 : 0)} KB`,
-      accessible: `${Math.round(bytes)} bytes (${formatKb(bytes)} kibibytes)`,
+      visual: `${value} KB`,
+      accessible: `${formatAmount(Math.round(bytes), locale, 0)} B (${value} KB)`,
     };
   }
   if (bytes < GB) {
     const mb = bytes / MB;
+    const value = formatAmount(mb, locale, mb < 10 ? 2 : mb < 100 ? 1 : 0);
     return {
-      visual: `${mb.toFixed(mb < 10 ? 2 : mb < 100 ? 1 : 0)} MB`,
-      accessible: `${Math.round(bytes)} bytes (${formatMb(bytes)} mebibytes)`,
+      visual: `${value} MB`,
+      accessible: `${formatAmount(Math.round(bytes), locale, 0)} B (${value} MB)`,
     };
   }
   const gb = bytes / GB;
+  const value = formatAmount(gb, locale, gb < 10 ? 2 : 1);
   return {
-    visual: `${gb.toFixed(gb < 10 ? 2 : 1)} GB`,
-    accessible: `${Math.round(bytes)} bytes (${formatGb(bytes)} gibibytes)`,
+    visual: `${value} GB`,
+    accessible: `${formatAmount(Math.round(bytes), locale, 0)} B (${value} GB)`,
   };
 }
 
-function formatKb(bytes: number): string {
-  return (bytes / KB).toFixed(1);
-}
-
-function formatMb(bytes: number): string {
-  return (bytes / MB).toFixed(2);
-}
-
-function formatGb(bytes: number): string {
-  return (bytes / GB).toFixed(2);
+function formatAmount(value: number, locale: Locale, maximumFractionDigits: number): string {
+  return new Intl.NumberFormat(locale, {
+    maximumFractionDigits,
+  }).format(value);
 }

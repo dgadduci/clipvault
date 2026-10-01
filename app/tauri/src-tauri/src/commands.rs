@@ -15,10 +15,11 @@ use clipvault_core::{
     ActiveAppDiagnostics, Capabilities, ClearOutcome, ClipboardAssetStore,
     CodeLanguageServiceError, CopyOutcome, DeleteOutcome, IgnoredAppEntry, IgnoredAppError,
     LocalSettingsReader, ManualTextCreationOutcome, PasteMode, PasteOutcome, PickAndAddOutcome,
-    PlatformGuidance, PlatformSettingsTarget, RetentionOutcome, RetentionPolicy, RetentionPreview,
-    RichTextAssetStore, SetFavoriteResult, SetTitleOutcome, Settings, SettingsNavigator,
-    SettingsOpenOutcome, SettingsServiceError, SettingsUpdate, TitleValidationError,
-    UpdateTextHistoryOutcome, ValidationCode, ValidationError, WatchTickOutcome,
+    PlatformGuidance, PlatformGuidanceId, PlatformSettingsTarget, RetentionOutcome,
+    RetentionPolicy, RetentionPreview, RichTextAssetStore, SetFavoriteResult, SetTitleOutcome,
+    Settings, SettingsNavigator, SettingsOpenOutcome, SettingsServiceError, SettingsUpdate,
+    TitleValidationError, UpdateTextHistoryOutcome, ValidationCode, ValidationError,
+    WatchTickOutcome,
 };
 use clipvault_platform::{
     read_icon_bytes, read_source_app_icon_bytes, ActiveAppError, IconReadError,
@@ -57,6 +58,7 @@ fn sync_linux_picker_gnome_runtime_state(_state: &SharedState) {}
 pub const ORGANIZATION_UPDATED_EVENT: &str = "clipvault://organization-updated";
 pub const CAPTURE_CONTROL_CHANGED_EVENT: &str = "clipvault://capture-control-changed";
 pub const CAPTURE_CONTROL_ERROR_EVENT: &str = "clipvault://capture-control-error";
+pub const LANGUAGE_CHANGED_EVENT: &str = "clipvault://language-changed";
 
 #[derive(Debug, Clone, Serialize)]
 struct CaptureControlChanged {
@@ -397,7 +399,7 @@ impl CopyResponse {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SettingsOpenResponse {
     Opened,
-    FallbackRequired { manual_steps: Vec<String> },
+    FallbackRequired { message_id: PlatformGuidanceId },
     Failed { reason: String },
 }
 
@@ -405,8 +407,8 @@ impl From<SettingsOpenOutcome> for SettingsOpenResponse {
     fn from(outcome: SettingsOpenOutcome) -> Self {
         match outcome {
             SettingsOpenOutcome::Opened => SettingsOpenResponse::Opened,
-            SettingsOpenOutcome::FallbackRequired { manual_steps } => {
-                SettingsOpenResponse::FallbackRequired { manual_steps }
+            SettingsOpenOutcome::FallbackRequired { message_id } => {
+                SettingsOpenResponse::FallbackRequired { message_id }
             }
             SettingsOpenOutcome::Failed { reason } => SettingsOpenResponse::Failed { reason },
         }
@@ -1028,6 +1030,7 @@ impl ValidationCommandError {
             ValidationCode::IdentifierTooLong => "validation_error",
             ValidationCode::InvalidPeerDisplayName => "validation_error",
             ValidationCode::PeerDisplayNameTooLong => "validation_error",
+            ValidationCode::InvalidLanguage => "validation_error",
         };
         Self {
             kind,
@@ -1054,10 +1057,25 @@ impl From<SettingsServiceError> for CommandError {
 /// the frontend can refresh without an extra round-trip.
 #[tauri::command]
 pub fn clipvault_settings_set(
+    handle: AppHandle,
     state: State<'_, SharedState>,
     update: SettingsUpdate,
 ) -> Result<Settings, CommandError> {
+    let previous_language = state.context().settings().load(state.context()).language;
     let outcome = state.context().settings().apply(state.context(), &update)?;
+    if outcome.language != previous_language {
+        if let Some(controller) = handle.try_state::<Arc<crate::tray::TauriTrayController>>() {
+            if let Err(error) = controller.set_language(&outcome.language) {
+                warn!(error = %error, "failed to refresh tray language");
+            }
+        }
+        if let Err(error) = handle.emit(
+            LANGUAGE_CHANGED_EVENT,
+            serde_json::json!({ "language": outcome.language }),
+        ) {
+            warn!(error = %error, "failed to emit language-changed event");
+        }
+    }
     Ok(outcome)
 }
 

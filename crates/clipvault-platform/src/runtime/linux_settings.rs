@@ -15,8 +15,7 @@ use std::process::Command;
 use tracing::warn;
 
 use crate::guidance::{
-    linux_unknown_session_guidance, linux_x11_backend_unavailable_guidance, PlatformSettingsTarget,
-    SettingsNavigator, SettingsOpenOutcome,
+    PlatformGuidanceId, PlatformSettingsTarget, SettingsNavigator, SettingsOpenOutcome,
 };
 
 /// Linux-backed settings navigator.
@@ -67,14 +66,14 @@ fn open_linux_settings() -> SettingsOpenOutcome {
     } else {
         warn!(desktop = %desktop, "no known Linux desktop target; returning fallback");
         return SettingsOpenOutcome::FallbackRequired {
-            manual_steps: fallback_steps(),
+            message_id: PlatformGuidanceId::LinuxSettingsFallback,
         };
     };
 
     if !std::path::Path::new(command_path).exists() {
         warn!(path = %command_path, "desktop settings binary not present");
         return SettingsOpenOutcome::FallbackRequired {
-            manual_steps: fallback_steps(),
+            message_id: PlatformGuidanceId::LinuxSettingsFallback,
         };
     }
 
@@ -83,21 +82,10 @@ fn open_linux_settings() -> SettingsOpenOutcome {
         Err(error) => {
             warn!(error = %error, path = %command_path, "failed to launch desktop settings");
             SettingsOpenOutcome::FallbackRequired {
-                manual_steps: fallback_steps(),
+                message_id: PlatformGuidanceId::LinuxSettingsFallback,
             }
         }
     }
-}
-
-fn fallback_steps() -> Vec<String> {
-    let mut steps = linux_x11_backend_unavailable_guidance("synthetic_paste").steps;
-    steps.extend(
-        linux_unknown_session_guidance("synthetic_paste")
-            .steps
-            .into_iter()
-            .map(|s| s.to_string()),
-    );
-    steps
 }
 
 #[cfg(test)]
@@ -125,12 +113,8 @@ mod tests {
         let nav = LinuxSettingsNavigator::new();
         let outcome = nav.open(PlatformSettingsTarget::LinuxDesktopIntegration);
         match outcome {
-            SettingsOpenOutcome::FallbackRequired { manual_steps } => {
-                assert!(!manual_steps.is_empty());
-                // Must not reference macOS or Accessibility.
-                let joined = manual_steps.join(" ").to_lowercase();
-                assert!(!joined.contains("macos"));
-                assert!(!joined.contains("accessibility"));
+            SettingsOpenOutcome::FallbackRequired { message_id } => {
+                assert_eq!(message_id, PlatformGuidanceId::LinuxSettingsFallback);
             }
             other => panic!("expected FallbackRequired, got {other:?}"),
         }

@@ -44,6 +44,7 @@
     type IconLoader,
     type IconResolver,
   } from "./lib/iconResolver";
+  import { t } from "./lib/localization";
 
   export let onSettingsChanged: (settings: Settings) => void = () => {};
 
@@ -51,6 +52,7 @@
   let ignoredEntries: IgnoredAppEntry[] = [];
   let pickerError: string | null = null;
   let actionMessage: string | null = null;
+  let actionMessageParams: Record<string, string | number | Date> = {};
   let loading = true;
   let diagnostics: ActiveAppDiagnostics | null = null;
   let diagnosticsError: string | null = null;
@@ -150,7 +152,8 @@
     if (!settings) return;
     const trimmed = identityDraft.trim();
     if (trimmed === (settings.local_peer_display_name ?? "")) {
-      actionMessage = "El nombre visible ya estaba actualizado.";
+      actionMessage = "privacy.identity.already_updated";
+      actionMessageParams = {};
       return;
     }
     identitySaving = true;
@@ -174,8 +177,9 @@
       };
       onSettingsChanged(settings);
       actionMessage = trimmed.length > 0
-        ? `Nombre visible actualizado: ${trimmed}.`
-        : "Nombre visible eliminado.";
+        ? "privacy.identity.updated"
+        : "privacy.identity.deleted";
+      actionMessageParams = trimmed.length > 0 ? { name: trimmed } : {};
     } catch (error) {
       identityError = describeError(error);
     } finally {
@@ -186,11 +190,11 @@
   function describePeerDisplayName(code: string | undefined): string {
     switch (code) {
       case "invalid_peer_display_name":
-        return "El nombre no puede estar vacío ni contener caracteres de control.";
+        return "privacy.identity.error.invalid_name";
       case "peer_display_name_too_long":
-        return "El nombre no puede superar los 64 caracteres.";
+        return "privacy.identity.error.name_too_long";
       default:
-        return "El backend rechazó el nombre visible.";
+        return "privacy.identity.error.name_rejected";
     }
   }
 
@@ -331,7 +335,8 @@
       closeLinuxPicker();
       if (response.kind === "added" || response.kind === "updated") {
         syncEntriesWithPicker([response.entry]);
-        actionMessage = `Aplicación añadida: ${describeEntryName(response.entry)}.`;
+        actionMessage = "privacy.ignored.added";
+        actionMessageParams = { name: describeEntryName(response.entry) };
       }
     } catch (error) {
       pickerError = describeError(error);
@@ -354,17 +359,19 @@
   function handlePickResponse(response: PickAndAddResponse): void {
     switch (response.kind) {
       case "added":
-        actionMessage = `Aplicación añadida: ${describeEntryName(response.entry)}.`;
+        actionMessage = "privacy.ignored.added";
+        actionMessageParams = { name: describeEntryName(response.entry) };
         syncEntriesWithPicker([response.entry]);
         break;
       case "updated":
-        actionMessage = `Aplicación ya estaba en la lista: ${describeEntryName(response.entry)}.`;
+        actionMessage = "privacy.ignored.already_listed";
+        actionMessageParams = { name: describeEntryName(response.entry) };
         syncEntriesWithPicker([response.entry]);
         break;
       case "cancelled":
         break;
       case "error":
-        pickerError = describePickError(response.reason, response.message);
+        pickerError = describePickError(response.reason);
         break;
     }
   }
@@ -397,7 +404,8 @@
     try {
       const next = await ignoredAppsRemoveCommand({ id: entry.id });
       ignoredEntries = ignoredEntries.filter((row) => row.id !== entry.id);
-      actionMessage = `Aplicación eliminada: ${describeEntryName(entry)}.`;
+      actionMessage = "privacy.ignored.removed";
+      actionMessageParams = { name: describeEntryName(entry) };
       onSettingsChanged(next);
       recomputeBlacklistMatch();
       iconResolver.releaseFor(entry.id);
@@ -433,35 +441,34 @@
     return entry.display_name || entry.id;
   }
 
-  function describePickError(reason: PickErrorReason, fallback: string): string {
+  function describePickError(reason: PickErrorReason): string {
     switch (reason) {
       case "cancelled":
-        return fallback;
+        return "privacy.error.unknown";
       case "invalid_selection":
-        return "La selección no es un bundle válido. Elige una aplicación instalada.";
+        return "privacy.error.selection_invalid";
       case "missing_identifier":
-        return "El bundle no expone un identificador utilizable. Selecciona otra aplicación.";
+        return "privacy.error.identifier_missing";
       case "backend_unavailable":
-        return "El selector nativo no está disponible en esta sesión.";
+        return "privacy.error.picker_unavailable";
       case "unsupported_session":
-        return "La selección visual no está disponible todavía en esta plataforma. Puedes seguir añadiendo identificadores manualmente.";
+        return "privacy.error.picker_unsupported";
       case "persistence_error":
-        return `No se pudo guardar la selección: ${fallback}`;
+        return "privacy.error.unknown";
       default:
-        return fallback;
+        return "privacy.error.unknown";
     }
   }
 
   function describeLinuxCatalogUnavailable(reason: string): string {
     if (reason === "linux picker catalog is empty for this session") {
-      return "No se encontraron aplicaciones instaladas compatibles con el selector visual de Linux.";
+      return "privacy.error.no_linux_apps";
     }
-    return "El catálogo visual de aplicaciones no está disponible en esta sesión de Linux. Vuelve a intentarlo cuando el adaptador de aplicación activa esté disponible.";
+    return "privacy.error.linux_catalog";
   }
 
   function describeError(error: unknown): string {
-    if (!error) return "Error desconocido.";
-    if (typeof error === "string") return error;
+    if (!error) return "privacy.error.unknown";
     if (typeof error === "object" && error) {
       const candidate = error as {
         message?: unknown;
@@ -478,11 +485,8 @@
           }
         }
       }
-      if (typeof candidate.message === "string") {
-        return candidate.message;
-      }
     }
-    return "Error desconocido.";
+    return "privacy.error.unknown";
   }
 
   function describeBackend(value: string): string {
@@ -492,7 +496,7 @@
       case "x11_ewmh":
         return "X11 EWMH";
       case "unavailable":
-        return "no disponible";
+        return "common.unavailable";
       default:
         return value;
     }
@@ -500,18 +504,16 @@
 
   function describeRefresh(
     outcome: ActiveAppDiagnostics["refresh_outcome"],
-  ): { headline: string; detail: string } {
+  ): { key: string; causeKey?: string } {
     switch (outcome.kind) {
       case "pending":
-        return { headline: "Aún no se ha refrescado la caché.", detail: "" };
+        return { key: "privacy.cache.pending" };
       case "ok":
-        return { headline: "Último refresco correcto.", detail: "" };
+        return { key: "privacy.cache.ok" };
       case "failed":
         return {
-          headline: `Último refresco falló: ${describeFailureKind(
-            outcome.failure_kind,
-          )}`,
-          detail: outcome.message,
+          key: "privacy.cache.failed",
+          causeKey: describeFailureKind(outcome.failure_kind),
         };
     }
   }
@@ -521,29 +523,32 @@
   ): string {
     switch (kind) {
       case "schedule":
-        return "El planificador de Tauri rechazó encolar el cierre.";
+        return "privacy.cache.failure.schedule";
       case "timeout":
-        return "El hilo principal no ejecutó el cierre dentro del tiempo límite.";
+        return "privacy.cache.failure.timeout";
       case "unavailable":
-        return "La sonda de plataforma no puede ejecutarse en esta sesión.";
+        return "privacy.cache.failure.unavailable";
       case "backend":
-        return "La sonda de plataforma devolvió un error.";
+        return "privacy.cache.failure.backend";
       case null:
-        return "Causa desconocida.";
+        return "privacy.cache.failure.unknown";
       default:
-        return `Causa desconocida (${kind}).`;
+        return "privacy.cache.failure.unknown";
     }
   }
 
-  function describeCache(diag: ActiveAppDiagnostics | null): string {
-    if (!diag) return "Sin diagnóstico.";
+  function describeCache(diag: ActiveAppDiagnostics | null): { key: string; params?: Record<string, string | number | Date> } {
+    if (!diag) return { key: "privacy.cache.no_diagnostics" };
     if (!diag.available) {
-      return "El adaptador de aplicación activa no está disponible en esta sesión.";
+      return { key: "privacy.cache.unavailable" };
     }
     if (!diag.cache_populated || !diag.identifier) {
-      return "Caché vacía: el bucle todavía no ha visto una aplicación activa.";
+      return { key: "privacy.cache.empty" };
     }
-    return `Identificador observado: ${diag.identifier}${diag.name ? ` (${diag.name})` : ""}.`;
+    return {
+      key: "privacy.cache.observed",
+      params: { identifier: diag.identifier, name: diag.name ? ` (${diag.name})` : "" },
+    };
   }
 
   function describeBlacklistMatch(
@@ -551,42 +556,45 @@
     diag: ActiveAppDiagnostics | null,
   ): string {
     if (!diag || !diag.identifier || match === null) {
-      return "Comprobará la lista ignorada cuando haya un identificador disponible.";
+      return "privacy.cache.match_check";
     }
     if (match) {
-      return "El bucle va a descartar capturas de esta aplicación.";
+      return "privacy.cache.will_ignore";
     }
-    return "El bucle va a permitir capturas de esta aplicación.";
+    return "privacy.cache.will_allow";
   }
 
   function describeLoop(diag: ActiveAppDiagnostics | null): string {
-    if (!diag) return "Sin diagnóstico.";
-    if (!diag.loop_started) return "El bucle todavía no ha arrancado.";
-    return "El bucle está en marcha.";
+    if (!diag) return "privacy.cache.no_diagnostics";
+    if (!diag.loop_started) return "privacy.cache.loop_not_started";
+    return "privacy.cache.loop_running";
   }
 
-  function describeCounters(diag: ActiveAppDiagnostics | null): string {
-    if (!diag) return "Sin diagnóstico.";
-    return `Intentos: ${diag.refresh_attempts} · Correctos: ${diag.successful_refreshes} · Fallidos: ${diag.failed_refreshes}`;
+  function describeCounters(diag: ActiveAppDiagnostics | null): { key: string; params?: Record<string, string | number | Date> } {
+    if (!diag) return { key: "privacy.cache.no_diagnostics" };
+    return {
+      key: "privacy.cache.counters_value",
+      params: { attempts: diag.refresh_attempts, successes: diag.successful_refreshes, failures: diag.failed_refreshes },
+    };
   }
 
-  function describeLastDecision(diag: ActiveAppDiagnostics | null): string {
-    if (!diag) return "Sin diagnóstico.";
+  function describeLastDecision(diag: ActiveAppDiagnostics | null): { key: string; params?: Record<string, string | number | Date> } {
+    if (!diag) return { key: "privacy.cache.no_diagnostics" };
     if (!diag.last_capture_decision) {
-      return "El bucle todavía no ha evaluado una captura.";
+      return { key: "privacy.cache.no_capture_decision" };
     }
-    return `Última decisión del bucle: ${diag.last_capture_decision}`;
+    return { key: "privacy.cache.last_capture_decision", params: { decision: diag.last_capture_decision } };
   }
 
-  function describeLastRefreshAt(diag: ActiveAppDiagnostics | null): string {
+  function describeLastRefreshAt(diag: ActiveAppDiagnostics | null): { key: string; params?: Record<string, string | number | Date> } {
     if (!diag || diag.last_refresh_unix_ms == null) {
-      return "El bucle todavía no ha intentado refrescar.";
+      return { key: "privacy.cache.no_refresh_attempt" };
     }
     try {
       const date = new Date(diag.last_refresh_unix_ms);
-      return `Último intento de refresco: ${date.toLocaleString()}`;
+      return { key: "privacy.cache.last_refresh_attempt", params: { date } };
     } catch {
-      return `Último intento de refresco (epoch ms): ${diag.last_refresh_unix_ms}`;
+      return { key: "privacy.cache.last_refresh_epoch", params: { timestamp: diag.last_refresh_unix_ms } };
     }
   }
 
@@ -608,17 +616,13 @@
 
 <section class="privacy" data-testid="privacy-modal">
   <article data-testid="local-identity-card">
-    <h3>Identidad de este equipo</h3>
+    <h3>{$t("privacy.identity.title")}</h3>
     <p class="muted">
-      ClipVault genera una identidad criptográfica estable para este
-      equipo y la guarda en el almacén seguro del sistema. El material
-      privado nunca abandona ese almacén ni aparece en la interfaz.
-      Compartir en red local se añadirá más adelante sobre esta
-      identidad.
+      {$t("privacy.identity.description")}
     </p>
     {#if identityLoading}
       <p class="muted" data-testid="local-identity-loading">
-        Cargando identidad…
+        {$t("privacy.identity.loading")}
       </p>
     {:else if identityUnavailable}
       <p
@@ -627,17 +631,15 @@
         aria-live="polite"
         data-testid="local-identity-unavailable"
       >
-        El almacén seguro del sistema no está disponible en esta sesión.
-        El nombre visible se guarda de todos modos y se asociará a la
-        identidad cuando vuelvas a desbloquearlo. Detalle: {identityUnavailable}
+        {$t("privacy.identity.unavailable", { detail: identityUnavailable })}
       </p>
     {:else if identityProfile}
       <dl class="diagnostics" data-testid="local-identity-profile">
-        <dt>peer_id</dt>
+        <dt>{$t("privacy.peer_id")}</dt>
         <dd data-testid="local-identity-peer-id">
           {identityProfile.peer_id}
         </dd>
-        <dt>Huella</dt>
+        <dt>{$t("privacy.identity.fingerprint")}</dt>
         <dd data-testid="local-identity-fingerprint">
           {identityProfile.fingerprint}
         </dd>
@@ -648,7 +650,7 @@
       on:submit|preventDefault={saveIdentityName}
       data-testid="local-identity-form"
     >
-      <label for="local-identity-name">Nombre visible</label>
+      <label for="local-identity-name">{$t("privacy.identity.display_name")}</label>
       <input
         id="local-identity-name"
         name="local-peer-display-name"
@@ -666,7 +668,7 @@
         aria-busy={identitySaving}
         data-testid="local-identity-save"
       >
-        {identitySaving ? "Guardando…" : "Guardar nombre"}
+        {identitySaving ? $t("privacy.identity.saving") : $t("privacy.identity.save_name")}
       </button>
       <button
         type="button"
@@ -678,7 +680,7 @@
         disabled={identitySaving}
         data-testid="local-identity-clear"
       >
-        Borrar
+        {$t("privacy.identity.clear_name")}
       </button>
     </form>
     {#if identityError}
@@ -688,18 +690,15 @@
         id="local-identity-error"
         data-testid="local-identity-error"
       >
-        {identityError}
+        {$t(identityError)}
       </p>
     {/if}
   </article>
 
   <article data-testid="privacy-blacklist-card">
-    <h3>Aplicaciones ignoradas</h3>
+    <h3>{$t("privacy.ignored.title")}</h3>
     <p class="muted">
-      Selecciona visualmente las aplicaciones cuyo contenido del portapapeles
-      nunca se almacena. La lista es insensible a mayúsculas; el panel
-      compara el identificador exacto que devuelve el adaptador antes de
-      aceptar una captura.
+      {$t("privacy.ignored.description")}
     </p>
     <div class="row">
       <button
@@ -709,7 +708,7 @@
         aria-busy={pickerPending}
         data-testid="blacklist-pick-button"
       >
-        {pickerPending ? "Seleccionando…" : "Seleccionar aplicación"}
+        {pickerPending ? $t("privacy.ignored.selecting") : $t("privacy.ignored.select")}
       </button>
       <button
         type="button"
@@ -717,20 +716,20 @@
         on:click={refreshIgnored}
         data-testid="blacklist-refresh"
       >
-        Refrescar
+        {$t("privacy.diagnostics.refresh")}
       </button>
     </div>
     {#if pickerError}
       <p class="error" role="alert" data-testid="blacklist-error">
-        {pickerError}
+        {$t(pickerError)}
       </p>
     {/if}
     {#if ignoredEntries.length === 0}
       <p class="muted" data-testid="blacklist-empty">
-        Aún no has añadido aplicaciones ignoradas.
+        {$t("privacy.ignored.empty")}
       </p>
     {:else}
-      <ul class="ignored-list" aria-label="Aplicaciones ignoradas" data-testid="blacklist-list">
+      <ul class="ignored-list" aria-label={$t("privacy.ignored.list")} data-testid="blacklist-list">
         {#each ignoredEntries as entry (entry.id)}
           {@const iconUrl = iconUrls[entry.id]}
           <li data-testid="blacklist-row">
@@ -767,11 +766,11 @@
               type="button"
               class="secondary"
               title={entry.id}
-              aria-label={`Eliminar ${describeEntryName(entry)} (${entry.id})`}
+              aria-label={$t("privacy.ignored.remove_aria", { name: describeEntryName(entry), id: entry.id })}
               on:click={() => removeIgnored(entry)}
               data-testid="blacklist-remove"
             >
-              Eliminar
+              {$t("privacy.ignored.remove")}
             </button>
           </li>
         {/each}
@@ -788,22 +787,19 @@
       data-testid="linux-picker-modal"
     >
       <div class="modal" data-testid="linux-picker-modal-content">
-        <h3 id="linux-picker-title">Selecciona una aplicación instalada</h3>
+        <h3 id="linux-picker-title">{$t("privacy.picker.title")}</h3>
         <p class="muted">
           {#if linuxPicker.strategy === "desktop_file_id"}
-            Estrategia: <code>desktop_file_id</code>. La sesión Wayland publica el Desktop File ID
-            de la aplicación activa.
+            {$t("privacy.picker.strategy_desktop")}
           {:else}
-            Estrategia: <code>wm_class</code>. La sesión publica el <code>WM_CLASS</code> o
-            <code>app_id</code> de la aplicación activa.
+            {$t("privacy.picker.strategy_wmclass")}
           {/if}
         </p>
         {#if linuxPickerLoading}
-          <p class="muted">Cargando catálogo…</p>
+          <p class="muted">{$t("privacy.picker.loading")}</p>
         {:else if linuxPicker.candidates.length === 0}
           <p class="muted" data-testid="linux-picker-empty">
-            No hay aplicaciones instaladas con un identificador determinista. Usa el ingreso
-            manual o instala más paquetes.
+            {$t("privacy.picker.empty")}
           </p>
         {:else}
           <ul class="ignored-list" data-testid="linux-picker-list">
@@ -818,7 +814,7 @@
                   disabled={pickerPending}
                   aria-busy={pickerPending}
                   data-testid="linux-picker-confirm"
-                  aria-label={`Añadir ${candidate.display_name ?? candidate.identifier}`}
+                  aria-label={$t("privacy.picker.add_aria", { name: candidate.display_name ?? candidate.identifier })}
                 >
                   <span class="icon-cell">
                     {#if iconUrl}
@@ -868,7 +864,7 @@
         {/if}
         {#if linuxPickerError}
           <p class="error" role="alert" data-testid="linux-picker-error">
-            {linuxPickerError}
+            {$t(linuxPickerError)}
           </p>
         {/if}
         <div class="row">
@@ -878,7 +874,7 @@
             on:click={closeLinuxPicker}
             data-testid="linux-picker-cancel"
           >
-            Cancelar
+            {$t("privacy.picker.cancel")}
           </button>
         </div>
       </div>
@@ -886,54 +882,61 @@
   {/if}
 
   <article data-testid="privacy-diagnostics-card">
-    <h3>Diagnóstico de la caché</h3>
+    <h3>{$t("privacy.diagnostics.title")}</h3>
     <p class="muted">
-      ClipVault refresca la caché de la aplicación activa de forma
-      síncrona antes de evaluar cada captura. Si la última prueba
-      falló, la captura siguiente se trata como "origen
-      desconocido" según el contrato del blacklist.
+      {$t("privacy.diagnostics.description")}
     </p>
     {#if diagnosticsError}
       <p class="error" role="alert" data-testid="diagnostics-error">
-        {diagnosticsError}
+        {$t(diagnosticsError)}
       </p>
     {:else if diagnostics}
+      {@const cacheCopy = describeCache(diagnostics)}
+      {@const refreshCopy = describeRefresh(diagnostics.refresh_outcome)}
+      {@const countersCopy = describeCounters(diagnostics)}
+      {@const decisionCopy = describeLastDecision(diagnostics)}
+      {@const refreshAttemptCopy = describeLastRefreshAt(diagnostics)}
       <dl class="diagnostics">
-        <dt>Adaptador</dt>
+        <dt>{$t("privacy.diagnostics.adapter")}</dt>
         <dd data-testid="diagnostics-backend">
-          {describeBackend(diagnostics.backend)}
+          {$t(describeBackend(diagnostics.backend))}
         </dd>
-        <dt>Estado</dt>
-        <dd data-testid="diagnostics-cache">{describeCache(diagnostics)}</dd>
-        <dt>Refresco</dt>
+        <dt>{$t("privacy.diagnostics.state")}</dt>
+        <dd data-testid="diagnostics-cache">
+          {$t(cacheCopy.key, cacheCopy.params)}
+        </dd>
+        <dt>{$t("privacy.diagnostics.refresh")}</dt>
         <dd data-testid="diagnostics-refresh">
-          {(() => {
-            const r = describeRefresh(diagnostics.refresh_outcome);
-            return r.detail ? `${r.headline} (${r.detail})` : r.headline;
-          })()}
+          {$t(refreshCopy.key, { cause: refreshCopy.causeKey ? $t(refreshCopy.causeKey) : "" })}
         </dd>
         {#if diagnostics.refresh_outcome.kind === "failed"}
-          <dt>Causa</dt>
+          <dt>{$t("privacy.diagnostics.cause")}</dt>
           <dd data-testid="diagnostics-failure-kind">
-            {describeFailureKind(diagnostics.failure_kind)}
+            {$t(describeFailureKind(diagnostics.failure_kind))}
           </dd>
         {/if}
-        <dt>Bucle</dt>
-        <dd data-testid="diagnostics-loop">{describeLoop(diagnostics)}</dd>
-        <dt>Contadores</dt>
-        <dd data-testid="diagnostics-counters">{describeCounters(diagnostics)}</dd>
-        <dt>Última decisión</dt>
-        <dd data-testid="diagnostics-decision">{describeLastDecision(diagnostics)}</dd>
-        <dt>Último intento</dt>
-        <dd data-testid="diagnostics-last-refresh">{describeLastRefreshAt(diagnostics)}</dd>
-        <dt>Lista ignorada</dt>
+        <dt>{$t("privacy.diagnostics.loop")}</dt>
+        <dd data-testid="diagnostics-loop">{$t(describeLoop(diagnostics))}</dd>
+        <dt>{$t("privacy.diagnostics.counters")}</dt>
+        <dd data-testid="diagnostics-counters">
+          {$t(countersCopy.key, countersCopy.params)}
+        </dd>
+        <dt>{$t("privacy.diagnostics.last_decision")}</dt>
+        <dd data-testid="diagnostics-decision">
+          {$t(decisionCopy.key, decisionCopy.params)}
+        </dd>
+        <dt>{$t("privacy.diagnostics.last_attempt")}</dt>
+        <dd data-testid="diagnostics-last-refresh">
+          {$t(refreshAttemptCopy.key, refreshAttemptCopy.params)}
+        </dd>
+        <dt>{$t("privacy.diagnostics.ignored_list")}</dt>
         <dd data-testid="diagnostics-blacklist-match">
-          {describeBlacklistMatch(lastBlacklistMatch, diagnostics)}
+          {$t(describeBlacklistMatch(lastBlacklistMatch, diagnostics))}
         </dd>
       </dl>
     {:else}
       <p class="muted" data-testid="diagnostics-empty">
-        Aún no se consultó el diagnóstico.
+        {$t("privacy.diagnostics.not_consulted")}
       </p>
     {/if}
     <div class="row">
@@ -943,7 +946,7 @@
         disabled={refreshingDiagnostics}
         data-testid="diagnostics-refresh-button"
       >
-        {refreshingDiagnostics ? "Refrescando…" : "Refrescar diagnóstico"}
+        {refreshingDiagnostics ? $t("privacy.diagnostics.refreshing") : $t("privacy.diagnostics.refresh_action")}
       </button>
       <button
         type="button"
@@ -952,18 +955,18 @@
         disabled={refreshingDiagnostics}
         data-testid="diagnostics-consult-button"
       >
-        Consultar diagnóstico
+        {$t("privacy.diagnostics.consult")}
       </button>
     </div>
   </article>
 
   {#if loading}
-    <p class="muted">Cargando ajustes…</p>
+    <p class="muted">{$t("privacy.diagnostics.loading_settings")}</p>
   {:else if !settings}
-    <p class="error">No se pudieron cargar los ajustes.</p>
+    <p class="error">{$t("privacy.diagnostics.load_error")}</p>
   {/if}
   {#if actionMessage}
-    <p class="ok" role="status" data-testid="action-message">{actionMessage}</p>
+    <p class="ok" role="status" data-testid="action-message">{$t(actionMessage, actionMessageParams)}</p>
   {/if}
 </section>
 

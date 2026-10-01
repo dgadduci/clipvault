@@ -25,14 +25,15 @@
   } from "./lib/management";
   import { onMount } from "svelte";
   import type { RetentionPolicy, Settings } from "./types";
+  import { t } from "./lib/localization.ts";
 
   export let onSettingsChanged: (settings: Settings) => void = () => {};
 
-  const retentionChoices: { value: RetentionPolicy; label: string }[] = [
-    { value: "forever", label: "Conservar siempre" },
-    { value: "days_7", label: "7 días" },
-    { value: "days_30", label: "30 días" },
-    { value: "days_90", label: "90 días" },
+  const retentionChoices: { value: RetentionPolicy }[] = [
+    { value: "forever" },
+    { value: "days_7" },
+    { value: "days_30" },
+    { value: "days_90" },
   ];
 
   let settings: Settings | null = null;
@@ -48,7 +49,7 @@
     try {
       settings = await settingsGetCommand();
     } catch (error) {
-      persistenceError = error instanceof Error ? error.message : String(error);
+      persistenceError = "retention.error.load";
     } finally {
       loading = false;
     }
@@ -63,9 +64,9 @@
       const next = await settingsSetCommand({ retention: policy });
       settings = next;
       onSettingsChanged(next);
-      retentionMessage = `Política de retención actualizada: ${describeRetention(policy)}`;
+      retentionMessage = $t("retention.policy.updated", { policy: $t(`retention.policy.${policy}`) });
     } catch (error) {
-      persistenceError = error instanceof Error ? error.message : String(error);
+      persistenceError = "retention.error.save";
     } finally {
       policyBusy = null;
     }
@@ -77,9 +78,9 @@
     busy = true;
     try {
       const preview = await retentionPreviewCommand();
-      retentionMessage = describeRetentionPreview(preview);
+      retentionMessage = describeRetentionPreview(preview, $t);
     } catch (error) {
-      retentionError = error instanceof Error ? error.message : String(error);
+      retentionError = "retention.error.preview";
     } finally {
       busy = false;
     }
@@ -91,17 +92,12 @@
     busy = true;
     try {
       const result = await applyRetentionCommand();
-      retentionMessage = describeRetentionResult(result);
+      retentionMessage = describeRetentionResult(result, $t);
     } catch (error) {
-      retentionError = error instanceof Error ? error.message : String(error);
+      retentionError = "retention.error.apply";
     } finally {
       busy = false;
     }
-  }
-
-  function describeRetention(policy: RetentionPolicy): string {
-    const entry = retentionChoices.find((c) => c.value === policy);
-    return entry ? entry.label : policy;
   }
 
   onMount(() => {
@@ -111,18 +107,16 @@
 
 <section class="retention" data-testid="retention-modal">
   <article>
-    <h3>Política de retención</h3>
-    <p class="muted">
-      Las entradas favoritas nunca se eliminan automáticamente.
-    </p>
+    <h3>{$t("retention.policy.title")}</h3>
+    <p class="muted">{$t("retention.policy.favorites_note")}</p>
     {#if loading}
-      <p class="muted">Cargando ajustes…</p>
+      <p class="muted">{$t("common.loading")}</p>
     {:else if persistenceError}
       <p class="error" role="alert" data-testid="retention-load-error">
-        {persistenceError}
+        {$t(persistenceError)}
       </p>
     {:else if settings}
-      <div class="row" role="radiogroup" aria-label="Política de retención">
+      <div class="row" role="radiogroup" aria-label={$t("retention.policy.title")}>
         {#each retentionChoices as choice (choice.value)}
           <label class="radio">
             <input
@@ -134,7 +128,7 @@
               disabled={policyBusy !== null}
               data-testid="retention-radio-{choice.value}"
             />
-            <span>{choice.label}</span>
+            <span>{$t(`retention.policy.${choice.value}`)}</span>
           </label>
         {/each}
       </div>
@@ -142,12 +136,8 @@
   </article>
 
   <article>
-    <h3>Acciones de retención</h3>
-    <p class="muted">
-      <strong>Preview retention</strong> calcula cuántas entradas no favoritas
-      se eliminarían con la política actual sin tocar la base de datos.
-      <strong>Apply retention now</strong> ejecuta la purga.
-    </p>
+    <h3>{$t("retention.actions.title")}</h3>
+    <p class="muted">{$t("retention.actions.description")}</p>
     <div class="row">
       <button
         type="button"
@@ -155,7 +145,7 @@
         disabled={busy}
         data-testid="preview-retention"
       >
-        {busy ? "Calculando…" : "Preview retention"}
+        {busy ? $t("retention.preview.calculating") : $t("retention.preview.action")}
       </button>
       <button
         type="button"
@@ -163,7 +153,7 @@
         disabled={busy}
         data-testid="apply-retention"
       >
-        {busy ? "Aplicando…" : "Apply retention now"}
+        {busy ? $t("retention.apply.applying") : $t("retention.apply.action")}
       </button>
     </div>
     {#if retentionMessage}
@@ -175,7 +165,7 @@
         role="alert"
         data-testid="retention-error"
       >
-        {retentionError}
+        {$t(retentionError)}
       </p>
     {/if}
   </article>

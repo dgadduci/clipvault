@@ -33,14 +33,21 @@ pub struct TauriTrayHandle<R: Runtime = tauri::Wry> {
     app: AppHandle<R>,
     menu: Mutex<Vec<TrayAction>>,
     capture_enabled: Mutex<bool>,
+    language: Mutex<String>,
 }
 
 impl<R: Runtime> TauriTrayHandle<R> {
-    fn new(app: AppHandle<R>, actions: Vec<TrayAction>, capture_enabled: bool) -> Self {
+    fn new(
+        app: AppHandle<R>,
+        actions: Vec<TrayAction>,
+        capture_enabled: bool,
+        language: String,
+    ) -> Self {
         Self {
             app,
             menu: Mutex::new(actions),
             capture_enabled: Mutex::new(capture_enabled),
+            language: Mutex::new(language),
         }
     }
 }
@@ -54,7 +61,8 @@ impl<R: Runtime> TrayHandle for TauriTrayHandle<R> {
         menu.clear();
         menu.extend(entries.iter().map(|e| e.action));
         let capture_enabled = *self.capture_enabled.lock();
-        rebuild_menu(&self.app, &menu, capture_enabled)
+        let language = self.language.lock().clone();
+        rebuild_menu(&self.app, &menu, capture_enabled, &language)
     }
 
     fn invoke(
@@ -105,7 +113,15 @@ impl<R: Runtime> TauriTrayHandle<R> {
     fn update_capture_enabled(&self, enabled: bool) -> Result<(), clipvault_platform::TrayError> {
         let menu = self.menu.lock();
         *self.capture_enabled.lock() = enabled;
-        rebuild_menu(&self.app, &menu, enabled)
+        let language = self.language.lock().clone();
+        rebuild_menu(&self.app, &menu, enabled, &language)
+    }
+
+    fn update_language(&self, language: &str) -> Result<(), clipvault_platform::TrayError> {
+        let menu = self.menu.lock();
+        *self.language.lock() = language.to_string();
+        let capture_enabled = *self.capture_enabled.lock();
+        rebuild_menu(&self.app, &menu, capture_enabled, language)
     }
 }
 
@@ -127,50 +143,51 @@ fn rebuild_menu<R: Runtime>(
     app: &AppHandle<R>,
     actions: &[TrayAction],
     capture_enabled: bool,
+    language: &str,
 ) -> Result<(), clipvault_platform::TrayError> {
     let menu = MenuBuilder::new(app)
         .items(&[
             &menu_item(
                 app,
                 ID_OPEN_MAIN,
-                "Open ClipVault",
+                &crate::localization::text(language, "tray.main"),
                 actions.contains(&TrayAction::OpenMainWindow),
             ),
             &menu_item(
                 app,
                 ID_OPEN_QUICK,
-                "Open quick search",
+                &crate::localization::text(language, "tray.quick_search"),
                 actions.contains(&TrayAction::OpenQuickSearch),
             ),
             &menu_item(
                 app,
                 ID_OPEN_FAVORITES,
-                "Favorites",
+                &crate::localization::text(language, "tray.favorites"),
                 actions.contains(&TrayAction::OpenFavorites),
             ),
             &menu_item(
                 app,
                 ID_CLEAR_HISTORY,
-                "Clear history…",
+                &crate::localization::text(language, "tray.clear_history"),
                 actions.contains(&TrayAction::ClearHistory),
             ),
             &menu_item(
                 app,
                 ID_OPEN_SETTINGS,
-                "Settings",
+                &crate::localization::text(language, "tray.settings"),
                 actions.contains(&TrayAction::OpenSettings),
             ),
             &menu_item(
                 app,
                 ID_TOGGLE_CAPTURE,
-                &capture_menu_label(capture_enabled),
+                &capture_menu_label(capture_enabled, language),
                 actions.contains(&TrayAction::ToggleClipboardCapture),
             ),
             &menu_separator(app),
             &menu_item(
                 app,
                 ID_QUIT,
-                "Quit ClipVault",
+                &crate::localization::text(language, "tray.quit"),
                 actions.contains(&TrayAction::Quit),
             ),
         ])
@@ -184,17 +201,17 @@ fn rebuild_menu<R: Runtime>(
     Ok(())
 }
 
-fn capture_menu_label(enabled: bool) -> String {
-    let action = if enabled {
-        "Pausar capturas"
+fn capture_menu_label(enabled: bool, language: &str) -> String {
+    let key = if enabled {
+        "tray.pause_captures"
     } else {
-        "Reanudar capturas"
+        "tray.resume_captures"
     };
     #[cfg(target_os = "macos")]
     let shortcut = "⌘⌥⇧B";
     #[cfg(not(target_os = "macos"))]
     let shortcut = "Ctrl+Alt+Shift+B";
-    format!("{action} ({shortcut})")
+    crate::localization::text(language, key).replace("{shortcut}", shortcut)
 }
 
 fn menu_item<R: Runtime>(
@@ -228,6 +245,7 @@ impl TauriTrayController {
     pub fn install(
         app: &AppHandle<tauri::Wry>,
         capture_enabled: bool,
+        language: &str,
         on_menu_event: impl Fn(&AppHandle<tauri::Wry>, MenuEvent) + Send + Sync + 'static,
         on_tray_event: impl Fn(&tauri::tray::TrayIcon<tauri::Wry>, TrayIconEvent)
             + Send
@@ -245,19 +263,49 @@ impl TauriTrayController {
         ];
         let initial_menu = MenuBuilder::new(app)
             .items(&[
-                &menu_item(app, ID_OPEN_MAIN, "Open ClipVault", true),
-                &menu_item(app, ID_OPEN_QUICK, "Open quick search", true),
-                &menu_item(app, ID_OPEN_FAVORITES, "Favorites", true),
-                &menu_item(app, ID_CLEAR_HISTORY, "Clear history…", true),
-                &menu_item(app, ID_OPEN_SETTINGS, "Settings", true),
+                &menu_item(
+                    app,
+                    ID_OPEN_MAIN,
+                    &crate::localization::text(language, "tray.main"),
+                    true,
+                ),
+                &menu_item(
+                    app,
+                    ID_OPEN_QUICK,
+                    &crate::localization::text(language, "tray.quick_search"),
+                    true,
+                ),
+                &menu_item(
+                    app,
+                    ID_OPEN_FAVORITES,
+                    &crate::localization::text(language, "tray.favorites"),
+                    true,
+                ),
+                &menu_item(
+                    app,
+                    ID_CLEAR_HISTORY,
+                    &crate::localization::text(language, "tray.clear_history"),
+                    true,
+                ),
+                &menu_item(
+                    app,
+                    ID_OPEN_SETTINGS,
+                    &crate::localization::text(language, "tray.settings"),
+                    true,
+                ),
                 &menu_item(
                     app,
                     ID_TOGGLE_CAPTURE,
-                    &capture_menu_label(capture_enabled),
+                    &capture_menu_label(capture_enabled, language),
                     true,
                 ),
                 &menu_separator(app),
-                &menu_item(app, ID_QUIT, "Quit ClipVault", true),
+                &menu_item(
+                    app,
+                    ID_QUIT,
+                    &crate::localization::text(language, "tray.quit"),
+                    true,
+                ),
             ])
             .build()?;
 
@@ -273,7 +321,12 @@ impl TauriTrayController {
             .build(app)?;
 
         Ok(Arc::new(Self {
-            handle: Arc::new(TauriTrayHandle::new(app.clone(), actions, capture_enabled)),
+            handle: Arc::new(TauriTrayHandle::new(
+                app.clone(),
+                actions,
+                capture_enabled,
+                language.to_string(),
+            )),
             _icon: icon,
         }))
     }
@@ -290,6 +343,10 @@ impl TauriTrayController {
     pub fn set_capture_enabled(&self, enabled: bool) -> Result<(), clipvault_platform::TrayError> {
         self.handle.update_capture_enabled(enabled)
     }
+
+    pub fn set_language(&self, language: &str) -> Result<(), clipvault_platform::TrayError> {
+        self.handle.update_language(language)
+    }
 }
 
 impl TrayController for TauriTrayController {
@@ -298,6 +355,7 @@ impl TrayController for TauriTrayController {
             app: self.handle.app.clone(),
             menu: Mutex::new(self.handle.menu.lock().clone()),
             capture_enabled: Mutex::new(*self.handle.capture_enabled.lock()),
+            language: Mutex::new(self.handle.language.lock().clone()),
         }))
     }
 
@@ -320,7 +378,12 @@ mod tests {
         WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
             .build()
             .expect("mock main window");
-        let tray = TauriTrayHandle::<MockRuntime>::new(app.handle().clone(), Vec::new(), true);
+        let tray = TauriTrayHandle::<MockRuntime>::new(
+            app.handle().clone(),
+            Vec::new(),
+            true,
+            "en".to_string(),
+        );
 
         assert_eq!(
             tray.invoke(TrayAction::OpenMainWindow)
@@ -331,10 +394,10 @@ mod tests {
 
     #[test]
     fn capture_menu_label_reflects_the_current_state() {
-        let active = capture_menu_label(true);
-        let paused = capture_menu_label(false);
-        assert!(active.starts_with("Pausar capturas ("));
-        assert!(paused.starts_with("Reanudar capturas ("));
+        let active = capture_menu_label(true, "en");
+        let paused = capture_menu_label(false, "en");
+        assert!(active.starts_with("Pause captures ("));
+        assert!(paused.starts_with("Resume captures ("));
         assert!(active.ends_with("B)"));
         assert!(paused.ends_with("B)"));
     }

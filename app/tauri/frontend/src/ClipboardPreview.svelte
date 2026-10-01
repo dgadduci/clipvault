@@ -49,11 +49,11 @@
   import {
     CONTENT_TYPE_ICON_SPRITE,
     contentTypeIconId,
-    contentTypeIconLabel,
+    contentTypeTranslationKey,
   } from "./lib/contentTypeIcons.ts";
   import { sourceAppAccessibleLabel } from "./lib/sourceAppFallback.ts";
-  import { contentTypeLabel } from "./lib/contentType.ts";
   import { formatElapsedTime } from "./lib/elapsedTime.ts";
+  import { localeStore, t } from "./lib/localization.ts";
   import {
     createClipboardAssetResolver,
     entryFullPreviewText,
@@ -266,13 +266,13 @@
       ? ""
       : (entry.title ?? "").trim().length > 0
         ? (entry.title ?? "").trim()
-        : contentTypeLabel(entry.content_type);
+        : $t(contentTypeTranslationKey(entry.content_type));
   $: derivedAccessibleLabel =
-    accessibleLabel ?? (entry == null ? "" : `Previsualización de ${titleLabel}`);
+    accessibleLabel ?? (entry == null ? "" : $t("preview.accessible", { title: titleLabel }));
   $: sourceLabel =
-    entry == null ? "" : sourceAppAccessibleLabel(entry);
+    entry == null ? "" : sourceAppAccessibleLabel(entry, $t);
   $: typeLabel =
-    entry == null ? "" : contentTypeIconLabel(entry.content_type);
+    entry == null ? "" : $t(contentTypeTranslationKey(entry.content_type));
   $: codeLanguageLabel =
     entry == null || !shouldShowCodeLanguageBadge(entry)
       ? ""
@@ -304,7 +304,7 @@
           data-testid="{testIdPrefix}-type"
           data-content-type={record.content_type}
           aria-hidden="true"
-          title={`Tipo: ${typeLabel}`}
+          title={$t("history.card.content_type", { type: typeLabel })}
         >
           <svg
             aria-hidden="true"
@@ -326,8 +326,8 @@
           type="button"
           class="cv-preview-close"
           data-testid="{testIdPrefix}-close"
-          aria-label="Cerrar previsualización"
-          title="Cerrar (Escape)"
+          aria-label={$t("preview.close")}
+          title={$t("preview.close_escape")}
           bind:this={closeButtonEl}
           on:click={handleClose}
         >
@@ -353,14 +353,14 @@
               class="cv-preview-image-unavailable"
               data-testid="{testIdPrefix}-image-loading"
             >
-              Cargando imagen…
+              {$t("preview.loading_image")}
             </p>
           {:else}
             <p
               class="cv-preview-image-unavailable"
               data-testid="{testIdPrefix}-image-unavailable"
             >
-              Vista previa no disponible.
+              {$t("preview.unavailable")}
             </p>
           {/if}
         {:else if fullText.length === 0}
@@ -368,7 +368,7 @@
             class="cv-preview-text-empty"
             data-testid="{testIdPrefix}-text-empty"
           >
-            (Captura vacía)
+            {$t("preview.empty_capture")}
           </p>
         {:else if highlightedHtml && shouldRenderHighlightedPreview(record)}
           <pre
@@ -401,14 +401,14 @@
             data-code-language={record.code_language ?? ""}
             title={`Lenguaje: ${codeLanguageLabel}`}
           >
-            Código · {codeLanguageLabel}
+            {$t("preview.code_language", { language: codeLanguageLabel })}
           </span>
         {/if}
         <span
           class="cv-preview-elapsed"
           data-testid="{testIdPrefix}-elapsed"
         >
-          {formatElapsedTime(record.created_at, new Date()).visual}
+          {formatElapsedTime(record.created_at, new Date(), $localeStore).visual}
         </span>
       </footer>
     </div>

@@ -9,17 +9,12 @@
  */
 
 const GNOME_ERROR_MESSAGES: Record<string, string> = {
-  bundled_missing:
-    "Esta build no incluye los archivos de la extensión GNOME. Reiniciá ClipVault desde la build actual.",
-  install_error:
-    "No se pudo instalar la extensión local. Verificá que tu directorio de usuario permita crear extensiones de GNOME y reintentá.",
-  listener_error:
-    "No se pudo preparar la conexión local con GNOME. No se aplicó la integración; reintentá tras cerrar otras instancias de ClipVault.",
-  consent_error:
-    "No se pudo guardar tu decisión de integración. Reintentá.",
-  feature_disabled:
-    "La integración GNOME no está incluida en esta build.",
-  invalid_consent: "La decisión de consentimiento no es válida. Reintentá.",
+  bundled_missing: "gnome.error.bundled_missing",
+  install_error: "gnome.error.install",
+  listener_error: "gnome.error.listener",
+  consent_error: "gnome.error.consent",
+  feature_disabled: "gnome.error.feature_disabled",
+  invalid_consent: "gnome.error.invalid_consent",
 };
 
 function commandErrorKind(error: unknown): string | null {
@@ -37,5 +32,5 @@ export function describeGnomeIntegrationError(error: unknown): string {
   if (kind && GNOME_ERROR_MESSAGES[kind]) {
     return GNOME_ERROR_MESSAGES[kind];
   }
-  return "No se pudo completar la operación de integración GNOME. Reintentá.";
+  return "gnome.error.generic";
 }

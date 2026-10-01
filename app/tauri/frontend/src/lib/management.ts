@@ -82,22 +82,30 @@ export function isClearConfirmationRequired(response: ClearResponse): boolean {
  * conservative so the frontend never has to map between the database
  * identifier and a user-visible string on its own.
  */
-export function describeRetentionPreview(preview: RetentionPreview): string {
+type RetentionTranslate = (key: string, params?: Record<string, string | number | Date>) => string;
+
+export function describeRetentionPreview(preview: RetentionPreview, translateText?: RetentionTranslate): string {
   switch (preview.policy) {
     case "forever":
-      return "Retention is set to forever: nothing will be purged automatically.";
+      return translateText?.("retention.preview.forever") ?? "Retention is set to forever: nothing will be purged automatically.";
     case "days_7":
     case "days_30":
     case "days_90":
-      return preview.would_remove === 0
-        ? `No non-favorite entries are older than the configured retention period.`
-        : `${preview.would_remove} non-favorite entr${preview.would_remove === 1 ? "y" : "ies"} would be removed by the next retention pass.`;
+      return translateText
+        ? preview.would_remove === 0
+          ? translateText("retention.preview.none")
+          : translateText("retention.preview.would_remove", { count: preview.would_remove })
+        : preview.would_remove === 0
+          ? "No non-favorite entries are older than the configured retention period."
+          : `${preview.would_remove} non-favorite entr${preview.would_remove === 1 ? "y" : "ies"} would be removed by the next retention pass.`;
   }
 }
 
-export function describeRetentionResult(result: RetentionResponse): string {
+export function describeRetentionResult(result: RetentionResponse, translateText?: RetentionTranslate): string {
   if (result.removed === 0) {
-    return "No non-favorite entries were removed by the retention pass.";
+    return translateText?.("retention.result.none") ?? "No non-favorite entries were removed by the retention pass.";
   }
-  return `${result.removed} non-favorite entr${result.removed === 1 ? "y" : "ies"} removed by the retention pass.`;
+  return translateText
+    ? translateText("retention.result.removed", { count: result.removed })
+    : `${result.removed} non-favorite entr${result.removed === 1 ? "y" : "ies"} removed by the retention pass.`;
 }

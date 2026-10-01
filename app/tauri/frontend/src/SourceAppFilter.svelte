@@ -36,6 +36,7 @@
   import { sourceAppIconCommand } from "./lib/tauri.ts";
   import { APP_FALLBACK_ICON_SVG } from "./lib/contentTypeIcons.ts";
   import { filterComboboxStyles } from "./lib/filterTokens.ts";
+  import { t } from "./lib/localization.ts";
   import type {
     SourceAppFilter,
     SourceApplicationOption,
@@ -43,7 +44,7 @@
 
   export let selected: SourceAppFilter;
   export let options: SourceApplicationOption[];
-  export let ariaLabel: string = "Filtrar por aplicación fuente";
+  export let ariaLabel: string = "";
   /**
    * Stable id used to wire `aria-controls` to the listbox. Kept on
    * the parent so the rest of the desktop (toolbar regression
@@ -67,7 +68,11 @@
   $: activeKey = activeIndex >= 0 && activeIndex < optionKeys.length
     ? optionKeys[activeIndex]
     : null;
-  $: triggerLabel = labelForSelected(selected);
+  $: triggerLabel = selected.kind === "all"
+    ? $t("filter.all")
+    : selected.kind === "unknown"
+      ? $t("filter.unknown_app")
+      : labelForSelected(selected);
   $: triggerAriaExpanded = open ? "true" : "false";
   $: triggerAriaActiveDescendant = open && activeKey ? `${testId}-option-${activeKey}` : null;
   $: selectedOptionIconUrl = selected.kind === "known" || selected.kind === "imported"
@@ -96,14 +101,14 @@
   function labelForSelected(value: SourceAppFilter): string {
     switch (value.kind) {
       case "all":
-        return "Todas";
+        return "";
       case "known":
         return options.find((option) => option.source_app === value.source_app)?.display_name ??
           "Aplicación";
       case "imported":
         return value.display_name;
       case "unknown":
-        return "Aplicación desconocida";
+        return "";
     }
   }
 
@@ -113,9 +118,9 @@
   ): boolean {
     switch (value.kind) {
       case "all":
-        return option.display_name === "Todas";
+        return option.filter.kind === "all";
       case "unknown":
-        return option.display_name === "Aplicación desconocida";
+        return option.filter.kind === "unknown";
       case "known":
         return option.source_app === value.source_app;
       case "imported":
@@ -139,9 +144,9 @@
     return list.findIndex((option) => {
       switch (value.kind) {
         case "all":
-          return option.display_name === "Todas";
+          return option.filter.kind === "all";
         case "unknown":
-          return option.display_name === "Aplicación desconocida";
+          return option.filter.kind === "unknown";
         case "known":
           return option.source_app === value.source_app;
         case "imported":
@@ -380,7 +385,7 @@
     aria-haspopup="listbox"
     aria-expanded={triggerAriaExpanded as "true" | "false"}
     aria-controls={`${testId}-listbox`}
-    aria-label={ariaLabel}
+    aria-label={ariaLabel || $t("filter.source_app")}
     aria-activedescendant={triggerAriaActiveDescendant}
     bind:this={triggerEl}
     on:click={toggle}
@@ -416,7 +421,7 @@
       class="listbox"
       role="listbox"
       id={`${testId}-listbox`}
-      aria-label={ariaLabel}
+      aria-label={ariaLabel || $t("filter.source_app")}
       bind:this={listEl}
       use:anchorPopupToViewport={{
         anchor: () => triggerEl,
@@ -447,7 +452,13 @@
               <img src={iconUrls.get(key) ?? undefined} alt="" />
             {/if}
           </span>
-          <span class="option-label">{option.display_name}</span>
+          <span class="option-label">
+            {option.filter.kind === "all"
+              ? $t("filter.all")
+              : option.filter.kind === "unknown"
+                ? $t("filter.unknown_app")
+                : option.display_name}
+          </span>
         </li>
       {/each}
     </ul>
