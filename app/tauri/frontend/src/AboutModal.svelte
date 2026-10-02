@@ -20,6 +20,13 @@
    */
   import type { Diagnostics } from "./types";
   import { t } from "./lib/localization.ts";
+  import {
+    checkForUpdates,
+    installAvailableUpdate,
+    isApplicationUpdaterEnabled,
+    restartAfterUpdate,
+    updateState,
+  } from "./lib/applicationUpdates";
 
   export let diagnostics: Diagnostics | null = null;
   export let onClose: () => void;
@@ -39,6 +46,18 @@
     if (raw && raw.length > 0) return `v${raw}`;
     return "v—";
   })();
+  $: updaterEnabled = isApplicationUpdaterEnabled();
+
+  function runUpdateAction(): void {
+    if ($updateState.status === "available") {
+      void installAvailableUpdate();
+    } else if ($updateState.status === "restart_required" ||
+      ($updateState.status === "error" && $updateState.errorPhase === "restart")) {
+      void restartAfterUpdate();
+    } else {
+      void checkForUpdates();
+    }
+  }
 </script>
 
 <section class="about-section" data-testid="about-modal">
@@ -55,6 +74,55 @@
     </dl>
     <p class="muted small">{$t("about.version_details")}</p>
   </article>
+  {#if updaterEnabled}
+    <section class="update-block" data-testid="about-update" aria-live="polite">
+      <p class="muted update-status" role="status" data-testid="about-update-status">
+        {#if $updateState.status === "checking"}
+          {$t("about.update.checking")}
+        {:else if $updateState.status === "current"}
+          {$t("about.update.current")}
+        {:else if $updateState.status === "available"}
+          {$t("about.update.available", { version: $updateState.availableVersion ?? "" })}
+        {:else if $updateState.status === "installing" && $updateState.progressPercent !== null}
+          {$t("about.update.progress", { progress: $updateState.progressPercent })}
+        {:else if $updateState.status === "installing"}
+          {$t("about.update.installing")}
+        {:else if $updateState.status === "restart_required"}
+          {$t("about.update.restart_required", { version: $updateState.availableVersion ?? "" })}
+        {:else if $updateState.status === "error" && $updateState.errorPhase === "restart"}
+          {$t("about.update.restart_error")}
+        {:else if $updateState.status === "error"}
+          {$t("about.update.error")}
+        {:else}
+          {$t("about.update.idle")}
+        {/if}
+      </p>
+      <div class="row" data-testid="about-update-actions">
+        {#if $updateState.status === "checking" || $updateState.status === "installing"}
+          <button type="button" class="update-action" disabled>
+            {$updateState.status === "checking"
+              ? $t("about.update.checking_action")
+              : $t("about.update.installing_action")}
+          </button>
+        {:else if $updateState.status === "available"}
+          <button type="button" class="update-action" on:click={runUpdateAction}>
+            {$t("about.update.install")}
+          </button>
+        {:else if $updateState.status === "restart_required" ||
+          ($updateState.status === "error" && $updateState.errorPhase === "restart")}
+          <button type="button" class="update-action" on:click={runUpdateAction}>
+            {$t("about.update.restart")}
+          </button>
+        {:else}
+          <button type="button" class="update-action" on:click={runUpdateAction}>
+            {$updateState.status === "error"
+              ? $t("about.update.retry")
+              : $t("about.update.check")}
+          </button>
+        {/if}
+      </div>
+    </section>
+  {/if}
   <div class="row" data-testid="about-actions">
     <button
       type="button"
@@ -117,6 +185,37 @@
     display: flex;
     gap: 0.5rem;
     justify-content: flex-end;
+  }
+
+  .update-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--cv-border, #30363d);
+  }
+
+  .update-status {
+    margin: 0;
+  }
+
+  button.update-action {
+    background: var(--cv-surface-raised, #30363d);
+    color: var(--cv-fg, #e6edf3);
+    border: 1px solid var(--cv-border, #30363d);
+    padding: 0.45rem 0.85rem;
+    border-radius: var(--cv-radius-sm, 6px);
+    cursor: pointer;
+    font: inherit;
+  }
+
+  button.update-action:hover:not(:disabled) {
+    background: var(--cv-surface-hover, #3b4654);
+  }
+
+  button.update-action:disabled {
+    opacity: 0.7;
+    cursor: wait;
   }
 
   button.close {

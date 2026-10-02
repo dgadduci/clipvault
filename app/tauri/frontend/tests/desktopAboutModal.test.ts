@@ -80,16 +80,14 @@ test("DesktopToolbar exposes exactly one 'Acerca de' item inside the global elli
   // without scraping labels.
   assert.match(source, /data-testid="open-about"/);
   assert.match(source, /onOpenAbout/);
-  // The visible label must appear exactly once as the text content
-  // of a `<button>` element — a regression that duplicates the
-  // entry (for example by also surfacing it through the per-card
-  // menu) would surface here.
-  const labelMatches =
-    source.match(/<button[\s\S]*?>\s*Acerca de\s*<\/button>/g) ?? [];
+  // The visible label is translated through the product catalog.
+  // A regression that duplicates the entry (for example by also
+  // surfacing it through the per-card menu) would surface here.
+  const labelMatches = source.match(/\$t\("toolbar\.menu\.about"\)/g) ?? [];
   assert.equal(
     labelMatches.length,
     1,
-    "Acerca de must appear exactly once as the text content of a <button>",
+    "the translated About label must appear exactly once",
   );
 });
 
@@ -138,7 +136,7 @@ test("App.svelte mounts the About modal exactly once and routes through the shar
   // configuration dialogs use, so focus, Escape, the backdrop
   // click and the destroy cleanup stay symmetric.
   assert.match(source, /<Modal[\s\S]*?open=\{openModal === "about"\}/);
-  assert.match(source, /title="Acerca de"/);
+  assert.match(source, /title=\{\$t\("app\.modal\.about"\)\}/);
   assert.match(source, /<AboutModal\s+diagnostics=\{diagnostics\}/);
   // The handler the toolbar dispatches through must live on the
   // parent so the menu / modal state machine stays single-sourced.

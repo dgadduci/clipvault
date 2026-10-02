@@ -52,7 +52,28 @@ fn main() {
 
     init_tracing();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default().plugin(tauri_plugin_process::init());
+
+    // The updater public key is a public GitHub Actions variable. It is
+    // compiled into release builds by the release workflow and deliberately
+    // omitted from local development builds, where the frontend also disables
+    // update checks. Keeping it out of source avoids committing a key before
+    // the matching private signing key has been provisioned.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let builder = if let Some(public_key) = option_env!("TAURI_UPDATER_PUBLIC_KEY")
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        builder.plugin(
+            tauri_plugin_updater::Builder::new()
+                .pubkey(public_key)
+                .build(),
+        )
+    } else {
+        builder
+    };
+
+    builder
         .setup(|app| {
             trace_main_window_lifecycle_for_app(app.handle(), "configured", None);
             trace_main_window_lifecycle_for_app(app.handle(), "setup_entered", None);

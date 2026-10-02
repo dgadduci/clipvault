@@ -59,6 +59,7 @@
     unorganizedClearableCountCommand,
   } from "./lib/tauri";
   import { retryGuidance } from "./lib/guidance";
+  import { startAutomaticUpdateCheck } from "./lib/applicationUpdates";
   import { runSearch } from "./lib/search";
   import {
     applyDestructive,
@@ -2268,6 +2269,9 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
 
   onMount(() => {
     void initializeKeyboardShortcuts();
+    // Update metadata is checked in the background only for signed
+    // production builds. A transient network failure never gates startup.
+    startAutomaticUpdateCheck();
     void refresh();
     startPairingInvitationRefresh();
     // Boot the desktop-owned snapshot polling cadence so a fresh

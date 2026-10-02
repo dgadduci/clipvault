@@ -126,6 +126,7 @@ clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
 ] }
 
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-process = "=2.2.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -137,6 +138,7 @@ arboard = { workspace = true }
 global-hotkey = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+tauri-plugin-updater = "=2.12.0"
 clipvault-core = { path = "../../../crates/clipvault-core", features = [
     "macos-native",
     "local-peer-discovery-mdns",
@@ -153,6 +155,7 @@ clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
 objc2-foundation = { workspace = true }
 
 [target.'cfg(all(target_os = "linux", not(target_os = "macos")))'.dependencies]
+tauri-plugin-updater = "=2.12.0"
 clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
     "clipboard-arboard",
     "arboard-wayland-data-control",

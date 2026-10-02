@@ -1,0 +1,199 @@
+name: Desktop release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-release:
+    name: Validate release metadata and signing setup
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate stable SemVer tag and canonical versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          match = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag)
+          if match is None:
+              raise SystemExit(f"Release tag is not stable SemVer: {tag}")
+          expected = tag[1:]
+
+          with Path("Cargo.toml").open("rb") as source:
+              cargo_version = tomllib.load(source)["workspace"]["package"]["version"]
+          tauri_version = json.loads(Path("app/tauri/src-tauri/tauri.conf.json").read_text())["version"]
+          frontend_version = json.loads(Path("app/tauri/frontend/package.json").read_text())["version"]
+          versions = {
+              "tag": expected,
+              "Cargo workspace": cargo_version,
+              "Tauri config": tauri_version,
+              "frontend package": frontend_version,
+          }
+          if any(version != expected for version in versions.values()):
+              detail = ", ".join(f"{name}={version}" for name, version in versions.items())
+              raise SystemExit(f"Version mismatch: {detail}")
+          print(f"Validated release version {expected} across all manifests.")
+          PY
+
+      - name: Require a trusted commit on main
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "::error::Release tags must point to a commit reachable from main."
+            exit 1
+          fi
+
+      - name: Require updater and Apple signing configuration
+        env:
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          required=(
+            TAURI_UPDATER_PUBLIC_KEY
+            TAURI_SIGNING_PRIVATE_KEY
+            APPLE_CERTIFICATE
+            APPLE_CERTIFICATE_PASSWORD
+            APPLE_SIGNING_IDENTITY
+            APPLE_ID
+            APPLE_PASSWORD
+            APPLE_TEAM_ID
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Required GitHub variable or secret is missing: $name"
+              exit 1
+            fi
+          done
+          echo "Updater and Apple signing configuration is present."
+
+  build-release:
+    name: Build ${{ matrix.label }}
+    needs: validate-release
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - label: macOS Apple Silicon
+            runner: macos-latest
+            rust_target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --bundles app,dmg
+          - label: macOS Intel
+            runner: macos-latest
+            rust_target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --bundles app,dmg
+          - label: Linux x86_64
+            runner: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            args: --bundles appimage,deb
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: app/tauri/frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: app/tauri/frontend/package-lock.json
+
+      - name: Set up pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.89.0
+          target: ${{ matrix.rust_target }}
+          rustflags: ""
+
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            patchelf \
+            xdg-utils
+
+      - name: Install frontend dependencies
+        working-directory: app/tauri/frontend
+        run: npm ci
+
+      - name: Install pinned Tauri CLI
+        run: cargo install tauri-cli --version 2.11.5 --locked
+
+      - name: Prepare updater public key for Tauri bundling
+        env:
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          overlay = {
+              "plugins": {
+                  "updater": {
+                      "pubkey": os.environ["TAURI_UPDATER_PUBLIC_KEY"],
+                  },
+              },
+          }
+          Path("app/tauri/src-tauri/tauri.release.conf.json").write_text(
+              json.dumps(overlay), encoding="utf-8"
+          )
+          PY
+
+      - name: Build and upload signed release artifacts
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          VITE_CLIPVAULT_UPDATER_ENABLED: "true"
+        with:
+          projectPath: app/tauri
+          tauriScript: cargo tauri
+          args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json
+          tagName: ${{ github.ref_name }}
+          releaseName: ClipVault ${{ github.ref_name }}
+          releaseBody: Review the attached installers and updater manifest before publishing this draft release.
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true

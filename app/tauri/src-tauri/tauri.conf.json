@@ -44,8 +44,9 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all",
+    "active": true,
+    "targets": ["app", "dmg", "appimage", "deb"],
+    "createUpdaterArtifacts": true,
     "resources": [
       "resources/gnome-extension/metadata.json",
       "resources/gnome-extension/extension.js",
@@ -57,6 +58,15 @@
     ],
     "macOS": {
       "infoPlist": "macos/Info.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "requireSignedVersion": true,
+      "endpoints": [
+        "https://github.com/dgadduci/clipvault/releases/latest/download/latest.json"
+      ]
     }
   }
 }
