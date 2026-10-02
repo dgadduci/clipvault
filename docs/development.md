@@ -11,8 +11,8 @@ ambient toolchain override, and no accidental writes to
 
 | Layer | Tool | Version | Pin location |
 | --- | --- | --- | --- |
-| Shell | Rust | 1.89.0 | `rust-toolchain.toml` |
-| Shell | Cargo | 1.89.0 | ships with the Rust toolchain |
+| Shell | Rust | 1.90.0 | `rust-toolchain.toml` |
+| Shell | Cargo | 1.90.0 | ships with the Rust toolchain |
 | Shell | Tauri CLI | 2.x | `cargo install tauri-cli --version "^2"` |
 | Frontend | Node.js | 20 LTS | `app/tauri/frontend/.nvmrc` |
 | Frontend | npm | 10 | `app/tauri/frontend/package.json` (`engines`) |
@@ -35,10 +35,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-The Rust workspace declares `rust-version = "1.85"` and the toolchain
-file pins `1.89.0`. Both checks run on the pinned toolchain; CI
-asserts `rustc --version` reports exactly `1.89.0` so an ambient
-stable compiler cannot silently pass.
+The Rust workspace declares `rust-version = "1.90"` and the toolchain
+file pins `1.90.0`. Local commands and CI use that pinned toolchain so an
+ambient stable compiler cannot silently change the project baseline.
 
 ### 2. Frontend checks (run from `app/tauri/frontend`)
 
