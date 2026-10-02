@@ -88,12 +88,16 @@ el proceso.
 - Producir builds Linux x86_64 en una base compatible con el runtime objetivo y
   publicar `.AppImage` y `.deb`. El manifiesto debe distinguir el tipo de
   instalador para que cada cliente reciba el formato que tiene instalado.
-- Producir builds macOS Apple Silicon e Intel. El actualizador instala el
-  bundle `.app` firmado; el `.dmg` sirve como instalador inicial y descarga
-  manual.
-- Configurar los secretos de Developer ID y notarización requeridos para
-  distribuir builds macOS fuera de la App Store. La clave de firma Tauri no
-  sustituye a la firma de código de Apple.
+- Producir builds macOS Apple Silicon e Intel con identidad de firma ad hoc
+  (`-`). No requieren certificados Developer ID ni credenciales de
+  notarización. macOS puede exigir que el usuario autorice manualmente la app
+  en Privacidad y seguridad; documentar ese flujo y probarlo en los equipos
+  objetivo.
+- La firma ad hoc no identifica al publisher frente a Gatekeeper ni equivale a
+  Developer ID/notarización. La firma Ed25519 de Tauri sigue protegiendo la
+  integridad de cada paquete updater, de forma independiente a Gatekeeper.
+  Migrar a Developer ID y notarización más adelante requerirá configurar
+  credenciales Apple en CI.
 - Crear cada release inicialmente como borrador, revisar artefactos y
   `latest.json`, y publicarlo para que los clientes lo vean. El workflow exige
   que la etiqueta apunte a un commit alcanzable desde `main` y limita la

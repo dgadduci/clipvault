@@ -57,7 +57,8 @@
       "icons/icon.png"
     ],
     "macOS": {
-      "infoPlist": "macos/Info.plist"
+      "infoPlist": "macos/Info.plist",
+      "signingIdentity": "-"
     }
   },
   "plugins": {

@@ -45,32 +45,35 @@ If the private key was generated with a password, also add that password as
 losing it prevents future releases from signing updates trusted by already
 installed clients. Rotating the key requires a separate migration plan.
 
-## macOS signing and notarization
+## macOS builds without an Apple Developer account
 
-Distribution outside the Mac App Store requires an Apple Developer ID
-certificate and notarization credentials. Add these repository secrets before
-tagging a release:
+The macOS bundle uses Tauri's ad-hoc signing identity (`-`). This lets the
+release workflow build Apple Silicon and Intel bundles without Apple Developer
+certificates or notarization credentials. The workflow does not sign with an
+Apple-issued identity and does not submit the application to Apple's notary
+service.
 
-| Secret | Value |
-| --- | --- |
-| `APPLE_CERTIFICATE` | Base64 encoded Developer ID `.p12` certificate |
-| `APPLE_CERTIFICATE_PASSWORD` | Password used to export the `.p12` |
-| `APPLE_SIGNING_IDENTITY` | Developer ID Application identity name |
-| `APPLE_ID` | Apple ID used for notarization |
-| `APPLE_PASSWORD` | App-specific Apple ID password |
-| `APPLE_TEAM_ID` | Apple Developer team ID |
+The Tauri updater still signs each update artifact with the private updater
+key. That signature verifies the update contents; it does not identify the
+publisher to Gatekeeper. macOS can warn that ClipVault is from an unidentified
+developer or cannot be checked for malicious software. Users must first try to
+open the app, then approve it under **System Settings → Privacy & Security →
+Open Anyway**. They should only do this after verifying they downloaded
+ClipVault from the official ClipVault GitHub release. Do not ask users to
+disable Gatekeeper globally.
 
-Never commit the certificate, its password, the Apple password or any private
-key. The validation job checks that the updater and Apple signing settings are
-present without printing their values; it stops before building if they are
-missing.
+Ad-hoc signing is not equivalent to Developer ID signing or notarization.
+Gatekeeper may require manual approval, including after an update. Test this
+flow on the supported macOS versions before distributing broadly. Switching to
+Developer ID signing and notarization later requires an Apple Developer Program
+membership and a separate CI credential setup.
 
 ## First installation and draft review
 
 1. Bump the Cargo workspace, Tauri and frontend versions together.
 2. Push a `vMAJOR.MINOR.PATCH` tag whose commit is reachable from `main`.
 3. Review the draft's macOS `.dmg` and `.app.tar.gz` artifacts, Linux
-   `.AppImage` and `.deb` artifacts, signatures and `latest.json`.
+   `.AppImage` and `.deb` artifacts, Tauri signatures and `latest.json`.
 4. Test updates from each supported installer type, including accepting and
    cancelling the Linux `.deb` authorization prompt.
 5. Publish the draft only after those checks pass. The first client install

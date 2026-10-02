@@ -109,6 +109,34 @@ authorization SHALL cancel the update without breaking the installed client.
   the package
 - **AND** cancelling authorization leaves the installed version usable
 
+### Requirement: macOS releases support ad-hoc signing without Apple credentials
+
+The macOS release workflow SHALL build Apple Silicon and Intel bundles using
+the ad-hoc signing identity when no Apple Developer credentials are configured.
+The workflow SHALL NOT require Apple Developer ID or notarization secrets for
+this mode. Release documentation SHALL explain that ad-hoc signing does not
+identify the publisher to Gatekeeper and that users may need to approve
+ClipVault manually in macOS Privacy & Security settings. Tauri updater
+signatures SHALL remain required independently of macOS code signing.
+
+#### Scenario: User opens an ad-hoc signed macOS release
+
+- **WHEN** a user downloads and opens ClipVault from a GitHub release
+- **THEN** the app bundle has an ad-hoc code signature and a valid Tauri updater
+  signature
+- **AND** the user is told how to approve the app in Privacy & Security if
+  Gatekeeper blocks the first launch
+- **AND** the documentation does not instruct users to disable Gatekeeper
+  globally
+
+#### Scenario: Release build runs without Apple Developer secrets
+
+- **WHEN** the release workflow builds a trusted version tag without Apple
+  Developer ID or notarization credentials
+- **THEN** macOS Apple Silicon and Intel artifacts are still produced using
+  ad-hoc signing
+- **AND** Linux artifacts retain their normal updater signing and packaging
+
 ### Requirement: Update behavior is localized and preserves local data
 
 All update-related product and accessible text SHALL be consumed through

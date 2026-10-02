@@ -46,12 +46,13 @@ manualmente la primera versión que incluya Tauri Updater.
   desde “Acerca de”, con progreso, errores recuperables y confirmación previa a
   instalar/reiniciar.
 - Releases: añadir un workflow de GitHub Actions disparado por tags SemVer,
-  construir los targets soportados, firmar los artefactos y crear releases en
-  borrador para revisión antes de publicarlos.
-- Seguridad operativa: guardar la clave privada del updater y credenciales de
-  firma/notarización de macOS como secretos de CI; entregar la clave pública al
-  build como variable de GitHub Actions y conservar un respaldo seguro de la
-  clave privada.
+  construir los targets soportados, firmar los artefactos updater y crear
+  releases en borrador para revisión antes de publicarlos. Los builds macOS
+  usan firma ad hoc, sin Developer ID ni notarización, y documentan la
+  aprobación manual que Gatekeeper puede exigir.
+- Seguridad operativa: guardar la clave privada del updater como secreto de
+  CI, entregar la clave pública al build como variable de GitHub Actions y
+  conservar un respaldo seguro de la clave privada.
 - Verificación: probar el manifiesto y la instalación en cada formato
   publicado, con atención especial al flujo `.deb` con autorización del
   sistema.

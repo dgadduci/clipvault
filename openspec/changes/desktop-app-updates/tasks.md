@@ -42,8 +42,8 @@
   `latest.json` mediante `tauri-apps/tauri-action`.
 - [x] 4.4 Crear releases en borrador con permisos mínimos de `GITHUB_TOKEN`;
   publicar sólo después de revisar artefactos y manifiesto.
-- [ ] 4.5 Configurar la firma y notarización de macOS con secretos de CI si se
-  habilita distribución externa de esos instaladores.
+- [x] 4.5 Configurar firma ad hoc de macOS sin identidad Apple y documentar la
+  aprobación manual de Gatekeeper para distribución directa.
 - [x] 4.6 Documentar la generación y el respaldo seguro de la clave privada,
   además de la instalación manual de la primera versión con updater.
 
