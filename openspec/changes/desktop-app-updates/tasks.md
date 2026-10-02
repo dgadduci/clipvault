@@ -49,7 +49,7 @@
 
 ## 5. Verificación y rollout
 
-- [ ] 5.1 Validar los manifiestos y enlaces para cada combinación de sistema,
+- [x] 5.1 Validar los manifiestos y enlaces para cada combinación de sistema,
   arquitectura e instalador, incluyendo la actualización `.deb`.
 - [ ] 5.2 Verificar firmas correctas e inválidas, errores de red, descarga,
   confirmación del usuario, cancelación de elevación y relanzamiento.
