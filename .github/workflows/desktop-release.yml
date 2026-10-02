@@ -18,6 +18,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Python for TOML version validation
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Validate stable SemVer tag and canonical versions
         env:
           RELEASE_TAG: ${{ github.ref_name }}
