@@ -144,6 +144,10 @@ jobs:
       - name: Install pinned Tauri CLI
         run: cargo install tauri-cli --version 2.11.5 --locked
 
+      - name: Generate platform application icons
+        run: cargo tauri icon src-tauri/icons/app-icon.png --output src-tauri/icons
+        working-directory: app/tauri
+
       - name: Prepare updater public key for Tauri bundling
         env:
           TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
@@ -154,6 +158,15 @@ jobs:
           from pathlib import Path
 
           overlay = {
+              "bundle": {
+                  "icon": [
+                      "icons/32x32.png",
+                      "icons/128x128.png",
+                      "icons/128x128@2x.png",
+                      "icons/icon.icns",
+                      "icons/icon.png",
+                  ],
+              },
               "plugins": {
                   "updater": {
                       "pubkey": os.environ["TAURI_UPDATER_PUBLIC_KEY"],
