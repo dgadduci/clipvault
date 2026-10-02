@@ -10,7 +10,7 @@
   de macOS y PNG generados para Linux.
 - [x] 2.3 Hacer que el workflow genere los formatos con `tauri icon` antes
   del build de cada target.
-- [ ] 3.1 Validar OpenSpec, el diff y que la configuración referencia los
+- [x] 3.1 Validar OpenSpec, el diff y que la configuración referencia los
   nombres de archivo generados.
 - [ ] 3.2 Reejecutar el workflow de release borrador `v0.0.16` y comprobar
   que los bundles de macOS Apple Silicon/Intel y Linux se crean.
