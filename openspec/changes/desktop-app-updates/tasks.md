@@ -6,7 +6,7 @@
   “Acerca de” y workflows de release.
 - [x] 1.2 Definir GitHub Releases + Tauri Updater + GitHub Actions para macOS y
   Linux, con instalación confirmada por el usuario y sin servidor propio.
-- [ ] 1.3 Confirmar los secretos operativos disponibles: clave privada Tauri y
+- [x] 1.3 Confirmar los secretos operativos disponibles: clave privada Tauri y
   credenciales de firma/notarización macOS; documentar su configuración segura
   sin incorporar valores al repositorio.
 
@@ -36,9 +36,9 @@
 
 - [x] 4.1 Añadir un workflow de GitHub Actions disparado por tags SemVer que
   valide la igualdad de las versiones Cargo, Tauri, frontend y tag.
-- [ ] 4.2 Construir macOS Apple Silicon/Intel y Linux x86_64 desde los paths y
+- [x] 4.2 Construir macOS Apple Silicon/Intel y Linux x86_64 desde los paths y
   comandos admitidos por el repositorio; generar `.dmg`, `.AppImage` y `.deb`.
-- [ ] 4.3 Firmar artefactos con los secretos Tauri, adjuntar firmas y generar
+- [x] 4.3 Firmar artefactos con los secretos Tauri, adjuntar firmas y generar
   `latest.json` mediante `tauri-apps/tauri-action`.
 - [x] 4.4 Crear releases en borrador con permisos mínimos de `GITHUB_TOKEN`;
   publicar sólo después de revisar artefactos y manifiesto.
