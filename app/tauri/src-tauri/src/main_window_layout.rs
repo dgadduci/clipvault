@@ -47,6 +47,31 @@ pub const MAIN_TARGET_HEIGHT: f64 = 460.0;
 /// collapsing the toolbar and the rail.
 pub const MAIN_MIN_WIDTH: f64 = 720.0;
 
+/// Pick usable monitor geometry. Backends can report an empty or
+/// incomplete work area before a window is mapped; in that case the
+/// monitor bounds still provide a useful startup size.
+pub fn resolve_monitor_area(
+    work_area: (f64, f64, f64, f64),
+    monitor_bounds: (f64, f64, f64, f64),
+) -> Option<(f64, f64, f64, f64)> {
+    fn is_valid((x, y, width, height): (f64, f64, f64, f64)) -> bool {
+        x.is_finite()
+            && y.is_finite()
+            && width.is_finite()
+            && height.is_finite()
+            && width > 0.0
+            && height > 0.0
+    }
+
+    if is_valid(work_area) {
+        Some(work_area)
+    } else if is_valid(monitor_bounds) {
+        Some(monitor_bounds)
+    } else {
+        None
+    }
+}
+
 /// Compute the documented startup layout: the main window fills the
 /// work-area width (clamped to the minimum), uses the bounded
 /// height, is centered horizontally inside the work area and is
@@ -58,9 +83,21 @@ pub const MAIN_MIN_WIDTH: f64 = 720.0;
 /// helper is the single source of truth for the math so the unit
 /// tests can pin every documented invariant without a Tauri
 /// runtime.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub fn compute_main_window_layout(
     work_area: (f64, f64, f64, f64),
     scale_factor: f64,
+) -> MainWindowLayout {
+    compute_main_window_layout_with_minimum_width(work_area, scale_factor, MAIN_MIN_WIDTH)
+}
+
+/// Compute a layout with a caller-selected minimum width. Linux uses
+/// this to lower the configured floor when the available monitor area
+/// itself is narrower than `MAIN_MIN_WIDTH`.
+pub fn compute_main_window_layout_with_minimum_width(
+    work_area: (f64, f64, f64, f64),
+    scale_factor: f64,
+    minimum_width: f64,
 ) -> MainWindowLayout {
     let (work_x, work_y, work_width, work_height) = work_area;
     let scale = if scale_factor <= 0.0 {
@@ -68,7 +105,12 @@ pub fn compute_main_window_layout(
     } else {
         scale_factor
     };
-    let logical_width = (work_width / scale).max(MAIN_MIN_WIDTH);
+    let minimum_width = if minimum_width.is_finite() {
+        minimum_width.max(0.0)
+    } else {
+        MAIN_MIN_WIDTH
+    };
+    let logical_width = (work_width / scale).max(minimum_width);
     let logical_height = (work_height / scale).clamp(MAIN_MIN_HEIGHT, MAIN_TARGET_HEIGHT);
     let work_logical_width = work_width / scale;
     let work_logical_x = work_x / scale;
@@ -162,5 +204,37 @@ mod tests {
         assert_eq!(layout.scale_factor, 1.0);
         assert_eq!(layout.logical_size.0, 1920.0);
         assert_eq!(layout.physical_size.0, 1920);
+    }
+
+    #[test]
+    fn layout_falls_back_to_monitor_bounds_when_work_area_is_invalid() {
+        let area = resolve_monitor_area((0.0, 0.0, 0.0, 0.0), (-100.0, 20.0, 1920.0, 1080.0));
+        assert_eq!(area, Some((-100.0, 20.0, 1920.0, 1080.0)));
+
+        let layout = compute_main_window_layout(area.unwrap(), 1.0);
+        assert_eq!(layout.logical_size.0, 1920.0);
+        assert_eq!(layout.logical_position, (-100.0, 20.0));
+    }
+
+    #[test]
+    fn layout_rejects_invalid_work_area_and_monitor_bounds() {
+        assert_eq!(
+            resolve_monitor_area((0.0, 0.0, f64::NAN, 800.0), (0.0, 0.0, -1.0, 800.0),),
+            None
+        );
+    }
+
+    #[test]
+    fn layout_can_fill_a_monitor_narrower_than_the_configured_minimum() {
+        let available_logical_width = 500.0;
+        let layout = compute_main_window_layout_with_minimum_width(
+            (0.0, 0.0, 500.0, 800.0),
+            1.0,
+            MAIN_MIN_WIDTH.min(available_logical_width),
+        );
+
+        assert_eq!(layout.logical_size.0, available_logical_width);
+        assert_eq!(layout.physical_size.0, 500);
+        assert_eq!(layout.logical_position.0, 0.0);
     }
 }

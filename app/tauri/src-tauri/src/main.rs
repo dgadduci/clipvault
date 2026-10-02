@@ -17,6 +17,8 @@ mod metadata_scheduler;
 mod state;
 mod tray;
 
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use clipvault_core::{RedactingMakeWriter, WatchTickOutcome};
@@ -55,14 +57,12 @@ fn main() {
             trace_main_window_lifecycle_for_app(app.handle(), "configured", None);
             trace_main_window_lifecycle_for_app(app.handle(), "setup_entered", None);
 
-            // Resize the main window to the available work area before
-            // anything else so the first paint already shows a desktop
-            // that fills the monitor horizontally. The operation only
-            // runs once during `setup`; afterwards the OS tracks the
-            // user's manual resize and we MUST NOT loop on
-            // `ResizeObserver` events. A monitor query failure falls
-            // back to the conf-file defaults declared in
-            // `tauri.conf.json` so the setup never blocks startup.
+            // Request the monitor-sized main window before building
+            // state. Linux also registers a one-shot correction for
+            // the first compositor-resolved size; it is disarmed before
+            // applying anything so later manual resizes stay user
+            // controlled. A monitor query failure keeps the defaults
+            // declared in `tauri.conf.json` and never blocks startup.
             resize_main_window_to_monitor(app);
             trace_main_window_lifecycle_for_app(app.handle(), "layout_completed", None);
 
@@ -630,16 +630,15 @@ fn trace_main_window_lifecycle_for_app<R: tauri::Runtime>(
 #[allow(dead_code)]
 fn _ensure_arc(_: &Arc<()>) {}
 
-/// Position the main window once during the Tauri `setup` callback.
+/// Apply the main window's startup geometry during Tauri `setup`.
 ///
-/// The window is sized to fill the primary monitor's work area
-/// horizontally and aligned to the top edge so the first paint
-/// already lands in the documented product position. The helper is
-/// intentionally a one-shot pass:
+/// The window is sized to fill the monitor's available area
+/// horizontally and aligned to the top edge. Linux additionally
+/// compares the first compositor-resolved width with the target and
+/// may correct it once:
 ///
-/// - the size and position are only ever written during the `setup`
-///   callback, so a later manual user move/resize is preserved by
-///   the OS and never clobbered by a `ResizeObserver` loop;
+/// - the correction listener is disarmed before it writes, so later
+///   manual user moves and resizes are never clobbered by a loop;
 /// - a missing monitor (headless, RDP, X11 without `RANDR`, …) keeps
 ///   the `tauri.conf.json` defaults, which the conf already picked
 ///   for that case;
@@ -647,52 +646,188 @@ fn _ensure_arc(_: &Arc<()>) {}
 ///   transient `quick-paste` window: only the `main` label is
 ///   touched.
 ///
-/// The math lives in [`crate::main_window_layout`] so the centring
-/// logic is unit tested without a Tauri runtime.
+/// The pure geometry lives in [`crate::main_window_layout`] so its
+/// scale, fallback and sizing rules are unit tested without a Tauri
+/// runtime.
 fn resize_main_window_to_monitor(app: &mut tauri::App) {
-    use crate::main_window_layout::compute_main_window_layout;
-    use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
-
     let Some(window) = app.get_webview_window("main") else {
         trace_main_window_lifecycle_for_app(app.handle(), "monitor_available", None);
         warn!("main window not present at setup; skipping initial layout");
         return;
     };
 
-    let monitor = match window.primary_monitor() {
-        Ok(Some(monitor)) => {
-            trace_main_window_lifecycle(&window, "monitor_available", Some(true));
-            monitor
+    #[cfg(target_os = "linux")]
+    {
+        register_linux_initial_size_correction(window.clone());
+        if let Some(layout) = linux_main_window_layout(&window) {
+            apply_main_window_layout(&window, &layout);
         }
-        Ok(None) => {
-            trace_main_window_lifecycle(&window, "monitor_available", Some(false));
-            warn!("no primary monitor reported; keeping conf defaults");
-            return;
+        return;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        use crate::main_window_layout::compute_main_window_layout;
+        use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
+
+        let monitor = match window.primary_monitor() {
+            Ok(Some(monitor)) => {
+                trace_main_window_lifecycle(&window, "monitor_available", Some(true));
+                monitor
+            }
+            Ok(None) => {
+                trace_main_window_lifecycle(&window, "monitor_available", Some(false));
+                warn!("no primary monitor reported; keeping conf defaults");
+                return;
+            }
+            Err(error) => {
+                trace_main_window_lifecycle(&window, "monitor_available", None);
+                warn!(error = %error, "primary monitor query failed; keeping conf defaults");
+                return;
+            }
+        };
+
+        let scale = monitor.scale_factor();
+        let work_area = monitor.work_area();
+        let work_tuple = (
+            work_area.position.x as f64,
+            work_area.position.y as f64,
+            work_area.size.width.max(1) as f64,
+            work_area.size.height.max(1) as f64,
+        );
+        let layout = compute_main_window_layout(work_tuple, scale);
+
+        let logical_size = LogicalSize::new(layout.logical_size.0, layout.logical_size.1);
+        let physical_size = PhysicalSize::new(layout.physical_size.0, layout.physical_size.1);
+
+        if let Err(error) = window.set_size(logical_size) {
+            warn!(error = %error, "logical resize failed; falling back to physical");
+            if let Err(physical_error) = window.set_size(physical_size) {
+                warn!(error = %physical_error, "physical resize failed; keeping conf defaults");
+            }
         }
-        Err(error) => {
-            trace_main_window_lifecycle(&window, "monitor_available", None);
-            warn!(error = %error, "primary monitor query failed; keeping conf defaults");
-            return;
+
+        let logical_position =
+            LogicalPosition::new(layout.logical_position.0, layout.logical_position.1);
+        let physical_position =
+            PhysicalPosition::new(layout.physical_position.0, layout.physical_position.1);
+
+        if let Err(error) = window.set_position(logical_position) {
+            warn!(error = %error, "logical position failed; falling back to physical");
+            if let Err(physical_error) = window.set_position(physical_position) {
+                warn!(error = %physical_error, "physical position failed; keeping conf defaults");
+            }
         }
+
+        info!(
+            logical_width = layout.logical_size.0,
+            logical_height = layout.logical_size.1,
+            logical_x = layout.logical_position.0,
+            logical_y = layout.logical_position.1,
+            scale = layout.scale_factor,
+            "main window positioned at top center of the primary monitor"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_main_window_layout<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+) -> Option<main_window_layout::MainWindowLayout> {
+    use crate::main_window_layout::{
+        compute_main_window_layout_with_minimum_width, resolve_monitor_area, MAIN_MIN_WIDTH,
     };
 
-    let scale = monitor.scale_factor();
+    let monitor = match window.current_monitor() {
+        Ok(Some(monitor)) => Some(monitor),
+        Ok(None) => None,
+        Err(error) => {
+            warn!(error = %error, "current monitor query failed; trying primary monitor");
+            None
+        }
+    }
+    .or_else(|| match window.primary_monitor() {
+        Ok(Some(monitor)) => Some(monitor),
+        Ok(None) => None,
+        Err(error) => {
+            warn!(error = %error, "primary monitor query failed");
+            None
+        }
+    });
+
+    let Some(monitor) = monitor else {
+        trace_main_window_lifecycle(window, "monitor_available", Some(false));
+        warn!("no monitor geometry reported; keeping configured main window size");
+        return None;
+    };
+    trace_main_window_lifecycle(window, "monitor_available", Some(true));
+
     let work_area = monitor.work_area();
-    let work_tuple = (
-        work_area.position.x as f64,
-        work_area.position.y as f64,
-        work_area.size.width.max(1) as f64,
-        work_area.size.height.max(1) as f64,
+    let monitor_position = monitor.position();
+    let monitor_size = monitor.size();
+    let area = resolve_monitor_area(
+        (
+            work_area.position.x as f64,
+            work_area.position.y as f64,
+            work_area.size.width as f64,
+            work_area.size.height as f64,
+        ),
+        (
+            monitor_position.x as f64,
+            monitor_position.y as f64,
+            monitor_size.width as f64,
+            monitor_size.height as f64,
+        ),
     );
-    let layout = compute_main_window_layout(work_tuple, scale);
+    let Some(area) = area else {
+        warn!("monitor and work-area geometry are invalid; keeping configured main window size");
+        return None;
+    };
+
+    let raw_scale = monitor.scale_factor();
+    let scale = if raw_scale.is_finite() && raw_scale > 0.0 {
+        raw_scale
+    } else {
+        1.0
+    };
+    let available_logical_width = area.2 / scale;
+    let minimum_width = MAIN_MIN_WIDTH.min(available_logical_width);
+    let layout = compute_main_window_layout_with_minimum_width(area, scale, minimum_width);
+
+    info!(
+        work_area_x = area.0,
+        work_area_y = area.1,
+        available_physical_width = area.2,
+        available_logical_width,
+        scale,
+        target_logical_width = layout.logical_size.0,
+        target_physical_width = layout.physical_size.0,
+        "computed Linux main window width from monitor geometry"
+    );
+    Some(layout)
+}
+
+#[cfg(target_os = "linux")]
+fn apply_main_window_layout<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    layout: &main_window_layout::MainWindowLayout,
+) {
+    use tauri::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
+
+    let min_width = main_window_layout::MAIN_MIN_WIDTH.min(layout.logical_size.0);
+    if let Err(error) = window.set_min_size(Some(LogicalSize::new(
+        min_width,
+        main_window_layout::MAIN_MIN_HEIGHT,
+    ))) {
+        warn!(error = %error, "could not adapt Linux main window minimum size");
+    }
 
     let logical_size = LogicalSize::new(layout.logical_size.0, layout.logical_size.1);
     let physical_size = PhysicalSize::new(layout.physical_size.0, layout.physical_size.1);
-
     if let Err(error) = window.set_size(logical_size) {
         warn!(error = %error, "logical resize failed; falling back to physical");
         if let Err(physical_error) = window.set_size(physical_size) {
-            warn!(error = %physical_error, "physical resize failed; keeping conf defaults");
+            warn!(error = %physical_error, "physical resize failed; keeping configured size");
         }
     }
 
@@ -700,22 +835,53 @@ fn resize_main_window_to_monitor(app: &mut tauri::App) {
         LogicalPosition::new(layout.logical_position.0, layout.logical_position.1);
     let physical_position =
         PhysicalPosition::new(layout.physical_position.0, layout.physical_position.1);
-
     if let Err(error) = window.set_position(logical_position) {
         warn!(error = %error, "logical position failed; falling back to physical");
         if let Err(physical_error) = window.set_position(physical_position) {
-            warn!(error = %physical_error, "physical position failed; keeping conf defaults");
+            warn!(error = %physical_error, "physical position failed");
         }
     }
+}
 
-    info!(
-        logical_width = layout.logical_size.0,
-        logical_height = layout.logical_size.1,
-        logical_x = layout.logical_position.0,
-        logical_y = layout.logical_position.1,
-        scale = layout.scale_factor,
-        "main window positioned at top center of the primary monitor"
-    );
+#[cfg(target_os = "linux")]
+fn initial_width_needs_correction(actual_width: u32, target_width: u32) -> bool {
+    actual_width != target_width
+}
+
+#[cfg(target_os = "linux")]
+fn register_linux_initial_size_correction<R: tauri::Runtime>(window: tauri::WebviewWindow<R>) {
+    let correction_pending = Arc::new(AtomicBool::new(true));
+    let event_window = window.clone();
+    window.on_window_event(move |event| {
+        let tauri::WindowEvent::Resized(actual_size) = event else {
+            return;
+        };
+        if !correction_pending.swap(false, Ordering::AcqRel) {
+            return;
+        }
+
+        let Some(layout) = linux_main_window_layout(&event_window) else {
+            // Setup already retained the configured default when no
+            // geometry was available. Do not keep observing after the
+            // first compositor configure, so a later manual resize is
+            // never corrected back to the startup size.
+            return;
+        };
+        let width_mismatch =
+            initial_width_needs_correction(actual_size.width, layout.physical_size.0);
+        info!(
+            effective_physical_width = actual_size.width,
+            target_physical_width = layout.physical_size.0,
+            effective_physical_height = actual_size.height,
+            target_physical_height = layout.physical_size.1,
+            width_matches_target = !width_mismatch,
+            "measured initial Linux main window geometry"
+        );
+        if width_mismatch {
+            info!("correcting Linux main window after its first compositor resize");
+            apply_main_window_layout(&event_window, &layout);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -727,5 +893,12 @@ mod tests {
         assert_eq!(normalize_window_visibility(Ok(true)), "visible");
         assert_eq!(normalize_window_visibility(Ok(false)), "hidden");
         assert_eq!(normalize_window_visibility(Err(())), "query_failed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compositor_reported_width_is_checked_against_requested_width() {
+        assert!(!super::initial_width_needs_correction(1366, 1366));
+        assert!(super::initial_width_needs_correction(1080, 1366));
     }
 }

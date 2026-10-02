@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-10-02
+goal: >-
+  Hacer que la ventana principal de ClipVault ocupe todo el ancho disponible
+  del monitor en Linux bajo Wayland y X11, incluidos GNOME y KDE Plasma.
