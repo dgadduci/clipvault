@@ -358,6 +358,15 @@ impl HotkeyManager for FakeHotkeyManager {
         Ok(())
     }
 
+    fn unregister(&self, binding: &HotkeyBinding) -> Result<(), HotkeyError> {
+        self.registered.lock().retain(|registered| {
+            registered.id != binding.id
+                || registered.key != binding.key
+                || registered.modifiers != binding.modifiers
+        });
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "fake"
     }

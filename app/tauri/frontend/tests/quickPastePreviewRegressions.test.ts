@@ -729,14 +729,16 @@ test("Fix 6 — QUICK_PASTE_SEARCH_LETTER documents the trigger key", () => {
   assert.equal(QUICK_PASTE_SEARCH_LETTER, "k");
 });
 
-test("Fix 6 — Quick Paste matcher consults the k letter (not f)", () => {
+test("Fix 6 — Quick Paste matcher uses its configured binding and defaults to k (not f)", () => {
   const matcher = extractFunctionBody(
     quickPasteSource,
     "matchesQuickPasteSearchShortcut",
   );
   assert.ok(
-    matcher.includes('key !== "k"'),
-    "the matcher must pin the trigger to the k / K letter",
+    matcher.includes('currentKeyboardShortcut("focus_quick_search")') &&
+      matcher.includes('matchesConfiguredShortcut(event, "focus_quick_search"') &&
+      matcher.includes('key !== "k"'),
+    "the matcher must use the configured action and retain its k / K default",
   );
 });
 

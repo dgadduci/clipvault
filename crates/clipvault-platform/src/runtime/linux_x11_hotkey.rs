@@ -33,12 +33,9 @@ const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// window gives the passive route precedence without making Quick Paste feel
 /// delayed when another client owns the keyboard.
 const RAW_FALLBACK_WAIT: Duration = Duration::from_millis(25);
-const XK_V_LOWER: u32 = 0x0076;
-const XK_V_UPPER: u32 = 0x0056;
-const XK_B_LOWER: u32 = 0x0062;
-const XK_B_UPPER: u32 = 0x0042;
 const XK_RETURN: u32 = 0xff0d;
 const XK_ESCAPE: u32 = 0xff1b;
+const XK_SPACE: u32 = 0x0020;
 type Callback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 fn ignored_modifier_variants() -> [ModMask; 4] {
@@ -118,6 +115,18 @@ impl HotkeyManager for LinuxX11HotkeyManagerAdapter {
         })
     }
 
+    fn unregister(&self, binding: &HotkeyBinding) -> Result<(), HotkeyError> {
+        match self.request(WorkerCommand::Unregister {
+            binding: binding.clone(),
+            response: None,
+        })? {
+            HotkeyOutcome::Registered => Ok(()),
+            HotkeyOutcome::Conflict { reason }
+            | HotkeyOutcome::Unsupported { reason }
+            | HotkeyOutcome::Failed { reason } => Err(HotkeyError::backend(reason)),
+        }
+    }
+
     fn unregister_all(&self) -> Result<(), HotkeyError> {
         match self.request(WorkerCommand::Clear { response: None })? {
             HotkeyOutcome::Registered => Ok(()),
@@ -145,6 +154,10 @@ enum WorkerCommand {
         callback: Callback,
         response: Option<SyncSender<HotkeyOutcome>>,
     },
+    Unregister {
+        binding: HotkeyBinding,
+        response: Option<SyncSender<HotkeyOutcome>>,
+    },
     Clear {
         response: Option<SyncSender<HotkeyOutcome>>,
     },
@@ -164,12 +177,17 @@ impl WorkerCommand {
             Self::Clear { .. } => Self::Clear {
                 response: Some(response),
             },
+            Self::Unregister { binding, .. } => Self::Unregister {
+                binding,
+                response: Some(response),
+            },
             Self::Shutdown => Self::Shutdown,
         }
     }
 }
 
 struct RegisteredBinding {
+    id: String,
     modifiers: ModMask,
     callback: Callback,
     pressed: bool,
@@ -276,12 +294,24 @@ impl Keymap {
     }
 }
 
-fn keysyms_for(key: HotkeyKey) -> &'static [u32] {
+fn keysyms_for(key: HotkeyKey) -> Vec<u32> {
     match key {
-        HotkeyKey::V => &[XK_V_LOWER, XK_V_UPPER],
-        HotkeyKey::B => &[XK_B_LOWER, XK_B_UPPER],
-        HotkeyKey::Enter => &[XK_RETURN],
-        HotkeyKey::Escape => &[XK_ESCAPE],
+        HotkeyKey::Enter => vec![XK_RETURN],
+        HotkeyKey::Escape => vec![XK_ESCAPE],
+        HotkeyKey::Space => vec![XK_SPACE],
+        _ => {
+            let Some(value) = key.as_str().as_bytes().first().copied() else {
+                return Vec::new();
+            };
+            if value.is_ascii_alphabetic() {
+                vec![
+                    u32::from(value.to_ascii_lowercase()),
+                    u32::from(value.to_ascii_uppercase()),
+                ]
+            } else {
+                vec![u32::from(value)]
+            }
+        }
     }
 }
 
@@ -457,6 +487,12 @@ fn drain_commands(
                     let _ = response.send(HotkeyOutcome::Registered);
                 }
             }
+            Ok(WorkerCommand::Unregister { binding, response }) => {
+                let outcome = unregister_binding(conn, root, keymap, bindings, &binding);
+                if let Some(response) = response {
+                    let _ = response.send(outcome);
+                }
+            }
             Ok(WorkerCommand::Shutdown) | Err(TryRecvError::Disconnected) => {
                 clear_bindings(conn, root, bindings);
                 pending_raw.clear();
@@ -484,7 +520,7 @@ fn register_binding(
     if let Some(existing) = bindings.get_mut(&keycode).and_then(|entries| {
         entries
             .iter_mut()
-            .find(|entry| entry.modifiers == modifiers)
+            .find(|entry| entry.id == binding.id && entry.modifiers == modifiers)
     }) {
         existing.callback = callback;
         existing.pressed = false;
@@ -498,10 +534,77 @@ fn register_binding(
         .entry(keycode)
         .or_default()
         .push(RegisteredBinding {
+            id: binding.id,
             modifiers,
             callback,
             pressed: false,
         });
+    HotkeyOutcome::Registered
+}
+
+fn unregister_binding(
+    conn: &RustConnection,
+    root: Window,
+    keymap: &Keymap,
+    bindings: &mut HashMap<Keycode, Vec<RegisteredBinding>>,
+    binding: &HotkeyBinding,
+) -> HotkeyOutcome {
+    let Some(keycode) = keymap.resolve_keycode(binding.key) else {
+        return HotkeyOutcome::Registered;
+    };
+    let modifiers = x11_modifiers(binding.modifiers);
+    let Some(entries) = bindings.get(&keycode) else {
+        return HotkeyOutcome::Registered;
+    };
+    let Some(index) = entries
+        .iter()
+        .position(|entry| entry.id == binding.id && entry.modifiers == modifiers)
+    else {
+        return HotkeyOutcome::Registered;
+    };
+    let should_release_grab = !entries
+        .iter()
+        .enumerate()
+        .any(|(other_index, entry)| other_index != index && entry.modifiers == modifiers);
+    if should_release_grab {
+        let variants = ignored_modifier_variants().map(|ignored| modifiers | ignored);
+        for (released_count, variant) in variants.iter().copied().enumerate() {
+            let result = conn
+                .ungrab_key(keycode, root, variant)
+                .map_err(|_| ())
+                .and_then(|cookie| cookie.check().map_err(|_| ()));
+            if result.is_err() {
+                // Keep the callback entry intact and restore any passive
+                // grabs already released so a failed replacement can leave
+                // the previous binding available.
+                for restore in variants.iter().take(released_count + 1) {
+                    if let Ok(cookie) = conn.grab_key(
+                        false,
+                        root,
+                        *restore,
+                        keycode,
+                        GrabMode::ASYNC,
+                        GrabMode::ASYNC,
+                    ) {
+                        let _ = cookie.check();
+                    }
+                }
+                let _ = conn.flush();
+                return HotkeyOutcome::Failed {
+                    reason: "x11_ungrab_failed".into(),
+                };
+            }
+        }
+    }
+
+    let entries = bindings
+        .get_mut(&keycode)
+        .expect("binding bucket was checked above");
+    entries.remove(index);
+    if entries.is_empty() {
+        bindings.remove(&keycode);
+    }
+    let _ = conn.flush();
     HotkeyOutcome::Registered
 }
 
@@ -693,6 +796,7 @@ mod tests {
         let mut bindings = HashMap::from([(
             55,
             vec![RegisteredBinding {
+                id: "test".into(),
                 modifiers: ctrl_shift(),
                 callback,
                 pressed: false,
@@ -733,6 +837,7 @@ mod tests {
         let bindings = HashMap::from([(
             55,
             vec![RegisteredBinding {
+                id: "test".into(),
                 modifiers: ctrl_shift(),
                 callback: Arc::new(|| {}),
                 pressed: false,
@@ -760,6 +865,7 @@ mod tests {
         let mut bindings = HashMap::from([(
             55,
             vec![RegisteredBinding {
+                id: "test".into(),
                 modifiers: ctrl_shift(),
                 callback: Arc::new(move || {
                     callback_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -796,7 +902,9 @@ mod tests {
 
     #[test]
     fn keysyms_cover_the_only_supported_hotkey_keys() {
-        assert!(keysyms_for(HotkeyKey::V).contains(&XK_V_LOWER));
+        assert!(keysyms_for(HotkeyKey::V).contains(&u32::from(b'v')));
+        assert!(keysyms_for(HotkeyKey::F).contains(&u32::from(b'F')));
+        assert!(keysyms_for(HotkeyKey::Digit5).contains(&u32::from(b'5')));
         assert!(keysyms_for(HotkeyKey::Enter).contains(&XK_RETURN));
         assert!(keysyms_for(HotkeyKey::Escape).contains(&XK_ESCAPE));
     }

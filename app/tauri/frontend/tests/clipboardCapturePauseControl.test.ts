@@ -21,9 +21,10 @@ test("General Settings uses persisted commands and reflects external toggles", (
   assert.match(modal, /captureControlGetCommand\(\)/);
   assert.match(modal, /captureControlSetCommand\(/);
   assert.match(modal, /listenCaptureControlChanged\(/);
-  assert.match(modal, /Captura del portapapeles/);
-  assert.match(modal, /Estado: \{captureEnabled \? "Activa" : "Pausada"\}/);
-  assert.match(modal, /Atajo global: \{shortcut\}/);
+  assert.match(modal, /\$t\("settings\.capture\.title"\)/);
+  assert.match(modal, /\$t\("settings\.state\.active"\)/);
+  assert.match(modal, /\$t\("settings\.state\.paused"\)/);
+  assert.match(modal, /\$t\("settings\.capture\.shortcut", \{ shortcut \}\)/);
   assert.match(modal, /capture-control-wayland-note/);
   assert.match(modal, /catch \(saveError\)/);
 });
@@ -46,7 +47,7 @@ test("General Settings is reachable from the toolbar overflow menu", () => {
   assert.match(app, /<GeneralSettingsModal[\s\S]*?platformOs=\{diagnostics\?\.platform_os/);
 });
 
-test("GNOME and KDE Wayland bridges register the Ctrl+Alt+Shift+B shortcut", () => {
+test("GNOME and KDE Wayland bridges register and update the configured capture shortcut", () => {
   const gnomeExtension = readFileSync(
     path.resolve(
       FRONTEND_ROOT,
@@ -72,7 +73,10 @@ test("GNOME and KDE Wayland bridges register the Ctrl+Alt+Shift+B shortcut", () 
     "utf8",
   );
   assert.match(gnomeExtension, /CAPTURE_TOGGLE_ACCELERATOR = '<Control><Alt><Shift>b'/);
-  assert.match(gnomeExtension, /kind:\s*'toggle_capture'/);
-  assert.match(kdeScript, /registerShortcut\([\s\S]*?"Ctrl\+Alt\+Shift\+B"/);
+  assert.match(gnomeExtension, /request\.action === 'toggle_clipboard_capture'/);
+  assert.match(gnomeExtension, /kind === 'set_shortcut'/);
+  assert.match(kdeScript, /CLIPVAULT_CAPTURE_TOGGLE_ACCELERATOR = "Ctrl\+Alt\+Shift\+B"/);
+  assert.match(kdeScript, /shortcutActionName\("toggle-clipboard-capture", CLIPVAULT_CAPTURE_TOGGLE_ACCELERATOR\)/);
+  assert.match(kdeScript, /CLIPVAULT_CAPTURE_TOGGLE_ACCELERATOR,\s*toggleLocalCapture/);
   assert.match(kdeScript, /CLIPVAULT_CAPTURE_TOGGLE_METHOD = "ToggleCapture"/);
 });

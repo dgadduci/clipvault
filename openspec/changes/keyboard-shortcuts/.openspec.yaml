@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-10-01
+goal: Permitir consultar, configurar y aplicar en caliente los atajos de teclado de ClipVault, con persistencia local y soporte para macOS, GNOME/KDE Wayland y X11.

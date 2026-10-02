@@ -14,7 +14,7 @@ test("manual text modal preserves a multiline draft through the typed bridge", (
   const app = source("src/App.svelte");
   assert.match(modal, /<textarea[\s\S]*data-testid="create-text-entry-textarea"/);
   assert.match(modal, /createManualTextCommand\(\{ collectionId, content: draft \}\)/);
-  assert.match(modal, /on:keydown=\{onKeydown\}/);
+  assert.doesNotMatch(modal, /save_text|on:keydown=\{onKeydown\}/);
   assert.match(bridge, /invoke<CreateManualTextResponse>\("clipvault_create_manual_text"/);
   assert.match(app, /!activeCollection\.is_peer_bound/);
   assert.match(app, /data-testid="create-manual-text-entry"|canCreateManualText/);
@@ -43,7 +43,7 @@ test("the shared note modal supports entry and collection notes with empty remov
 
 test("canceling manual text creation closes without calling the persistence bridge", () => {
   const modal = source("src/CreateTextEntryModal.svelte");
-  const cancel = modal.slice(modal.indexOf("function cancel()"), modal.indexOf("function onKeydown"));
+  const cancel = modal.slice(modal.indexOf("function cancel()"), modal.indexOf("</script>"));
   assert.match(cancel, /if \(!saving\) dispatch\("close"\)/);
   assert.doesNotMatch(cancel, /createManualTextCommand/);
   assert.match(modal, /<textarea[\s\S]*rows="10"/);

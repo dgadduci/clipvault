@@ -274,21 +274,6 @@
     dispatch("close");
   }
 
-  function onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape") {
-      // The shared shell already closes the dialog on Escape,
-      // so we only need to keep the caret movement defaults intact
-      // for the textarea itself.
-      return;
-    }
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-      // Cmd/Ctrl+Enter matches the platform-aware shortcut the
-      // preview modal exposes and gives keyboard-only users a
-      // single shortcut for "save and close".
-      event.preventDefault();
-      void save();
-    }
-  }
 </script>
 
 <Modal
@@ -317,7 +302,6 @@
       disabled={saving || !isEligible}
       aria-labelledby={editorId}
       spellcheck="false"
-      on:keydown={onKeydown}
     ></textarea>
     {#if errorKey}
       <p

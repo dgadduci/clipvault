@@ -77,15 +77,16 @@ test("Quick Paste exposes inline shortcut matchers for search and preview", () =
   );
 });
 
-test("matchesQuickPasteSearchShortcut accepts the platform-specific key only", () => {
+test("matchesQuickPasteSearchShortcut uses the configured binding and retains its default fallback", () => {
   const body = extractFunctionBody("matchesQuickPasteSearchShortcut");
   assert.ok(
-    body.includes("altKey") && body.includes("shiftKey"),
-    "search matcher must reject Alt+ and Shift+ combinations",
+    body.includes('currentKeyboardShortcut("focus_quick_search")') &&
+      body.includes('matchesConfiguredShortcut(event, "focus_quick_search"'),
+    "search matcher must use the persisted action binding when available",
   );
   assert.ok(
-    body.includes('key !== "k"'),
-    "search matcher must pin the trigger to the k / K letter",
+    body.includes("altKey") && body.includes("shiftKey") && body.includes('key !== "k"'),
+    "the Cmd/Ctrl+K fallback must continue to reject extra modifiers",
   );
   assert.ok(
     body.includes("metaKey") && body.includes("ctrlKey"),

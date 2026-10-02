@@ -60,12 +60,6 @@
     if (!saving) dispatch("close");
   }
 
-  function onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-      event.preventDefault();
-      void save();
-    }
-  }
 </script>
 
 <Modal
@@ -88,9 +82,7 @@
       disabled={saving}
       aria-label={$t("text_capture.modal.label")}
       placeholder={$t("text_capture.modal.placeholder")}
-      on:keydown={onKeydown}
     ></textarea>
-    <p class="create-text-entry-hint">{$t("text_capture.modal.shortcut_hint")}</p>
     {#if errorKey}
       <p class="create-text-entry-error" role="alert" data-testid="create-text-entry-error">{$t(errorKey)}</p>
     {/if}
@@ -112,7 +104,7 @@
     background: #0e1116; font: inherit; line-height: 1.45;
   }
   :global(.create-text-entry-textarea:focus-visible) { outline: 2px solid var(--cv-focus-ring, rgba(37,99,235,.45)); outline-offset: 1px; }
-  .create-text-entry-hint, .create-text-entry-error { margin: 0; color: var(--cv-fg-muted, #94a3b8); font-size: var(--cv-meta, 0.75rem); }
+  .create-text-entry-error { margin: 0; color: var(--cv-fg-muted, #94a3b8); font-size: var(--cv-meta, 0.75rem); }
   .create-text-entry-error { color: var(--cv-danger, #f87171); }
   .create-text-entry-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
   .create-text-entry-actions button { padding: 0.45rem 0.85rem; border: 0; border-radius: var(--cv-radius-sm, 6px); cursor: pointer; color: white; background: var(--cv-accent, #2563eb); }

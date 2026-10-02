@@ -23,6 +23,7 @@ import type {
   GnomeIntegrationPayload,
   GnomeIntegrationStatusResponse,
   KdeKwinIntegrationPayload,
+  KeyboardShortcutsSnapshot,
   IgnoredAppEntry,
   LinuxCatalogResponse,
   LinuxPickAndAddResponse,
@@ -58,6 +59,7 @@ import type {
   TextNoteRecord,
   UpdateTextEntryResponse,
   WatchTickResponse,
+  HotkeySpec,
 } from "../types.ts";
 import type { ContentTypeValue } from "./contentType.ts";
 
@@ -294,6 +296,18 @@ export const settingsSetCommand: ClipvaultCommandArg<
   SettingsUpdate
 > = (args) =>
   invoke<Settings>("clipvault_settings_set", { update: args });
+
+export const keyboardShortcutsGetCommand:
+  ClipvaultCommand<KeyboardShortcutsSnapshot> = () =>
+    invoke<KeyboardShortcutsSnapshot>("clipvault_keyboard_shortcuts_get");
+
+export const keyboardShortcutSetCommand: ClipvaultCommandArg<
+  KeyboardShortcutsSnapshot,
+  HotkeySpec
+> = (binding) =>
+  invoke<KeyboardShortcutsSnapshot>("clipvault_keyboard_shortcut_set", {
+    binding,
+  });
 
 export const captureControlGetCommand: ClipvaultCommand<boolean> = () =>
   invoke<boolean>("clipvault_capture_control_get");
@@ -1261,6 +1275,6 @@ export type {
   Tag,
   UpdateTextEntryResponse,
   WatchTickResponse,
-} from "../types";
+} from "../types.ts";
 
-export { isEditableTextEntry } from "../types";
+export { isEditableTextEntry } from "../types.ts";

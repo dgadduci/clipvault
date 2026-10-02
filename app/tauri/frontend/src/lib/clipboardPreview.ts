@@ -33,6 +33,12 @@
  */
 
 import { searchShortcutPlatform, type SearchShortcutPlatform } from "./searchShortcut.ts";
+import {
+  ariaShortcut,
+  configuredLabel,
+  currentKeyboardShortcut,
+  matchesConfiguredShortcut,
+} from "./keyboardShortcuts.ts";
 
 /**
  * Re-export of the `SearchShortcutPlatform` shape so Desktop and
@@ -75,6 +81,9 @@ export function matchesPreviewShortcut(
   >,
   platform: PreviewShortcutPlatform,
 ): boolean {
+  if (currentKeyboardShortcut("preview_selected")) {
+    return matchesConfiguredShortcut(event, "preview_selected", platform === "macos");
+  }
   if (event.altKey || event.shiftKey) return false;
   if (event.key !== "Enter") return false;
   return platform === "macos"
@@ -97,6 +106,8 @@ export function previewShortcutPlatform(
 export function previewShortcutLabel(
   platform: PreviewShortcutPlatform,
 ): string {
+  const configured = configuredLabel("preview_selected", platform === "macos");
+  if (configured) return configured;
   return platform === "macos" ? "⌘Enter" : "Ctrl Enter";
 }
 
@@ -105,6 +116,10 @@ export function previewShortcutAccessibleLabel(
   platform: PreviewShortcutPlatform,
   translateText?: (key: string, params?: Record<string, string | number | Date>) => string,
 ): string {
+  const configured = configuredLabel("preview_selected", platform === "macos");
+  if (configured && translateText) {
+    return translateText("shortcut.preview_binding", { shortcut: configured });
+  }
   const modifier = platform === "macos" ? "shortcut.command" : "shortcut.control";
   return translateText
     ? translateText("shortcut.preview", { modifier: translateText(modifier) })
@@ -123,5 +138,7 @@ export function previewShortcutAccessibleLabel(
 export function previewShortcutKeyAttribute(
   platform: PreviewShortcutPlatform,
 ): string {
+  const configured = currentKeyboardShortcut("preview_selected");
+  if (configured) return ariaShortcut(configured, platform === "macos");
   return platform === "macos" ? "Meta+Enter" : "Control+Enter";
 }

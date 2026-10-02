@@ -438,6 +438,18 @@ export interface HotkeySpec {
   meta: boolean;
 }
 
+export type KeyboardShortcutStatus =
+  | "ready"
+  | "registered"
+  | "conflict"
+  | "unsupported"
+  | "failed";
+
+export interface KeyboardShortcutsSnapshot {
+  bindings: HotkeySpec[];
+  status: Record<string, KeyboardShortcutStatus | string>;
+}
+
 export interface Settings {
   language: "en" | "es" | "pt" | "de" | "fr";
   retention: RetentionPolicy;

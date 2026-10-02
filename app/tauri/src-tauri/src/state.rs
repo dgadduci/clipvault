@@ -1,9 +1,11 @@
 //! Shared state managed by Tauri.
 
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use clipvault_core::{AppContext, PlatformAdapters, SettingsServiceError, WatchTickOutcome};
+use parking_lot::Mutex;
 
 use crate::bootstrap::AppState;
 
@@ -12,12 +14,14 @@ use crate::bootstrap::AppState;
 #[derive(Clone)]
 pub struct SharedState {
     inner: Arc<AppState>,
+    shortcut_status: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl SharedState {
     pub fn new(state: AppState) -> Self {
         Self {
             inner: Arc::new(state),
+            shortcut_status: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -27,6 +31,16 @@ impl SharedState {
 
     pub fn adapters(&self) -> &PlatformAdapters {
         &self.inner.adapters
+    }
+
+    pub fn set_shortcut_status(&self, id: &str, status: &str) {
+        self.shortcut_status
+            .lock()
+            .insert(id.to_string(), status.to_string());
+    }
+
+    pub fn shortcut_status(&self) -> HashMap<String, String> {
+        self.shortcut_status.lock().clone()
     }
 
     pub fn app_state(&self) -> &AppState {

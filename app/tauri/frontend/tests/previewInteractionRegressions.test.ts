@@ -444,25 +444,21 @@ test("HistoryCard menu exposes aria-keyshortcuts on Previsualizar", () => {
     "the Previsualizar menu item must keep its stable test id",
   );
   assert.ok(
-    cardSource.includes("aria-keyshortcuts={cardMenuPreviewShortcutKeyAttribute(previewPlatform)}"),
+    cardSource.includes("aria-keyshortcuts={$keyboardShortcuts && cardMenuPreviewShortcutKeyAttribute(previewPlatform)}"),
     "Previsualizar must expose aria-keyshortcuts through the helper",
   );
 });
 
-test("HistoryCard menu never invents shortcuts for items that have none", () => {
-  // Inspect every menu item test id: only `history-card-preview`
-  // carries an `aria-keyshortcuts` attribute.
-  const menuStart = cardSource.indexOf('data-testid="history-card-menu"');
-  const menuEnd = cardSource.indexOf("{/if}", menuStart);
-  assert.notEqual(menuStart, -1, "the menu block must exist");
-  assert.notEqual(menuEnd, -1, "the menu block must close");
-  const menuBlock = cardSource.slice(menuStart, menuEnd);
-  const keyshortcutMatches = menuBlock.match(/aria-keyshortcuts/g) ?? [];
-  assert.equal(
-    keyshortcutMatches.length,
-    1,
-    "the menu must expose exactly one aria-keyshortcuts (Previsualizar)",
-  );
+test("HistoryCard menu exposes bindings only on actions that have shortcuts", () => {
+  const titleActionStart = cardSource.indexOf('data-testid="history-card-edit-title"');
+  const noteActionStart = cardSource.indexOf('data-testid="history-card-note-action"');
+  const previewActionStart = cardSource.indexOf('data-testid="history-card-preview"', noteActionStart);
+  const titleAction = cardSource.slice(titleActionStart, cardSource.indexOf("</button>", titleActionStart));
+  const noteAction = cardSource.slice(noteActionStart, cardSource.indexOf("</button>", noteActionStart));
+  const previewAction = cardSource.slice(previewActionStart, cardSource.indexOf("</button>", previewActionStart));
+  assert.doesNotMatch(titleAction, /aria-keyshortcuts/);
+  assert.match(noteAction, /aria-keyshortcuts=\{entryNoteShortcutKeyAttributeText\}/);
+  assert.match(previewAction, /aria-keyshortcuts=/);
 });
 
 test("HistoryCardRail exports the selectedEntryId bind target", () => {
@@ -625,17 +621,11 @@ test("HistoryCard preview hint sits in the footer, not absolutely positioned", (
   );
 });
 
-test("HistoryCard preview hint uses the English 'Preview' label", () => {
-  // The previous baseline rendered the Spanish `Previsualizar`
-  // label. The regression fix uses the English `Preview` label
-  // to match the spec wording and keep the surface consistent
-  // with the rest of the menu copy.
-  const labelMatch = cardSource.match(/preview-hint-label">([^<]+)</);
-  assert.ok(labelMatch, "the preview hint must declare a label span");
-  assert.equal(
-    labelMatch![1],
-    "Preview",
-    "the preview hint must render the English 'Preview' label",
+test("HistoryCard preview hint uses the localized preview label", () => {
+  assert.match(
+    cardSource,
+    /<span class="preview-hint-label">\{\$t\("history\.card\.preview"\)\}<\/span>/,
+    "the preview hint must use the shared localized label",
   );
 });
 
@@ -700,7 +690,7 @@ test("QuickPaste preview hint uses the shared shortcut helpers", () => {
     "QuickPaste must consume previewShortcutLabel through the shared helper",
   );
   assert.ok(
-    quickPasteSource.includes("previewShortcutAccessibleLabel(shortcutPlatform)"),
+    quickPasteSource.includes("previewShortcutAccessibleLabel(shortcutPlatform, $t)"),
     "QuickPaste must consume previewShortcutAccessibleLabel through the shared helper",
   );
   // No parallel implementation must exist; a regression that
@@ -717,19 +707,24 @@ test("QuickPaste preview hint uses the shared shortcut helpers", () => {
   );
 });
 
-test("QuickPaste preview hint uses the English 'Preview' label", () => {
-  // The label must read `Preview` so the Quick Paste palette and
-  // the desktop rail share the same wording.
+test("QuickPaste preview hint reads its label from the locale catalog", () => {
   const quickPasteSource = readFileSync(
     resolvePath(process.cwd(), "src", "QuickPaste.svelte"),
     "utf8",
   );
-  const labelMatch = quickPasteSource.match(/qp-preview-hint-label">([^<]+)</);
-  assert.ok(labelMatch, "the Quick Paste preview hint must declare a label span");
+  const english = JSON.parse(readFileSync(
+    resolvePath(process.cwd(), "src", "locales", "en.json"),
+    "utf8",
+  )) as Record<string, string>;
   assert.equal(
-    labelMatch![1],
+    quickPasteSource.includes('class="qp-preview-hint-label">{$t("history.card.preview")}</span>'),
+    true,
+    "the Quick Paste preview hint must use the translated preview label",
+  );
+  assert.equal(
+    english["history.card.preview"],
     "Preview",
-    "the Quick Paste preview hint must render the English 'Preview' label",
+    "the English catalog must contain the expected preview label",
   );
 });
 
@@ -1323,11 +1318,10 @@ test("QuickPaste preview hint renders AFTER the title in the meta line", () => {
   );
 });
 
-test("QuickPaste preview hint still uses the shared shortcut helpers and English label", () => {
+test("QuickPaste preview hint still uses the shared shortcut helpers and localized label", () => {
   // Reaffirm the existing contract: the hint must consult the
   // shared helpers (no parallel implementation) and render the
-  // English `Preview` label so the rail and Quick Paste surfaces
-  // stay aligned.
+  // localized label so the rail and Quick Paste surfaces stay aligned.
   const quickPasteSource = readFileSync(
     resolvePath(process.cwd(), "src", "QuickPaste.svelte"),
     "utf8",
@@ -1337,12 +1331,14 @@ test("QuickPaste preview hint still uses the shared shortcut helpers and English
     "QuickPaste must consume previewShortcutLabel through the shared helper",
   );
   assert.ok(
-    quickPasteSource.includes("previewShortcutAccessibleLabel(shortcutPlatform)"),
+    quickPasteSource.includes("previewShortcutAccessibleLabel(shortcutPlatform, $t)"),
     "QuickPaste must consume previewShortcutAccessibleLabel through the shared helper",
   );
-  const labelMatch = quickPasteSource.match(/qp-preview-hint-label">([^<]+)</);
-  assert.ok(labelMatch, "the Quick Paste preview hint must declare a label span");
-  assert.equal(labelMatch![1], "Preview");
+  assert.match(
+    quickPasteSource,
+    /<span class="qp-preview-hint-label">\{\$t\("history\.card\.preview"\)\}<\/span>/,
+    "the Quick Paste preview hint must use the shared localized label",
+  );
 });
 
 test("QuickPaste preview hint never breaks the row layout", () => {
@@ -1505,7 +1501,7 @@ test("HistoryCard preview-hint and QuickPaste preview-hint still share the helpe
   );
   assert.match(
     cardSource,
-    /previewShortcutAccessibleLabel\(previewPlatform\)/,
+    /previewShortcutAccessibleLabel\(previewPlatform, \$t\)/,
     "HistoryCard must consume previewShortcutAccessibleLabel through the shared helper",
   );
 });
@@ -1874,7 +1870,7 @@ test("HistoryCardRail skips horizontal navigation on typing surfaces", () => {
   );
 });
 
-test("HistoryCardRail delegates the next-id math to horizontalRailNextSelectionId (no inline modulo wrap)", () => {
+test("HistoryCardRail delegates the next-id math to horizontalRailNextSelectionIdGeneric (no inline modulo wrap)", () => {
   // The handler MUST delegate the navigation math to the pure
   // helper; a regression that re-implemented the wrap-around
   // inline (e.g. with `(currentIndex + delta + total) % total`)
@@ -1890,8 +1886,8 @@ test("HistoryCardRail delegates the next-id math to horizontalRailNextSelectionI
   const body = handlerMatch![0];
   assert.match(
     body,
-    /horizontalRailNextSelectionId\(/,
-    "onRailHorizontalKeydown must delegate the next-id math to the pure horizontalRailNextSelectionId helper",
+    /horizontalRailNextSelectionIdGeneric\(/,
+    "onRailHorizontalKeydown must delegate the next-id math to the pure horizontalRailNextSelectionIdGeneric helper",
   );
   // A future regression that re-introduced the modulo wrap would
   // surface here: the inline wrap helper MUST NOT exist on the
@@ -2247,7 +2243,7 @@ test("drag-and-drop on collections stays operational after the cleanup", () => {
 test("the horizontal arrow navigation stays wired after the cleanup", () => {
   // The regression surfaced because a future cleanup could
   // accidentally remove the rail handler that delegates the
-  // navigation math to `horizontalRailNextSelectionId`. The
+  // navigation math to `horizontalRailNextSelectionIdGeneric`. The
   // assertions pin the keydown listener, the preventDefault call
   // and the helper delegation so a future refactor that removes
   // the bottom indicator cannot silently drop the navigation.
@@ -2263,8 +2259,8 @@ test("the horizontal arrow navigation stays wired after the cleanup", () => {
   );
   assert.match(
     railSource,
-    /horizontalRailNextSelectionId\(/,
-    "HistoryCardRail must keep delegating to horizontalRailNextSelectionId",
+    /horizontalRailNextSelectionIdGeneric\(/,
+    "HistoryCardRail must keep delegating to horizontalRailNextSelectionIdGeneric",
   );
   assert.match(
     railSource,
@@ -2313,7 +2309,7 @@ test("no accessibility marker was removed from the rail or the card", () => {
   );
   assert.match(
     railSource,
-    /aria-label="Historial reciente"/,
+    /aria-label=\{\$t\("history\.recent\.aria"\)\}/,
     "HistoryCardRail must keep the rail's accessible name",
   );
   assert.match(

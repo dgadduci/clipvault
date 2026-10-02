@@ -65,6 +65,8 @@
    */
   export let showClearHistory: boolean = true;
   export let canCreateManualText: boolean = false;
+  export let createTextShortcut: string = "";
+  export let createTextShortcutAccessible: string = "";
   /**
    * Source-application filter the combobox renders. The toolbar is
    * still presentational: the parent owns the canonical state so
@@ -288,7 +290,10 @@
         class="text-entry"
         bind:this={textEntryEl}
         aria-label={$t("toolbar.text_capture.aria")}
-        title={$t("toolbar.text_capture.aria")}
+        aria-keyshortcuts={createTextShortcutAccessible || undefined}
+        title={createTextShortcut
+          ? `${$t("toolbar.text_capture.aria")} (${createTextShortcut})`
+          : $t("toolbar.text_capture.aria")}
         data-testid="create-manual-text-entry"
         on:click={(event) => onCreateManualText(event, textEntryEl)}
       >
@@ -308,6 +313,11 @@
           <path d="M13 3v7h7M12 14v5m-2.5-2.5h5" />
         </svg>
         <span>{$t("toolbar.text_capture.label")}</span>
+        {#if createTextShortcut}
+          <kbd class="text-entry-shortcut" data-testid="create-text-capture-shortcut" aria-hidden="true">
+            {createTextShortcut}
+          </kbd>
+        {/if}
       </button>
     {/if}
     <div class="actions" role="toolbar" aria-label={$t("toolbar.config.aria")}>
@@ -595,6 +605,11 @@
   .text-entry:focus-visible {
     outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.45));
     outline-offset: 2px;
+  }
+
+  .text-entry-shortcut {
+    color: var(--cv-fg-muted, #94a3b8);
+    font-size: 0.7rem;
   }
 
   .menu-trigger:hover {

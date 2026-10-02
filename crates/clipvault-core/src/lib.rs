@@ -24,6 +24,7 @@ pub mod ignored_apps;
 pub mod ignored_apps_service;
 pub mod image_capture_diagnostic;
 pub mod kde_kwin_integration;
+pub mod keyboard_shortcuts;
 #[cfg(target_os = "linux")]
 pub mod linux_picker;
 pub mod management;

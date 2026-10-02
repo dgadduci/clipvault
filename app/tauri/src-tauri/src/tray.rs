@@ -34,6 +34,7 @@ pub struct TauriTrayHandle<R: Runtime = tauri::Wry> {
     menu: Mutex<Vec<TrayAction>>,
     capture_enabled: Mutex<bool>,
     language: Mutex<String>,
+    capture_shortcut: Mutex<String>,
 }
 
 impl<R: Runtime> TauriTrayHandle<R> {
@@ -42,12 +43,14 @@ impl<R: Runtime> TauriTrayHandle<R> {
         actions: Vec<TrayAction>,
         capture_enabled: bool,
         language: String,
+        capture_shortcut: String,
     ) -> Self {
         Self {
             app,
             menu: Mutex::new(actions),
             capture_enabled: Mutex::new(capture_enabled),
             language: Mutex::new(language),
+            capture_shortcut: Mutex::new(capture_shortcut),
         }
     }
 }
@@ -62,7 +65,8 @@ impl<R: Runtime> TrayHandle for TauriTrayHandle<R> {
         menu.extend(entries.iter().map(|e| e.action));
         let capture_enabled = *self.capture_enabled.lock();
         let language = self.language.lock().clone();
-        rebuild_menu(&self.app, &menu, capture_enabled, &language)
+        let shortcut = self.capture_shortcut.lock().clone();
+        rebuild_menu(&self.app, &menu, capture_enabled, &language, &shortcut)
     }
 
     fn invoke(
@@ -114,14 +118,24 @@ impl<R: Runtime> TauriTrayHandle<R> {
         let menu = self.menu.lock();
         *self.capture_enabled.lock() = enabled;
         let language = self.language.lock().clone();
-        rebuild_menu(&self.app, &menu, enabled, &language)
+        let shortcut = self.capture_shortcut.lock().clone();
+        rebuild_menu(&self.app, &menu, enabled, &language, &shortcut)
     }
 
     fn update_language(&self, language: &str) -> Result<(), clipvault_platform::TrayError> {
         let menu = self.menu.lock();
         *self.language.lock() = language.to_string();
         let capture_enabled = *self.capture_enabled.lock();
-        rebuild_menu(&self.app, &menu, capture_enabled, language)
+        let shortcut = self.capture_shortcut.lock().clone();
+        rebuild_menu(&self.app, &menu, capture_enabled, language, &shortcut)
+    }
+
+    fn update_capture_shortcut(&self, shortcut: &str) -> Result<(), clipvault_platform::TrayError> {
+        let menu = self.menu.lock();
+        *self.capture_shortcut.lock() = shortcut.to_string();
+        let capture_enabled = *self.capture_enabled.lock();
+        let language = self.language.lock().clone();
+        rebuild_menu(&self.app, &menu, capture_enabled, &language, shortcut)
     }
 }
 
@@ -144,6 +158,7 @@ fn rebuild_menu<R: Runtime>(
     actions: &[TrayAction],
     capture_enabled: bool,
     language: &str,
+    capture_shortcut: &str,
 ) -> Result<(), clipvault_platform::TrayError> {
     let menu = MenuBuilder::new(app)
         .items(&[
@@ -180,7 +195,7 @@ fn rebuild_menu<R: Runtime>(
             &menu_item(
                 app,
                 ID_TOGGLE_CAPTURE,
-                &capture_menu_label(capture_enabled, language),
+                &capture_menu_label(capture_enabled, language, capture_shortcut),
                 actions.contains(&TrayAction::ToggleClipboardCapture),
             ),
             &menu_separator(app),
@@ -201,16 +216,12 @@ fn rebuild_menu<R: Runtime>(
     Ok(())
 }
 
-fn capture_menu_label(enabled: bool, language: &str) -> String {
+fn capture_menu_label(enabled: bool, language: &str, shortcut: &str) -> String {
     let key = if enabled {
         "tray.pause_captures"
     } else {
         "tray.resume_captures"
     };
-    #[cfg(target_os = "macos")]
-    let shortcut = "⌘⌥⇧B";
-    #[cfg(not(target_os = "macos"))]
-    let shortcut = "Ctrl+Alt+Shift+B";
     crate::localization::text(language, key).replace("{shortcut}", shortcut)
 }
 
@@ -246,6 +257,7 @@ impl TauriTrayController {
         app: &AppHandle<tauri::Wry>,
         capture_enabled: bool,
         language: &str,
+        capture_shortcut: &str,
         on_menu_event: impl Fn(&AppHandle<tauri::Wry>, MenuEvent) + Send + Sync + 'static,
         on_tray_event: impl Fn(&tauri::tray::TrayIcon<tauri::Wry>, TrayIconEvent)
             + Send
@@ -296,7 +308,7 @@ impl TauriTrayController {
                 &menu_item(
                     app,
                     ID_TOGGLE_CAPTURE,
-                    &capture_menu_label(capture_enabled, language),
+                    &capture_menu_label(capture_enabled, language, capture_shortcut),
                     true,
                 ),
                 &menu_separator(app),
@@ -326,6 +338,7 @@ impl TauriTrayController {
                 actions,
                 capture_enabled,
                 language.to_string(),
+                capture_shortcut.to_string(),
             )),
             _icon: icon,
         }))
@@ -347,6 +360,13 @@ impl TauriTrayController {
     pub fn set_language(&self, language: &str) -> Result<(), clipvault_platform::TrayError> {
         self.handle.update_language(language)
     }
+
+    pub fn set_capture_shortcut(
+        &self,
+        shortcut: &str,
+    ) -> Result<(), clipvault_platform::TrayError> {
+        self.handle.update_capture_shortcut(shortcut)
+    }
 }
 
 impl TrayController for TauriTrayController {
@@ -356,6 +376,7 @@ impl TrayController for TauriTrayController {
             menu: Mutex::new(self.handle.menu.lock().clone()),
             capture_enabled: Mutex::new(*self.handle.capture_enabled.lock()),
             language: Mutex::new(self.handle.language.lock().clone()),
+            capture_shortcut: Mutex::new(self.handle.capture_shortcut.lock().clone()),
         }))
     }
 
@@ -383,6 +404,7 @@ mod tests {
             Vec::new(),
             true,
             "en".to_string(),
+            "Ctrl+Alt+Shift+B".to_string(),
         );
 
         assert_eq!(
@@ -394,8 +416,8 @@ mod tests {
 
     #[test]
     fn capture_menu_label_reflects_the_current_state() {
-        let active = capture_menu_label(true, "en");
-        let paused = capture_menu_label(false, "en");
+        let active = capture_menu_label(true, "en", "Ctrl+Alt+Shift+B");
+        let paused = capture_menu_label(false, "en", "Ctrl+Alt+Shift+B");
         assert!(active.starts_with("Pause captures ("));
         assert!(paused.starts_with("Resume captures ("));
         assert!(active.ends_with("B)"));

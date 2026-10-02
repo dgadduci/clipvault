@@ -13,14 +13,13 @@ use std::time::Duration;
 
 use clipvault_core::{
     ActiveAppDiagnostics, ActiveAppFailureKind, AppBootstrap, AppContext, CaptureWatcher,
-    IgnoredAppError, IgnoredAppsServiceError, PeerIdentityStore, PickAndAddOutcome,
+    HotkeySpec, IgnoredAppError, IgnoredAppsServiceError, PeerIdentityStore, PickAndAddOutcome,
     PlatformAdapters, WatchTickOutcome,
 };
 use clipvault_platform::{
-    default_linux_binding, default_macos_binding, ActiveApplicationProbe, Capabilities,
-    ClipboardBackend, HotkeyKey, HotkeyManager, HotkeyModifiers, HotkeyOutcome,
-    NoopSettingsNavigator, OsFamily, PasteController, PlatformInfo, SettingsNavigator,
-    TrayController,
+    ActiveApplicationProbe, Capabilities, ClipboardBackend, HotkeyKey, HotkeyManager,
+    HotkeyModifiers, HotkeyOutcome, NoopSettingsNavigator, OsFamily, PasteController, PlatformInfo,
+    SettingsNavigator, TrayController,
 };
 use tauri::{AppHandle, Emitter, Runtime};
 use tracing::{info, warn};
@@ -1473,31 +1472,39 @@ fn log_capture_outcome(outcome: &clipvault_core::WatchTickOutcome) {
     }
 }
 
-/// Register the default global hotkey. The callback runs on the
-/// `global-hotkey` background thread; the shell emits a Tauri event so
-/// the frontend can react.
-pub fn register_default_hotkey<R: Runtime>(
+/// Register either of the application-owned global shortcut actions. The
+/// action ID is stable and the callback is the same regardless of whether
+/// the binding came from defaults or local settings.
+pub fn register_global_shortcut<R: Runtime>(
     state: &AppState,
     handle: &AppHandle<R>,
+    binding: &clipvault_platform::HotkeyBinding,
 ) -> HotkeyOutcome {
-    let binding = default_binding_for(state.adapters.info());
     let binding_for_log = binding.clone();
-    let hotkey_id = binding.id.clone();
     let app_handle = handle.clone();
+    let callback: Box<dyn Fn() + Send + Sync + 'static> = match binding.id.as_str() {
+        "open_quick_paste" | "quick_search" => {
+            let id = binding.id.clone();
+            Box::new(move || {
+                info!(id = %id, "global hotkey activated");
+                if let Err(error) = app_handle.emit(QUICK_SEARCH_EVENT, ()) {
+                    warn!(error = %error, "failed to emit quick-search event");
+                }
+            })
+        }
+        "toggle_clipboard_capture" => Box::new(move || {
+            crate::commands::toggle_capture_from_hotkey(&app_handle);
+        }),
+        _ => {
+            return HotkeyOutcome::Failed {
+                reason: "unknown_global_shortcut_action".into(),
+            }
+        }
+    };
     let outcome = state
         .adapters
         .hotkey()
-        .register(
-            &binding,
-            Box::new(move || {
-                info!(id = %hotkey_id, "global hotkey activated");
-                if let Err(error) = app_handle.emit(QUICK_SEARCH_EVENT, ()) {
-                    warn!(error = %error, "failed to emit quick-search event");
-                } else {
-                    info!("quick-search event emitted");
-                }
-            }),
-        )
+        .register(binding, callback)
         .unwrap_or(HotkeyOutcome::Failed {
             reason: "hotkey backend rejected the binding".into(),
         });
@@ -1509,42 +1516,20 @@ pub fn register_default_hotkey<R: Runtime>(
     outcome
 }
 
-/// Register the global local-capture toggle independently from quick search.
-/// The binding stays installed even while the capture watcher is paused.
-pub fn register_capture_toggle_hotkey<R: Runtime>(
-    state: &AppState,
-    handle: &AppHandle<R>,
-) -> HotkeyOutcome {
-    let binding = capture_toggle_binding_for(state.adapters.info());
-    let binding_for_log = binding.clone();
-    let app_handle = handle.clone();
-    let outcome = state
-        .adapters
-        .hotkey()
-        .register(
-            &binding,
-            Box::new(move || {
-                crate::commands::toggle_capture_from_hotkey(&app_handle);
-            }),
-        )
-        .unwrap_or(HotkeyOutcome::Failed {
-            reason: "hotkey backend rejected the binding".into(),
-        });
-    info!(
-        kind = outcome.kind(),
-        id = %binding_for_log.id,
-        "capture toggle hotkey outcome"
-    );
-    outcome
+pub fn platform_hotkey_binding(spec: &HotkeySpec) -> Option<clipvault_platform::HotkeyBinding> {
+    Some(clipvault_platform::HotkeyBinding {
+        id: spec.id.clone(),
+        modifiers: HotkeyModifiers {
+            cmd_or_ctrl: spec.cmd_or_ctrl,
+            shift: spec.shift,
+            alt: spec.alt,
+            meta: spec.meta,
+        },
+        key: HotkeyKey::from_str(&spec.key)?,
+    })
 }
 
-fn default_binding_for(info: &PlatformInfo) -> clipvault_platform::HotkeyBinding {
-    match info.os_family {
-        OsFamily::Macos => default_macos_binding("quick_search"),
-        _ => default_linux_binding("quick_search"),
-    }
-}
-
+#[cfg(test)]
 fn capture_toggle_binding_for(info: &PlatformInfo) -> clipvault_platform::HotkeyBinding {
     clipvault_platform::HotkeyBinding {
         id: "toggle_clipboard_capture".into(),

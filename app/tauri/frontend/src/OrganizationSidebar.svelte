@@ -25,13 +25,14 @@
   } from "./lib/collectionDropZone";
   import { endDragSession, isDropTarget } from "./lib/dragAndDrop";
   import { POINTER_DRAG_END_EVENT } from "./lib/pointerDragAndDrop";
-  import CollectionColorModal from "./CollectionColorModal.svelte";
-  import TextNoteModal from "./TextNoteModal.svelte";
-  import LinkedPeers from "./LinkedPeers.svelte";
-  import { t } from "./lib/localization.ts";
+import CollectionColorModal from "./CollectionColorModal.svelte";
+import TextNoteModal from "./TextNoteModal.svelte";
+import LinkedPeers from "./LinkedPeers.svelte";
+import { t } from "./lib/localization.ts";
 
   export let collections: Collection[] = [];
   export let activeCollectionId: number | null = null;
+  export let historyShortcutAccessible: string = "";
   /**
    * Snapshot the parent polls on every refresh / pairing close so
    * the `Equipos vinculados` scroller below the collection list
@@ -623,6 +624,7 @@
             on:click={() => selectCollection(collection.id)}
             on:dblclick={() => startRename(collection)}
             aria-pressed={isActive(collection.id)}
+            aria-keyshortcuts={isHistory(collection) ? historyShortcutAccessible || undefined : undefined}
             aria-label={isHistory(collection)
               ? $t("collections.select_system")
               : $t("collections.rename_hint", { name: collection.name })}

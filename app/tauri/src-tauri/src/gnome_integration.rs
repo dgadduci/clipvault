@@ -8,8 +8,11 @@
 
 #![cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
 
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clipvault_core::{
     GnomeConsentDecision, GnomeIntegrationService as CoreIntegrationService, GnomeTechnicalState,
@@ -69,6 +72,63 @@ impl GnomeIntegrationState {
     /// while `build_state` is still assembling the Tauri application handle.
     pub fn set_event_sink(&self, sink: GnomeShellEventSink) {
         *self.event_sink.lock() = Some(sink);
+    }
+
+    /// Replace one of the GNOME extension's global accelerators and wait for
+    /// Mutter to confirm the new grab before the caller persists it.
+    pub fn update_global_shortcut(
+        &self,
+        binding: &clipvault_core::HotkeySpec,
+    ) -> Result<(), String> {
+        let action = match binding.id.as_str() {
+            "open_quick_paste" => "open_quick_paste",
+            "toggle_clipboard_capture" => "toggle_clipboard_capture",
+            _ => return Err("shortcut_unsupported".to_string()),
+        };
+        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .ok_or_else(|| "shortcut_integration_unavailable".to_string())?;
+        let path = runtime_dir
+            .join("clipvault")
+            .join("clipvault-shortcuts.sock");
+        let stream = UnixStream::connect(path)
+            .map_err(|_| "shortcut_integration_unavailable".to_string())?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|_| "shortcut_registration_failed".to_string())?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .map_err(|_| "shortcut_registration_failed".to_string())?;
+        let request = GnomeShortcutRequest {
+            v: GNOME_PROTOCOL_VERSION,
+            kind: "set_shortcut",
+            action,
+            accelerator: gnome_accelerator(binding),
+        };
+        let mut stream = stream;
+        serde_json::to_writer(&mut stream, &request)
+            .map_err(|_| "shortcut_registration_failed".to_string())?;
+        stream
+            .write_all(b"\n")
+            .map_err(|_| "shortcut_registration_failed".to_string())?;
+        let mut response_line = String::new();
+        BufReader::new(stream)
+            .read_line(&mut response_line)
+            .map_err(|_| "shortcut_registration_failed".to_string())?;
+        let response: GnomeShortcutResponse = serde_json::from_str(&response_line)
+            .map_err(|_| "shortcut_registration_failed".to_string())?;
+        if response.v != GNOME_PROTOCOL_VERSION
+            || response.kind != "shortcut_result"
+            || response.action != action
+        {
+            return Err("shortcut_registration_failed".to_string());
+        }
+        match response.status.as_str() {
+            "registered" => Ok(()),
+            "conflict" => Err("shortcut_conflict".to_string()),
+            "unsupported" => Err("shortcut_unsupported".to_string()),
+            _ => Err("shortcut_registration_failed".to_string()),
+        }
     }
 
     /// Persist a consent decision through the core service. The helper
@@ -347,6 +407,45 @@ impl GnomeIntegrationState {
     }
 }
 
+#[derive(Serialize)]
+struct GnomeShortcutRequest<'a> {
+    v: u16,
+    kind: &'static str,
+    action: &'a str,
+    accelerator: String,
+}
+
+#[derive(Deserialize)]
+struct GnomeShortcutResponse {
+    v: u16,
+    kind: String,
+    action: String,
+    status: String,
+}
+
+fn gnome_accelerator(binding: &clipvault_core::HotkeySpec) -> String {
+    let mut accelerator = String::new();
+    if binding.cmd_or_ctrl {
+        accelerator.push_str("<Control>");
+    }
+    if binding.meta {
+        accelerator.push_str("<Super>");
+    }
+    if binding.alt {
+        accelerator.push_str("<Alt>");
+    }
+    if binding.shift {
+        accelerator.push_str("<Shift>");
+    }
+    accelerator.push_str(match binding.key.to_ascii_lowercase().as_str() {
+        "enter" => "Return",
+        "escape" => "Escape",
+        "space" => "space",
+        value => value,
+    });
+    accelerator
+}
+
 /// Payload every GNOME-related Tauri command returns. The struct is
 /// metadata-only: it never carries absolute filesystem paths,
 /// clipboard content, process identifiers, asset references or
@@ -581,6 +680,22 @@ fn convert_technical_state_from_platform(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn configured_global_shortcuts_use_shell_accelerator_names() {
+        let binding = clipvault_core::HotkeySpec {
+            id: "toggle_clipboard_capture".into(),
+            key: "enter".into(),
+            cmd_or_ctrl: true,
+            shift: true,
+            alt: true,
+            meta: true,
+        };
+        assert_eq!(
+            gnome_accelerator(&binding),
+            "<Control><Super><Alt><Shift>Return"
+        );
+    }
 
     #[test]
     fn not_applicable_payload_carries_protocol_constants() {

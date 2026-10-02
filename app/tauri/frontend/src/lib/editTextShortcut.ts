@@ -31,6 +31,12 @@ import {
   searchShortcutPlatform,
   type SearchShortcutPlatform,
 } from "./searchShortcut.ts";
+import {
+  ariaShortcut,
+  configuredLabel,
+  currentKeyboardShortcut,
+  matchesConfiguredShortcut,
+} from "./keyboardShortcuts.ts";
 
 /**
  * Platform the edit-text shortcut listener cares about. Mirrors
@@ -64,6 +70,8 @@ export const EDIT_TEXT_SHORTCUT_LETTER = "e";
 export function editTextShortcutLabel(
   platform: EditTextShortcutPlatform,
 ): string {
+  const configured = configuredLabel("edit_selected_text", platform === "macos");
+  if (configured) return configured;
   return platform === "macos" ? "⌘E" : "Ctrl+E";
 }
 
@@ -75,6 +83,10 @@ export function editTextShortcutAccessibleLabel(
   platform: EditTextShortcutPlatform,
   translateText?: (key: string, params?: Record<string, string | number | Date>) => string,
 ): string {
+  const configured = configuredLabel("edit_selected_text", platform === "macos");
+  if (configured && translateText) {
+    return translateText("shortcut.edit_capture_binding", { shortcut: configured });
+  }
   const modifier = platform === "macos" ? "shortcut.command" : "shortcut.control";
   return translateText
     ? translateText("shortcut.edit_capture", { modifier: translateText(modifier) })
@@ -91,6 +103,8 @@ export function editTextShortcutAccessibleLabel(
 export function editTextShortcutKeyAttribute(
   platform: EditTextShortcutPlatform,
 ): string {
+  const configured = currentKeyboardShortcut("edit_selected_text");
+  if (configured) return ariaShortcut(configured, platform === "macos");
   return platform === "macos" ? "Meta+E" : "Control+E";
 }
 
@@ -122,6 +136,9 @@ export function matchesEditTextShortcut(
   >,
   platform: EditTextShortcutPlatform,
 ): boolean {
+  if (currentKeyboardShortcut("edit_selected_text")) {
+    return matchesConfiguredShortcut(event, "edit_selected_text", platform === "macos");
+  }
   if (event.altKey || event.shiftKey) return false;
   const key = (event.key ?? "").toLowerCase();
   if (key !== EDIT_TEXT_SHORTCUT_LETTER) return false;

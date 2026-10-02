@@ -56,6 +56,7 @@
 
 #![cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
@@ -109,6 +110,8 @@ pub const MAX_IDENTIFIER_BYTES: usize = 512;
 
 /// Callback for the KWin-owned local-capture shortcut.
 pub type KdeKwinCaptureToggleSink = Arc<dyn Fn() + Send + Sync + 'static>;
+pub type KdeKwinQuickPasteSink = Arc<dyn Fn() + Send + Sync + 'static>;
+pub type KdeKwinShortcutStatus = Arc<Mutex<HashMap<String, String>>>;
 
 // =====================================================================
 // Errors
@@ -424,6 +427,8 @@ struct KdeKwinReceiver {
     /// compared against it without round-tripping to the broker.
     kwin_unique_name: Arc<Mutex<Option<String>>>,
     capture_toggle_sink: Option<KdeKwinCaptureToggleSink>,
+    quick_paste_sink: Option<KdeKwinQuickPasteSink>,
+    shortcut_status: KdeKwinShortcutStatus,
 }
 
 #[interface(name = "org.clipvault.SourceApp")]
@@ -450,6 +455,60 @@ impl KdeKwinReceiver {
             ));
         };
         sink();
+        Ok(())
+    }
+
+    async fn open_quick_paste(&self, #[zbus(header)] hdr: ZbusHeader<'_>) -> zbus::fdo::Result<()> {
+        let sender_unique = hdr
+            .sender()
+            .map(|sender| sender.to_string())
+            .ok_or_else(|| {
+                zbus::fdo::Error::Failed(KdeKwinError::UnexpectedSender.stable_label().to_string())
+            })?;
+        if !sender_matches_kwin(&sender_unique, &self.kwin_unique_name.lock()) {
+            return Err(zbus::fdo::Error::Failed(
+                KdeKwinError::UnexpectedSender.stable_label().to_string(),
+            ));
+        }
+        let Some(sink) = &self.quick_paste_sink else {
+            return Err(zbus::fdo::Error::Failed(
+                "quick_paste_unavailable".to_string(),
+            ));
+        };
+        sink();
+        Ok(())
+    }
+
+    async fn shortcut_status(
+        &self,
+        #[zbus(header)] hdr: ZbusHeader<'_>,
+        action: String,
+        status: String,
+        v: String,
+    ) -> zbus::fdo::Result<()> {
+        let sender_unique = hdr
+            .sender()
+            .map(|sender| sender.to_string())
+            .ok_or_else(|| {
+                zbus::fdo::Error::Failed(KdeKwinError::UnexpectedSender.stable_label().to_string())
+            })?;
+        if !sender_matches_kwin(&sender_unique, &self.kwin_unique_name.lock()) {
+            return Err(zbus::fdo::Error::Failed(
+                KdeKwinError::UnexpectedSender.stable_label().to_string(),
+            ));
+        }
+        if v != PROTOCOL_VERSION.to_string()
+            || !matches!(
+                action.as_str(),
+                "open_quick_paste" | "toggle_clipboard_capture"
+            )
+            || !matches!(status.as_str(), "registered" | "conflict")
+        {
+            return Err(zbus::fdo::Error::Failed(
+                "invalid_shortcut_status".to_string(),
+            ));
+        }
+        self.shortcut_status.lock().insert(action, status);
         Ok(())
     }
 
@@ -685,6 +744,23 @@ pub async fn start_bridge_with_capture_toggle(
     snapshot: SharedKdeKwinSnapshot,
     capture_toggle_sink: Option<KdeKwinCaptureToggleSink>,
 ) -> Result<KdeKwinBridgeHandle, KdeKwinError> {
+    start_bridge_with_shortcuts(
+        snapshot,
+        capture_toggle_sink,
+        None,
+        Arc::new(Mutex::new(HashMap::new())),
+    )
+    .await
+}
+
+/// Start the sender-authenticated KWin bridge with all shortcut callbacks and
+/// the status channel used to confirm compositor registration.
+pub async fn start_bridge_with_shortcuts(
+    snapshot: SharedKdeKwinSnapshot,
+    capture_toggle_sink: Option<KdeKwinCaptureToggleSink>,
+    quick_paste_sink: Option<KdeKwinQuickPasteSink>,
+    shortcut_status: KdeKwinShortcutStatus,
+) -> Result<KdeKwinBridgeHandle, KdeKwinError> {
     snapshot.set_backend(Some(BACKEND_NAME));
 
     let kwin_unique_name = Arc::new(Mutex::new(None::<String>));
@@ -699,6 +775,8 @@ pub async fn start_bridge_with_capture_toggle(
                 snapshot: snapshot.clone(),
                 kwin_unique_name: kwin_unique_name.clone(),
                 capture_toggle_sink,
+                quick_paste_sink,
+                shortcut_status,
             },
         )
         .map_err(|error| KdeKwinError::Dbus(error.to_string()))?

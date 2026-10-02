@@ -26,12 +26,15 @@ const MAX_BACKOFF_MS = 4000;
 const FOCUS_HYSTERESIS_MS = 80;
 const QUICK_PASTE_ACCELERATOR = '<Control><Shift>v';
 const CAPTURE_TOGGLE_ACCELERATOR = '<Control><Alt><Shift>b';
+const COMMAND_SOCKET_BASENAME = 'clipvault-shortcuts.sock';
 const QUICK_PASTE_ACTION_MODES = Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW;
 
 const AppState = {
   socket: null,
   socket_path: null,
   output: null,
+  command_service: null,
+  command_socket_path: null,
   reconnect_source: null,
   focus_source: null,
   accelerator_source: null,
@@ -55,6 +58,8 @@ const AppState = {
   pending_app_id: null,
   pending_quick_paste: false,
   pending_capture_toggle: false,
+  quick_paste_accelerator: QUICK_PASTE_ACCELERATOR,
+  capture_toggle_accelerator: CAPTURE_TOGGLE_ACCELERATOR,
   last_app_id: null,
   destroyed: false,
 };
@@ -256,57 +261,188 @@ function _checkFocus() {
 }
 
 function _installQuickPasteBinding() {
-    if (AppState.accelerator_action) return;
+    return _replaceQuickPasteBinding(AppState.quick_paste_accelerator);
+}
+
+function _replaceQuickPasteBinding(accelerator) {
+    if (AppState.accelerator_action && AppState.quick_paste_accelerator === accelerator) {
+        return 'registered';
+    }
+    let action = 0;
+    let source = null;
     try {
-        const action = global.display.grab_accelerator(
-            QUICK_PASTE_ACCELERATOR,
+        action = global.display.grab_accelerator(
+            accelerator,
             Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
         );
-        if (!action || action === Meta.KeyBindingAction.NONE) return;
-        // Store the action before any follow-up Mutter call so the catch path
-        // can always release a successful grab.
-        AppState.accelerator_action = action;
+        if (!action || action === Meta.KeyBindingAction.NONE) return 'conflict';
         const bindingName = Meta.external_binding_name_for_action(action);
         Main.wm.allowKeybinding(bindingName, QUICK_PASTE_ACTION_MODES);
-        AppState.accelerator_source = global.display.connect(
+        source = global.display.connect(
             'accelerator-activated',
             function (_display, activatedAction) {
-                if (activatedAction !== AppState.accelerator_action) return;
+                if (activatedAction !== action) return;
                 // Queue any new focus id first so the listener observes the
                 // same metadata ordering as the existing focus bridge.
                 _checkFocus();
                 _publishQuickPaste();
             },
         );
+        const oldAction = AppState.accelerator_action;
+        const oldSource = AppState.accelerator_source;
+        AppState.accelerator_action = action;
+        AppState.accelerator_source = source;
+        AppState.quick_paste_accelerator = accelerator;
+        _releaseBinding(oldAction, oldSource);
+        return 'registered';
     } catch (e) {
-        // A conflicting Shell shortcut must not destabilise the desktop.
-        _uninstallQuickPasteBinding();
+        if (source !== null) {
+            try { global.display.disconnect(source); } catch (ignored) {}
+        }
+        _releaseBinding(action, null);
+        return 'failed';
     }
 }
 
 function _installCaptureToggleBinding() {
-    if (AppState.capture_toggle_action) return;
+    return _replaceCaptureToggleBinding(AppState.capture_toggle_accelerator);
+}
+
+function _replaceCaptureToggleBinding(accelerator) {
+    if (AppState.capture_toggle_action && AppState.capture_toggle_accelerator === accelerator) {
+        return 'registered';
+    }
+    let action = 0;
+    let source = null;
     try {
-        const action = global.display.grab_accelerator(
-            CAPTURE_TOGGLE_ACCELERATOR,
+        action = global.display.grab_accelerator(
+            accelerator,
             Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
         );
         if (!action || action === Meta.KeyBindingAction.NONE) {
-            print('ClipVault Ctrl+Alt+Shift+B shortcut unavailable (conflict)');
-            return;
+            return 'conflict';
         }
-        AppState.capture_toggle_action = action;
         const bindingName = Meta.external_binding_name_for_action(action);
         Main.wm.allowKeybinding(bindingName, QUICK_PASTE_ACTION_MODES);
-        AppState.capture_toggle_source = global.display.connect(
+        source = global.display.connect(
             'accelerator-activated',
             function (_display, activatedAction) {
-                if (activatedAction !== AppState.capture_toggle_action) return;
+                if (activatedAction !== action) return;
                 _publishCaptureToggle();
             },
         );
+        const oldAction = AppState.capture_toggle_action;
+        const oldSource = AppState.capture_toggle_source;
+        AppState.capture_toggle_action = action;
+        AppState.capture_toggle_source = source;
+        AppState.capture_toggle_accelerator = accelerator;
+        _releaseBinding(oldAction, oldSource);
+        return 'registered';
     } catch (e) {
-        _uninstallCaptureToggleBinding();
+        if (source !== null) {
+            try { global.display.disconnect(source); } catch (ignored) {}
+        }
+        _releaseBinding(action, null);
+        return 'failed';
+    }
+}
+
+function _releaseBinding(action, source) {
+    if (source !== null) {
+        try { global.display.disconnect(source); } catch (e) {}
+    }
+    if (!action) return;
+    try {
+        const bindingName = Meta.external_binding_name_for_action(action);
+        Main.wm.allowKeybinding(bindingName, Shell.ActionMode.NONE);
+        global.display.ungrab_accelerator(action);
+    } catch (e) {}
+}
+
+function _shortcutCommandPath() {
+    const focusPath = _buildSocketPath();
+    if (!focusPath) return null;
+    return focusPath.replace(SOCKET_BASENAME, COMMAND_SOCKET_BASENAME);
+}
+
+function _replyShortcutCommand(connection, response) {
+    const output = connection.get_output_stream();
+    output.write_async(
+        JSON.stringify(response) + '\n',
+        GLib.PRIORITY_DEFAULT,
+        null,
+        function (source, result) {
+            try { source.write_finish(result); } catch (e) {}
+            try { connection.close(null); } catch (e) {}
+        },
+    );
+}
+
+function _handleShortcutCommand(connection) {
+    const input = Gio.DataInputStream.new(connection.get_input_stream());
+    input.read_line_async(GLib.PRIORITY_DEFAULT, null, function (source, result) {
+        let line = null;
+        try {
+            const [value] = source.read_line_finish_utf8(result);
+            line = value;
+        } catch (e) {}
+        let request = null;
+        try { request = line ? JSON.parse(line) : null; } catch (e) {}
+        let status = 'failed';
+        const validAccelerator = request && typeof request.accelerator === 'string'
+            && /^((<(Control|Alt|Shift|Super)>){1,4})([A-Za-z0-9]|Return|Escape|space)$/.test(request.accelerator);
+        if (request && request.v === PROTOCOL_VERSION && request.kind === 'set_shortcut'
+            && validAccelerator) {
+            if (request.action === 'open_quick_paste') {
+                status = _replaceQuickPasteBinding(request.accelerator);
+            } else if (request.action === 'toggle_clipboard_capture') {
+                status = _replaceCaptureToggleBinding(request.accelerator);
+            } else {
+                status = 'unsupported';
+            }
+        }
+        _replyShortcutCommand(connection, {
+            v: PROTOCOL_VERSION,
+            kind: 'shortcut_result',
+            action: request && typeof request.action === 'string' ? request.action : '',
+            status,
+        });
+    });
+}
+
+function _startShortcutCommandServer() {
+    const path = _shortcutCommandPath();
+    if (!path) return;
+    try {
+        if (GLib.file_test(path, GLib.FileTest.EXISTS)) GLib.unlink(path);
+        const service = new Gio.SocketService();
+        service.add_address(
+            new Gio.UnixSocketAddress({ path }),
+            Gio.SocketType.STREAM,
+            Gio.SocketProtocol.DEFAULT,
+            null,
+        );
+        service.connect('incoming', function (_service, connection) {
+            _handleShortcutCommand(connection);
+            return true;
+        });
+        service.start();
+        AppState.command_service = service;
+        AppState.command_socket_path = path;
+    } catch (e) {
+        AppState.command_service = null;
+        AppState.command_socket_path = null;
+    }
+}
+
+function _stopShortcutCommandServer() {
+    if (AppState.command_service) {
+        try { AppState.command_service.stop(); } catch (e) {}
+        AppState.command_service = null;
+    }
+    if (AppState.command_socket_path) {
+        try { GLib.unlink(AppState.command_socket_path); } catch (e) {}
+        AppState.command_socket_path = null;
     }
 }
 
@@ -424,6 +560,7 @@ function enable() {
     AppState.destroyed = false;
     _installQuickPasteBinding();
     _installCaptureToggleBinding();
+    _startShortcutCommandServer();
     AppState.socket_path = _buildSocketPath();
     _connect();
     if (AppState.focus_source === null) {
@@ -441,6 +578,7 @@ function enable() {
 
 function disable() {
     AppState.destroyed = true;
+    _stopShortcutCommandServer();
     _uninstallQuickPasteBinding();
     _uninstallCaptureToggleBinding();
     if (AppState.focus_source !== null) {

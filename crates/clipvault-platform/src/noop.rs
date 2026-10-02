@@ -66,6 +66,10 @@ impl HotkeyManager for NoopHotkeyManager {
         Ok(())
     }
 
+    fn unregister(&self, _binding: &HotkeyBinding) -> Result<(), HotkeyError> {
+        Ok(())
+    }
+
     fn name(&self) -> &'static str {
         "unavailable"
     }

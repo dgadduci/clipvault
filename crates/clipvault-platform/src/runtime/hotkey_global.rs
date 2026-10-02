@@ -74,6 +74,10 @@ impl Dispatcher {
     fn clear(&self) {
         self.map.lock().clear();
     }
+
+    fn remove(&self, id: u32) {
+        self.map.lock().remove(&id);
+    }
 }
 
 /// Manager wrapper that exposes the platform-agnostic [`HotkeyManager`]
@@ -97,10 +101,45 @@ impl GlobalHotkeyManagerAdapter {
 
     fn map_key(key: HotkeyKey) -> Code {
         match key {
-            HotkeyKey::V => Code::KeyV,
+            HotkeyKey::A => Code::KeyA,
             HotkeyKey::B => Code::KeyB,
+            HotkeyKey::C => Code::KeyC,
+            HotkeyKey::D => Code::KeyD,
+            HotkeyKey::E => Code::KeyE,
+            HotkeyKey::F => Code::KeyF,
+            HotkeyKey::G => Code::KeyG,
+            HotkeyKey::H => Code::KeyH,
+            HotkeyKey::I => Code::KeyI,
+            HotkeyKey::J => Code::KeyJ,
+            HotkeyKey::K => Code::KeyK,
+            HotkeyKey::L => Code::KeyL,
+            HotkeyKey::M => Code::KeyM,
+            HotkeyKey::N => Code::KeyN,
+            HotkeyKey::O => Code::KeyO,
+            HotkeyKey::P => Code::KeyP,
+            HotkeyKey::Q => Code::KeyQ,
+            HotkeyKey::R => Code::KeyR,
+            HotkeyKey::S => Code::KeyS,
+            HotkeyKey::T => Code::KeyT,
+            HotkeyKey::U => Code::KeyU,
+            HotkeyKey::V => Code::KeyV,
+            HotkeyKey::W => Code::KeyW,
+            HotkeyKey::X => Code::KeyX,
+            HotkeyKey::Y => Code::KeyY,
+            HotkeyKey::Z => Code::KeyZ,
+            HotkeyKey::Digit0 => Code::Digit0,
+            HotkeyKey::Digit1 => Code::Digit1,
+            HotkeyKey::Digit2 => Code::Digit2,
+            HotkeyKey::Digit3 => Code::Digit3,
+            HotkeyKey::Digit4 => Code::Digit4,
+            HotkeyKey::Digit5 => Code::Digit5,
+            HotkeyKey::Digit6 => Code::Digit6,
+            HotkeyKey::Digit7 => Code::Digit7,
+            HotkeyKey::Digit8 => Code::Digit8,
+            HotkeyKey::Digit9 => Code::Digit9,
             HotkeyKey::Enter => Code::Enter,
             HotkeyKey::Escape => Code::Escape,
+            HotkeyKey::Space => Code::Space,
         }
     }
 
@@ -127,7 +166,14 @@ impl GlobalHotkeyManagerAdapter {
             out |= GhModifiers::ALT;
         }
         if modifiers.meta {
-            out |= GhModifiers::SUPER;
+            #[cfg(target_os = "macos")]
+            {
+                out |= GhModifiers::CONTROL;
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                out |= GhModifiers::SUPER;
+            }
         }
         out
     }
@@ -184,14 +230,34 @@ impl HotkeyManager for GlobalHotkeyManagerAdapter {
     }
 
     fn unregister_all(&self) -> Result<(), HotkeyError> {
-        // Drop callbacks first so any concurrent handler invocation
-        // becomes a no-op.
-        self.dispatcher.clear();
         let mut registered = self.registered.lock();
-        let snapshot = std::mem::take(&mut *registered);
         self.manager
-            .unregister_all(&snapshot)
+            .unregister_all(&registered)
             .map_err(HotkeyError::backend)?;
+        registered.clear();
+        self.dispatcher.clear();
+        Ok(())
+    }
+
+    fn unregister(&self, binding: &HotkeyBinding) -> Result<(), HotkeyError> {
+        let hotkey = GhHotKey::new(
+            Some(Self::map_modifiers(binding.modifiers)),
+            Self::map_key(binding.key),
+        );
+        let id = hotkey.id();
+        let mut registered = self.registered.lock();
+        let Some(index) = registered.iter().position(|entry| entry.id() == id) else {
+            return Ok(());
+        };
+        // Keep both the callback and bookkeeping entry until the OS has
+        // confirmed the unregister. Callers can then roll back safely if
+        // releasing the old binding fails during replacement.
+        self.manager
+            .unregister(hotkey)
+            .map_err(HotkeyError::backend)?;
+        registered.remove(index);
+        drop(registered);
+        self.dispatcher.remove(id);
         Ok(())
     }
 

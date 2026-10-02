@@ -53,6 +53,7 @@
   } from "./lib/codeLanguageProjections";
   import {
     previewShortcutAccessibleLabel,
+    previewShortcutKeyAttribute,
     previewShortcutLabel,
     type PreviewShortcutPlatform,
   } from "./lib/clipboardPreview";
@@ -120,6 +121,7 @@
   import TextNoteModal from "./TextNoteModal.svelte";
   import { isEditableTextEntry } from "./types";
   import { localeStore, t } from "./lib/localization.ts";
+  import { ariaShortcut, keyboardShortcuts, shortcutLabel } from "./lib/keyboardShortcuts.ts";
 
   export let entry: EntryRecord;
   /** Present only while rendering the matching peer-bound import collection. */
@@ -261,6 +263,12 @@
     }
     openTextEditor();
   }
+  function handleCardEntryNoteShortcut(event: Event): void {
+    const detail = (event as CustomEvent<{ entryId: number }>).detail;
+    if (!detail || detail.entryId !== entry.id) return;
+    openNote();
+    closeMenuAfterAction();
+  }
   /**
    * Close the text editor when the rail broadcasts a
    * `card-edit-text-shortcut-close` event on this card's
@@ -279,6 +287,11 @@
     textEditorReturnFocusTarget = null;
     textEditorOpen = false;
   }
+  function handleCardEntryNoteShortcutClose(): void {
+    if (!noteModalOpen) return;
+    noteReturnFocusTarget = null;
+    noteModalOpen = false;
+  }
   $: if (cardArticleEl) {
     cardArticleEl.addEventListener(
       "card-edit-text-shortcut",
@@ -287,6 +300,14 @@
     cardArticleEl.addEventListener(
       "card-edit-text-shortcut-close",
       handleCardEditTextShortcutClose,
+    );
+    cardArticleEl.addEventListener(
+      "card-entry-note-shortcut",
+      handleCardEntryNoteShortcut,
+    );
+    cardArticleEl.addEventListener(
+      "card-entry-note-shortcut-close",
+      handleCardEntryNoteShortcutClose,
     );
   }
   onDestroy(() => {
@@ -298,6 +319,14 @@
       cardArticleEl.removeEventListener(
         "card-edit-text-shortcut-close",
         handleCardEditTextShortcutClose,
+      );
+      cardArticleEl.removeEventListener(
+        "card-entry-note-shortcut",
+        handleCardEntryNoteShortcut,
+      );
+      cardArticleEl.removeEventListener(
+        "card-entry-note-shortcut-close",
+        handleCardEntryNoteShortcutClose,
       );
     }
   });
@@ -1325,16 +1354,23 @@
     return editTextShortcutPlatform(null);
   }
   $: editTextShortcutCardPlatform = editTextCardPlatform();
-  $: editTextShortcutLabelText = editTextShortcutLabel(
+  $: editTextShortcutLabelText = $keyboardShortcuts && editTextShortcutLabel(
     editTextShortcutCardPlatform,
   );
-  $: editTextShortcutKeyAttributeText = editTextShortcutKeyAttribute(
+  $: editTextShortcutKeyAttributeText = $keyboardShortcuts && editTextShortcutKeyAttribute(
     editTextShortcutCardPlatform,
   );
-  $: editTextShortcutAccessibleText = editTextShortcutAccessibleLabel(
+  $: editTextShortcutAccessibleText = $keyboardShortcuts && editTextShortcutAccessibleLabel(
     editTextShortcutCardPlatform,
     $t,
   );
+  $: entryNoteShortcutBinding = $keyboardShortcuts["open_entry_note"] ?? null;
+  $: entryNoteShortcutLabelText = entryNoteShortcutBinding
+    ? shortcutLabel(entryNoteShortcutBinding, editTextShortcutCardPlatform === "macos")
+    : "";
+  $: entryNoteShortcutKeyAttributeText = entryNoteShortcutBinding
+    ? ariaShortcut(entryNoteShortcutBinding, editTextShortcutCardPlatform === "macos")
+    : undefined;
   function matchesEditTextShortcut(event: KeyboardEvent): boolean {
     return matchesEditTextShortcutHelper(event, editTextShortcutCardPlatform);
   }
@@ -2246,15 +2282,13 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
         class="preview-hint"
         data-testid="history-card-preview-hint"
         data-preview-platform={previewPlatform}
-        title={previewShortcutAccessibleLabel(previewPlatform, $t)}
-        aria-label={previewShortcutAccessibleLabel(previewPlatform, $t)}
-        aria-keyshortcuts={previewPlatform === "macos"
-          ? "Meta+Enter"
-          : "Control+Enter"}
+        title={$keyboardShortcuts && previewShortcutAccessibleLabel(previewPlatform, $t)}
+        aria-label={$keyboardShortcuts && previewShortcutAccessibleLabel(previewPlatform, $t)}
+        aria-keyshortcuts={$keyboardShortcuts && previewShortcutKeyAttribute(previewPlatform)}
       >
         <span class="preview-hint-label">{$t("history.card.preview")}</span>
         <span class="preview-hint-keys" aria-hidden="true">
-          {previewShortcutLabel(previewPlatform)}
+          {$keyboardShortcuts && previewShortcutLabel(previewPlatform)}
         </span>
       </span>
     {/if}
@@ -2428,9 +2462,15 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
         role="menuitem"
         class="menu-item"
         data-testid="history-card-note-action"
+        aria-keyshortcuts={entryNoteShortcutKeyAttributeText}
         on:click={(event) => openNote(event)}
       >
-        {hasNote ? $t("history.card.note_edit") : $t("history.card.note_add")}
+        <span class="menu-item-label">
+          {hasNote ? $t("history.card.note_edit") : $t("history.card.note_add")}
+        </span>
+        <span class="menu-item-shortcut" data-testid="history-card-note-shortcut" aria-hidden="true">
+          {entryNoteShortcutLabelText}
+        </span>
       </button>
       <button
         type="button"
@@ -2438,8 +2478,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
         class="menu-item preview-action"
         data-testid="history-card-preview"
         data-shortcut-platform={previewPlatform}
-        aria-keyshortcuts={cardMenuPreviewShortcutKeyAttribute(previewPlatform)}
-        title={cardMenuPreviewShortcutAccessibleLabel(previewPlatform, $t)}
+        aria-keyshortcuts={$keyboardShortcuts && cardMenuPreviewShortcutKeyAttribute(previewPlatform)}
+        title={$keyboardShortcuts && cardMenuPreviewShortcutAccessibleLabel(previewPlatform, $t)}
         on:click={requestPreview}
       >
         <span class="menu-item-label">{$t("history.card.preview_capture")}</span>
@@ -2448,7 +2488,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           data-testid="history-card-preview-shortcut"
           aria-hidden="true"
         >
-          {cardMenuPreviewShortcutLabel(previewPlatform)}
+          {$keyboardShortcuts && cardMenuPreviewShortcutLabel(previewPlatform)}
         </span>
       </button>
       <button

@@ -79,12 +79,6 @@
     if (!busy) dispatch("close");
   }
 
-  function onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-      event.preventDefault();
-      void save();
-    }
-  }
 </script>
 
 <Modal
@@ -107,7 +101,6 @@
       disabled={busy}
       aria-label={$t("notes.modal.label", { target: targetLabel })}
       placeholder={$t("notes.modal.placeholder")}
-      on:keydown={onKeydown}
     ></textarea>
     {#if loading}
       <p class="text-note-status" data-testid="text-note-loading">{$t("notes.loading")}</p>

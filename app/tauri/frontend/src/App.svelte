@@ -86,6 +86,7 @@
   } from "./lib/codeLanguageProjections";
   import {
     matchesSearchShortcut,
+    searchShortcutAccessibleLabel,
     searchShortcutLabel,
     searchShortcutPlatform,
   } from "./lib/searchShortcut";
@@ -104,6 +105,7 @@
   import { isEditableTextEntry } from "./types";
   import { visualTokenCss } from "./lib/visualTokens";
   import { t, tPlural } from "./lib/localization.ts";
+import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcuts, keyboardShortcuts, matchesConfiguredShortcut, shortcutLabel } from "./lib/keyboardShortcuts.ts";
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
   import HistoryCardRail from "./HistoryCardRail.svelte";
   import OrganizationSidebar from "./OrganizationSidebar.svelte";
@@ -112,12 +114,12 @@
   import DevelopmentModal from "./DevelopmentModal.svelte";
   import GnomeIntegrationModal from "./GnomeIntegrationModal.svelte";
   import GeneralSettingsModal from "./GeneralSettingsModal.svelte";
+  import KeyboardShortcutsModal from "./KeyboardShortcutsModal.svelte";
   import PrivacyModal from "./PrivacyModal.svelte";
   import PeerSharingModal from "./PeerSharingModal.svelte";
   import PeerPairingModal from "./PeerPairingModal.svelte";
   import RemoteHistoryRail from "./RemoteHistoryRail.svelte";
   import RetentionModal from "./RetentionModal.svelte";
-  import QuickPasteShortcutModal from "./QuickPasteShortcutModal.svelte";
   import AboutModal from "./AboutModal.svelte";
   import ClipboardPreview from "./ClipboardPreview.svelte";
   import CreateTextEntryModal from "./CreateTextEntryModal.svelte";
@@ -145,7 +147,7 @@
     | "peer_sharing"
     | "peer_pairing"
     | "retention"
-    | "quick_paste_shortcut"
+    | "keyboard_shortcuts"
     | "about";
 
   let diagnostics: Diagnostics | null = null;
@@ -171,8 +173,6 @@
   let unorganizedClearableCount: number | null = null;
   let unorganizedClearableCountLoaded = false;
   let unorganizedClearableCountLoading = false;
-  let quickSearchListenerStatus: "registering" | "ready" | "error" = "registering";
-  let quickSearchError: string | null = null;
   let searchController: { cancel: () => void } | null = null;
   /**
    * The shell registers exactly one shortcut listener for
@@ -213,6 +213,7 @@
   let nonEditableTextNoticeReturnFocus: HTMLElement | null = null;
   let openModal: ModalId = null;
   let modalReturnFocus: HTMLElement | null = null;
+  let keyboardShortcutReturnModal: ModalId = null;
   /** The global pairing prompt can appear even while Settings is closed. */
   let pairingRow: PeerRow | null = null;
   const PAIRING_INVITATION_REFRESH_MS = 1_000;
@@ -410,7 +411,19 @@
   $: if (diagnostics) {
     editTextShortcut = editTextShortcutPlatform(diagnostics.platform_os);
   }
-  $: searchShortcutLabelText = searchShortcutLabel(shortcutPlatform);
+  $: searchShortcutLabelText = $keyboardShortcuts && searchShortcutLabel(shortcutPlatform);
+  $: searchShortcutAccessibleText = $keyboardShortcuts && searchShortcutAccessibleLabel(shortcutPlatform, $t);
+  $: createTextShortcutBinding = $keyboardShortcuts["create_text_capture"] ?? null;
+  $: createTextShortcutLabelText = createTextShortcutBinding
+    ? shortcutLabel(createTextShortcutBinding, shortcutPlatform === "macos")
+    : "";
+  $: createTextShortcutAccessibleText = createTextShortcutBinding
+    ? ariaShortcut(createTextShortcutBinding, shortcutPlatform === "macos")
+    : "";
+  $: historyShortcutBinding = $keyboardShortcuts["open_history"] ?? null;
+  $: historyShortcutAccessibleText = historyShortcutBinding
+    ? ariaShortcut(historyShortcutBinding, shortcutPlatform === "macos")
+    : "";
 
   /**
    * Open the shared preview overlay for the supplied entry. The
@@ -907,10 +920,8 @@
     }
   }
 
-  function openCreateTextEntry(
-    _event: MouseEvent,
-    returnFocusTo: HTMLElement | null,
-  ): void {
+  function beginCreateTextEntry(returnFocusTo: HTMLElement | null): void {
+    if (!canCreateManualText) return;
     const target = activeCollectionIsHistory
       ? organization?.collections.find((collection) => collection.kind === "system") ?? null
       : activeCollection;
@@ -919,6 +930,19 @@
     createTextCollectionName = target.name;
     createTextReturnFocus = returnFocusTo;
     createTextEntryOpen = true;
+  }
+
+  function openCreateTextEntry(
+    _event: MouseEvent,
+    returnFocusTo: HTMLElement | null,
+  ): void {
+    beginCreateTextEntry(returnFocusTo);
+  }
+
+  function openCreateTextEntryFromShortcut(): void {
+    beginCreateTextEntry(
+      document.activeElement instanceof HTMLElement ? document.activeElement : null,
+    );
   }
 
   async function handleManualTextCreated(): Promise<void> {
@@ -1079,7 +1103,12 @@
   async function selectCollectionFromSidebar(
     event: CustomEvent<{ collectionId: number | null }>,
   ): Promise<void> {
-    const targetCollectionId = event.detail.collectionId;
+    await selectCollectionById(event.detail.collectionId);
+  }
+
+  async function selectCollectionById(
+    targetCollectionId: number | null,
+  ): Promise<void> {
     selectedCollectionId = targetCollectionId;
     peerImportedSourceAppsToken += 1;
     peerImportedSourceApps = new Map();
@@ -1654,7 +1683,78 @@
           detail: { entryId: targetEntryId },
         }),
       );
+      return;
     }
+
+    const macos = shortcutPlatform === "macos";
+    if (matchesConfiguredShortcut(event, "open_entry_note", macos)) {
+      if (
+        openModal !== null ||
+        guidance !== null ||
+        previewEntry !== null ||
+        activePeerId !== null ||
+        isShortcutBlockedSurface(event.target) ||
+        railSelectedEntryId === null
+      ) {
+        return;
+      }
+      const selectedEntry = visibleEntries.find(
+        (entry) => entry.id === railSelectedEntryId,
+      ) ?? entries.find((entry) => entry.id === railSelectedEntryId);
+      if (!selectedEntry) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      document.dispatchEvent(
+        new CustomEvent("clipvault:entry-note-shortcut", {
+          detail: { entryId: selectedEntry.id },
+        }),
+      );
+      return;
+    }
+
+    if (matchesConfiguredShortcut(event, "open_history", macos)) {
+      if (
+        openModal !== null ||
+        guidance !== null ||
+        isShortcutBlockedSurface(event.target) ||
+        historyCollectionId === null
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void selectCollectionById(historyCollectionId);
+      return;
+    }
+
+    if (matchesConfiguredShortcut(event, "create_text_capture", macos)) {
+      if (
+        openModal !== null ||
+        guidance !== null ||
+        isShortcutBlockedSurface(event.target) ||
+        !canCreateManualText
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      openCreateTextEntryFromShortcut();
+    }
+  }
+
+  function isShortcutBlockedSurface(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false;
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement ||
+      target.isContentEditable
+    ) {
+      return true;
+    }
+    return target.closest(
+      "[role='dialog'], [role='menu'], [role='menuitem'], .menu, [data-testid='confirm-dialog']",
+    ) !== null;
   }
 
   /**
@@ -2014,7 +2114,19 @@
   }
 
   function onOpenShortcut(event: MouseEvent): void {
-    openModalWith("quick_paste_shortcut", event.currentTarget as HTMLElement | null);
+    keyboardShortcutReturnModal = null;
+    openModalWith("keyboard_shortcuts", event.currentTarget as HTMLElement | null);
+  }
+
+  function onOpenKeyboardShortcuts(): void {
+    keyboardShortcutReturnModal = openModal;
+    openModalWith("keyboard_shortcuts", document.activeElement as HTMLElement | null);
+  }
+
+  function closeKeyboardShortcuts(): void {
+    openModal = keyboardShortcutReturnModal;
+    keyboardShortcutReturnModal = null;
+    if (openModal === null) modalReturnFocus = null;
   }
 
   /**
@@ -2063,7 +2175,6 @@
   const registerQuickSearch = createQuickSearchRegistrar(
     defaultQuickPasteBridge,
     () => {
-      quickSearchError = "quickpaste.activation_error";
     },
   );
   let unlistenQuickSearch: (() => void) | null = null;
@@ -2145,7 +2256,6 @@
 
   async function handleQuickSearchActivation(): Promise<void> {
     searchQuery = "";
-    quickSearchError = null;
     searchError = null;
     searching = false;
     searchStatus = "idle";
@@ -2157,6 +2267,7 @@
   }
 
   onMount(() => {
+    void initializeKeyboardShortcuts();
     void refresh();
     startPairingInvitationRefresh();
     // Boot the desktop-owned snapshot polling cadence so a fresh
@@ -2170,12 +2281,9 @@
     registerQuickSearch(handleQuickSearchActivation)
       .then((unlisten) => {
         unlistenQuickSearch = unlisten;
-        quickSearchListenerStatus = "ready";
       })
       .catch((error) => {
         console.error("failed to register quick-search listener", error);
-        quickSearchListenerStatus = "error";
-        quickSearchError = "quickpaste.listener_unavailable";
       });
     registerHistoryUpdated(handleHistoryUpdated)
       .then((unlisten) => {
@@ -2210,6 +2318,7 @@
   });
 
   onDestroy(() => {
+    disposeKeyboardShortcutUpdates();
     stopPairingInvitationRefresh();
     // Halt the desktop-owned snapshot polling cadence so the
     // unmount path never leaks a timer that keeps the bridge
@@ -2269,6 +2378,7 @@
       <OrganizationSidebar
         collections={organization?.collections ?? []}
         activeCollectionId={selectedCollectionId}
+        historyShortcutAccessible={historyShortcutAccessibleText}
         linkedPeers={peerSnapshot}
         activePeerId={activePeerId}
         on:select={(e) => selectCollectionFromSidebar(e)}
@@ -2297,8 +2407,11 @@
             searchQuery={searchQuery}
             searching={searching}
             searchShortcut={searchShortcutLabelText}
+            searchShortcutAccessible={searchShortcutAccessibleText}
             showClearHistory={activeCollectionIsHistory}
             canCreateManualText={canCreateManualText}
+            createTextShortcut={createTextShortcutLabelText}
+            createTextShortcutAccessible={createTextShortcutAccessibleText}
             sourceAppFilter={sourceAppFilter}
             sourceAppOptions={sourceAppOptions}
             tagFilter={tagFilter}
@@ -2655,6 +2768,7 @@
     open={openModal === "general_settings"}
     platformOs={diagnostics?.platform_os ?? null}
     displayServer={diagnostics?.display_server ?? null}
+    on:keyboardShortcutsRequested={onOpenKeyboardShortcuts}
   />
 </Modal>
 
@@ -2696,16 +2810,13 @@
 </Modal>
 
 <Modal
-  open={openModal === "quick_paste_shortcut"}
+  open={openModal === "keyboard_shortcuts"}
   titleId="shortcut-title"
-  title={$t("app.modal.shortcut")}
+  title={$t("keyboard_shortcuts.title")}
   returnFocusTo={modalReturnFocus}
-  onClose={closeModal}
+  onClose={closeKeyboardShortcuts}
 >
-  <QuickPasteShortcutModal
-    {capabilities}
-    listenerStatus={quickSearchListenerStatus}
-    listenerError={quickSearchError}
+  <KeyboardShortcutsModal
     platformOs={diagnostics?.platform_os ?? null}
   />
 </Modal>

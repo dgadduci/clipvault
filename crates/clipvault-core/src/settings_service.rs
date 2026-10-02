@@ -13,6 +13,9 @@ use thiserror::Error;
 
 use crate::bootstrap::AppContext;
 use crate::clock::Clock;
+use crate::keyboard_shortcuts::{
+    default_keyboard_shortcuts, validate_shortcut, KeyboardShortcutId,
+};
 use crate::management::{RetentionPolicy, RETENTION_SETTING_KEY};
 use crate::peer_discovery::PeerDiscoveryRuntime;
 use crate::peer_identity::{
@@ -93,6 +96,76 @@ impl SettingsService {
             .flatten()
             .map(|setting| setting.value);
         parse_local_clipboard_capture_enabled(raw.as_deref())
+    }
+
+    /// Load the effective keyboard shortcut catalog. User choices take
+    /// precedence; an existing `quick_paste_hotkey` value remains the fallback
+    /// for `open_quick_paste` until that action gets its new per-action key.
+    pub fn load_keyboard_shortcuts(&self, context: &AppContext) -> Vec<HotkeySpec> {
+        let defaults = default_keyboard_shortcuts();
+        let mut db = context.database().lock();
+        let repo = AppSettingsRepository::new(db.connection_mut());
+        let legacy = repo
+            .get(HOTKEY_SETTING_STORAGE_KEY)
+            .ok()
+            .flatten()
+            .and_then(|setting| HotkeySpec::parse(Some(&setting.value)))
+            .and_then(Result::ok);
+
+        defaults
+            .into_iter()
+            .map(|default| {
+                let id = KeyboardShortcutId::parse(&default.id)
+                    .expect("default shortcut IDs are catalogued");
+                let stored = repo
+                    .get(id.storage_key())
+                    .ok()
+                    .flatten()
+                    .and_then(|setting| HotkeySpec::parse(Some(&setting.value)))
+                    .and_then(Result::ok)
+                    .map(|mut value| {
+                        value.id = id.as_str().to_string();
+                        value
+                    })
+                    .filter(|value| validate_shortcut(value).is_ok());
+                if let Some(value) = stored {
+                    value
+                } else if id == KeyboardShortcutId::OpenQuickPaste {
+                    legacy
+                        .clone()
+                        .map(|mut value| {
+                            value.id = id.as_str().to_string();
+                            value
+                        })
+                        .filter(|value| validate_shortcut(value).is_ok())
+                        .unwrap_or(default)
+                } else {
+                    default
+                }
+            })
+            .collect()
+    }
+
+    /// Persist a single, already runtime-activated shortcut. The caller owns
+    /// the platform registration transaction and rolls it back if this write
+    /// fails.
+    pub fn persist_keyboard_shortcut(
+        &self,
+        context: &AppContext,
+        shortcut: &HotkeySpec,
+    ) -> Result<(), SettingsServiceError> {
+        let id = validate_shortcut(shortcut).map_err(|_| ValidationError::invalid_hotkey())?;
+        let value = shortcut.as_setting_value();
+        if value.is_empty() {
+            return Err(ValidationError::invalid_hotkey().into());
+        }
+        let mut db = context.database().lock();
+        AppSettingsRepository::new(db.connection_mut()).set(
+            id.storage_key(),
+            &value,
+            self.clock.now(),
+        )?;
+        Ok(())
     }
 
     /// Persist the local clipboard-capture preference. The caller updates
@@ -542,6 +615,47 @@ mod tests {
         assert_eq!(stored.local_peer_display_name.as_deref(), Some("Studio"));
         let reloaded = service.load(&context);
         assert_eq!(reloaded.local_peer_display_name.as_deref(), Some("Studio"));
+    }
+
+    #[test]
+    fn keyboard_shortcut_catalog_persists_all_actions_and_reads_legacy_open_binding() {
+        use crate::keyboard_shortcuts::{default_keyboard_shortcuts, KeyboardShortcutId};
+        use crate::test_support::isolated_harness;
+        use std::sync::Arc;
+
+        let (_dir, context) = isolated_harness();
+        let service = minimal_service();
+        let defaults = default_keyboard_shortcuts();
+        for binding in &defaults {
+            service
+                .persist_keyboard_shortcut(&context, binding)
+                .expect("persist shortcut");
+        }
+        assert_eq!(service.load_keyboard_shortcuts(&context), defaults);
+
+        let mut legacy = defaults
+            .iter()
+            .find(|binding| binding.id == KeyboardShortcutId::OpenQuickPaste.as_str())
+            .expect("open shortcut")
+            .clone();
+        legacy.key = "q".to_string();
+        legacy.id = "legacy_id_is_ignored".to_string();
+        let (_legacy_dir, legacy_context) = isolated_harness();
+        let now = Arc::new(crate::clock::SystemClock).now();
+        let value = legacy.as_setting_value();
+        let mut database = legacy_context.database().lock();
+        AppSettingsRepository::new(database.connection_mut())
+            .set(HOTKEY_SETTING_STORAGE_KEY, &value, now)
+            .expect("persist legacy shortcut");
+        drop(database);
+
+        let loaded = service.load_keyboard_shortcuts(&legacy_context);
+        let open = loaded
+            .iter()
+            .find(|binding| binding.id == KeyboardShortcutId::OpenQuickPaste.as_str())
+            .expect("loaded open shortcut");
+        assert_eq!(open.key, "q");
+        assert_eq!(open.id, KeyboardShortcutId::OpenQuickPaste.as_str());
     }
 
     #[test]

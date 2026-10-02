@@ -14,6 +14,11 @@
 // accidental combination does not steal focus from a search input.
 
 import { platformFromDiagnostics } from "./platform.ts";
+import {
+  configuredLabel,
+  currentKeyboardShortcut,
+  matchesConfiguredShortcut,
+} from "./keyboardShortcuts.ts";
 
 /**
  * Resolve the platform the search-shortcut listener cares about.
@@ -34,6 +39,8 @@ export function searchShortcutPlatform(
 export function searchShortcutLabel(
   platform: SearchShortcutPlatform,
 ): string {
+  const configured = configuredLabel("focus_main_search", platform === "macos");
+  if (configured) return configured;
   return platform === "macos" ? "⌘F" : "Ctrl F";
 }
 
@@ -42,6 +49,10 @@ export function searchShortcutAccessibleLabel(
   platform: SearchShortcutPlatform,
   translateText?: (key: string, params?: Record<string, string | number | Date>) => string,
 ): string {
+  const configured = configuredLabel("focus_main_search", platform === "macos");
+  if (configured && translateText) {
+    return translateText("shortcut.search_binding", { shortcut: configured });
+  }
   const modifier = platform === "macos" ? "shortcut.command" : "shortcut.control";
   return translateText
     ? translateText("shortcut.search", { modifier: translateText(modifier) })
@@ -75,6 +86,8 @@ export const QUICK_PASTE_SEARCH_LETTER = "k";
 export function quickPasteSearchShortcutLabel(
   platform: SearchShortcutPlatform,
 ): string {
+  const configured = configuredLabel("focus_quick_search", platform === "macos");
+  if (configured) return configured;
   return platform === "macos" ? "⌘K" : "Ctrl K";
 }
 
@@ -83,6 +96,10 @@ export function quickPasteSearchShortcutAccessibleLabel(
   platform: SearchShortcutPlatform,
   translateText?: (key: string, params?: Record<string, string | number | Date>) => string,
 ): string {
+  const configured = configuredLabel("focus_quick_search", platform === "macos");
+  if (configured && translateText) {
+    return translateText("shortcut.quickpaste_search_binding", { shortcut: configured });
+  }
   const modifier = platform === "macos" ? "shortcut.command" : "shortcut.control";
   return translateText
     ? translateText("shortcut.quickpaste_search", { modifier: translateText(modifier) })
@@ -101,6 +118,9 @@ export function matchesSearchShortcut(
   event: KeyboardEvent | { key: string; metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean },
   platform: SearchShortcutPlatform,
 ): boolean {
+  if (currentKeyboardShortcut("focus_main_search")) {
+    return matchesConfiguredShortcut(event, "focus_main_search", platform === "macos");
+  }
   if (event.altKey || event.shiftKey) return false;
   const key = (event.key ?? "").toLowerCase();
   if (key !== "f") return false;

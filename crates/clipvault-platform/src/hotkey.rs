@@ -75,24 +75,149 @@ impl HotkeyModifiers {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HotkeyKey {
+    A,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
     #[serde(rename = "v")]
     V,
+    W,
+    X,
+    Y,
+    Z,
+    #[serde(rename = "0")]
+    Digit0,
+    #[serde(rename = "1")]
+    Digit1,
+    #[serde(rename = "2")]
+    Digit2,
+    #[serde(rename = "3")]
+    Digit3,
+    #[serde(rename = "4")]
+    Digit4,
+    #[serde(rename = "5")]
+    Digit5,
+    #[serde(rename = "6")]
+    Digit6,
+    #[serde(rename = "7")]
+    Digit7,
+    #[serde(rename = "8")]
+    Digit8,
+    #[serde(rename = "9")]
+    Digit9,
     #[serde(rename = "b")]
     B,
     #[serde(rename = "enter")]
     Enter,
     #[serde(rename = "escape")]
     Escape,
+    Space,
 }
 
 impl HotkeyKey {
     pub fn as_str(self) -> &'static str {
         match self {
+            HotkeyKey::A => "a",
+            HotkeyKey::C => "c",
+            HotkeyKey::D => "d",
+            HotkeyKey::E => "e",
+            HotkeyKey::F => "f",
+            HotkeyKey::G => "g",
+            HotkeyKey::H => "h",
+            HotkeyKey::I => "i",
+            HotkeyKey::J => "j",
+            HotkeyKey::K => "k",
+            HotkeyKey::L => "l",
+            HotkeyKey::M => "m",
+            HotkeyKey::N => "n",
+            HotkeyKey::O => "o",
+            HotkeyKey::P => "p",
+            HotkeyKey::Q => "q",
+            HotkeyKey::R => "r",
+            HotkeyKey::S => "s",
+            HotkeyKey::T => "t",
+            HotkeyKey::U => "u",
             HotkeyKey::V => "v",
+            HotkeyKey::W => "w",
+            HotkeyKey::X => "x",
+            HotkeyKey::Y => "y",
+            HotkeyKey::Z => "z",
+            HotkeyKey::Digit0 => "0",
+            HotkeyKey::Digit1 => "1",
+            HotkeyKey::Digit2 => "2",
+            HotkeyKey::Digit3 => "3",
+            HotkeyKey::Digit4 => "4",
+            HotkeyKey::Digit5 => "5",
+            HotkeyKey::Digit6 => "6",
+            HotkeyKey::Digit7 => "7",
+            HotkeyKey::Digit8 => "8",
+            HotkeyKey::Digit9 => "9",
             HotkeyKey::B => "b",
             HotkeyKey::Enter => "enter",
             HotkeyKey::Escape => "escape",
+            HotkeyKey::Space => "space",
         }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        Some(match value.trim().to_ascii_lowercase().as_str() {
+            "a" => Self::A,
+            "b" => Self::B,
+            "c" => Self::C,
+            "d" => Self::D,
+            "e" => Self::E,
+            "f" => Self::F,
+            "g" => Self::G,
+            "h" => Self::H,
+            "i" => Self::I,
+            "j" => Self::J,
+            "k" => Self::K,
+            "l" => Self::L,
+            "m" => Self::M,
+            "n" => Self::N,
+            "o" => Self::O,
+            "p" => Self::P,
+            "q" => Self::Q,
+            "r" => Self::R,
+            "s" => Self::S,
+            "t" => Self::T,
+            "u" => Self::U,
+            "v" => Self::V,
+            "w" => Self::W,
+            "x" => Self::X,
+            "y" => Self::Y,
+            "z" => Self::Z,
+            "0" => Self::Digit0,
+            "1" => Self::Digit1,
+            "2" => Self::Digit2,
+            "3" => Self::Digit3,
+            "4" => Self::Digit4,
+            "5" => Self::Digit5,
+            "6" => Self::Digit6,
+            "7" => Self::Digit7,
+            "8" => Self::Digit8,
+            "9" => Self::Digit9,
+            "enter" | "return" => Self::Enter,
+            "escape" | "esc" => Self::Escape,
+            "space" => Self::Space,
+            _ => return None,
+        })
     }
 }
 
@@ -193,6 +318,10 @@ pub trait HotkeyManager: Send + Sync {
         binding: &HotkeyBinding,
         on_activate: Box<dyn Fn() + Send + Sync + 'static>,
     ) -> Result<HotkeyOutcome, HotkeyError>;
+
+    /// Unregister exactly one binding. Other actions registered through the
+    /// same manager remain active.
+    fn unregister(&self, binding: &HotkeyBinding) -> Result<(), HotkeyError>;
 
     /// Release every binding registered through this manager. Safe to
     /// call multiple times.

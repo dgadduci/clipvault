@@ -278,6 +278,25 @@
     );
   }
 
+  function handleEntryNoteShortcutRequest(event: Event): void {
+    const detail = (event as CustomEvent<{ entryId: number }>).detail;
+    if (!detail || typeof detail.entryId !== "number") return;
+    const card = cardEls.get(detail.entryId);
+    if (!card) return;
+    for (const [mountedId, mountedCard] of cardEls) {
+      if (mountedId === detail.entryId) continue;
+      mountedCard.dispatchEvent(
+        new CustomEvent("card-entry-note-shortcut-close", { bubbles: false }),
+      );
+    }
+    card.dispatchEvent(
+      new CustomEvent("card-entry-note-shortcut", {
+        bubbles: false,
+        detail: { entryId: detail.entryId },
+      }),
+    );
+  }
+
   function closeAllMenus(): void {
     openCardId = null;
   }
@@ -436,6 +455,11 @@
       handleEditTextShortcutRequest,
       true,
     );
+    document.addEventListener(
+      "clipvault:entry-note-shortcut",
+      handleEntryNoteShortcutRequest,
+      true,
+    );
     detachWindow = () => {
       document.removeEventListener("click", onWindowClick, true);
       document.removeEventListener("keydown", onWindowKeydown, true);
@@ -447,6 +471,11 @@
       document.removeEventListener(
         "clipvault:edit-text-shortcut",
         handleEditTextShortcutRequest,
+        true,
+      );
+      document.removeEventListener(
+        "clipvault:entry-note-shortcut",
+        handleEntryNoteShortcutRequest,
         true,
       );
     };

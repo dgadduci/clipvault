@@ -13,13 +13,13 @@ use clipvault_core::{
 };
 use clipvault_core::{
     ActiveAppDiagnostics, Capabilities, ClearOutcome, ClipboardAssetStore,
-    CodeLanguageServiceError, CopyOutcome, DeleteOutcome, IgnoredAppEntry, IgnoredAppError,
-    LocalSettingsReader, ManualTextCreationOutcome, PasteMode, PasteOutcome, PickAndAddOutcome,
-    PlatformGuidance, PlatformGuidanceId, PlatformSettingsTarget, RetentionOutcome,
-    RetentionPolicy, RetentionPreview, RichTextAssetStore, SetFavoriteResult, SetTitleOutcome,
-    Settings, SettingsNavigator, SettingsOpenOutcome, SettingsServiceError, SettingsUpdate,
-    TitleValidationError, UpdateTextHistoryOutcome, ValidationCode, ValidationError,
-    WatchTickOutcome,
+    CodeLanguageServiceError, CopyOutcome, DeleteOutcome, HotkeySpec, IgnoredAppEntry,
+    IgnoredAppError, LocalSettingsReader, ManualTextCreationOutcome, PasteMode, PasteOutcome,
+    PickAndAddOutcome, PlatformGuidance, PlatformGuidanceId, PlatformSettingsTarget,
+    RetentionOutcome, RetentionPolicy, RetentionPreview, RichTextAssetStore, SetFavoriteResult,
+    SetTitleOutcome, Settings, SettingsNavigator, SettingsOpenOutcome, SettingsServiceError,
+    SettingsUpdate, TitleValidationError, UpdateTextHistoryOutcome, ValidationCode,
+    ValidationError, WatchTickOutcome,
 };
 use clipvault_platform::{
     read_icon_bytes, read_source_app_icon_bytes, ActiveAppError, IconReadError,
@@ -988,6 +988,52 @@ pub fn run_retention(context: &clipvault_core::AppContext) {
 #[tauri::command]
 pub fn clipvault_settings_get(state: State<'_, SharedState>) -> Result<Settings, CommandError> {
     Ok(state.context().settings().load(state.context()))
+}
+
+pub use crate::keyboard_shortcuts::KeyboardShortcutsSnapshot;
+
+#[tauri::command]
+pub fn clipvault_keyboard_shortcuts_get(
+    state: State<'_, SharedState>,
+) -> Result<KeyboardShortcutsSnapshot, CommandError> {
+    Ok(crate::keyboard_shortcuts::snapshot(&state))
+}
+
+#[tauri::command]
+pub async fn clipvault_keyboard_shortcut_set(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    binding: HotkeySpec,
+) -> Result<KeyboardShortcutsSnapshot, CommandError> {
+    crate::keyboard_shortcuts::set(app, state.inner().clone(), binding).await
+}
+
+pub(crate) fn format_keyboard_shortcut(binding: &HotkeySpec, macos: bool) -> String {
+    let mut parts = Vec::<String>::new();
+    if binding.cmd_or_ctrl {
+        parts.push(if macos { "⌘" } else { "Ctrl" }.to_string());
+    }
+    if binding.meta {
+        parts.push(if macos { "⌃" } else { "Super" }.to_string());
+    }
+    if binding.alt {
+        parts.push(if macos { "⌥" } else { "Alt" }.to_string());
+    }
+    if binding.shift {
+        parts.push(if macos { "⇧" } else { "Shift" }.to_string());
+    }
+    let key = match binding.key.to_ascii_lowercase().as_str() {
+        "enter" => "Enter".to_string(),
+        "escape" => "Escape".to_string(),
+        "space" => "Space".to_string(),
+        value => value.to_ascii_uppercase(),
+    };
+    parts.push(key);
+    if macos {
+        parts.join("")
+    } else {
+        parts.join("+")
+    }
 }
 
 #[tauri::command]
@@ -2782,8 +2828,22 @@ mod kde_kwin_commands {
         handle: tauri::AppHandle,
     ) -> Result<KdeKwinIntegrationPayload, CommandError> {
         let integration = integration(&state)?;
-        let bundled = read_bundled_script(&handle).map_err(|_| {
+        let template = read_bundled_script(&handle).map_err(|_| {
             CommandError::new("bundled_missing", "KWin script resources are unavailable")
+        })?;
+        let shortcuts = state
+            .context()
+            .settings()
+            .load_keyboard_shortcuts(state.context());
+        let language = state.context().settings().load(state.context()).language;
+        let bundled = crate::kde_kwin_integration::configure_bundled_shortcuts(
+            &template, &shortcuts, &language,
+        )
+        .map_err(|_| {
+            CommandError::new(
+                "keyboard_shortcut_invalid",
+                "KWin shortcut settings are invalid",
+            )
         })?;
         let context = state.context().clone();
         let fallback = state.adapters().active_app();
@@ -2838,8 +2898,22 @@ mod kde_kwin_commands {
         handle: tauri::AppHandle,
     ) -> Result<KdeKwinIntegrationPayload, CommandError> {
         let integration = integration(&state)?;
-        let bundled = read_bundled_script(&handle).map_err(|_| {
+        let template = read_bundled_script(&handle).map_err(|_| {
             CommandError::new("bundled_missing", "KWin script resources are unavailable")
+        })?;
+        let shortcuts = state
+            .context()
+            .settings()
+            .load_keyboard_shortcuts(state.context());
+        let language = state.context().settings().load(state.context()).language;
+        let bundled = crate::kde_kwin_integration::configure_bundled_shortcuts(
+            &template, &shortcuts, &language,
+        )
+        .map_err(|_| {
+            CommandError::new(
+                "keyboard_shortcut_invalid",
+                "KWin shortcut settings are invalid",
+            )
         })?;
         let context = state.context().clone();
         let fallback = state.adapters().active_app();

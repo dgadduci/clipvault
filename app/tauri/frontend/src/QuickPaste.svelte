@@ -39,6 +39,13 @@
   } from "./lib/quickPasteActions";
   import { listen } from "@tauri-apps/api/event";
   import {
+    currentKeyboardShortcut,
+    currentPlatformIsMacos,
+    initializeKeyboardShortcuts,
+    keyboardShortcuts,
+    matchesConfiguredShortcut,
+  } from "./lib/keyboardShortcuts.ts";
+  import {
     APP_FALLBACK_ICON_SVG,
     CONTENT_TYPE_ICON_SPRITE,
     contentTypeIconId,
@@ -1318,7 +1325,7 @@
     await runCopyForEntry(entryId, action.mode, { hideAfterSuccess: options.hideAfterSuccess ?? true });
   }
 
-  async function handleEnter(event?: KeyboardEvent): Promise<void> {
+  async function handleEnter(): Promise<void> {
     if (selectedIndex < 0 || selectedIndex >= resultIds.length) {
       // No selection: do NOT invoke any command. The contract is
       // "Enter without selection must not paste / copy".
@@ -1326,7 +1333,7 @@
     }
     const entryId = resultIds[selectedIndex];
     if (entryId == null) return;
-    await confirmEntry(entryId, { shiftKey: event?.shiftKey ?? false, hideAfterSuccess: true });
+    await confirmEntry(entryId, { hideAfterSuccess: true });
   }
 
   /**
@@ -2185,6 +2192,27 @@
     } else if (event.key === "End") {
       event.preventDefault();
       jumpToLast();
+    } else if (
+      currentKeyboardShortcut("copy_plain_text")
+        ? matchesConfiguredShortcut(event, "copy_plain_text", currentPlatformIsMacos())
+        : event.key === "Enter" && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey
+    ) {
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        target !== document.body &&
+        target.tagName !== "INPUT" &&
+        target.tagName !== "TEXTAREA"
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (selectedIndex >= 0 && selectedIndex < resultIds.length) {
+        const entryId = resultIds[selectedIndex];
+        if (entryId != null) {
+          void confirmEntry(entryId, { shiftKey: true, hideAfterSuccess: true });
+        }
+      }
     } else if (event.key === "Enter") {
       // Only handle Enter when the focus is on the search input or
       // the list, so typing in another input does not trigger a
@@ -2239,15 +2267,17 @@
   }
 
   /**
-   * Whether the keyboard event matches the platform-specific search
-   * shortcut the Quick Paste window installs. Mirrors the
-   * `searchShortcut.ts` helper so the listener stays a thin matcher
-   * without duplicating the modifier table.
+   * Whether the keyboard event matches the configured QuickVault
+   * search binding. Before the persisted catalog loads, keep the
+   * platform default so the first keypress still works.
    */
   function matchesQuickPasteSearchShortcut(
     event: KeyboardEvent,
     platform: SearchShortcutPlatform,
   ): boolean {
+    if (currentKeyboardShortcut("focus_quick_search")) {
+      return matchesConfiguredShortcut(event, "focus_quick_search", platform === "macos");
+    }
     if (event.altKey || event.shiftKey) return false;
     const key = (event.key ?? "").toLowerCase();
     if (key !== "k") return false;
@@ -2617,8 +2647,8 @@
    * derives from `quickPasteSearchShortcutLabel` instead of the
    * `F`-key helper the main window uses.
    */
-  $: shortcutLabelText = quickPasteSearchShortcutLabel(shortcutPlatform);
-  $: shortcutAccessibleLabel = quickPasteSearchShortcutAccessibleLabel(
+  $: shortcutLabelText = $keyboardShortcuts && quickPasteSearchShortcutLabel(shortcutPlatform);
+  $: shortcutAccessibleLabel = $keyboardShortcuts && quickPasteSearchShortcutAccessibleLabel(
     shortcutPlatform,
     $t,
   );
@@ -2641,6 +2671,7 @@
   }
 
   onMount(() => {
+    void initializeKeyboardShortcuts();
     void loadShortcutPlatform();
     void loadRecent();
     unlistenOpened = safeListenOpened(() => {
@@ -2908,16 +2939,16 @@
                   class="qp-preview-hint"
                   data-testid="quick-paste-preview-hint"
                   data-preview-platform={shortcutPlatform}
-                  title={previewShortcutAccessibleLabel(shortcutPlatform, $t)}
-                  aria-label={previewShortcutAccessibleLabel(shortcutPlatform, $t)}
-                  aria-keyshortcuts={previewShortcutKeyAttribute(shortcutPlatform)}
+                  title={$keyboardShortcuts && previewShortcutAccessibleLabel(shortcutPlatform, $t)}
+                  aria-label={$keyboardShortcuts && previewShortcutAccessibleLabel(shortcutPlatform, $t)}
+                  aria-keyshortcuts={$keyboardShortcuts && previewShortcutKeyAttribute(shortcutPlatform)}
                 >
                   <span class="qp-preview-hint-label">{$t("history.card.preview")}</span>
                   <span
                     class="qp-preview-hint-keys"
                     aria-hidden="true"
                   >
-                    {previewShortcutLabel(shortcutPlatform)}
+                    {$keyboardShortcuts && previewShortcutLabel(shortcutPlatform)}
                   </span>
                 </span>
               {/if}
@@ -3178,9 +3209,9 @@
             on:keydown={onMenuKeydown}
           >
             {#each anchorActions as action (action.testId)}
-              {@const shortcutLabel = actionShortcutLabel(action)}
-              {@const shortcutAccessible = actionShortcutAccessibleLabel(action, $t)}
-              {@const shortcutKey = actionShortcutKeyAttribute(action)}
+              {@const shortcutLabel = $keyboardShortcuts && actionShortcutLabel(action)}
+              {@const shortcutAccessible = $keyboardShortcuts && actionShortcutAccessibleLabel(action, $t)}
+              {@const shortcutKey = $keyboardShortcuts && actionShortcutKeyAttribute(action)}
               <li role="none">
                 <button
                   type="button"

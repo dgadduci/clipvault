@@ -32,7 +32,16 @@ const CLIPVAULT_OBJECT_PATH = "/org/clipvault/SourceApp";
 const CLIPVAULT_INTERFACE = "org.clipvault.SourceApp";
 const CLIPVAULT_METHOD = "Publish";
 const CLIPVAULT_CAPTURE_TOGGLE_METHOD = "ToggleCapture";
+const CLIPVAULT_OPEN_QUICK_PASTE_METHOD = "OpenQuickPaste";
+const CLIPVAULT_SHORTCUT_STATUS_METHOD = "ShortcutStatus";
 const CLIPVAULT_PROTOCOL_VERSION = 2;
+const CLIPVAULT_QUICK_PASTE_ACCELERATOR = "Ctrl+Shift+V";
+const CLIPVAULT_CAPTURE_TOGGLE_ACCELERATOR = "Ctrl+Alt+Shift+B";
+const CLIPVAULT_QUICK_PASTE_DESCRIPTION = "Open ClipVault QuickVault";
+const CLIPVAULT_CAPTURE_TOGGLE_DESCRIPTION = "Toggle ClipVault local clipboard capture";
+function shortcutActionName(action, accelerator) {
+    return "clipvault-" + action.replace(/_/g, "-") + "-" + accelerator.replace(/[^A-Za-z0-9]/g, "-");
+}
 let loggedIdentifierAcknowledgement = false;
 let loggedEmptyAcknowledgement = false;
 
@@ -149,6 +158,37 @@ function toggleLocalCapture() {
     }
 }
 
+function openQuickPaste() {
+    try {
+        callDBus(
+            CLIPVAULT_BUS_NAME,
+            CLIPVAULT_OBJECT_PATH,
+            CLIPVAULT_INTERFACE,
+            CLIPVAULT_OPEN_QUICK_PASTE_METHOD,
+            function () {}
+        );
+    } catch (error) {
+        // ClipVault may be restarting; do not replay this activation.
+    }
+}
+
+function reportShortcutStatus(action, registered) {
+    try {
+        callDBus(
+            CLIPVAULT_BUS_NAME,
+            CLIPVAULT_OBJECT_PATH,
+            CLIPVAULT_INTERFACE,
+            CLIPVAULT_SHORTCUT_STATUS_METHOD,
+            action,
+            registered ? "registered" : "conflict",
+            String(CLIPVAULT_PROTOCOL_VERSION),
+            function () {}
+        );
+    } catch (error) {
+        // The bridge may still be starting. Its next reload reports status.
+    }
+}
+
 function reportPublishAcknowledgement(hasIdentifier) {
     if (hasIdentifier) {
         if (loggedIdentifierAcknowledgement) {
@@ -170,13 +210,24 @@ function reportPublishAcknowledgement(hasIdentifier) {
 // Publish immediately for the current focus, then follow future changes.
 workspace.windowActivated.connect(onWindowActivated);
 const captureShortcutRegistered = registerShortcut(
-    "clipvault-toggle-local-capture",
-    "Toggle ClipVault local clipboard capture",
-    "Ctrl+Alt+Shift+B",
+    shortcutActionName("toggle-clipboard-capture", CLIPVAULT_CAPTURE_TOGGLE_ACCELERATOR),
+    CLIPVAULT_CAPTURE_TOGGLE_DESCRIPTION,
+    CLIPVAULT_CAPTURE_TOGGLE_ACCELERATOR,
     toggleLocalCapture
 );
+reportShortcutStatus("toggle_clipboard_capture", captureShortcutRegistered);
 if (!captureShortcutRegistered) {
     print("ClipVault Ctrl+Alt+Shift+B shortcut unavailable (conflict)");
+}
+const quickPasteShortcutRegistered = registerShortcut(
+    shortcutActionName("open-quick-paste", CLIPVAULT_QUICK_PASTE_ACCELERATOR),
+    CLIPVAULT_QUICK_PASTE_DESCRIPTION,
+    CLIPVAULT_QUICK_PASTE_ACCELERATOR,
+    openQuickPaste
+);
+reportShortcutStatus("open_quick_paste", quickPasteShortcutRegistered);
+if (!quickPasteShortcutRegistered) {
+    print("ClipVault QuickVault shortcut unavailable (conflict)");
 }
 print("ClipVault KWin source-app script started");
 publishInitial();

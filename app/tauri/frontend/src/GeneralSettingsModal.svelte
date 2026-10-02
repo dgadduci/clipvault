@@ -12,6 +12,8 @@
     listenCaptureControlError,
   } from "./lib/captureControlUpdates.ts";
   import { captureToggleShortcutLabel } from "./lib/clipboardCaptureControl.ts";
+  import { keyboardShortcuts } from "./lib/keyboardShortcuts.ts";
+  import { createEventDispatcher } from "svelte";
   import {
     localeStore,
     setLocale,
@@ -22,6 +24,8 @@
   export let open = false;
   export let platformOs: string | null = null;
   export let displayServer: string | null = null;
+
+  const dispatch = createEventDispatcher<{ keyboardShortcutsRequested: void }>();
 
   let captureEnabled: boolean | null = null;
   let shareNotesEnabled: boolean | null = null;
@@ -34,7 +38,7 @@
   let unlisten: (() => void) | null = null;
   let unlistenError: (() => void) | null = null;
 
-  $: shortcut = captureToggleShortcutLabel(platformOs);
+  $: shortcut = $keyboardShortcuts && captureToggleShortcutLabel(platformOs);
   $: if (open) void loadSettings();
 
   async function loadSettings(): Promise<void> {
@@ -151,6 +155,17 @@
 </script>
 
 <section class="general-settings" data-testid="general-settings-modal">
+  <article data-testid="keyboard-shortcuts-setting">
+    <h3>{$t("keyboard_shortcuts.title")}</h3>
+    <p class="muted">{$t("keyboard_shortcuts.description")}</p>
+    <div class="controls">
+      <button
+        type="button"
+        data-testid="keyboard-shortcuts-open"
+        on:click={() => dispatch("keyboardShortcutsRequested")}
+      >{$t("keyboard_shortcuts.open")}</button>
+    </div>
+  </article>
   <article data-testid="language-setting">
     <h3>{$t("settings.language.title")}</h3>
     <p class="muted">{$t("settings.language.description")}</p>

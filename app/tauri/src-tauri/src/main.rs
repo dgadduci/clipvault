@@ -10,6 +10,7 @@ mod commands;
 mod gnome_integration;
 #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
 mod kde_kwin_integration;
+mod keyboard_shortcuts;
 mod localization;
 mod main_window_layout;
 mod metadata_scheduler;
@@ -26,8 +27,8 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
 use crate::bootstrap::{
-    build_state, install_capture_loop, refresh_active_app_cached, register_capture_toggle_hotkey,
-    register_default_hotkey, stop_network_subsystems, QUICK_SEARCH_EVENT,
+    build_state, install_capture_loop, platform_hotkey_binding, refresh_active_app_cached,
+    register_global_shortcut, stop_network_subsystems, QUICK_SEARCH_EVENT,
 };
 use crate::commands::run_retention;
 use crate::state::SharedState;
@@ -88,7 +89,23 @@ fn main() {
                 let context = state.context.clone();
                 let fallback = state.adapters.active_app();
                 match crate::kde_kwin_integration::read_bundled_script(app.handle()) {
-                    Ok(bundled) => {
+                    Ok(template) => {
+                        let settings = state.context.settings().load(&state.context);
+                        let shortcuts = state
+                            .context
+                            .settings()
+                            .load_keyboard_shortcuts(&state.context);
+                        let bundled = match crate::kde_kwin_integration::configure_bundled_shortcuts(
+                            &template,
+                            &shortcuts,
+                            &settings.language,
+                        ) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                warn!(error = %error, "KWin shortcut settings could not be prepared");
+                                template
+                            }
+                        };
                         tauri::async_runtime::spawn(async move {
                             if let Err(error) = integration
                                 .reactivate_if_consented(&context, fallback, &bundled)
@@ -116,10 +133,25 @@ fn main() {
             let tray_handler = move |tray: &TrayIcon<tauri::Wry>, event: TrayIconEvent| {
                 on_tray_event(tray, event);
             };
+            let initial_shortcuts = state
+                .context
+                .settings()
+                .load_keyboard_shortcuts(&state.context);
+            let capture_shortcut = initial_shortcuts
+                .iter()
+                .find(|binding| binding.id == "toggle_clipboard_capture")
+                .map(|binding| {
+                    commands::format_keyboard_shortcut(
+                        binding,
+                        state.context.platform().os_family == clipvault_core::OsFamily::Macos,
+                    )
+                })
+                .unwrap_or_default();
             match TauriTrayController::install(
                 app.handle(),
                 state.watcher.is_capture_enabled(),
                 &state.context.settings().load(&state.context).language,
+                &capture_shortcut,
                 menu_handler,
                 tray_handler,
             ) {
@@ -165,14 +197,69 @@ fn main() {
             // Register the default Quick Search and clipboard-capture
             // shortcuts after managed state is available to their callbacks.
             if let Some(shared) = app.try_state::<SharedState>() {
-                let outcome = register_default_hotkey(shared.app_state(), app.handle());
-                info!(kind = outcome.kind(), "default hotkey outcome");
-                let capture_outcome =
-                    register_capture_toggle_hotkey(shared.app_state(), app.handle());
-                info!(
-                    kind = capture_outcome.kind(),
-                    "capture toggle hotkey registration"
-                );
+                let shortcuts = shared
+                    .context()
+                    .settings()
+                    .load_keyboard_shortcuts(shared.context());
+                for shortcut in shortcuts {
+                    let Some(id) = clipvault_core::keyboard_shortcuts::KeyboardShortcutId::parse(
+                        &shortcut.id,
+                    ) else {
+                        continue;
+                    };
+                    if !id.is_global() {
+                        continue;
+                    }
+                    #[cfg(target_os = "linux")]
+                    if shared.context().platform().display_server
+                        == clipvault_core::DisplayServer::Wayland
+                    {
+                        let mut integration_available = false;
+                        #[cfg(feature = "linux-gnome-shell-integration")]
+                        if let Some(gnome) = shared.app_state().gnome_integration.as_ref() {
+                            let payload = gnome.payload();
+                            if payload.applicable && payload.installed && payload.consent == "accepted" {
+                                let status = if gnome.update_global_shortcut(&shortcut).is_ok() {
+                                    "registered"
+                                } else {
+                                    "failed"
+                                };
+                                shared.set_shortcut_status(&shortcut.id, status);
+                                integration_available = true;
+                            }
+                        }
+                        #[cfg(feature = "linux-kde-kwin-integration")]
+                        if !integration_available {
+                            if let Some(kde) = shared.app_state().kde_kwin_integration.as_ref() {
+                                let payload = kde.payload();
+                                if payload.applicable
+                                    && payload.installed
+                                    && payload.enabled
+                                    && payload.consent == "accepted"
+                                {
+                                    // KWin reports the effective registration through its
+                                    // authenticated shortcut-status method after script reload.
+                                    integration_available = true;
+                                }
+                            }
+                        }
+                        if !integration_available {
+                            shared.set_shortcut_status(&shortcut.id, "unsupported");
+                        }
+                        continue;
+                    }
+                    let Some(binding) = platform_hotkey_binding(&shortcut) else {
+                        shared.set_shortcut_status(&shortcut.id, "unsupported");
+                        continue;
+                    };
+                    let outcome = register_global_shortcut(
+                        shared.app_state(),
+                        app.handle(),
+                        &binding,
+                    );
+                    shared.set_shortcut_status(&shortcut.id, outcome.kind());
+                    info!(id = shortcut.id, kind = outcome.kind(), "global shortcut registration");
+                }
             }
             trace_main_window_lifecycle_for_app(app.handle(), "hotkey_configured", None);
 
@@ -242,6 +329,8 @@ fn main() {
             commands::clipvault_retention_preview,
             commands::clipvault_settings_get,
             commands::clipvault_settings_set,
+            commands::clipvault_keyboard_shortcuts_get,
+            commands::clipvault_keyboard_shortcut_set,
             commands::clipvault_capture_control_get,
             commands::clipvault_capture_control_set,
             commands::clipvault_ignored_apps_list,
@@ -368,6 +457,12 @@ fn configure_kde_capture_toggle_sink(
     let app_handle = handle.clone();
     kde_integration.set_capture_toggle_sink(Arc::new(move || {
         crate::commands::toggle_capture_from_hotkey(&app_handle);
+    }));
+    let app_handle = handle.clone();
+    kde_integration.set_quick_paste_sink(Arc::new(move || {
+        if let Err(error) = app_handle.emit(QUICK_SEARCH_EVENT, ()) {
+            warn!(error = %error, "failed to emit KWin QuickVault shortcut event");
+        }
     }));
 }
 
