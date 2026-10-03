@@ -12,10 +12,11 @@
 
 - [x] 2.1 Actualizar el pin de Tauri CLI a `2.12.0` y sincronizar las
   versiones canónicas a `0.0.18`.
-- [ ] 2.2 Ejecutar el workflow de release para crear el borrador `v0.0.18`;
+- [x] 2.2 Ejecutar el workflow de release para crear el borrador `v0.0.18`;
   comprobar AppImage, `.deb`, bundles macOS, firmas y `latest.json`.
-- [ ] 2.3 Inspeccionar la AppImage y confirmar que no sombrea las bibliotecas
-  Wayland/EGL del host que deben ser compatibles con Mesa.
+- [x] 2.3 Inspeccionar la AppImage y confirmar que no incluye
+  `libwayland-client.so`, de modo que WebKit resuelva la biblioteca Wayland
+  del host compatible con Mesa/EGL.
 
 ## 3. Verificación
 
@@ -23,6 +24,6 @@
   que la interfaz se dibuja sin el aborto EGL.
 - [ ] 3.2 Confirmar que reemplazar la AppImage conserva historial y assets
   locales en `~/.clipvault`.
-- [ ] 3.3 Confirmar que el `.deb` de Ubuntu y los bundles macOS siguen
+- [x] 3.3 Confirmar que el `.deb` de Ubuntu y los bundles macOS siguen
   empaquetándose correctamente en CI.
 - [x] 3.4 Ejecutar la validación OpenSpec estricta y revisar `git diff --check`.
