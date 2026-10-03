@@ -96,5 +96,6 @@
 - [ ] 5.6 Verificar en paquetes locales de producción para macOS y Linux que
   “Acerca de” permite comprobar una actualización y que sólo instala artefactos
   firmados tras confirmación.
-- [ ] 5.7 Completar en macOS un build local `app,dmg` y confirmar que el bundle
-  `.app` incluye y muestra el icono configurado.
+- [x] 5.7 Completar en macOS un build local `app,dmg` y confirmar que el bundle
+  `.app` incluye y muestra el icono configurado; verificado manualmente por el
+  usuario el 2026-10-03.
