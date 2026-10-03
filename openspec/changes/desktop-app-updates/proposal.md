@@ -13,6 +13,12 @@ requiere distribuir manualmente nuevos instaladores y avisar a los usuarios.
   de macOS y Linux.
 - Integrar Tauri Updater con artefactos firmados y un manifiesto estático
   generado para cada release.
+- Habilitar las actualizaciones también en paquetes de producción generados
+  localmente con `cargo tauri build`; la clave pública de verificación forma
+  parte de la configuración de la aplicación y la clave privada permanece
+  fuera del repositorio.
+- Mantener alineadas las versiones minor de las dependencias Rust y JavaScript
+  de Tauri para que el build local de producción complete la validación CLI.
 - Comprobar actualizaciones de forma asíncrona al iniciar una build de
   producción. Mostrar el resultado en “Acerca de” y solicitar confirmación
   antes de descargar e instalar una actualización o reiniciar.
@@ -31,6 +37,7 @@ manualmente la primera versión que incluya Tauri Updater.
 ## Fuera de alcance
 
 - Actualizaciones de Windows, Android o iOS.
+- Comprobaciones e instalaciones desde `cargo tauri dev`.
 - Paquetes RPM, repositorios APT propios o gestores de paquetes adicionales.
 - Instalación silenciosa, descargas automáticas o reinicio sin consentimiento.
 - Servidor de actualización propio, cuentas, telemetría o envío de datos de

@@ -22,6 +22,8 @@ varias acciones habituales del acceso de bandeja en macOS y Linux.
   de Configuración general.
 - Agregar `About`, que muestra la ventana principal y abre el modal Acerca de
   existente, compartido con el menú de la ventana.
+- Actualizar el runtime Tauri a una versión que incluya la corrección upstream
+  de controles nativos de ventana en Wayland.
 - Localizar la nueva etiqueta `About` en todos los idiomas disponibles.
 
 ## Capabilities

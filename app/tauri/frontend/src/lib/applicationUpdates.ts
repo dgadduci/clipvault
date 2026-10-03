@@ -47,9 +47,11 @@ const initialState: UpdateState = {
   errorPhase: null,
 };
 
+const UPDATE_CHECK_TIMEOUT_MS = 15_000;
+
 const tauriUpdateDriver: UpdateDriver = {
   async check(): Promise<Update | null> {
-    return check();
+    return check({ timeout: UPDATE_CHECK_TIMEOUT_MS });
   },
   relaunch,
 };
@@ -216,9 +218,14 @@ export function createUpdateController(
 }
 
 export function isApplicationUpdaterEnabled(): boolean {
-  return import.meta.env.PROD &&
-    import.meta.env.VITE_CLIPVAULT_UPDATER_ENABLED === "true" &&
-    isTauri();
+  return supportsApplicationUpdates(import.meta.env.PROD, isTauri());
+}
+
+export function supportsApplicationUpdates(
+  isProductionBuild: boolean,
+  isTauriApplication: boolean,
+): boolean {
+  return isProductionBuild && isTauriApplication;
 }
 
 const applicationUpdateController = createUpdateController(

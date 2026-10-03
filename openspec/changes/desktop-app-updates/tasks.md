@@ -14,12 +14,19 @@
 
 - [x] 2.1 Añadir y registrar las dependencias oficiales Tauri updater y process
   en el shell Rust y sus bindings JavaScript.
-- [x] 2.2 Activar los bundles requeridos y configurar el endpoint HTTPS,
-  artefactos de actualización y clave pública Tauri.
+- [x] 2.2 Activar los bundles requeridos, configurar el endpoint HTTPS y la
+  clave pública Tauri en la configuración base, y habilitar artefactos
+  firmados sólo en el workflow de release.
 - [x] 2.3 Conceder en las capabilities únicamente los permisos necesarios para
   comprobar, instalar y relanzar la aplicación.
-- [x] 2.4 Asegurar que las builds de desarrollo no consulten el endpoint y
-  que la comprobación de producción no bloquee el arranque.
+- [x] 2.4 Asegurar que `cargo tauri dev` no consulte el endpoint, que los
+  paquetes locales de producción habiliten el updater y que la comprobación
+  acotada por timeout no bloquee el arranque.
+- [x] 2.5 Versionar la clave pública para builds locales, reservar la firma de
+  artefactos para CI y validar que la variable pública de GitHub coincida con
+  la configuración de la aplicación.
+- [x] 2.6 Alinear `@tauri-apps/api` con Tauri Rust 2.12.1 y validar el build
+  local de producción.
 
 ## 3. Experiencia de actualización
 
@@ -32,8 +39,8 @@
 - [x] 3.4 Confirmar que la ausencia de red, rechazo de elevación o fallo de
   instalación conserva la versión actual y permite continuar usando la app.
 - [x] 3.5 Mantener visible y deshabilitada la acción de actualización cuando el
-  updater no está habilitado; quitar del modal Acerca de el texto interno sobre
-  manifiestos y foco.
+  updater no está habilitado en desarrollo; quitar del modal Acerca de el texto
+  interno sobre manifiestos y foco.
 
 ## 4. Pipeline de releases
 
@@ -83,3 +90,6 @@
     confirmada sin problemas.
 - [x] 5.5 Ejecutar `openspec validate desktop-app-updates --strict` y revisar
   `git diff --check`.
+- [ ] 5.6 Verificar en paquetes locales de producción para macOS y Linux que
+  “Acerca de” permite comprobar una actualización y que sólo instala artefactos
+  firmados tras confirmación.

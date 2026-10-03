@@ -39,6 +39,16 @@ that menu item SHALL NOT remove the application's favorite feature.
 - **AND** makes it visible and requests focus
 - **AND** subsequent activations reuse that same window
 
+#### Scenario: Native window controls continue working after tray reopen on Wayland
+
+- **GIVEN** ClipVault is running in a Linux Wayland session
+- **WHEN** the user closes the main window, reopens it from the tray, then
+  uses its minimize, maximize or close control
+- **THEN** each native control responds normally without requiring a resize,
+  title-bar double-click or application restart
+- **AND** close continues to hide the window and leave ClipVault available
+  from the tray
+
 #### Scenario: Favorites is absent from the tray menu
 
 - **WHEN** the native tray/menu-bar menu is displayed

@@ -23,6 +23,8 @@
   de, sin duplicar la ventana o el modal.
 - [x] 2.6 Mantener el callback nativo como adaptador delgado y entregar las
   acciones a los flujos existentes del frontend y Rust.
+- [x] 2.7 Actualizar el runtime Tauri a 2.12.1 para incluir la corrección
+  upstream de decoraciones y controles de título en Wayland.
 
 ## 3. Especificaciones y localización
 
@@ -47,3 +49,5 @@
   generados.
 - [ ] 4.6 Verificar manualmente el menú de bandeja en las plataformas cubiertas
   cuando no pueda reproducirse automáticamente.
+- [ ] 4.7 Verificar en Linux Wayland el ciclo cerrar/ocultar → reabrir desde la
+  bandeja y probar minimizar, maximizar y cerrar sin resize o reinicio previo.

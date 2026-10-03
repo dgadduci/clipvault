@@ -13,7 +13,7 @@
     "test": "tsc --noCheck -p tsconfig.test.json && node --test --test-reporter=spec node_modules/.cache/clipvault-test-build/tests/"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/api": "2.12.1",
     "@tauri-apps/plugin-process": "2.2.1",
     "@tauri-apps/plugin-updater": "2.12.0",
     "highlight.js": "^11.10.0",

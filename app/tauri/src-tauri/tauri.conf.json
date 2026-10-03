@@ -46,7 +46,7 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg", "appimage", "deb"],
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "resources": [
       "resources/gnome-extension/metadata.json",
       "resources/gnome-extension/extension.js",
@@ -63,7 +63,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVDMEUxNDIyM0VFQjQyRTUKUldUbFF1cytJaFFPWFA1eHY1N0xmSUhrV2ZlUlBRRXFUNlBxVzhtK2dLNDEzZFQ1Rk4vL3FGS28K",
       "requireSignedVersion": true,
       "endpoints": [
         "https://github.com/dgadduci/clipvault/releases/latest/download/latest.json"

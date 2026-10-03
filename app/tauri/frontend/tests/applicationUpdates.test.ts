@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { get } from "svelte/store";
 import {
   createUpdateController,
+  supportsApplicationUpdates,
   type UpdateDriver,
   type UpdatePackage,
 } from "../src/lib/applicationUpdates.ts";
@@ -23,6 +24,12 @@ function makePackage(version = "0.0.16"): UpdatePackage {
     async downloadAndInstall() {},
   };
 }
+
+test("application updates are enabled only in production Tauri builds", () => {
+  assert.equal(supportsApplicationUpdates(true, true), true);
+  assert.equal(supportsApplicationUpdates(false, true), false);
+  assert.equal(supportsApplicationUpdates(true, false), false);
+});
 
 test("automatic checks are single-flight and expose a compatible update", async () => {
   const result = deferred<UpdatePackage | null>();

@@ -23,6 +23,21 @@ principal después del callback del menú nativo para que el cierre del menú no
 deje la ventana en segundo plano. La solicitud no cambia de pantalla ni crea
 una ventana secundaria.
 
+### Mantener funcionales las decoraciones nativas de Wayland
+
+El ciclo cerrar la ventana principal → ocultarla en la bandeja → volver a
+mostrarla debe conservar el comportamiento de sus controles nativos. La
+versión bloqueada actualmente usa `tauri-runtime-wry` 2.11.4 con Tao 0.35.3;
+esa versión presenta una regresión upstream en los botones de la barra de
+título bajo Wayland. Se actualizará el runtime Tauri a 2.12.1, que incorpora
+el arreglo de decoraciones de Tao, y se mantendrá el cierre a la bandeja
+existente.
+
+No se usará el workaround que alterna `resizable` al recibir foco: depende de
+forzar un relayout de GTK, puede alterar el tamaño/estado de la ventana y queda
+obsoleto con la corrección upstream disponible. La dependencia se actualiza
+por el arreglo de plataforma; no se añade una dependencia nueva.
+
 ### Despachar acciones de interfaz como eventos delgados
 
 El callback de menú nativo identifica la acción y la entrega a la ventana
@@ -69,6 +84,9 @@ específica de un solo entorno.
 
 - **Una acción nativa llega mientras la ventana está oculta**: mostrar,
   restaurar y enfocar `main` antes de enviar la petición al frontend.
+- **Wayland pierde la interacción de los controles de título al ocultar/mostrar**:
+  usar la versión corregida del runtime y repetir el ciclo en una sesión
+  Wayland real; no intentar compensarlo con cambios de tamaño de la ventana.
 - **La confirmación elimina más capturas de las previstas**: mantener la
   operación `clear_unorganized_history` y verificar explícitamente que
   favoritos y membresías de colecciones de usuario se preservan.

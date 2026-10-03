@@ -32,10 +32,12 @@ frontend application versions SHALL identify the same SemVer version.
 ### Requirement: Update checks do not interrupt normal use
 
 Production builds SHALL check for updates asynchronously without blocking
-startup or ordinary ClipVault use. The user SHALL be able to initiate another
-check from “Acerca de”. Development builds SHALL NOT contact the release
-endpoint. Update checks and downloads SHALL NOT transmit clipboard content,
-history records, titles, local paths or local entry identifiers.
+startup or ordinary ClipVault use. Locally packaged production builds SHALL
+use the same configured endpoint and verification key as release builds. The
+user SHALL be able to initiate another check from “Acerca de”. Development
+builds SHALL NOT contact the release endpoint. Update checks and downloads
+SHALL NOT transmit clipboard content, history records, titles, local paths or
+local entry identifiers.
 
 #### Scenario: Update check finds no release
 
@@ -48,8 +50,19 @@ history records, titles, local paths or local entry identifiers.
 #### Scenario: Update service is offline or unavailable
 
 - **WHEN** a check cannot reach GitHub or the release manifest is unavailable
+- **OR** the update check exceeds its configured request timeout
 - **THEN** startup and all existing application features remain usable
 - **AND** “Acerca de” presents a recoverable status and permits a manual retry
+
+#### Scenario: Locally packaged production build checks for updates
+
+- **WHEN** the user opens “Acerca de” in a locally packaged Tauri production
+  build on macOS or Linux
+- **THEN** the update action is enabled and checks the configured GitHub release
+  endpoint
+- **AND** a compatible signed release can be installed after explicit user
+  approval
+- **AND** the local build does not require the updater private signing key
 
 #### Scenario: Development build starts
 
@@ -58,8 +71,8 @@ history records, titles, local paths or local entry identifiers.
 
 #### Scenario: Update action in a build without updater support
 
-- **WHEN** the user opens “Acerca de” in a build where updater checks are
-  disabled
+- **WHEN** the user opens “Acerca de” in a development build where updater
+  checks are disabled
 - **THEN** the update action remains visible but disabled
 - **AND** a localized message explains that updates are available in installed
   ClipVault releases

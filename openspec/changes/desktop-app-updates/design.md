@@ -3,10 +3,12 @@
 ## Estado actual
 
 - `Cargo.toml`, `app/tauri/src-tauri/tauri.conf.json` y
-  `app/tauri/frontend/package.json` declaran la versión `0.0.15`.
-- `tauri.conf.json` mantiene `bundle.active` en `false` y no configura
-  `createUpdaterArtifacts`, endpoint ni clave pública.
-- `main.rs` construye el shell Tauri sin los plugins updater ni process.
+  `app/tauri/frontend/package.json` declaran la versión canónica de la app.
+- `tauri.conf.json` activa los bundles, declara el endpoint de releases y
+  contiene la clave pública Ed25519 para verificar paquetes updater.
+- `createUpdaterArtifacts` está desactivado en la configuración base; el
+  workflow de release lo habilita al crear instaladores y manifiestos firmados.
+- `main.rs` registra los plugins updater y process en macOS y Linux.
 - La capacidad Tauri predeterminada no concede permisos de updater o relaunch.
 - `AboutModal.svelte` ya muestra la versión canónica recibida desde
   diagnostics y es la superficie existente adecuada para el estado de
@@ -55,29 +57,36 @@ el proceso.
 
 ## Firma y configuración Tauri
 
-- Generar una clave de firma Tauri una sola vez antes de habilitar el canal
-  estable. El workflow recibe la clave pública desde la variable de GitHub
-  `TAURI_UPDATER_PUBLIC_KEY`, genera un overlay temporal para que Tauri CLI
-  firme los artefactos con esa misma clave y la compila en el plugin updater;
-  la clave privada y su contraseña sólo se exponen al job de release mediante
-  secretos. Así el repositorio no lleva una clave pública desconectada de la
-  clave privada operativa.
+- Mantener la clave pública del updater en `tauri.conf.json` para que los
+  paquetes locales y de CI verifiquen los mismos artefactos. El workflow
+  compara esa clave con la variable de GitHub `TAURI_UPDATER_PUBLIC_KEY` y la
+  usa en su overlay; la clave privada y su contraseña sólo se exponen al job
+  de release mediante secretos.
 - Respaldar la clave privada en un lugar seguro y restringido. Rotarla o
   perderla requiere un plan explícito para que las instalaciones existentes
   puedan confiar en claves futuras.
-- Configurar el endpoint HTTPS de `latest.json` de GitHub Releases y
-  `createUpdaterArtifacts`. Los builds locales y de desarrollo omiten el
-  plugin updater si no tienen la variable pública; el workflow de release
-  falla antes de compilar si faltan la variable o los secretos de firma.
+- Configurar en `tauri.conf.json` el endpoint HTTPS de `latest.json` de
+  GitHub Releases y la clave pública del updater. La clave pública no es un
+  secreto y permite que las builds locales empaquetadas verifiquen las mismas
+  releases firmadas que las builds de CI.
+- Mantener `createUpdaterArtifacts` desactivado por defecto para que una build
+  local de producción no necesite la clave privada. El overlay de CI lo activa
+  y configura la clave pública desde la variable de GitHub; la validación del
+  workflow exige que coincida con la clave versionada y con la privada usada
+  para firmar.
 - Exigir `requireSignedVersion` para vincular la versión del manifiesto con la
-  versión protegida por la firma del artefacto. La configuración Tauri conserva
-  un `pubkey` vacío de desarrollo; el `Builder` del plugin lo reemplaza con la
-  variable pública antes de registrar el updater en los builds de release.
+  versión protegida por la firma del artefacto. Registrar el plugin updater
+  para macOS y Linux; las builds `cargo tauri dev` no consultan el endpoint y
+  conservan deshabilitada la acción de actualización.
+- Limitar a 15 segundos cada solicitud de comprobación para que una conexión
+  sin respuesta termine en un estado de error recuperable y habilite el
+  reintento manual.
 - Registrar los plugins updater y process en el bootstrap Tauri y conceder en
   la capability sólo los permisos necesarios para comprobar/instalar y
   relanzar.
-- No guardar claves, contraseñas ni certificados en el repositorio, artefactos
-  frontend, fixtures o logs.
+- No guardar claves privadas, contraseñas ni certificados en el repositorio,
+  artefactos frontend, fixtures o logs. La clave pública del updater es la
+  única clave versionada en la configuración Tauri.
 
 ## Releases y compatibilidad
 
