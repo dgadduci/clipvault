@@ -62,6 +62,9 @@
     durante la descarga del artefacto.
   - [ ] Cancelar la autorización elevada de una actualización `.deb` y
     confirmar que la versión instalada sigue funcionando.
+  - Nota de alcance (2026-10-02): por decisión del usuario, diferir estas
+    pruebas restantes y asumir provisionalmente que funcionan correctamente;
+    siguen sin estar verificadas.
 - [x] 5.3 Comprobar builds y pruebas relevantes de Tauri/frontend, paridad de
   traducciones, capacidades mínimas y preservación de la base SQLite y assets.
 - [ ] 5.4 Completar la verificación manual por formato y arquitectura, y
@@ -71,7 +74,8 @@
   - [x] Linux `.deb`: actualización de `v0.0.16` a `v0.0.17` confirmada
     correctamente en Ubuntu; la instalación inicial mostró un aviso informativo
     del sandbox `_apt`, pero terminó con éxito.
-  - [ ] macOS Intel: actualización pendiente.
+  - [ ] macOS Intel: diferido por falta de un equipo disponible; compatibilidad
+    asumida provisionalmente, sin verificación manual.
   - [x] macOS Apple Silicon: actualización de `v0.0.16` a `v0.0.17`
     confirmada sin problemas.
 - [x] 5.5 Ejecutar `openspec validate desktop-app-updates --strict` y revisar
