@@ -59,7 +59,9 @@
   registrar los resultados del primer release:
   - [x] Linux AppImage: actualización de `v0.0.16` a `v0.0.17` confirmada;
     la aplicación reinició correctamente y el historial siguió disponible.
-  - [ ] Linux `.deb`: actualización y autorización del sistema pendientes.
+  - [x] Linux `.deb`: actualización de `v0.0.16` a `v0.0.17` confirmada
+    correctamente en Ubuntu; la instalación inicial mostró un aviso informativo
+    del sandbox `_apt`, pero terminó con éxito.
   - [ ] macOS Intel: actualización pendiente.
   - [x] macOS Apple Silicon: actualización de `v0.0.16` a `v0.0.17`
     confirmada sin problemas.
