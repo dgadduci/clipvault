@@ -51,8 +51,17 @@
 
 - [x] 5.1 Validar los manifiestos y enlaces para cada combinación de sistema,
   arquitectura e instalador, incluyendo la actualización `.deb`.
-- [ ] 5.2 Verificar firmas correctas e inválidas, errores de red, descarga,
-  confirmación del usuario, cancelación de elevación y relanzamiento.
+- [ ] 5.2 Completar los escenarios de fallo y recuperación:
+  - [x] Actualizar desde un artefacto con firma válida, con confirmación del
+    usuario, descarga, instalación y relanzamiento; comprobado en Linux
+    AppImage, Linux `.deb` y macOS Apple Silicon.
+  - [x] Comprobar el estado sin conexión y reintentar tras restaurar Wi-Fi;
+    verificado en Ubuntu con la instalación `.deb` `v0.0.17`.
+  - [ ] Rechazar un artefacto con firma inválida o faltante.
+  - [ ] Verificar el error y la recuperación ante una interrupción de red
+    durante la descarga del artefacto.
+  - [ ] Cancelar la autorización elevada de una actualización `.deb` y
+    confirmar que la versión instalada sigue funcionando.
 - [x] 5.3 Comprobar builds y pruebas relevantes de Tauri/frontend, paridad de
   traducciones, capacidades mínimas y preservación de la base SQLite y assets.
 - [ ] 5.4 Completar la verificación manual por formato y arquitectura, y
