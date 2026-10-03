@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use clipvault_core::{
-    AppBootstrap, AppContext, ClearOutcome, Clock, CollectionDeleteOutcome, DeleteOutcome,
-    HistoryManagementService, LocalSettingsReader, RetentionPolicy, SetFavoriteResult,
-    SettingsReader,
+    AppBootstrap, AppContext, ClearOutcome, Clock, CollectionClearOutcome, CollectionDeleteOutcome,
+    DeleteOutcome, HistoryManagementService, LocalSettingsReader, RetentionPolicy,
+    SetFavoriteResult, SettingsReader,
 };
 use clipvault_db::{CollectionDeletionPreview, ContentType, EntryRepository, NewEntry};
 use tempfile::TempDir;
@@ -248,6 +248,78 @@ fn collection_deletion_requires_confirmation_and_applies_the_selected_scope() {
             .expect("untouched entry query")
             .is_some()
     );
+}
+
+#[test]
+fn collection_clear_requires_confirmation_keeps_definition_and_applies_global_scope() {
+    let when = datetime!(2026-01-02 03:04:05 UTC);
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock { instant: when });
+    let (_dir, context) = bootstrap_with_clock(clock.clone());
+    let organization = context.organization();
+    let collection = organization
+        .create_collection(&context, "Vaciar")
+        .expect("create collection");
+    let entry = insert_entry(&context, "capture", when);
+    organization
+        .replace_entry_collections(&context, entry, &[collection.id])
+        .expect("assign collection");
+    let service = HistoryManagementService::new(clock);
+    let preview = service
+        .preview_collection_deletion(&context, collection.id)
+        .expect("preview");
+
+    assert_eq!(
+        service
+            .clear_collection(&context, collection.id, false, preview, false)
+            .expect("cancelled clear"),
+        CollectionClearOutcome::ConfirmationRequired
+    );
+    assert_eq!(
+        EntryRepository::new(context.database().lock().connection_mut())
+            .count()
+            .expect("entry count after cancel"),
+        1
+    );
+
+    assert_eq!(
+        service
+            .clear_collection(&context, collection.id, false, preview, true)
+            .expect("clear collection only"),
+        CollectionClearOutcome::Cleared { removed_entries: 0 }
+    );
+    assert!(organization
+        .find_collection(&context, collection.id)
+        .expect("find collection")
+        .is_some());
+    assert!(
+        EntryRepository::new(context.database().lock().connection_mut())
+            .find_by_id(entry)
+            .expect("entry remains")
+            .is_some()
+    );
+
+    organization
+        .replace_entry_collections(&context, entry, &[collection.id])
+        .expect("restore collection membership");
+    let delete_preview = service
+        .preview_collection_deletion(&context, collection.id)
+        .expect("delete preview");
+    assert_eq!(
+        service
+            .clear_collection(&context, collection.id, true, delete_preview, true)
+            .expect("clear collection and delete entries"),
+        CollectionClearOutcome::Cleared { removed_entries: 1 }
+    );
+    assert_eq!(
+        EntryRepository::new(context.database().lock().connection_mut())
+            .count()
+            .expect("entry count after global delete"),
+        0
+    );
+    assert!(organization
+        .find_collection(&context, collection.id)
+        .expect("collection remains after global delete")
+        .is_some());
 }
 
 #[test]

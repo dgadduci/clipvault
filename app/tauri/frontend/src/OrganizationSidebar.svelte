@@ -55,6 +55,7 @@ import { t } from "./lib/localization.ts";
     rename: { collectionId: number; name: string };
     delete: { collectionId: number };
     "card-drop": { entryId: number; collectionId: number };
+    "peer-bound-drop": Record<string, never>;
     "set-color": { collectionId: number; colorHex: string };
     "select-peer": { peerId: string };
   };
@@ -352,6 +353,10 @@ import { t } from "./lib/localization.ts";
     dispatch("card-drop", { entryId, collectionId });
   }
 
+  function onPeerBoundDropDispatch(): void {
+    dispatch("peer-bound-drop", {});
+  }
+
   function pointerDropZone(node: HTMLElement): { destroy(): void } {
     const onPointerDragOver = (event: Event): void => {
       dropZoneHandlers.onPointerDragOver(
@@ -382,6 +387,7 @@ import { t } from "./lib/localization.ts";
       dragOverCollectionId = id;
     },
     onCardDrop: onCardDropDispatch,
+    onPeerBoundDrop: onPeerBoundDropDispatch,
   });
 
   function onWindowDragEnd(): void {
@@ -545,6 +551,7 @@ import { t } from "./lib/localization.ts";
         data-drop-target={isDropTarget(collection)
           ? COLLECTION_DROP_TARGET_VALUE
           : null}
+        data-collection-drop-row={collection.kind === "user" ? "true" : null}
         on:keydown={(event) => onCollectionRowKeydown(event, collection)}
         role="presentation"
       >

@@ -11,6 +11,7 @@ import type {
   ClipvaultCommandArg,
   Collection,
   CollectionDeleteResponse,
+  CollectionClearResponse,
   CollectionDeletionPreview,
   CopyResponse,
   CreateManualTextResponse,
@@ -1051,6 +1052,32 @@ export const collectionsDeleteCommand: ClipvaultCommandArg<
   }
 > = (args) =>
   invoke<CollectionDeleteResponse>("clipvault_collections_delete", {
+    collectionId: args.collectionId,
+    deleteEntries: args.deleteEntries,
+    expectedEntries: args.expectedEntries,
+    expectedFavorites: args.expectedFavorites,
+    confirm: args.confirm,
+  });
+
+export const collectionsClearPreviewCommand: ClipvaultCommandArg<
+  CollectionDeletionPreview,
+  { collectionId: number }
+> = (args) =>
+  invoke<CollectionDeletionPreview>("clipvault_collections_clear_preview", {
+    collectionId: args.collectionId,
+  });
+
+export const collectionsClearCommand: ClipvaultCommandArg<
+  CollectionClearResponse,
+  {
+    collectionId: number;
+    deleteEntries: boolean;
+    expectedEntries: number;
+    expectedFavorites: number;
+    confirm: boolean;
+  }
+> = (args) =>
+  invoke<CollectionClearResponse>("clipvault_collections_clear", {
     collectionId: args.collectionId,
     deleteEntries: args.deleteEntries,
     expectedEntries: args.expectedEntries,

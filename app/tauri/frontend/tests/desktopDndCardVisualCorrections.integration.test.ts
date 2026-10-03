@@ -88,6 +88,7 @@ class SidebarHarness {
   rows = new Map<number, DomElement>();
   events: RecordedEvent[] = [];
   foreignDrops = 0;
+  peerBoundDrops = 0;
   dragOverCollectionId: number | null = null;
   cardDroppedOnCollectionId: number | null = null;
   document: DocumentImpl;
@@ -128,6 +129,9 @@ class SidebarHarness {
       onForeignDrop: () => {
         this.foreignDrops += 1;
       },
+      onPeerBoundDrop: () => {
+        this.peerBoundDrops += 1;
+      },
     });
 
     viewport.addEventListener("dragenter", (event) =>
@@ -165,11 +169,16 @@ class SidebarHarness {
     row.setAttribute("data-collection-kind", collection.kind);
     row.setAttribute(
       "data-droppable",
-      collection.kind === "user" ? "true" : "false",
+      collection.kind === "user" && collection.is_peer_bound !== true
+        ? "true"
+        : "false",
     );
     if (collection.kind === "user") {
-      row.setAttribute("data-drop-target", COLLECTION_DROP_TARGET_VALUE);
-      row.classList.add("drop-target");
+      row.setAttribute("data-collection-drop-row", "true");
+      if (collection.is_peer_bound !== true) {
+        row.setAttribute("data-drop-target", COLLECTION_DROP_TARGET_VALUE);
+        row.classList.add("drop-target");
+      }
     } else {
       row.classList.add("system-collection");
     }
@@ -365,6 +374,54 @@ test("dragstart → dragenter → dragover → drop on a non-first user row disp
       false,
       "drop must remove the drag-over class",
     );
+    assert.equal(hasActiveDragSession(), false);
+  } finally {
+    restore();
+  }
+});
+
+test("dropping on a peer-bound collection reports rejection without highlighting or mutating membership", () => {
+  const collections = makeFewCollections().map((collection) =>
+    collection.id === 9 ? { ...collection, is_peer_bound: true } : collection,
+  );
+  const { restore, harness } = setupHarness({ collections });
+  try {
+    __resetDragSessionForTests();
+    const targetRow = harness.rows.get(9);
+    assert.ok(targetRow, "peer-bound collection row must be present");
+    assert.equal(targetRow.getAttribute("data-droppable"), "false");
+    assert.equal(targetRow.getAttribute("data-drop-target"), null);
+    assert.equal(targetRow.getAttribute("data-collection-drop-row"), "true");
+
+    const transfer = buildDualTransfer(42);
+    beginDragSession(42);
+    const enter = new DragEventImpl("dragenter", {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: transfer,
+    });
+    targetRow.dispatchEvent(enter);
+    const over = new DragEventImpl("dragover", {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: transfer,
+    });
+    targetRow.dispatchEvent(over);
+    assert.equal(over.defaultPrevented, true, "the browser must deliver drop");
+    assert.equal(transfer.dropEffect, "none");
+    assert.equal(harness.dragOverCollectionId, null);
+
+    const drop = new DragEventImpl("drop", {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: transfer,
+    });
+    targetRow.dispatchEvent(drop);
+    assert.equal(drop.defaultPrevented, true);
+    assert.equal(harness.peerBoundDrops, 1);
+    assert.equal(harness.events.length, 0, "no card-drop mutation may be dispatched");
+    assert.equal(harness.foreignDrops, 0, "internal drops are not classified as foreign");
+    assert.equal(harness.dragOverCollectionId, null);
     assert.equal(hasActiveDragSession(), false);
   } finally {
     restore();
@@ -917,6 +974,7 @@ test("a row missing data-drop-target is not a valid drop target", () => {
     const targetRow = harness.rows.get(9);
     assert.ok(targetRow);
     targetRow.removeAttribute("data-drop-target");
+    targetRow.removeAttribute("data-collection-drop-row");
     const entryId = 73;
     const transfer = buildDualTransfer(entryId);
     beginDragSession(entryId);

@@ -17,7 +17,8 @@ export type KeyboardShortcutId =
   | "open_entry_note"
   | "open_history"
   | "create_text_capture"
-  | "copy_plain_text";
+  | "copy_plain_text"
+  | "open_keyboard_shortcuts";
 
 export const KEYBOARD_SHORTCUTS_CHANGED_EVENT =
   "clipvault://keyboard-shortcuts-changed";

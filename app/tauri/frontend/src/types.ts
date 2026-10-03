@@ -417,6 +417,11 @@ export type CollectionDeleteResponse =
   | { kind: "preview_changed"; preview: CollectionDeletionPreview }
   | { kind: "confirmation_required" };
 
+export type CollectionClearResponse =
+  | { kind: "cleared"; removed_entries: number }
+  | { kind: "preview_changed"; preview: CollectionDeletionPreview }
+  | { kind: "confirmation_required" };
+
 export type RetentionPolicy = "forever" | "days_7" | "days_30" | "days_90";
 
 export interface RetentionResponse {
@@ -859,6 +864,7 @@ export type PeerImageImportResponse =
       kind: "imported";
       entry_id: number;
       collection_id: number;
+      collection_name: string;
       deduplicated: boolean;
     }
   | {
@@ -1008,6 +1014,8 @@ export type PeerImportResponse =
       entry_id: number;
       /** Peer-bound collection id the entry was added to. */
       collection_id: number;
+      /** Local display name of the bound collection. */
+      collection_name: string;
       /**
        * `true` when the import reused an existing local row
        * (an identical canonical hash was already stored or the

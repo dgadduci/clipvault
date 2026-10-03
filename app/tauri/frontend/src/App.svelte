@@ -8,6 +8,7 @@
     ActiveApplicationResponse,
     Capabilities,
     Collection,
+    CollectionClearResponse,
     CollectionDeleteResponse,
     CollectionDeletionPreview,
     Diagnostics,
@@ -34,6 +35,8 @@
     collectionsCreateCommand,
     collectionsDeleteCommand,
     collectionsDeletePreviewCommand,
+    collectionsClearCommand,
+    collectionsClearPreviewCommand,
     collectionsRenameCommand,
     collectionsSetColorCommand,
     deleteEntryCommand,
@@ -202,6 +205,14 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
   let collectionDeletionError: string | null = null;
   let collectionDeletionPreviewChanged = false;
   let collectionDeletionTrigger: HTMLElement | null = null;
+  let pendingCollectionClear: { collectionId: number; name: string } | null = null;
+  let collectionClearPreview: CollectionDeletionPreview | null = null;
+  let collectionClearBusy = false;
+  let collectionClearError: string | null = null;
+  let collectionClearPreviewChanged = false;
+  let collectionClearTrigger: HTMLElement | null = null;
+  let collectionDropRejected = false;
+  let collectionDropRejectedTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingScopedEntryDeletion:
     | { entryId: number; collectionId: number; collectionName: string }
     | null = null;
@@ -1269,6 +1280,98 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
     }
   }
 
+  async function onRequestClearCollection(event: MouseEvent): Promise<void> {
+    const collection = activeCollection;
+    if (!collection || collection.kind !== "user") return;
+    pendingCollectionClear = { collectionId: collection.id, name: collection.name };
+    collectionClearPreview = null;
+    collectionClearPreviewChanged = false;
+    collectionClearError = null;
+    collectionClearBusy = true;
+    collectionClearTrigger = event.currentTarget as HTMLElement;
+    try {
+      collectionClearPreview = await collectionsClearPreviewCommand({
+        collectionId: collection.id,
+      });
+    } catch (err) {
+      collectionClearError = "app.error.generic";
+    } finally {
+      collectionClearBusy = false;
+    }
+  }
+
+  function cancelCollectionClear(): void {
+    pendingCollectionClear = null;
+    collectionClearPreview = null;
+    collectionClearBusy = false;
+    collectionClearError = null;
+    collectionClearPreviewChanged = false;
+    collectionClearTrigger = null;
+  }
+
+  async function refreshCollectionClearPreview(): Promise<void> {
+    const pending = pendingCollectionClear;
+    if (!pending || collectionClearBusy) return;
+    collectionClearBusy = true;
+    collectionClearError = null;
+    try {
+      collectionClearPreview = await collectionsClearPreviewCommand({
+        collectionId: pending.collectionId,
+      });
+      collectionClearPreviewChanged = false;
+    } catch (err) {
+      collectionClearError = "app.error.generic";
+    } finally {
+      collectionClearBusy = false;
+    }
+  }
+
+  async function confirmCollectionClear(deleteEntries: boolean): Promise<void> {
+    const pending = pendingCollectionClear;
+    const preview = collectionClearPreview;
+    if (!pending || !preview || collectionClearBusy) return;
+    collectionClearBusy = true;
+    collectionClearError = null;
+    collectionClearPreviewChanged = false;
+    try {
+      const outcome: CollectionClearResponse = await collectionsClearCommand({
+        collectionId: pending.collectionId,
+        deleteEntries,
+        expectedEntries: preview.entries,
+        expectedFavorites: preview.favorites,
+        confirm: true,
+      });
+      if (outcome.kind === "confirmation_required") {
+        collectionClearError = "app.collection.clear.changed";
+        return;
+      }
+      if (outcome.kind === "preview_changed") {
+        collectionClearPreview = outcome.preview;
+        collectionClearPreviewChanged = true;
+        return;
+      }
+      cancelCollectionClear();
+      await refreshOrganization();
+      await refreshEntries();
+      await refreshUnorganizedClearableCount();
+    } catch (err) {
+      collectionClearError = "app.error.generic";
+    } finally {
+      collectionClearBusy = false;
+    }
+  }
+
+  function showPeerCollectionDropRejected(): void {
+    if (collectionDropRejectedTimer !== null) {
+      clearTimeout(collectionDropRejectedTimer);
+    }
+    collectionDropRejected = true;
+    collectionDropRejectedTimer = setTimeout(() => {
+      collectionDropRejected = false;
+      collectionDropRejectedTimer = null;
+    }, 3000);
+  }
+
   /**
    * Persist a new `#rrggbb` colour for an arbitrary collection
    * (system or user). The sidebar dispatches the event with the
@@ -1346,19 +1449,23 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
     ) {
       return;
     }
-    const entry = entries.find((candidate) => candidate.id === entryId);
-    if (!entry) {
-      // The card is not visible right now; the drop is a no-op.
-      return;
-    }
     const targetCollection = organization?.collections.find(
       (collection) => collection.id === collectionId,
     );
+    if (targetCollection?.is_peer_bound) {
+      showPeerCollectionDropRejected();
+      return;
+    }
     if (!targetCollection || targetCollection.kind !== "user") {
       // Step 2: refuse system collections and any non-user target
       // that slipped through the sidebar guard. Historial is the
       // only system collection today; future kinds inherit the
       // protection automatically.
+      return;
+    }
+    const entry = entries.find((candidate) => candidate.id === entryId);
+    if (!entry) {
+      // The card is not visible right now; the drop is a no-op.
       return;
     }
     // Step 11: avoid duplicate writes while the same drop is in
@@ -1710,6 +1817,20 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
           detail: { entryId: selectedEntry.id },
         }),
       );
+      return;
+    }
+
+    if (matchesConfiguredShortcut(event, "open_keyboard_shortcuts", macos)) {
+      if (
+        openModal !== null ||
+        guidance !== null ||
+        isShortcutBlockedSurface(event.target)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      onOpenKeyboardShortcuts();
       return;
     }
 
@@ -2324,6 +2445,10 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
   onDestroy(() => {
     disposeKeyboardShortcutUpdates();
     stopPairingInvitationRefresh();
+    if (collectionDropRejectedTimer !== null) {
+      clearTimeout(collectionDropRejectedTimer);
+      collectionDropRejectedTimer = null;
+    }
     // Halt the desktop-owned snapshot polling cadence so the
     // unmount path never leaks a timer that keeps the bridge
     // call alive in the background.
@@ -2390,10 +2515,20 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
         on:rename={(e) => handleRenameCollection(e)}
         on:delete={(e) => handleDeleteCollection(e)}
         on:card-drop={(e) => handleCardDrop(e)}
+        on:peer-bound-drop={showPeerCollectionDropRejected}
         on:set-color={(e) => handleSetCollectionColor(e)}
         on:select-peer={(e) => selectPeer(e.detail.peerId)}
       />
       <div class="layout-main" data-testid="layout-main">
+        {#if collectionDropRejected}
+          <p
+            class="collection-drop-rejected"
+            role="status"
+            data-testid="collection-drop-rejected"
+          >
+            {$t("collections.drop_peer_rejected")}
+          </p>
+        {/if}
         {#if activePeerId !== null}
           <!--
             The remote rail replaces the local history rail while a
@@ -2413,6 +2548,10 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
             searchShortcut={searchShortcutLabelText}
             searchShortcutAccessible={searchShortcutAccessibleText}
             showClearHistory={activeCollectionIsHistory}
+            showClearCollection={activeCollection?.kind === "user"}
+            clearCollectionLabel={activeCollection?.kind === "user"
+              ? $t("toolbar.clear_collection", { name: activeCollection.name })
+              : ""}
             canCreateManualText={canCreateManualText}
             createTextShortcut={createTextShortcutLabelText}
             createTextShortcutAccessible={createTextShortcutAccessibleText}
@@ -2429,6 +2568,7 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
             onOpenShortcut={onOpenShortcut}
             onOpenAbout={onOpenAbout}
             onRequestClearHistory={onRequestClearHistory}
+            onRequestClearCollection={onRequestClearCollection}
             onCreateManualText={openCreateTextEntry}
             onSourceAppFilterChange={(next) => handleSourceAppFilterChange(next)}
             onTagFilterChange={(next) => handleTagFilterChange(next)}
@@ -2573,6 +2713,78 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
           on:click={cancelCollectionDeletion}
           disabled={collectionDeletionBusy}
           data-testid="collection-delete-cancel"
+        >
+          {$t("common.cancel")}
+        </button>
+      </div>
+    </div>
+  {/if}
+</Modal>
+
+<Modal
+  open={pendingCollectionClear !== null}
+  titleId="collection-clear-modal-title"
+  title={$t("app.collection.clear.title")}
+  busy={collectionClearBusy}
+  returnFocusTo={collectionClearTrigger}
+  onClose={cancelCollectionClear}
+>
+  {#if pendingCollectionClear}
+    <div data-testid="collection-clear-modal">
+      <p data-testid="collection-clear-summary">
+        {$t("app.collection.clear.question", { name: pendingCollectionClear.name })}
+        {#if collectionClearPreview}
+          {$tPlural("app.collection.delete.captures", collectionClearPreview.entries)}
+          {$tPlural("app.collection.delete.favorites", collectionClearPreview.favorites)}
+        {:else if collectionClearBusy}
+          {$t("app.collection.clear.loading")}
+        {/if}
+      </p>
+      {#if collectionClearPreviewChanged}
+        <p role="status" data-testid="collection-clear-preview-changed">
+          {$t("app.collection.clear.changed")}
+        </p>
+      {/if}
+      {#if collectionClearError}
+        <p role="alert" data-testid="collection-clear-error">
+          {$t(collectionClearError)}
+        </p>
+      {/if}
+      <div class="row">
+        {#if !collectionClearPreview}
+          <button
+            type="button"
+            on:click={() => void refreshCollectionClearPreview()}
+            disabled={collectionClearBusy}
+            data-testid="collection-clear-retry-preview"
+          >
+            {$t("app.collection.clear.retry")}
+          </button>
+        {:else}
+          <button
+            type="button"
+            on:click={() => void confirmCollectionClear(false)}
+            disabled={collectionClearBusy}
+            data-testid="collection-clear-keep-history"
+          >
+            {$t("app.collection.clear.keep_history")}
+          </button>
+          <button
+            type="button"
+            class="danger"
+            on:click={() => void confirmCollectionClear(true)}
+            disabled={collectionClearBusy}
+            data-testid="collection-clear-delete-history"
+            data-cv-danger="collection-clear-confirm"
+          >
+            {$t("app.collection.clear.delete_history")}
+          </button>
+        {/if}
+        <button
+          type="button"
+          on:click={cancelCollectionClear}
+          disabled={collectionClearBusy}
+          data-testid="collection-clear-cancel"
         >
           {$t("common.cancel")}
         </button>
@@ -2914,6 +3126,16 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
 
   .status.error {
     color: var(--cv-fg-error, #f87171);
+  }
+
+  .collection-drop-rejected {
+    margin: 0;
+    padding: 0.45rem 0.7rem;
+    border: 1px solid var(--cv-border, #30363d);
+    border-radius: 6px;
+    background: var(--cv-bg-elev, #1f2937);
+    color: var(--cv-fg, #f0f4f8);
+    font-size: 0.85rem;
   }
 
   .muted {

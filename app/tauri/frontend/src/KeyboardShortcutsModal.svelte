@@ -28,6 +28,7 @@
     { id: "open_history", title: "keyboard_shortcuts.action.open_history", context: "keyboard_shortcuts.context.main_window" },
     { id: "create_text_capture", title: "keyboard_shortcuts.action.create_text_capture", context: "keyboard_shortcuts.context.main_window" },
     { id: "copy_plain_text", title: "keyboard_shortcuts.action.copy_plain_text", context: "keyboard_shortcuts.context.quick_paste" },
+    { id: "open_keyboard_shortcuts", title: "keyboard_shortcuts.action.open_keyboard_shortcuts", context: "keyboard_shortcuts.context.main_window" },
   ];
 
   let loading = true;

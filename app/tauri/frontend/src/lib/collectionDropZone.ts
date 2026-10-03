@@ -22,17 +22,17 @@
 // Contract being pinned:
 //
 //   - The viewport must carry `data-collections-drop-viewport`.
-//   - Each drop target row must carry
-//     `data-drop-target="collection"` AND a numeric
-//     `data-collection-id` attribute. Rows that do not satisfy
-//     both attributes are ignored — the helper never falls back
-//     to attribute-only inference that could be tricked by a
-//     foreign drag.
+//   - Local drop targets carry `data-drop-target="collection"`.
+//     Peer-bound user rows carry only `data-collection-drop-row` so
+//     the helper can report their rejected drops without advertising
+//     them as accepted destinations. Both use a numeric
+//     `data-collection-id`; the helper never infers a destination
+//     from an unvalidated row.
 //   - The helper resolves the row in this order:
 //       1. Walk up from `event.target` to the viewport, stopping
-//          at the first element with `data-drop-target="collection"`
-//          whose `data-collection-id` resolves to a `user`
-//          collection that lives inside the viewport.
+//          at the first local target or rejected peer row whose
+//          `data-collection-id` resolves to a `user` collection
+//          that lives inside the viewport.
 //       2. Fall back to `document.elementFromPoint(clientX, clientY)`
 //          when the walk-up fails — this is the WebKit path where
 //          the event target is the viewport itself (the listener
@@ -84,6 +84,7 @@ export const COLLECTIONS_DROP_VIEWPORT_ATTR = "data-collections-drop-viewport";
  */
 export const COLLECTION_DROP_TARGET_ATTR = "data-drop-target";
 export const COLLECTION_DROP_TARGET_VALUE = "collection";
+export const COLLECTION_DROP_ROW_ATTR = "data-collection-drop-row";
 
 /**
  * Attribute that exposes the numeric collection id of the row.
@@ -100,10 +101,10 @@ export interface ResolvedDropRow {
 
 /**
  * Walk up from the live event target to the viewport, stopping at
- * the first element that carries `data-drop-target="collection"`
- * AND a numeric `data-collection-id` matching a `user`
- * collection. The row MUST live inside the viewport so a row
- * mounted by another sidebar cannot be impersonated.
+ * the first local drop target or peer-bound rejection row with a
+ * numeric `data-collection-id` matching a `user` collection. The
+ * row MUST live inside the viewport so a row mounted by another
+ * sidebar cannot be impersonated.
  */
 export function resolveDropRowFromTarget(
   target: EventTarget | null,
@@ -114,8 +115,7 @@ export function resolveDropRowFromTarget(
   while (node && node !== viewport) {
     if (
       node instanceof Element &&
-      node.getAttribute(COLLECTION_DROP_TARGET_ATTR) ===
-        COLLECTION_DROP_TARGET_VALUE
+      isCollectionDropCandidate(node)
     ) {
       return resolveRow(node, viewport, collections);
     }
@@ -144,15 +144,18 @@ export function resolveDropRowFromPoint(
   if (!viewport.contains(element)) return null;
   let node: Element | null = element;
   while (node && node !== viewport) {
-    if (
-      node.getAttribute(COLLECTION_DROP_TARGET_ATTR) ===
-      COLLECTION_DROP_TARGET_VALUE
-    ) {
+    if (isCollectionDropCandidate(node)) {
       return resolveRow(node, viewport, collections);
     }
     node = node.parentElement;
   }
   return null;
+}
+
+function isCollectionDropCandidate(element: Element): boolean {
+  return element.getAttribute(COLLECTION_DROP_TARGET_ATTR) ===
+      COLLECTION_DROP_TARGET_VALUE ||
+    element.getAttribute(COLLECTION_DROP_ROW_ATTR) === "true";
 }
 
 function resolveRow(
@@ -183,6 +186,8 @@ export interface CollectionDropZoneOptions {
   onCardDrop: (entryId: number, collectionId: number) => void;
   /** Called when the drop resolves to NO valid payload (foreign drag). */
   onForeignDrop?: () => void;
+  /** Called for a valid internal card dropped on a peer-bound collection. */
+  onPeerBoundDrop?: () => void;
 }
 
 export interface CollectionDropZoneHandlers {
@@ -246,6 +251,10 @@ export function createCollectionDropZoneHandlers(
     lastResolvedHit = hit;
     event.preventDefault();
     if (!accepted) return;
+    if (hit.collection.is_peer_bound) {
+      options.setDragOverCollectionId(null);
+      return;
+    }
     options.setDragOverCollectionId(hit.collection.id);
   }
 
@@ -262,6 +271,17 @@ export function createCollectionDropZoneHandlers(
     // app for a foreign drag.
     event.preventDefault();
     if (!accepted) return;
+    if (hit.collection.is_peer_bound) {
+      if (event.dataTransfer) {
+        try {
+          event.dataTransfer.dropEffect = "none";
+        } catch {
+          /* readonly in some WebKit builds; ignore. */
+        }
+      }
+      options.setDragOverCollectionId(null);
+      return;
+    }
     if (event.dataTransfer) {
       try {
         event.dataTransfer.dropEffect = "copy";
@@ -338,6 +358,10 @@ export function createCollectionDropZoneHandlers(
     // `dragend` from the source card will skip the close
     // because the token no longer matches.
     endDragSession();
+    if (hit.collection.is_peer_bound) {
+      options.onPeerBoundDrop?.();
+      return;
+    }
     options.onCardDrop(entryId, hit.collection.id);
   }
 
@@ -372,7 +396,9 @@ export function createCollectionDropZoneHandlers(
     }
     event.preventDefault();
     lastResolvedHit = hit;
-    if (options.getDragOverCollectionId() !== hit.collection.id) {
+    if (hit.collection.is_peer_bound) {
+      options.setDragOverCollectionId(null);
+    } else if (options.getDragOverCollectionId() !== hit.collection.id) {
       options.setDragOverCollectionId(hit.collection.id);
     }
   }
@@ -396,7 +422,11 @@ export function createCollectionDropZoneHandlers(
     event.preventDefault();
     lastResolvedHit = null;
     options.setDragOverCollectionId(null);
-    options.onCardDrop(activeEntryId, hit.collection.id);
+    if (hit.collection.is_peer_bound) {
+      options.onPeerBoundDrop?.();
+    } else {
+      options.onCardDrop(activeEntryId, hit.collection.id);
+    }
   }
 
   return {

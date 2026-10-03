@@ -23,10 +23,11 @@ pub enum KeyboardShortcutId {
     OpenHistory,
     CreateTextCapture,
     CopyPlainText,
+    OpenKeyboardShortcuts,
 }
 
 impl KeyboardShortcutId {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::OpenQuickPaste,
         Self::ToggleClipboardCapture,
         Self::FocusMainSearch,
@@ -37,6 +38,7 @@ impl KeyboardShortcutId {
         Self::OpenHistory,
         Self::CreateTextCapture,
         Self::CopyPlainText,
+        Self::OpenKeyboardShortcuts,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -51,6 +53,7 @@ impl KeyboardShortcutId {
             Self::OpenHistory => "open_history",
             Self::CreateTextCapture => "create_text_capture",
             Self::CopyPlainText => "copy_plain_text",
+            Self::OpenKeyboardShortcuts => "open_keyboard_shortcuts",
         }
     }
 
@@ -74,6 +77,7 @@ impl KeyboardShortcutId {
             Self::OpenHistory => "keyboard_shortcut_open_history",
             Self::CreateTextCapture => "keyboard_shortcut_create_text_capture",
             Self::CopyPlainText => "keyboard_shortcut_copy_plain_text",
+            Self::OpenKeyboardShortcuts => "keyboard_shortcut_open_keyboard_shortcuts",
         }
     }
 
@@ -84,6 +88,7 @@ impl KeyboardShortcutId {
             | Self::OpenEntryNote
             | Self::OpenHistory
             | Self::CreateTextCapture => &["main"],
+            Self::OpenKeyboardShortcuts => &["main"],
             Self::FocusQuickSearch | Self::CopyPlainText => &["quick_paste"],
             Self::PreviewSelected | Self::EditSelectedText => &["main", "quick_paste"],
         }
@@ -122,6 +127,7 @@ pub fn default_keyboard_shortcuts() -> Vec<HotkeySpec> {
             alt: false,
             meta: false,
         },
+        make(Id::OpenKeyboardShortcuts, "k", true, false),
     ]
 }
 
@@ -206,11 +212,12 @@ mod tests {
                 .unwrap()
                 .shift
         );
-        assert_eq!(Id::ALL.map(Id::as_str).len(), 10);
+        assert_eq!(Id::ALL.map(Id::as_str).len(), 11);
         for (id, key, shift) in [
             (Id::OpenEntryNote, "n", true),
             (Id::OpenHistory, "h", true),
             (Id::CreateTextCapture, "n", false),
+            (Id::OpenKeyboardShortcuts, "k", true),
         ] {
             let binding = defaults
                 .iter()

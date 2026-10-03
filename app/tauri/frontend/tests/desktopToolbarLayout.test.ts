@@ -273,9 +273,19 @@ test("DesktopToolbar renders the trash button outside the menu as a sibling of t
   // The trash button keeps its data-testid, accessible label,
   // danger treatment and aria-busy hook so the existing
   // confirmation flow remains reachable.
-  assert.match(source, /data-testid="trash-clear-history"/);
-  assert.match(source, /data-cv-danger="clear-history"/);
+  assert.match(
+    source,
+    /data-testid=\{showClearCollection \? "trash-clear-collection" : "trash-clear-history"\}/,
+  );
+  assert.match(
+    source,
+    /data-cv-danger=\{showClearCollection \? "clear-collection" : "clear-history"\}/,
+  );
   assert.match(source, /aria-busy=\{trashConfirming\}/);
+  assert.match(
+    source,
+    /on:click=\{showClearCollection \? onRequestClearCollection : onRequestClearHistory\}/,
+  );
   // The trash button must NOT be inside the menu: the menu markup
   // is the block that uses `role="menu"` and `{#if menuOpen}`. A
   // regression that moves the trash into the menu would surface

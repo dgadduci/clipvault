@@ -21,9 +21,10 @@ use time::OffsetDateTime;
 use tracing::warn;
 
 use clipvault_db::{
-    AppSettingsRepository, CollectionDeletionOutcome as RepositoryCollectionDeletionOutcome,
-    CollectionDeletionPreview, EntryRecord, EntryRepository, EntryRepositoryError,
-    OrganizationError, OrganizationRepository, SetFavoriteOutcome,
+    AppSettingsRepository, CollectionClearOutcome as RepositoryCollectionClearOutcome,
+    CollectionDeletionOutcome as RepositoryCollectionDeletionOutcome, CollectionDeletionPreview,
+    EntryRecord, EntryRepository, EntryRepositoryError, OrganizationError, OrganizationRepository,
+    SetFavoriteOutcome,
 };
 
 use crate::bootstrap::AppContext;
@@ -221,6 +222,16 @@ pub enum DeleteOutcome {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CollectionDeleteOutcome {
     Deleted { removed_entries: usize },
+    PreviewChanged { preview: CollectionDeletionPreview },
+    ConfirmationRequired,
+}
+
+/// Outcome of clearing a collection while retaining its definition and
+/// optional peer binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CollectionClearOutcome {
+    Cleared { removed_entries: usize },
     PreviewChanged { preview: CollectionDeletionPreview },
     ConfirmationRequired,
 }
@@ -642,6 +653,39 @@ impl HistoryManagementService {
                     self.notify_destructive_change(removed_entries);
                 }
                 Ok(CollectionDeleteOutcome::Deleted { removed_entries })
+            }
+        }
+    }
+
+    /// Clear every association or delete every entry in a user collection,
+    /// keeping the collection row and any peer binding. Deleted rows are
+    /// passed through the existing asset and watcher cleanup path.
+    pub fn clear_collection(
+        &self,
+        context: &AppContext,
+        collection_id: i64,
+        delete_entries: bool,
+        expected: CollectionDeletionPreview,
+        confirm: bool,
+    ) -> Result<CollectionClearOutcome, ManagementServiceError> {
+        if !confirm {
+            return Ok(CollectionClearOutcome::ConfirmationRequired);
+        }
+        let outcome = {
+            let mut db = context.database().lock();
+            let mut repo = OrganizationRepository::new(db.connection_mut());
+            repo.clear_collection_with_scope(collection_id, delete_entries, expected)?
+        };
+        match outcome {
+            RepositoryCollectionClearOutcome::PreviewChanged { preview } => {
+                Ok(CollectionClearOutcome::PreviewChanged { preview })
+            }
+            RepositoryCollectionClearOutcome::Cleared { removed_entries } => {
+                if removed_entries > 0 {
+                    self.collect_unreferenced_assets(context);
+                    self.notify_destructive_change(removed_entries);
+                }
+                Ok(CollectionClearOutcome::Cleared { removed_entries })
             }
         }
     }

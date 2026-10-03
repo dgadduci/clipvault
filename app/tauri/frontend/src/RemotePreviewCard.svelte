@@ -169,7 +169,7 @@
   function describeImageOutcome(outcome: PeerImageImportResponse): string {
     switch (outcome.kind) {
       case "imported":
-        return outcome.deduplicated ? "remote.import.duplicate" : "remote.import.success";
+        return outcome.deduplicated ? "remote.import.duplicate_collection" : "remote.import.success";
       case "peer_unavailable":
         // The host surfaces `reason = not_available` when the
         // peer did not advertise `image_import`. The card
@@ -203,7 +203,33 @@
    * discriminated union the bridge returns — the renderer
    * never has to inspect free-form strings or content bytes.
    */
-  let lastResult: { kind: "ok" | "error"; summaryKey: string } | null = null;
+  let lastResult: {
+    kind: "ok" | "error";
+    summaryKey: string;
+    values?: Record<string, string>;
+  } | null = null;
+  let resultDismissTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearResultDismissTimer(): void {
+    if (resultDismissTimer === null) return;
+    clearTimeout(resultDismissTimer);
+    resultDismissTimer = null;
+  }
+
+  function setImportResult(
+    kind: "ok" | "error",
+    summaryKey: string,
+    values?: Record<string, string>,
+  ): void {
+    clearResultDismissTimer();
+    lastResult = { kind, summaryKey, values };
+    if (kind === "ok") {
+      resultDismissTimer = setTimeout(() => {
+        lastResult = null;
+        resultDismissTimer = null;
+      }, 3000);
+    }
+  }
 
   /**
    * Thumbnail request state the `peer-image-preview-thumbnails`
@@ -320,7 +346,7 @@
   function describeOutcome(outcome: PeerImportResponse): string {
     switch (outcome.kind) {
       case "imported":
-        return outcome.deduplicated ? "remote.import.duplicate" : "remote.import.success";
+        return outcome.deduplicated ? "remote.import.duplicate_collection" : "remote.import.success";
       case "peer_unavailable":
         return "remote.import.unavailable";
       case "transport_unavailable":
@@ -348,13 +374,11 @@
     // a wasted round-trip and surfaces the typed reason before
     // the user sees a generic error copy.
     if (isImageRow && !peerSupportsImageImport) {
-      lastResult = {
-        kind: "error",
-        summaryKey: "remote.import.image_unsupported",
-      };
+      setImportResult("error", "remote.import.image_unsupported");
       return;
     }
     busy = true;
+    clearResultDismissTimer();
     lastResult = null;
     menuOpen = false;
     try {
@@ -364,26 +388,29 @@
           remote_entry_id: row.remote_entry_id,
           display_name: displayName ?? "",
         });
-        lastResult = {
-          kind: outcome.kind === "imported" ? "ok" : "error",
-          summaryKey: describeImageOutcome(outcome),
-        };
+        setImportResult(
+          outcome.kind === "imported" ? "ok" : "error",
+          describeImageOutcome(outcome),
+          outcome.kind === "imported" && outcome.deduplicated
+            ? { collection: outcome.collection_name }
+            : undefined,
+        );
       } else {
         const outcome = await peerImportFetchCommand({
           peer_id: peerId,
           remote_entry_id: row.remote_entry_id,
           display_name: displayName ?? "",
         });
-        lastResult = {
-          kind: outcome.kind === "imported" ? "ok" : "error",
-          summaryKey: describeOutcome(outcome),
-        };
+        setImportResult(
+          outcome.kind === "imported" ? "ok" : "error",
+          describeOutcome(outcome),
+          outcome.kind === "imported" && outcome.deduplicated
+            ? { collection: outcome.collection_name }
+            : undefined,
+        );
       }
     } catch (err) {
-      lastResult = {
-        kind: "error",
-        summaryKey: "remote.import.error",
-      };
+      setImportResult("error", "remote.import.error");
     } finally {
       busy = false;
     }
@@ -599,6 +626,7 @@
     onCardRef(cardElement);
   });
   onDestroy(() => {
+    clearResultDismissTimer();
     if (metadataTimer !== null) {
       clearInterval(metadataTimer);
       metadataTimer = null;
@@ -754,22 +782,25 @@
           </li>
         </ul>
       {/if}
-      {#if lastResult}
-        <p
-          class="remote-preview-card-result"
-          data-testid="remote-preview-card-result"
-          data-result-kind={lastResult.kind}
-          role={lastResult.kind === "error" ? "alert" : "status"}
-        >
-          {$t(lastResult.summaryKey)}
-        </p>
-      {/if}
     </div>
   </footer>
+  {#if lastResult}
+    <p
+      class="remote-preview-card-result"
+      data-testid="remote-preview-card-result"
+      data-result-kind={lastResult.kind}
+      role={lastResult.kind === "error" ? "alert" : "status"}
+      aria-label={$t(lastResult.summaryKey, lastResult.values ?? {})}
+      title={$t(lastResult.summaryKey, lastResult.values ?? {})}
+    >
+      {$t(lastResult.summaryKey, lastResult.values ?? {})}
+    </p>
+  {/if}
 </article>
 
 <style>
   .remote-preview-card {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 0.45rem;
@@ -972,6 +1003,12 @@
     opacity: 0.55;
   }
   .remote-preview-card-result {
+    position: absolute;
+    left: 0.8rem;
+    right: 0.8rem;
+    bottom: 2.3rem;
+    z-index: 1;
+    box-sizing: border-box;
     margin: 0.35rem 0 0;
     padding: 0.35rem 0.55rem;
     font-size: 0.7rem;
@@ -980,8 +1017,12 @@
     border: 1px solid var(--cv-border, #30363d);
     background: rgba(255, 255, 255, 0.04);
     color: inherit;
-    min-width: 12rem;
-    max-width: 18rem;
+    min-width: 0;
+    max-width: calc(100% - 1.6rem);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    pointer-events: none;
   }
   .remote-preview-card-result[data-result-kind="error"] {
     border-color: rgba(248, 113, 113, 0.55);

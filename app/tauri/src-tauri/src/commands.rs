@@ -2223,6 +2223,54 @@ pub fn clipvault_collections_delete_preview(
         .map_err(management_command_error)
 }
 
+#[tauri::command]
+pub fn clipvault_collections_clear(
+    state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
+    collection_id: i64,
+    delete_entries: bool,
+    expected_entries: i64,
+    expected_favorites: i64,
+    confirm: bool,
+) -> Result<clipvault_core::CollectionClearOutcome, CommandError> {
+    let outcome = state
+        .context()
+        .management()
+        .clear_collection(
+            state.context(),
+            collection_id,
+            delete_entries,
+            clipvault_core::CollectionDeletionPreview {
+                entries: expected_entries,
+                favorites: expected_favorites,
+            },
+            confirm,
+        )
+        .map_err(management_command_error)?;
+    if matches!(
+        &outcome,
+        clipvault_core::CollectionClearOutcome::Cleared { .. }
+    ) {
+        emit_organization_updated(&handle);
+        if delete_entries {
+            emit_history_updated(&handle);
+        }
+    }
+    Ok(outcome)
+}
+
+#[tauri::command]
+pub fn clipvault_collections_clear_preview(
+    state: State<'_, SharedState>,
+    collection_id: i64,
+) -> Result<clipvault_core::CollectionDeletionPreview, CommandError> {
+    state
+        .context()
+        .management()
+        .preview_collection_deletion(state.context(), collection_id)
+        .map_err(management_command_error)
+}
+
 /// Update the persistent `#rrggbb` colour of any collection (system or
 /// user). The command is a thin adapter over
 /// [`clipvault_core::OrganizationService::set_collection_color`]:
@@ -4108,6 +4156,7 @@ pub enum PeerImportResponse {
     Imported {
         entry_id: i64,
         collection_id: i64,
+        collection_name: String,
         deduplicated: bool,
     },
     /// The peer is not currently eligible to serve an import
@@ -4147,18 +4196,31 @@ pub enum PeerImportResponse {
 }
 
 impl PeerImportResponse {
-    fn from_outcome(outcome: clipvault_core::peer_text_import::PeerImportOutcome) -> Self {
+    fn from_outcome(
+        context: &clipvault_core::AppContext,
+        outcome: clipvault_core::peer_text_import::PeerImportOutcome,
+    ) -> Self {
         use clipvault_core::peer_text_import::PeerImportOutcome as Core;
         match outcome {
             Core::Imported {
                 entry_id,
                 collection_id,
                 deduplicated,
-            } => PeerImportResponse::Imported {
-                entry_id,
-                collection_id,
-                deduplicated,
-            },
+            } => {
+                let collection_name = context
+                    .organization()
+                    .find_collection(context, collection_id)
+                    .ok()
+                    .flatten()
+                    .map(|collection| collection.name)
+                    .unwrap_or_default();
+                PeerImportResponse::Imported {
+                    entry_id,
+                    collection_id,
+                    collection_name,
+                    deduplicated,
+                }
+            }
             Core::PeerUnavailable { reason } => PeerImportResponse::PeerUnavailable { reason },
             Core::TransportUnavailable { reason } => {
                 PeerImportResponse::TransportUnavailable { reason }
@@ -4220,7 +4282,7 @@ pub fn clipvault_peer_import_fetch(
         emit_history_updated(&handle);
         emit_organization_updated(&handle);
     }
-    PeerImportResponse::from_outcome(outcome)
+    PeerImportResponse::from_outcome(context, outcome)
 }
 
 /// Best-effort sync hook the shell calls after every peer
@@ -4423,6 +4485,7 @@ pub enum PeerImageImportResponse {
     Imported {
         entry_id: i64,
         collection_id: i64,
+        collection_name: String,
         deduplicated: bool,
     },
     /// The peer is not currently eligible to serve an import.
@@ -4442,18 +4505,31 @@ pub enum PeerImageImportResponse {
 }
 
 impl PeerImageImportResponse {
-    fn from_outcome(outcome: clipvault_core::peer_image_import::PeerImageImportOutcome) -> Self {
+    fn from_outcome(
+        context: &clipvault_core::AppContext,
+        outcome: clipvault_core::peer_image_import::PeerImageImportOutcome,
+    ) -> Self {
         use clipvault_core::peer_image_import::PeerImageImportOutcome as Core;
         match outcome {
             Core::Imported {
                 entry_id,
                 collection_id,
                 deduplicated,
-            } => PeerImageImportResponse::Imported {
-                entry_id,
-                collection_id,
-                deduplicated,
-            },
+            } => {
+                let collection_name = context
+                    .organization()
+                    .find_collection(context, collection_id)
+                    .ok()
+                    .flatten()
+                    .map(|collection| collection.name)
+                    .unwrap_or_default();
+                PeerImageImportResponse::Imported {
+                    entry_id,
+                    collection_id,
+                    collection_name,
+                    deduplicated,
+                }
+            }
             Core::PeerUnavailable { reason } => PeerImageImportResponse::PeerUnavailable { reason },
             Core::TransportUnavailable { reason } => {
                 PeerImageImportResponse::TransportUnavailable { reason }
@@ -4508,7 +4584,7 @@ pub fn clipvault_peer_image_fetch(
         emit_history_updated(&handle);
         emit_organization_updated(&handle);
     }
-    PeerImageImportResponse::from_outcome(outcome)
+    PeerImageImportResponse::from_outcome(context, outcome)
 }
 
 #[tauri::command]

@@ -243,10 +243,18 @@
         textBuffer = cached.textBuffer;
         imageBuffer = cached.imageBuffer;
         snapshotId = cached.snapshotId;
+        // A previous request may have been invalidated by a peer
+        // switch before it could update this cache. Restart that
+        // load with the current generation so the spinner cannot
+        // remain stuck on a cached `loading` bit.
         loading = cached.loading;
         error = cached.error;
         exhausted = cached.exhausted;
-        void refreshPeerState(peerId).catch(() => undefined);
+        if (cached.loading) {
+          void loadInitialPage(peerId, loadGeneration);
+        } else {
+          void refreshPeerState(peerId).catch(() => undefined);
+        }
       } else {
         rows = [];
         cursor = "";
@@ -254,9 +262,10 @@
         snapshotId = "";
         textBuffer = [];
         imageBuffer = [];
-        loading = false;
+        loading = true;
         error = null;
         exhausted = false;
+        persistCache();
         void loadInitialPage(peerId, loadGeneration);
       }
     }
@@ -728,10 +737,6 @@
         {/if}
       </p>
     </div>
-  {:else if loading && rows.length === 0}
-    <p class="remote-history-rail-loading" data-testid="remote-history-rail-loading">
-      {$t("quickpaste.loading")}
-    </p>
   {:else if error && rows.length === 0}
     <div
       class="remote-history-rail-error"
@@ -748,41 +753,43 @@
         {$t("common.retry")}
       </button>
     </div>
-  {:else if rows.length === 0}
+  {:else if rows.length === 0 && !loading}
     <p class="remote-history-rail-empty" data-testid="remote-history-rail-empty">
       {$t("remote.history.empty")}
     </p>
   {:else}
-    <div
-      class="remote-history-rail-toolbar"
-      data-testid="remote-history-rail-toolbar"
-    >
-      <button
-        type="button"
-        class="remote-history-rail-pager"
-        data-testid="remote-history-rail-prev"
-        on:click={requestPreviousPage}
-        disabled={rows.length === 0 || loading}
+    {#if rows.length > 0}
+      <div
+        class="remote-history-rail-toolbar"
+        data-testid="remote-history-rail-toolbar"
       >
-        {$t("remote.history.previous")}
-      </button>
-      <button
-        type="button"
-        class="remote-history-rail-pager"
-        data-testid="remote-history-rail-next"
-        on:click={requestNextPage}
-        disabled={exhausted || loading}
-      >
-        {$t("remote.history.next")}
-      </button>
-      <span
-        class="remote-history-rail-snapshot"
-        data-testid="remote-history-rail-snapshot"
-        title={$t("remote.history.snapshot")}
-      >
-        {$tPlural("remote.history.capture_count", rows.length)}
-      </span>
-    </div>
+        <button
+          type="button"
+          class="remote-history-rail-pager"
+          data-testid="remote-history-rail-prev"
+          on:click={requestPreviousPage}
+          disabled={loading}
+        >
+          {$t("remote.history.previous")}
+        </button>
+        <button
+          type="button"
+          class="remote-history-rail-pager"
+          data-testid="remote-history-rail-next"
+          on:click={requestNextPage}
+          disabled={exhausted || loading}
+        >
+          {$t("remote.history.next")}
+        </button>
+        <span
+          class="remote-history-rail-snapshot"
+          data-testid="remote-history-rail-snapshot"
+          title={$t("remote.history.snapshot")}
+        >
+          {$tPlural("remote.history.capture_count", rows.length)}
+        </span>
+      </div>
+    {/if}
     {#if error}
       <p
         class="remote-history-rail-error-inline"
@@ -792,56 +799,70 @@
         {$t("remote.history.load_error")}
       </p>
     {/if}
-    <div
-      class="remote-history-rail-cards"
-      data-testid="remote-history-rail-cards"
-      role="listbox"
-      aria-label={$t("remote.history.captures")}
-      aria-orientation="horizontal"
-    >
-      {#each rows as item, index (remoteImageThumbnailCardKey(peerId, item.row.remote_entry_id))}
+    <div class="remote-history-rail-card-stage">
+      {#if rows.length > 0}
         <div
-          role="presentation"
-          class="remote-history-rail-card-slot"
-          data-testid="remote-history-rail-card-slot"
-          data-remote-entry-id={item.row.remote_entry_id}
-          data-row-kind={item.kind}
+          class="remote-history-rail-cards"
+          data-testid="remote-history-rail-cards"
+          role="listbox"
+          aria-label={$t("remote.history.captures")}
+          aria-orientation="horizontal"
         >
-          {#if item.kind === "text"}
-            <RemotePreviewCard
-              row={item.row}
-              rowTestId={`remote-history-rail-card-${index}`}
-              peerId={peerId}
-              displayName={activeEntry?.display_name ?? null}
-              peerCapability={activePeerCapability}
-              peerStateReady={thumbnailPeerStateReady}
-              selected={selectedRemoteEntryId === item.row.remote_entry_id}
-              onSelect={selectRemoteEntry}
-              onCardRef={(el) => registerCardRef(item.row.remote_entry_id, el)}
-            />
-          {:else}
-            <RemotePreviewCard
-              row={{
-                remote_entry_id: item.row.remote_entry_id,
-                title: item.row.title,
-                content_type: item.row.content_type,
-                created_at: item.row.created_at,
-                preview: `${item.row.width}×${item.row.height} · ${Math.round(item.row.byte_size / 1024)} KB`,
-                source_app_name: item.row.source_app_name,
-              }}
-              rowTestId={`remote-history-rail-card-${index}`}
-              peerId={peerId}
-              displayName={activeEntry?.display_name ?? null}
-              isImageRow={true}
-              peerCapability={activePeerCapability}
-              peerStateReady={thumbnailPeerStateReady}
-              selected={selectedRemoteEntryId === item.row.remote_entry_id}
-              onSelect={selectRemoteEntry}
-              onCardRef={(el) => registerCardRef(item.row.remote_entry_id, el)}
-            />
-          {/if}
+          {#each rows as item, index (remoteImageThumbnailCardKey(peerId, item.row.remote_entry_id))}
+            <div
+              role="presentation"
+              class="remote-history-rail-card-slot"
+              data-testid="remote-history-rail-card-slot"
+              data-remote-entry-id={item.row.remote_entry_id}
+              data-row-kind={item.kind}
+            >
+              {#if item.kind === "text"}
+                <RemotePreviewCard
+                  row={item.row}
+                  rowTestId={`remote-history-rail-card-${index}`}
+                  peerId={peerId}
+                  displayName={activeEntry?.display_name ?? null}
+                  peerCapability={activePeerCapability}
+                  peerStateReady={thumbnailPeerStateReady}
+                  selected={selectedRemoteEntryId === item.row.remote_entry_id}
+                  onSelect={selectRemoteEntry}
+                  onCardRef={(el) => registerCardRef(item.row.remote_entry_id, el)}
+                />
+              {:else}
+                <RemotePreviewCard
+                  row={{
+                    remote_entry_id: item.row.remote_entry_id,
+                    title: item.row.title,
+                    content_type: item.row.content_type,
+                    created_at: item.row.created_at,
+                    preview: `${item.row.width}×${item.row.height} · ${Math.round(item.row.byte_size / 1024)} KB`,
+                    source_app_name: item.row.source_app_name,
+                  }}
+                  rowTestId={`remote-history-rail-card-${index}`}
+                  peerId={peerId}
+                  displayName={activeEntry?.display_name ?? null}
+                  isImageRow={true}
+                  peerCapability={activePeerCapability}
+                  peerStateReady={thumbnailPeerStateReady}
+                  selected={selectedRemoteEntryId === item.row.remote_entry_id}
+                  onSelect={selectRemoteEntry}
+                  onCardRef={(el) => registerCardRef(item.row.remote_entry_id, el)}
+                />
+              {/if}
+            </div>
+          {/each}
         </div>
-      {/each}
+      {/if}
+      {#if loading}
+        <div
+          class="remote-history-rail-loading-overlay"
+          role="status"
+          aria-label={$t("remote.history.loading_previews")}
+          data-testid="remote-history-rail-loading"
+        >
+          <span class="remote-history-rail-spinner" aria-hidden="true"></span>
+        </div>
+      {/if}
     </div>
   {/if}
 </section>
@@ -863,8 +884,7 @@
     font-size: 1rem;
     flex: 1 1 auto;
   }
-  .remote-history-rail-empty,
-  .remote-history-rail-loading {
+  .remote-history-rail-empty {
     margin: 0;
     color: var(--cv-fg-muted, #94a3b8);
     font-size: 0.85rem;
@@ -931,6 +951,29 @@
     overflow-x: auto;
     overflow-y: hidden;
     padding-bottom: 0.5rem;
+  }
+  .remote-history-rail-card-stage {
+    position: relative;
+    min-height: 16rem;
+  }
+  .remote-history-rail-loading-overlay {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+    z-index: 1;
+  }
+  .remote-history-rail-spinner {
+    width: 2rem;
+    height: 2rem;
+    border: 3px solid var(--cv-border, #30363d);
+    border-top-color: var(--cv-accent, #60a5fa);
+    border-radius: 50%;
+    animation: remote-history-rail-spin 0.8s linear infinite;
+  }
+  @keyframes remote-history-rail-spin {
+    to { transform: rotate(360deg); }
   }
   .remote-history-rail-card-slot {
     display: contents;

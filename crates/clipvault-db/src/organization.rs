@@ -161,6 +161,15 @@ pub enum CollectionDeletionOutcome {
     PreviewChanged { preview: CollectionDeletionPreview },
 }
 
+/// Result of emptying a user collection while preserving its definition and
+/// any peer binding. A stale metadata preview is returned without mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CollectionClearOutcome {
+    Cleared { removed_entries: usize },
+    PreviewChanged { preview: CollectionDeletionPreview },
+}
+
 impl Collection {
     pub fn is_system(&self) -> bool {
         matches!(self.kind, CollectionKind::System)
@@ -513,6 +522,71 @@ impl<'a> OrganizationRepository<'a> {
         }
         tx.commit()?;
         Ok(CollectionDeletionOutcome::Deleted { removed_entries })
+    }
+
+    /// Empty a user collection without deleting its definition or peer
+    /// binding. The complete metadata preview is checked inside the same
+    /// transaction as the mutation.
+    pub fn clear_collection_with_scope(
+        &mut self,
+        id: i64,
+        delete_entries: bool,
+        expected: CollectionDeletionPreview,
+    ) -> Result<CollectionClearOutcome, OrganizationError> {
+        let tx = self.conn.transaction()?;
+        let collection_kind: Option<(String, Option<String>)> = tx
+            .query_row(
+                "SELECT kind, stable_key FROM collections WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((kind, stable_key)) = collection_kind else {
+            return Err(OrganizationError::CollectionNotFound(id));
+        };
+        if kind == "system" || stable_key.as_deref() == Some(HISTORY_STABLE_KEY) {
+            return Err(OrganizationError::SystemCollectionProtected(
+                HISTORY_STABLE_KEY,
+            ));
+        }
+
+        let current = collection_deletion_preview(&tx, id)?;
+        if current != expected {
+            return Ok(CollectionClearOutcome::PreviewChanged { preview: current });
+        }
+
+        let removed_entries = if delete_entries {
+            tx.execute(
+                "DELETE FROM clipboard_entries
+                 WHERE id IN (
+                    SELECT entry_id FROM entry_collections WHERE collection_id = ?1
+                 )",
+                params![id],
+            )?
+        } else {
+            // Preserve the required History membership even for legacy rows
+            // that lost it before the invariant was repaired.
+            let history_id: i64 = tx.query_row(
+                "SELECT id FROM collections WHERE stable_key = ?1",
+                params![HISTORY_STABLE_KEY],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO entry_collections (entry_id, collection_id, created_at)
+                 SELECT ec.entry_id, ?1, ec.created_at
+                   FROM entry_collections ec
+                  WHERE ec.collection_id = ?2",
+                params![history_id, id],
+            )?;
+            tx.execute(
+                "DELETE FROM entry_collections WHERE collection_id = ?1",
+                params![id],
+            )?;
+            0
+        };
+
+        tx.commit()?;
+        Ok(CollectionClearOutcome::Cleared { removed_entries })
     }
 
     /// List every tag in case-insensitive display order. The
@@ -2036,5 +2110,246 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))
             .expect("tag definition remains");
         assert_eq!(tag_count, 1);
+    }
+
+    #[test]
+    fn collection_clear_keeps_definition_binding_other_memberships_and_provenance() {
+        let (_dir, mut db) = open_temp_db();
+        seed_peer(&mut db, "peer-clear", "Equipo vinculado");
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (target, other) = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            let target = org
+                .create_user_collection("Equipo vinculado", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("peer collection")
+                .id;
+            let other = org
+                .create_user_collection("Otra", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("other collection")
+                .id;
+            (target, other)
+        };
+        {
+            let mut imports = crate::PeerImportRepository::new(db.connection_mut());
+            imports
+                .upsert_binding("peer-clear", target, when)
+                .expect("binding");
+        }
+        let entry = insert_text_entry(db.connection_mut(), "private capture", when);
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.replace_entry_collections(entry, &[target, other], when)
+                .expect("memberships");
+        }
+        db.connection_mut()
+            .execute(
+                "UPDATE clipboard_entries SET is_pinned = 1 WHERE id = ?1",
+                params![entry],
+            )
+            .expect("favorite");
+        {
+            let mut imports = crate::PeerImportRepository::new(db.connection_mut());
+            imports
+                .record_import("peer-clear", "remote-1", "hash-1", entry, when)
+                .expect("provenance");
+        }
+
+        let preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_deletion(target).expect("preview")
+        };
+        assert_eq!(
+            preview,
+            CollectionDeletionPreview {
+                entries: 1,
+                favorites: 1
+            }
+        );
+        let outcome = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.clear_collection_with_scope(target, false, preview)
+                .expect("clear membership")
+        };
+        assert_eq!(
+            outcome,
+            CollectionClearOutcome::Cleared { removed_entries: 0 }
+        );
+
+        let retained = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.find_collection(target)
+                .expect("find collection")
+                .expect("collection retained")
+        };
+        assert!(retained.is_peer_bound);
+        let history_id: i64 = db
+            .connection()
+            .query_row(
+                "SELECT id FROM collections WHERE stable_key = ?1",
+                params![HISTORY_STABLE_KEY],
+                |row| row.get(0),
+            )
+            .expect("History collection");
+        let memberships = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.entry_collection_ids(entry).expect("entry memberships")
+        };
+        assert!(!memberships.contains(&target));
+        assert!(memberships.contains(&history_id));
+        assert!(memberships.contains(&other));
+        let binding = {
+            let imports = crate::PeerImportRepository::new(db.connection_mut());
+            imports
+                .find_binding("peer-clear")
+                .expect("lookup binding")
+                .expect("binding retained")
+        };
+        assert_eq!(binding.collection_id, target);
+        let provenance = {
+            let imports = crate::PeerImportRepository::new(db.connection_mut());
+            imports
+                .find_import("peer-clear", "remote-1", "hash-1")
+                .expect("lookup provenance")
+                .expect("provenance retained")
+        };
+        assert_eq!(provenance.local_entry_id, entry);
+    }
+
+    #[test]
+    fn collection_clear_delete_scope_removes_entries_but_keeps_collection_binding() {
+        let (_dir, mut db) = open_temp_db();
+        seed_peer(&mut db, "peer-clear-delete", "Equipo importado");
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let target = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.create_user_collection("Equipo importado", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("peer collection")
+                .id
+        };
+        {
+            let mut imports = crate::PeerImportRepository::new(db.connection_mut());
+            imports
+                .upsert_binding("peer-clear-delete", target, when)
+                .expect("binding");
+        }
+        let entry = insert_text_entry(db.connection_mut(), "delete globally", when);
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.replace_entry_collections(entry, &[target], when)
+                .expect("membership");
+        }
+        db.connection_mut()
+            .execute(
+                "UPDATE clipboard_entries SET is_pinned = 1 WHERE id = ?1",
+                params![entry],
+            )
+            .expect("favorite");
+        let preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_deletion(target).expect("preview")
+        };
+        assert_eq!(
+            preview,
+            CollectionDeletionPreview {
+                entries: 1,
+                favorites: 1
+            }
+        );
+        let outcome = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.clear_collection_with_scope(target, true, preview)
+                .expect("clear and delete entries")
+        };
+        assert_eq!(
+            outcome,
+            CollectionClearOutcome::Cleared { removed_entries: 1 }
+        );
+        let count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM clipboard_entries", [], |row| {
+                row.get(0)
+            })
+            .expect("remaining entries");
+        assert_eq!(count, 0);
+        let retained = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.find_collection(target)
+                .expect("find collection")
+                .expect("collection retained")
+        };
+        assert!(retained.is_peer_bound);
+        let binding = {
+            let imports = crate::PeerImportRepository::new(db.connection_mut());
+            imports
+                .find_binding("peer-clear-delete")
+                .expect("lookup binding")
+                .expect("binding retained")
+        };
+        assert_eq!(binding.collection_id, target);
+    }
+
+    #[test]
+    fn collection_clear_rejects_stale_counts_and_rolls_back_errors() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let target = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.create_user_collection("Target", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("collection")
+                .id
+        };
+        let entry = insert_text_entry(db.connection_mut(), "capture", when);
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.replace_entry_collections(entry, &[target], when)
+                .expect("membership");
+        }
+        let preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_deletion(target).expect("preview")
+        };
+        let stale = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.clear_collection_with_scope(
+                target,
+                false,
+                CollectionDeletionPreview {
+                    entries: preview.entries + 1,
+                    favorites: preview.favorites,
+                },
+            )
+            .expect("stale preview result")
+        };
+        assert_eq!(stale, CollectionClearOutcome::PreviewChanged { preview });
+
+        db.connection_mut()
+            .execute_batch(&format!(
+                "CREATE TRIGGER reject_collection_membership_clear
+                 BEFORE DELETE ON entry_collections
+                 WHEN OLD.collection_id = {target}
+                 BEGIN SELECT RAISE(ABORT, 'forced membership failure'); END;"
+            ))
+            .expect("create rollback trigger");
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            assert!(org
+                .clear_collection_with_scope(target, false, preview)
+                .is_err());
+        }
+        let memberships = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.entry_collection_ids(entry)
+                .expect("memberships after rollback")
+        };
+        assert!(memberships.contains(&target));
+        let collection_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM collections WHERE id = ?1",
+                params![target],
+                |row| row.get(0),
+            )
+            .expect("collection count");
+        assert_eq!(collection_count, 1);
     }
 }

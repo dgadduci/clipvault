@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-10-03
+goal: >-
+  Mejorar la carga e importación de previews entre equipos, impedir drops en
+  colecciones de pares, agregar acceso por atajo y permitir vaciar colecciones.

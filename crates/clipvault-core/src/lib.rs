@@ -140,10 +140,10 @@ pub use kde_kwin_integration::{
     KDE_KWIN_CONSENT_STORAGE_KEY,
 };
 pub use management::{
-    AssetCollectionOutcome, ClearOutcome, CollectionDeleteOutcome, DeleteOutcome,
-    HistoryManagementService, LocalSettingsReader, ManagementServiceError, RetentionOutcome,
-    RetentionPolicy, RetentionPreview, SetFavoriteResult, SettingsReader, DEFAULT_RETENTION,
-    RETENTION_SETTING_KEY,
+    AssetCollectionOutcome, ClearOutcome, CollectionClearOutcome, CollectionDeleteOutcome,
+    DeleteOutcome, HistoryManagementService, LocalSettingsReader, ManagementServiceError,
+    RetentionOutcome, RetentionPolicy, RetentionPreview, SetFavoriteResult, SettingsReader,
+    DEFAULT_RETENTION, RETENTION_SETTING_KEY,
 };
 pub use notes::{NotesService, NotesServiceError};
 pub use organization::{

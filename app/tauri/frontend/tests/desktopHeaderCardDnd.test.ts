@@ -329,6 +329,8 @@ test("acceptsDragOver returns true for the private MIME or the text/plain fallba
 
 test("isDropTarget only accepts user collections", () => {
   assert.equal(isDropTarget({ kind: "user" }), true);
+  assert.equal(isDropTarget({ kind: "user", is_peer_bound: true }), false);
+  assert.equal(isDropTarget({ kind: "user", is_peer_bound: false }), true);
   assert.equal(isDropTarget({ kind: "system" }), false);
   assert.equal(isDropTarget(null), false);
   assert.equal(isDropTarget(undefined), false);
@@ -699,7 +701,7 @@ test("main.rs::resize_main_window_to_monitor runs once during setup", () => {
   // is what the spec forbids.
   const source = loadRepoSource("app/tauri/src-tauri/src/main.rs");
   // The setup callback is the only call site.
-  const setupMatch = source.match(/tauri::Builder::default\(\)\s*\.setup\(\|app\| \{([\s\S]*?)\}\)/);
+  const setupMatch = source.match(/\.setup\(\|app\| \{([\s\S]*?)\}\)/);
   assert.ok(setupMatch, "setup callback must remain");
   const setupBody = setupMatch?.[1] ?? "";
   assert.match(

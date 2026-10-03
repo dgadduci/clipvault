@@ -39,9 +39,10 @@ pub use migration::{Migration, MigrationOutcome};
 pub use notes::{NoteRecord, NoteRepository, NoteRepositoryError};
 pub use organization::{
     normalise_tag_identity, validate_collection_color, validate_user_collection_name, Collection,
-    CollectionDeletionOutcome, CollectionDeletionPreview, CollectionKind, OrganizationError,
-    OrganizationRepository, Tag, DEFAULT_COLLECTION_PALETTE, HISTORY_DEFAULT_COLOR_HEX,
-    HISTORY_DISPLAY_NAME, HISTORY_STABLE_KEY, MAX_ORGANIZATION_NAME_CHARS,
+    CollectionClearOutcome, CollectionDeletionOutcome, CollectionDeletionPreview, CollectionKind,
+    OrganizationError, OrganizationRepository, Tag, DEFAULT_COLLECTION_PALETTE,
+    HISTORY_DEFAULT_COLOR_HEX, HISTORY_DISPLAY_NAME, HISTORY_STABLE_KEY,
+    MAX_ORGANIZATION_NAME_CHARS,
 };
 pub use peer_import_repository::{
     find_binding_in_tx, ImageImportOutcome, ImageImportSpec, PeerCollectionBinding,

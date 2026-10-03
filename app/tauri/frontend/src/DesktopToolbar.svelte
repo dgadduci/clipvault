@@ -64,6 +64,8 @@
    * view where the destructive branch would be misleading.
    */
   export let showClearHistory: boolean = true;
+  export let showClearCollection: boolean = false;
+  export let clearCollectionLabel: string = "";
   export let canCreateManualText: boolean = false;
   export let createTextShortcut: string = "";
   export let createTextShortcutAccessible: string = "";
@@ -112,6 +114,7 @@
    */
   export let onOpenAbout: (event: MouseEvent) => void = () => {};
   export let onRequestClearHistory: (event: MouseEvent) => void = () => {};
+  export let onRequestClearCollection: (event: MouseEvent) => void = () => {};
   export let onCreateManualText: (
     event: MouseEvent,
     returnFocusTo: HTMLElement | null,
@@ -434,16 +437,20 @@
           </div>
         {/if}
       </div>
-      {#if showClearHistory}
+      {#if showClearHistory || showClearCollection}
         <button
           type="button"
           class="trash"
-          aria-label={trashLabel || $t("toolbar.clear_unorganized")}
-          title={trashLabel || $t("toolbar.clear_unorganized")}
+          aria-label={showClearCollection
+            ? clearCollectionLabel
+            : trashLabel || $t("toolbar.clear_unorganized")}
+          title={showClearCollection
+            ? clearCollectionLabel
+            : trashLabel || $t("toolbar.clear_unorganized")}
           aria-busy={trashConfirming}
-          data-testid="trash-clear-history"
-          data-cv-danger="clear-history"
-          on:click={onRequestClearHistory}
+          data-testid={showClearCollection ? "trash-clear-collection" : "trash-clear-history"}
+          data-cv-danger={showClearCollection ? "clear-collection" : "clear-history"}
+          on:click={showClearCollection ? onRequestClearCollection : onRequestClearHistory}
         >
           <svg
             aria-hidden="true"

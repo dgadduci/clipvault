@@ -488,6 +488,8 @@ export function acceptsDragOver(event: {
  * that wired the system collection as a drop target would surface
  * here as a failed assertion in the tests.
  */
-export function isDropTarget(collection: { kind: string } | null | undefined): boolean {
-  return !!collection && collection.kind === "user";
+export function isDropTarget(
+  collection: { kind: string; is_peer_bound?: boolean } | null | undefined,
+): boolean {
+  return !!collection && collection.kind === "user" && collection.is_peer_bound !== true;
 }
