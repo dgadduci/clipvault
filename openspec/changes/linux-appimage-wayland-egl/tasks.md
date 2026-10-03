@@ -20,7 +20,7 @@
 
 ## 3. Verificación
 
-- [ ] 3.1 Probar manualmente la nueva AppImage en Arch KDE Wayland y registrar
+- [x] 3.1 Probar manualmente la nueva AppImage en Arch KDE Wayland y registrar
   que la interfaz se dibuja sin el aborto EGL.
 - [ ] 3.2 Confirmar que reemplazar la AppImage conserva historial y assets
   locales en `~/.clipvault`.
