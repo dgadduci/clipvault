@@ -8,6 +8,10 @@
   contiene la clave pública Ed25519 para verificar paquetes updater.
 - `createUpdaterArtifacts` está desactivado en la configuración base; el
   workflow de release lo habilita al crear instaladores y manifiestos firmados.
+- Los iconos de escritorio derivados de `icons/app-icon.png` están
+  versionados. La configuración común referencia `.icns`, `.ico` y PNG
+  compatibles para que los builds locales y de CI no dependan de pasos de
+  generación distintos.
 - `main.rs` registra los plugins updater y process en macOS y Linux.
 - La capacidad Tauri predeterminada no concede permisos de updater o relaunch.
 - `AboutModal.svelte` ya muestra la versión canónica recibida desde

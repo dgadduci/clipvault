@@ -68,6 +68,25 @@ used; the project does not pass `--manifest-path` to `cargo tauri
 dev` and the documented flow does the working-directory switch
 instead.
 
+### Local production bundles (run from `app/tauri`)
+
+Linux:
+
+```text
+cargo tauri build --bundles deb,appimage
+```
+
+macOS:
+
+```text
+cargo tauri build --bundles app,dmg
+```
+
+The desktop icon files referenced by `src-tauri/tauri.conf.json` are
+checked in alongside the source `src-tauri/icons/app-icon.png`. Local builds
+and release CI therefore use the same macOS `.icns` and Linux PNG icons
+without a separate icon-generation step.
+
 ## `npm test` on Node 20 LTS
 
 `npm test` runs the Node 20 built-in test runner against TypeScript

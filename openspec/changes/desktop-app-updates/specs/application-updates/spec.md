@@ -64,6 +64,13 @@ local entry identifiers.
   approval
 - **AND** the local build does not require the updater private signing key
 
+#### Scenario: Local macOS production bundle has a compatible application icon
+
+- **WHEN** a contributor packages the macOS application from a clean checkout
+- **THEN** the configured icon set includes the `.icns` asset required by the
+  `.app` bundle
+- **AND** the local build uses the same versioned icon assets as release CI
+
 #### Scenario: Development build starts
 
 - **WHEN** ClipVault runs from a development build

@@ -19,6 +19,9 @@ requiere distribuir manualmente nuevos instaladores y avisar a los usuarios.
   fuera del repositorio.
 - Mantener alineadas las versiones minor de las dependencias Rust y JavaScript
   de Tauri para que el build local de producción complete la validación CLI.
+- Compartir entre los builds locales y CI el mismo conjunto versionado de
+  iconos de macOS y Linux para que el empaquetado no dependa de una generación
+  previa ejecutada sólo en CI.
 - Comprobar actualizaciones de forma asíncrona al iniciar una build de
   producción. Mostrar el resultado en “Acerca de” y solicitar confirmación
   antes de descargar e instalar una actualización o reiniciar.

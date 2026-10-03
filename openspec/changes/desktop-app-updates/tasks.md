@@ -27,6 +27,9 @@
   la configuración de la aplicación.
 - [x] 2.6 Alinear `@tauri-apps/api` con Tauri Rust 2.12.1 y validar el build
   local de producción.
+- [x] 2.7 Versionar el conjunto de iconos de escritorio generado desde
+  `app-icon.png`, compartirlo entre CI y builds locales y quitar la generación
+  exclusiva del workflow de release.
 
 ## 3. Experiencia de actualización
 
@@ -93,3 +96,5 @@
 - [ ] 5.6 Verificar en paquetes locales de producción para macOS y Linux que
   “Acerca de” permite comprobar una actualización y que sólo instala artefactos
   firmados tras confirmación.
+- [ ] 5.7 Completar en macOS un build local `app,dmg` y confirmar que el bundle
+  `.app` incluye y muestra el icono configurado.
