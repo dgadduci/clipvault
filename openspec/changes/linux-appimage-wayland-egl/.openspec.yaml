@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-10-02
+goal: >-
+  Evitar que la AppImage de ClipVault muestre una ventana en blanco o aborte
+  WebKit al iniciar en Arch Linux KDE Wayland con EGL_BAD_PARAMETER.

@@ -142,7 +142,7 @@ jobs:
         run: npm ci
 
       - name: Install pinned Tauri CLI
-        run: cargo install tauri-cli --version 2.11.5 --locked
+        run: cargo install tauri-cli --version 2.12.0 --locked
 
       - name: Generate platform application icons
         run: cargo tauri icon src-tauri/icons/app-icon.png --output src-tauri/icons
