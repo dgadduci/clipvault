@@ -55,8 +55,13 @@
   confirmación del usuario, cancelación de elevación y relanzamiento.
 - [x] 5.3 Comprobar builds y pruebas relevantes de Tauri/frontend, paridad de
   traducciones, capacidades mínimas y preservación de la base SQLite y assets.
-- [ ] 5.4 Verificar manualmente actualización de AppImage y `.deb` en Linux,
-  `.app` en macOS Intel y Apple Silicon, y registrar resultados del primer
-  release borrador.
+- [ ] 5.4 Completar la verificación manual por formato y arquitectura, y
+  registrar los resultados del primer release:
+  - [x] Linux AppImage: actualización de `v0.0.16` a `v0.0.17` confirmada;
+    la aplicación reinició correctamente y el historial siguió disponible.
+  - [ ] Linux `.deb`: actualización y autorización del sistema pendientes.
+  - [ ] macOS Intel: actualización pendiente.
+  - [x] macOS Apple Silicon: actualización de `v0.0.16` a `v0.0.17`
+    confirmada sin problemas.
 - [x] 5.5 Ejecutar `openspec validate desktop-app-updates --strict` y revisar
   `git diff --check`.
