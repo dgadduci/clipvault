@@ -117,6 +117,12 @@ el proceso.
 - sin actualizaciones;
 - error de red, firma o instalación, con posibilidad de reintentar.
 
+El bloque de actualización y su botón permanecen visibles en “Acerca de”
+cuando el updater está deshabilitado, como en builds de desarrollo. En ese
+estado el botón aparece deshabilitado y un mensaje traducido explica que las
+actualizaciones están disponibles en versiones instaladas. La interfaz no
+inicia consultas al endpoint desde esos builds.
+
 La comprobación no debe bloquear el arranque, abrir ventanas de terminal ni
 mostrar fallos transitorios como errores fatales. Todo el texto de producto y
 accesible se traduce mediante claves presentes en los cinco catálogos.

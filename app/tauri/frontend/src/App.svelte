@@ -4,6 +4,7 @@
 
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import type {
     ActiveApplicationResponse,
     Capabilities,
@@ -109,7 +110,11 @@
   import { isEditableTextEntry } from "./types";
   import { visualTokenCss } from "./lib/visualTokens";
   import { t, tPlural } from "./lib/localization.ts";
-import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcuts, keyboardShortcuts, matchesConfiguredShortcut, shortcutLabel } from "./lib/keyboardShortcuts.ts";
+  import {
+    dispatchTrayMenuAction,
+    TRAY_MENU_ACTION_EVENT,
+  } from "./lib/trayMenuActions.ts";
+  import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcuts, keyboardShortcuts, matchesConfiguredShortcut, shortcutLabel } from "./lib/keyboardShortcuts.ts";
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
   import HistoryCardRail from "./HistoryCardRail.svelte";
   import OrganizationSidebar from "./OrganizationSidebar.svelte";
@@ -2251,15 +2256,7 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
     if (openModal === null) modalReturnFocus = null;
   }
 
-  /**
-   * Single-source "Acerca de" handler. Only the global ellipsis
-   * menu on the desktop toolbar dispatches this callback, so the
-   * version string the user sees can never drift from the
-   * canonical diagnostics payload. Opening the modal closes the
-   * menu (the toolbar's `selectItem` already drops it before the
-   * parent opens the modal) and returns focus to the trigger once
-   * the modal closes.
-   */
+  /** The toolbar and native tray both open this single About modal. */
   function onOpenAbout(event: MouseEvent): void {
     openModalWith("about", event.currentTarget as HTMLElement | null);
   }
@@ -2267,6 +2264,18 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
   function onRequestClearHistory(event: MouseEvent): void {
     modalReturnFocus = event.currentTarget as HTMLElement | null;
     void requestClearHistory();
+  }
+
+  function handleTrayMenuAction(action: unknown): void {
+    dispatchTrayMenuAction(action, {
+      clearHistory: () => {
+        openModal = null;
+        modalReturnFocus = null;
+        void requestClearHistory();
+      },
+      openSettings: () => openModalWith("general_settings", null),
+      openAbout: () => openModalWith("about", null),
+    });
   }
 
   function onPasteFailed(event: CustomEvent<PasteResponse>): void {
@@ -2300,6 +2309,7 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
     },
   );
   let unlistenQuickSearch: (() => void) | null = null;
+  let unlistenTrayMenuAction: (() => void) | null = null;
 
   const registerHistoryUpdated = createHistoryUpdatedRegistrar();
   let unlistenHistoryUpdated: (() => void) | null = null;
@@ -2410,6 +2420,17 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
       .catch((error) => {
         console.error("failed to register quick-search listener", error);
       });
+    listen<unknown>(
+      TRAY_MENU_ACTION_EVENT,
+      (event) => handleTrayMenuAction(event.payload),
+      { target: "main" },
+    )
+      .then((unlisten) => {
+        unlistenTrayMenuAction = unlisten;
+      })
+      .catch((error) => {
+        console.error("failed to register tray-menu listener", error);
+      });
     registerHistoryUpdated(handleHistoryUpdated)
       .then((unlisten) => {
         unlistenHistoryUpdated = unlisten;
@@ -2456,6 +2477,10 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
     if (unlistenQuickSearch) {
       unlistenQuickSearch();
       unlistenQuickSearch = null;
+    }
+    if (unlistenTrayMenuAction) {
+      unlistenTrayMenuAction();
+      unlistenTrayMenuAction = null;
     }
     if (unlistenHistoryUpdated) {
       unlistenHistoryUpdated();
@@ -3037,16 +3062,7 @@ import { ariaShortcut, disposeKeyboardShortcutUpdates, initializeKeyboardShortcu
   />
 </Modal>
 
-<!--
-  "Acerca de" modal. The version string lives in the canonical
-  diagnostics payload (the Rust `clipvault_core::DiagnosticsService`
-  reading from `Cargo.toml`'s `[workspace.package].version`), so a
-  drift between the modal copy and the manifests would surface as a
-  test failure on the validation suite. Only the global ellipsis
-  menu on the desktop toolbar opens this modal — the per-card
-  menus MUST NOT carry a parallel item so the version stays
-  single-sourced.
--->
+<!-- The toolbar and native tray open this same diagnostics-backed modal. -->
 <Modal
   open={openModal === "about"}
   titleId="about-title"

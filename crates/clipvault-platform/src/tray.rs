@@ -18,9 +18,9 @@ use thiserror::Error;
 pub enum TrayAction {
     OpenMainWindow,
     OpenQuickSearch,
-    OpenFavorites,
     ClearHistory,
     OpenSettings,
+    OpenAbout,
     ToggleClipboardCapture,
     Quit,
 }
@@ -30,23 +30,25 @@ impl TrayAction {
         match self {
             TrayAction::OpenMainWindow => "open_main_window",
             TrayAction::OpenQuickSearch => "open_quick_search",
-            TrayAction::OpenFavorites => "open_favorites",
             TrayAction::ClearHistory => "clear_history",
             TrayAction::OpenSettings => "open_settings",
+            TrayAction::OpenAbout => "open_about",
             TrayAction::ToggleClipboardCapture => "toggle_clipboard_capture",
             TrayAction::Quit => "quit",
         }
     }
 
-    /// Returns `true` for actions whose underlying capability is part
-    /// of this change (open main window, open quick search, quit). The
-    /// other actions depend on future specs and must report
-    /// `TrayOutcome::Unavailable` until those specs land.
+    /// Returns `true` for tray actions implemented by the desktop
+    /// application. Actions added later remain unavailable until their
+    /// application flow is wired.
     pub fn is_supported_in_mvp(self) -> bool {
         matches!(
             self,
             TrayAction::OpenMainWindow
                 | TrayAction::OpenQuickSearch
+                | TrayAction::ClearHistory
+                | TrayAction::OpenSettings
+                | TrayAction::OpenAbout
                 | TrayAction::ToggleClipboardCapture
                 | TrayAction::Quit
         )
@@ -143,9 +145,9 @@ mod tests {
     fn action_strings_are_stable() {
         assert_eq!(TrayAction::OpenMainWindow.as_str(), "open_main_window");
         assert_eq!(TrayAction::OpenQuickSearch.as_str(), "open_quick_search");
-        assert_eq!(TrayAction::OpenFavorites.as_str(), "open_favorites");
         assert_eq!(TrayAction::ClearHistory.as_str(), "clear_history");
         assert_eq!(TrayAction::OpenSettings.as_str(), "open_settings");
+        assert_eq!(TrayAction::OpenAbout.as_str(), "open_about");
         assert_eq!(
             TrayAction::ToggleClipboardCapture.as_str(),
             "toggle_clipboard_capture"
@@ -157,10 +159,10 @@ mod tests {
     fn mvp_supported_actions_are_a_subset() {
         assert!(TrayAction::OpenMainWindow.is_supported_in_mvp());
         assert!(TrayAction::OpenQuickSearch.is_supported_in_mvp());
+        assert!(TrayAction::ClearHistory.is_supported_in_mvp());
+        assert!(TrayAction::OpenSettings.is_supported_in_mvp());
+        assert!(TrayAction::OpenAbout.is_supported_in_mvp());
         assert!(TrayAction::ToggleClipboardCapture.is_supported_in_mvp());
         assert!(TrayAction::Quit.is_supported_in_mvp());
-        assert!(!TrayAction::OpenFavorites.is_supported_in_mvp());
-        assert!(!TrayAction::ClearHistory.is_supported_in_mvp());
-        assert!(!TrayAction::OpenSettings.is_supported_in_mvp());
     }
 }

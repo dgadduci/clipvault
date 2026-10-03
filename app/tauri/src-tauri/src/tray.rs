@@ -2,16 +2,15 @@
 //!
 //! Wires Tauri's built-in [`tauri::tray::TrayIconBuilder`] to the
 //! platform-agnostic [`clipvault_platform::TrayAction`] enum. Actions
-//! that depend on not-yet-implemented specs emit a thin
-//! `clipvault://capability-unavailable` event so the frontend can
-//! surface the placeholder.
+//! whose application flows are not implemented emit a thin
+//! `clipvault://capability-unavailable` event for the frontend.
 
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tauri::menu::{MenuBuilder, MenuEvent};
 use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 use tracing::warn;
 
 use clipvault_platform::{TrayAction, TrayController, TrayHandle};
@@ -19,11 +18,13 @@ use clipvault_platform::{TrayAction, TrayController, TrayHandle};
 /// Tray menu IDs. Stable so the frontend can correlate events.
 const ID_OPEN_MAIN: &str = "clipvault://open_main_window";
 const ID_OPEN_QUICK: &str = "clipvault://open_quick_search";
-const ID_OPEN_FAVORITES: &str = "clipvault://open_favorites";
 const ID_CLEAR_HISTORY: &str = "clipvault://clear_history";
 const ID_OPEN_SETTINGS: &str = "clipvault://open_settings";
+const ID_OPEN_ABOUT: &str = "clipvault://open_about";
 const ID_TOGGLE_CAPTURE: &str = "clipvault://toggle_clipboard_capture";
 const ID_QUIT: &str = "clipvault://quit";
+const TRAY_MENU_ACTION_EVENT: &str = "clipvault://tray-menu-action";
+const MAIN_WINDOW_LABEL: &str = "main";
 
 /// Tauri-backed tray handle. Implements the platform-agnostic
 /// [`TrayHandle`] trait so the rest of the application can keep using
@@ -82,13 +83,16 @@ impl<R: Runtime> TrayHandle for TauriTrayHandle<R> {
         }
         match action {
             TrayAction::OpenMainWindow => {
-                if let Some(window) = self.app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                bring_main_window_forward(&self.app)?;
             }
             TrayAction::OpenQuickSearch => {
                 let _ = self.app.emit("clipvault://quick-search", ());
+            }
+            TrayAction::ClearHistory | TrayAction::OpenSettings | TrayAction::OpenAbout => {
+                bring_main_window_forward(&self.app)?;
+                self.app
+                    .emit_to("main", TRAY_MENU_ACTION_EVENT, action.as_str())
+                    .map_err(clipvault_platform::TrayError::backend)?;
             }
             TrayAction::Quit => {
                 self.app.exit(0);
@@ -96,13 +100,6 @@ impl<R: Runtime> TrayHandle for TauriTrayHandle<R> {
             TrayAction::ToggleClipboardCapture => {
                 crate::commands::toggle_capture_from_app(&self.app)
                     .map_err(|error| clipvault_platform::TrayError::backend(error.message))?;
-            }
-            TrayAction::OpenFavorites | TrayAction::ClearHistory | TrayAction::OpenSettings => {
-                let _ = self.app.emit(
-                    "clipvault://capability-unavailable",
-                    capability_payload(action),
-                );
-                return Ok(clipboard_platform_unavailable(action));
             }
         }
         Ok(clipvault_platform::TrayOutcome::Delivered)
@@ -136,6 +133,67 @@ impl<R: Runtime> TauriTrayHandle<R> {
         let capture_enabled = *self.capture_enabled.lock();
         let language = self.language.lock().clone();
         rebuild_menu(&self.app, &menu, capture_enabled, &language, shortcut)
+    }
+}
+
+fn bring_main_window_forward<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), clipvault_platform::TrayError> {
+    let window = get_or_create_main_window(app)?;
+
+    if window
+        .is_minimized()
+        .map_err(clipvault_platform::TrayError::backend)?
+    {
+        window
+            .unminimize()
+            .map_err(clipvault_platform::TrayError::backend)?;
+    }
+    window
+        .show()
+        .map_err(clipvault_platform::TrayError::backend)?;
+    window
+        .set_focus()
+        .map_err(clipvault_platform::TrayError::backend)?;
+
+    // Native tray menus may dismiss after their callback returns. Request
+    // focus again on the app thread so the menu cannot leave itself above the
+    // main window's activation request.
+    let focus_window = window.clone();
+    window
+        .run_on_main_thread(move || {
+            if let Err(error) = focus_window.set_focus() {
+                warn!(error = %error, "failed to focus the main window after tray activation");
+            }
+        })
+        .map_err(clipvault_platform::TrayError::backend)?;
+    Ok(())
+}
+
+fn get_or_create_main_window<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<WebviewWindow<R>, clipvault_platform::TrayError> {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        return Ok(window);
+    }
+
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == MAIN_WINDOW_LABEL)
+        .ok_or_else(|| {
+            clipvault_platform::TrayError::backend("main window configuration unavailable")
+        })?;
+
+    let builder = WebviewWindowBuilder::from_config(app, config)
+        .map_err(clipvault_platform::TrayError::backend)?;
+    match builder.build() {
+        Ok(window) => Ok(window),
+        Err(error) => app
+            .get_webview_window(MAIN_WINDOW_LABEL)
+            .ok_or_else(|| clipvault_platform::TrayError::backend(error)),
     }
 }
 
@@ -176,12 +234,6 @@ fn rebuild_menu<R: Runtime>(
             ),
             &menu_item(
                 app,
-                ID_OPEN_FAVORITES,
-                &crate::localization::text(language, "tray.favorites"),
-                actions.contains(&TrayAction::OpenFavorites),
-            ),
-            &menu_item(
-                app,
                 ID_CLEAR_HISTORY,
                 &crate::localization::text(language, "tray.clear_history"),
                 actions.contains(&TrayAction::ClearHistory),
@@ -191,6 +243,12 @@ fn rebuild_menu<R: Runtime>(
                 ID_OPEN_SETTINGS,
                 &crate::localization::text(language, "tray.settings"),
                 actions.contains(&TrayAction::OpenSettings),
+            ),
+            &menu_item(
+                app,
+                ID_OPEN_ABOUT,
+                &crate::localization::text(language, "tray.about"),
+                actions.contains(&TrayAction::OpenAbout),
             ),
             &menu_item(
                 app,
@@ -267,9 +325,9 @@ impl TauriTrayController {
         let actions = vec![
             TrayAction::OpenMainWindow,
             TrayAction::OpenQuickSearch,
-            TrayAction::OpenFavorites,
             TrayAction::ClearHistory,
             TrayAction::OpenSettings,
+            TrayAction::OpenAbout,
             TrayAction::ToggleClipboardCapture,
             TrayAction::Quit,
         ];
@@ -289,12 +347,6 @@ impl TauriTrayController {
                 ),
                 &menu_item(
                     app,
-                    ID_OPEN_FAVORITES,
-                    &crate::localization::text(language, "tray.favorites"),
-                    true,
-                ),
-                &menu_item(
-                    app,
                     ID_CLEAR_HISTORY,
                     &crate::localization::text(language, "tray.clear_history"),
                     true,
@@ -303,6 +355,12 @@ impl TauriTrayController {
                     app,
                     ID_OPEN_SETTINGS,
                     &crate::localization::text(language, "tray.settings"),
+                    true,
+                ),
+                &menu_item(
+                    app,
+                    ID_OPEN_ABOUT,
+                    &crate::localization::text(language, "tray.about"),
                     true,
                 ),
                 &menu_item(
@@ -396,6 +454,38 @@ mod tests {
     #[test]
     fn open_main_window_action_is_delivered_to_a_registered_main_window() {
         let app = mock_app();
+        let window = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .build()
+            .expect("mock main window");
+        let tray = TauriTrayHandle::<MockRuntime>::new(
+            app.handle().clone(),
+            Vec::new(),
+            true,
+            "en".to_string(),
+            "Ctrl+Alt+Shift+B".to_string(),
+        );
+
+        window.hide().expect("hide main window");
+        assert_eq!(
+            tray.invoke(TrayAction::OpenMainWindow)
+                .expect("restore hidden main window"),
+            clipvault_platform::TrayOutcome::Delivered
+        );
+        assert!(window.is_visible().expect("main window visibility"));
+
+        window.minimize().expect("minimize main window");
+        assert_eq!(
+            tray.invoke(TrayAction::OpenMainWindow)
+                .expect("restore minimized main window"),
+            clipvault_platform::TrayOutcome::Delivered
+        );
+        assert!(!window.is_minimized().expect("main window minimized state"));
+        assert_eq!(app.webview_windows().len(), 1);
+    }
+
+    #[test]
+    fn implemented_ui_menu_actions_are_delivered_to_main_window() {
+        let app = mock_app();
         WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
             .build()
             .expect("mock main window");
@@ -407,11 +497,37 @@ mod tests {
             "Ctrl+Alt+Shift+B".to_string(),
         );
 
+        for action in [
+            TrayAction::ClearHistory,
+            TrayAction::OpenSettings,
+            TrayAction::OpenAbout,
+        ] {
+            assert_eq!(
+                tray.invoke(action).expect("tray action"),
+                clipvault_platform::TrayOutcome::Delivered
+            );
+        }
+    }
+
+    #[test]
+    fn tray_menu_ids_cover_working_actions_and_do_not_dispatch_favorites() {
         assert_eq!(
-            tray.invoke(TrayAction::OpenMainWindow)
-                .expect("open main window action"),
-            clipvault_platform::TrayOutcome::Delivered
+            menu_event_to_action(ID_OPEN_MAIN),
+            Some(TrayAction::OpenMainWindow)
         );
+        assert_eq!(
+            menu_event_to_action(ID_CLEAR_HISTORY),
+            Some(TrayAction::ClearHistory)
+        );
+        assert_eq!(
+            menu_event_to_action(ID_OPEN_SETTINGS),
+            Some(TrayAction::OpenSettings)
+        );
+        assert_eq!(
+            menu_event_to_action(ID_OPEN_ABOUT),
+            Some(TrayAction::OpenAbout)
+        );
+        assert_eq!(menu_event_to_action("clipvault://open_favorites"), None);
     }
 
     #[test]
@@ -431,9 +547,9 @@ pub fn menu_event_to_action(id: &str) -> Option<TrayAction> {
     match id {
         ID_OPEN_MAIN => Some(TrayAction::OpenMainWindow),
         ID_OPEN_QUICK => Some(TrayAction::OpenQuickSearch),
-        ID_OPEN_FAVORITES => Some(TrayAction::OpenFavorites),
         ID_CLEAR_HISTORY => Some(TrayAction::ClearHistory),
         ID_OPEN_SETTINGS => Some(TrayAction::OpenSettings),
+        ID_OPEN_ABOUT => Some(TrayAction::OpenAbout),
         ID_TOGGLE_CAPTURE => Some(TrayAction::ToggleClipboardCapture),
         ID_QUIT => Some(TrayAction::Quit),
         _ => None,

@@ -274,11 +274,14 @@ mod tests {
         handle.set_menu(&entries).expect("set_menu");
         let outcome = handle.invoke(TrayAction::OpenQuickSearch).expect("invoke");
         assert!(matches!(outcome, crate::tray::TrayOutcome::Delivered));
-        let outcome = handle.invoke(TrayAction::OpenFavorites).expect("invoke");
-        assert!(matches!(
-            outcome,
-            crate::tray::TrayOutcome::Unavailable { .. }
-        ));
+        for action in [
+            TrayAction::ClearHistory,
+            TrayAction::OpenSettings,
+            TrayAction::OpenAbout,
+        ] {
+            let outcome = handle.invoke(action).expect("implemented tray action");
+            assert!(matches!(outcome, crate::tray::TrayOutcome::Delivered));
+        }
         handle.shutdown().expect("shutdown");
     }
 

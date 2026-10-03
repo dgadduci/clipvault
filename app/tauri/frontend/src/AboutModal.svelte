@@ -2,14 +2,11 @@
   /**
    * Modal exposing the canonical product identity for ClipVault.
    *
-   * The desktop only ever opens this modal from the global ellipsis
-   * menu on the toolbar — every other surface (the HistoryCard rail
-   * menu, the Quick Paste preview, the per-card actions) MUST NOT
-   * surface a parallel "Acerca de" entry. Keeping the affordance on
-   * a single menu keeps the version string and the project metadata
-   * honest: the user reads the same number the canonical Tauri
-   * command (`clipvault_diagnostics`) reports, never a hard-coded
-   * constant that the maintainer forgot to bump.
+   * The global toolbar and native tray share this modal. Other
+   * surfaces (the HistoryCard rail menu and Quick Paste) MUST NOT
+   * surface a parallel "Acerca de" entry. The user reads the version
+   * reported by the canonical Tauri command (`clipvault_diagnostics`),
+   * never a hard-coded constant that the maintainer forgot to bump.
    *
    * The modal is metadata-only: it never echoes clipboard content,
    * source identifiers, asset paths or hashes. Closing the dialog
@@ -72,57 +69,60 @@
         <code data-testid="about-version">{displayVersion}</code>
       </dd>
     </dl>
-    <p class="muted small">{$t("about.version_details")}</p>
   </article>
-  {#if updaterEnabled}
-    <section class="update-block" data-testid="about-update" aria-live="polite">
-      <p class="muted update-status" role="status" data-testid="about-update-status">
-        {#if $updateState.status === "checking"}
-          {$t("about.update.checking")}
-        {:else if $updateState.status === "current"}
-          {$t("about.update.current")}
-        {:else if $updateState.status === "available"}
-          {$t("about.update.available", { version: $updateState.availableVersion ?? "" })}
-        {:else if $updateState.status === "installing" && $updateState.progressPercent !== null}
-          {$t("about.update.progress", { progress: $updateState.progressPercent })}
-        {:else if $updateState.status === "installing"}
-          {$t("about.update.installing")}
-        {:else if $updateState.status === "restart_required"}
-          {$t("about.update.restart_required", { version: $updateState.availableVersion ?? "" })}
-        {:else if $updateState.status === "error" && $updateState.errorPhase === "restart"}
-          {$t("about.update.restart_error")}
-        {:else if $updateState.status === "error"}
-          {$t("about.update.error")}
-        {:else}
-          {$t("about.update.idle")}
-        {/if}
-      </p>
-      <div class="row" data-testid="about-update-actions">
-        {#if $updateState.status === "checking" || $updateState.status === "installing"}
-          <button type="button" class="update-action" disabled>
-            {$updateState.status === "checking"
-              ? $t("about.update.checking_action")
-              : $t("about.update.installing_action")}
-          </button>
-        {:else if $updateState.status === "available"}
-          <button type="button" class="update-action" on:click={runUpdateAction}>
-            {$t("about.update.install")}
-          </button>
-        {:else if $updateState.status === "restart_required" ||
-          ($updateState.status === "error" && $updateState.errorPhase === "restart")}
-          <button type="button" class="update-action" on:click={runUpdateAction}>
-            {$t("about.update.restart")}
-          </button>
-        {:else}
-          <button type="button" class="update-action" on:click={runUpdateAction}>
-            {$updateState.status === "error"
-              ? $t("about.update.retry")
-              : $t("about.update.check")}
-          </button>
-        {/if}
-      </div>
-    </section>
-  {/if}
+  <section class="update-block" data-testid="about-update" aria-live="polite">
+    <p class="muted update-status" role="status" data-testid="about-update-status">
+      {#if !updaterEnabled}
+        {$t("about.update.unavailable")}
+      {:else if $updateState.status === "checking"}
+        {$t("about.update.checking")}
+      {:else if $updateState.status === "current"}
+        {$t("about.update.current")}
+      {:else if $updateState.status === "available"}
+        {$t("about.update.available", { version: $updateState.availableVersion ?? "" })}
+      {:else if $updateState.status === "installing" && $updateState.progressPercent !== null}
+        {$t("about.update.progress", { progress: $updateState.progressPercent })}
+      {:else if $updateState.status === "installing"}
+        {$t("about.update.installing")}
+      {:else if $updateState.status === "restart_required"}
+        {$t("about.update.restart_required", { version: $updateState.availableVersion ?? "" })}
+      {:else if $updateState.status === "error" && $updateState.errorPhase === "restart"}
+        {$t("about.update.restart_error")}
+      {:else if $updateState.status === "error"}
+        {$t("about.update.error")}
+      {:else}
+        {$t("about.update.idle")}
+      {/if}
+    </p>
+    <div class="row" data-testid="about-update-actions">
+      {#if !updaterEnabled}
+        <button type="button" class="update-action" disabled>
+          {$t("about.update.check")}
+        </button>
+      {:else if $updateState.status === "checking" || $updateState.status === "installing"}
+        <button type="button" class="update-action" disabled>
+          {$updateState.status === "checking"
+            ? $t("about.update.checking_action")
+            : $t("about.update.installing_action")}
+        </button>
+      {:else if $updateState.status === "available"}
+        <button type="button" class="update-action" on:click={runUpdateAction}>
+          {$t("about.update.install")}
+        </button>
+      {:else if $updateState.status === "restart_required" ||
+        ($updateState.status === "error" && $updateState.errorPhase === "restart")}
+        <button type="button" class="update-action" on:click={runUpdateAction}>
+          {$t("about.update.restart")}
+        </button>
+      {:else}
+        <button type="button" class="update-action" on:click={runUpdateAction}>
+          {$updateState.status === "error"
+            ? $t("about.update.retry")
+            : $t("about.update.check")}
+        </button>
+      {/if}
+    </div>
+  </section>
   <div class="row" data-testid="about-actions">
     <button
       type="button"
@@ -156,10 +156,6 @@
 
   .muted {
     color: var(--cv-fg-muted, #94a3b8);
-  }
-
-  .muted.small {
-    font-size: var(--cv-muted, 0.78rem);
   }
 
   .meta-list {

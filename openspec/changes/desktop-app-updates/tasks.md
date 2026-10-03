@@ -31,6 +31,9 @@
   `pt`, `de` y `fr`, manteniendo la paridad de claves y placeholders.
 - [x] 3.4 Confirmar que la ausencia de red, rechazo de elevación o fallo de
   instalación conserva la versión actual y permite continuar usando la app.
+- [x] 3.5 Mantener visible y deshabilitada la acción de actualización cuando el
+  updater no está habilitado; quitar del modal Acerca de el texto interno sobre
+  manifiestos y foco.
 
 ## 4. Pipeline de releases
 

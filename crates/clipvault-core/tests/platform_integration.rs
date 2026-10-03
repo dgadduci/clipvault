@@ -554,8 +554,8 @@ fn tray_actions_are_routed_via_the_handle() {
     let outcome = handle.invoke(TrayAction::OpenQuickSearch).expect("invoke");
     assert!(matches!(outcome, TrayOutcome::Delivered));
 
-    let outcome = handle.invoke(TrayAction::OpenFavorites).expect("invoke");
-    assert!(matches!(outcome, TrayOutcome::Unavailable { .. }));
+    let outcome = handle.invoke(TrayAction::ClearHistory).expect("invoke");
+    assert!(matches!(outcome, TrayOutcome::Delivered));
 
     handle.shutdown().expect("shutdown");
 

@@ -108,9 +108,8 @@
    * item from the ellipsis menu. The action opens a metadata-only
    * modal that surfaces the canonical product name and version
    * read from the diagnostics bridge (never a hard-coded Svelte
-   * constant). Only the global ellipsis menu exposes the entry;
-   * the per-card menus MUST NOT carry a parallel item so the
-   * version string stays single-sourced.
+   * constant). The native tray has a second entry point to the same
+   * modal; per-card menus MUST NOT carry a parallel item.
    */
   export let onOpenAbout: (event: MouseEvent) => void = () => {};
   export let onRequestClearHistory: (event: MouseEvent) => void = () => {};

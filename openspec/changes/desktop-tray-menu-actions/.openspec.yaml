@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-10-03
+goal: >-
+  Completar y corregir las acciones del menú nativo de la bandeja de ClipVault
+  en macOS y Linux.

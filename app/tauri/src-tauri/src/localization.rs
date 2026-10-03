@@ -43,6 +43,7 @@ mod tests {
     #[test]
     fn native_text_uses_selected_catalog_and_falls_back_to_english() {
         assert_eq!(text("fr", "tray.quit"), "Quitter ClipVault");
+        assert_eq!(text("fr", "tray.about"), "À propos de ClipVault");
         assert_eq!(text("unsupported", "tray.quit"), "Quit ClipVault");
         assert_eq!(text("en", "missing.key"), "missing.key");
     }

@@ -56,6 +56,15 @@ history records, titles, local paths or local entry identifiers.
 - **WHEN** ClipVault runs from a development build
 - **THEN** it does not query GitHub for production updates
 
+#### Scenario: Update action in a build without updater support
+
+- **WHEN** the user opens “Acerca de” in a build where updater checks are
+  disabled
+- **THEN** the update action remains visible but disabled
+- **AND** a localized message explains that updates are available in installed
+  ClipVault releases
+- **AND** the build does not contact the release endpoint
+
 ### Requirement: Users approve update installation
 
 ClipVault SHALL display an available compatible version and SHALL require an
