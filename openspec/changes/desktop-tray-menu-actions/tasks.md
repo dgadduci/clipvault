@@ -47,7 +47,9 @@
 - [x] 4.5 Revisar el diff, `git diff --check`, los cinco catálogos y confirmar
   que no se añadieron dependencias, migraciones, secretos ni archivos
   generados.
-- [ ] 4.6 Verificar manualmente el menú de bandeja en las plataformas cubiertas
-  cuando no pueda reproducirse automáticamente.
-- [ ] 4.7 Verificar en Linux Wayland el ciclo cerrar/ocultar → reabrir desde la
-  bandeja y probar minimizar, maximizar y cerrar sin resize o reinicio previo.
+- [x] 4.6 Verificar manualmente el menú de bandeja en las plataformas cubiertas
+  cuando no pueda reproducirse automáticamente; verificado por el usuario en
+  macOS y Ubuntu el 2026-10-03.
+- [x] 4.7 Verificar en Linux Wayland el ciclo cerrar/ocultar → reabrir desde la
+  bandeja y probar minimizar, maximizar y cerrar sin resize o reinicio previo;
+  verificado por el usuario en Ubuntu el 2026-10-03.
