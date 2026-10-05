@@ -88,3 +88,5 @@
 - [x] 5.4 Publicar el borrador tras la revisión explícita del usuario. La
   release `v0.0.19` quedó publicada el 2026-10-05:
   https://github.com/dgadduci/clipvault/releases/tag/v0.0.19
+- [x] 5.5 El usuario confirmó que las pruebas manuales de la release publicada
+  pasaron en macOS, Arch con KDE Plasma y Ubuntu con GNOME sobre Wayland.
