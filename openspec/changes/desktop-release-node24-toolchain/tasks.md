@@ -33,8 +33,10 @@
 - [x] 3.1 Alinear la versión `0.0.19` en Cargo, `Cargo.lock`, Tauri, frontend,
   `package-lock.json` y la tabla/versionado de `projects.md`; documentar el
   bump `0.0.18` → `0.0.19`.
-- [ ] 3.2 Confirmar que ningún tag existente se mueve y que `v0.0.19` apunta a
-  un commit alcanzable desde `main` sólo después de integrar las validaciones.
+- [x] 3.2 Confirmar que ningún tag existente se mueve y que `v0.0.19` apunta a
+  un commit alcanzable desde `main` después de integrar las validaciones. El
+  tag anotado y publicado apunta a `336887e`; antes de crearlo no existía el
+  tag remoto y `main` contiene ese commit.
 
 ## 4. Verificación
 
@@ -75,8 +77,9 @@
 
 - [x] 5.1 Integrar y subir el candidato validado a `main` en el commit
   `f8b0d96` (`build: prepare v0.0.19 release candidate`).
-- [ ] 5.2 Crear y subir el tag `v0.0.19` para que GitHub Actions genere el
-  borrador; no publicar automáticamente.
+- [x] 5.2 Crear y subir el tag anotado `v0.0.19`; inició el workflow
+  `desktop-release.yml` (run `37370613055`) para generar un borrador, sin
+  publicar automáticamente.
 - [ ] 5.3 Revisar jobs, instaladores para todos los targets, firmas `.sig` y
   enlaces de `latest.json` en el borrador `v0.0.19`.
 - [ ] 5.4 Publicar el borrador sólo tras la revisión explícita del usuario.
