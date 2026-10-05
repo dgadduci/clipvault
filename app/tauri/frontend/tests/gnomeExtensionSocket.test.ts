@@ -63,7 +63,7 @@ test("the GNOME extension owns a Mutter Quick Paste accelerator for its enabled 
   assert.match(extensionSource, /const QUICK_PASTE_ACCELERATOR = '<Control><Shift>v'/);
   assert.match(
     extensionSource,
-    /global\.display\.grab_accelerator\(\s*QUICK_PASTE_ACCELERATOR,\s*Meta\.KeyBindingFlags\.IGNORE_AUTOREPEAT,/,
+    /function _replaceQuickPasteBinding\(accelerator\)[\s\S]*?global\.display\.grab_accelerator\(\s*accelerator,\s*Meta\.KeyBindingFlags\.IGNORE_AUTOREPEAT,/,
   );
   assert.match(
     extensionSource,

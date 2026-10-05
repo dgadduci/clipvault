@@ -14,11 +14,11 @@ ambient toolchain override, and no accidental writes to
 | Shell | Rust | 1.90.0 | `rust-toolchain.toml` |
 | Shell | Cargo | 1.90.0 | ships with the Rust toolchain |
 | Shell | Tauri CLI | 2.x | `cargo install tauri-cli --version "^2"` |
-| Frontend | Node.js | 20 LTS | `app/tauri/frontend/.nvmrc` |
-| Frontend | npm | 10 | `app/tauri/frontend/package.json` (`engines`) |
+| Frontend | Node.js | 24 LTS | `app/tauri/frontend/.nvmrc` |
+| Frontend | npm | 11 | `app/tauri/frontend/package.json` (`engines`) |
 
-`node --version` MUST report `v20.x` and `npm --version` MUST report
-`10.x` from `app/tauri/frontend`. Running `npm ci` on any other
+`node --version` MUST report `v24.x` and `npm --version` MUST report
+`11.x` from `app/tauri/frontend`. Running `npm ci` on any other
 Node major version emits an `EBADENGINE` warning and is treated as
 a local-host problem, not a project configuration issue.
 
@@ -54,7 +54,7 @@ npm test
   surfaces type errors in `src/`.
 - `npm run build` runs `svelte-check` and then `vite build`. The
   bundle output lands in `app/tauri/frontend/dist/`.
-- `npm test` runs the Node 20 test pipeline documented below.
+- `npm test` runs the Node 24 test pipeline documented below.
 
 ### 3. Tauri shell (run from `app/tauri`)
 
@@ -87,33 +87,32 @@ checked in alongside the source `src-tauri/icons/app-icon.png`. Local builds
 and release CI therefore use the same macOS `.icns` and Linux PNG icons
 without a separate icon-generation step.
 
-## `npm test` on Node 20 LTS
+## `npm test` on Node 24 LTS
 
-`npm test` runs the Node 20 built-in test runner against TypeScript
+`npm test` runs the Node 24 built-in test runner against TypeScript
 sources through a `tsc` transpile step. The script:
 
 ```text
-"test": "tsc --noCheck -p tsconfig.test.json && node --test --test-reporter=spec node_modules/.cache/clipvault-test-build/tests/"
+"test": "tsc --noCheck -p tsconfig.test.json && node --test --test-reporter=spec test-build/tests/*.test.js"
 ```
 
 - `tsconfig.test.json` extends the regular `tsconfig.json` and
   enables `noEmit: false`, `declaration: false`, `sourceMap: false`,
   `rewriteRelativeImportExtensions: true`, `rootDir: "./"` and
-  `outDir: "./node_modules/.cache/clipvault-test-build"`.
+  `outDir: "./test-build"`.
 - `--noCheck` is intentional: the test pipeline does not add
   `@types/node` as a `devDependency`. The user-facing type contract
   for `src/` is covered by `npm run check` (`svelte-check`); the test
-  pipeline keeps Node 20 as a runtime dependency.
-- The transpiled cache directory lives under
-  `app/tauri/frontend/node_modules/.cache/clipvault-test-build/`,
-  which is matched by `**/node_modules` in `.gitignore`. It is
-  recreated on every `npm ci` / `npm test` invocation and is never
-  committed.
+  pipeline uses Node 24's built-in test runner.
+- The transpiled test directory lives at `app/tauri/frontend/test-build/`.
+  It is ignored by `.gitignore` and is never committed. Keeping it outside
+  `node_modules` allows Node's test runner to discover and execute the
+  compiled test files.
 
-The pipeline is intentionally **not** `--experimental-strip-types`
-(removed) and **not** `tsx` / `ts-node` (no new dependency). Both
-options would either split the toolchain from Node 20 LTS or add an
-unnecessary devDependency for a single command.
+The pipeline is intentionally **not** experimental type stripping and
+**not** `tsx` / `ts-node` (no new dependency). The built-in runner executes
+the compiled test files and reports a failure if the target directory is
+missing.
 
 ## Generated-file hygiene
 
@@ -121,7 +120,7 @@ unnecessary devDependency for a single command.
 
 - `app/tauri/frontend/node_modules/` (anywhere)
 - `app/tauri/frontend/dist/`
-- `app/tauri/frontend/node_modules/.cache/clipvault-test-build/`
+- `app/tauri/frontend/test-build/`
 - `pnpm-lock.yaml`, `pnpm-workspace.yaml` (anywhere)
 - `~/.clipvault/clipvault.db`, `~/.clipvault/assets/`
 

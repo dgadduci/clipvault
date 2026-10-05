@@ -5,7 +5,7 @@
     "declaration": false,
     "sourceMap": false,
     "rewriteRelativeImportExtensions": true,
-    "outDir": "./node_modules/.cache/clipvault-test-build",
+    "outDir": "./test-build",
     "rootDir": "./"
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"]

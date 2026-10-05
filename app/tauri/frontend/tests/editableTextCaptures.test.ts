@@ -170,7 +170,7 @@ test("modal disables Guardar while the IPC round-trip is in flight", () => {
   const savingDecl = modalSource.match(/let saving\s*=\s*false/);
   assert.notEqual(savingDecl, null, "the modal must declare a `saving` flag");
   const disabled = modalSource.match(
-    /disabled=\{!canSave\}[\s\S]{0,100}Guardar/,
+    /disabled=\{!canSave\}[\s\S]{0,150}\$t\("common\.save"\)/,
   );
   assert.notEqual(
     disabled,
@@ -780,7 +780,7 @@ test("modal keeps aria-labelledby, textarea label and accessible error surface",
   assert.notEqual(labelBlock, null, "the textarea must keep a visible <label>");
   assert.match(
     labelBlock?.[0] ?? "",
-    /Contenido editable de la captura/,
+    /\$t\("text_capture\.edit\.label"\)/,
     "the visible label must keep the documented copy",
   );
   const errorBlock = modalSource.match(
@@ -817,7 +817,7 @@ test("card menu item exposes the platform-aware shortcut hint with aria-keyshort
   // shared `editTextShortcut*` helpers so the matcher, the visible
   // hint and the accessible attribute cannot drift apart.
   const itemMatch = cardSource.match(
-    /<button\s[\s\S]*?data-testid="history-card-edit-text"[\s\S]*?<\/button>/,
+    /<button\b(?=[^>]*data-testid="history-card-edit-text")[^>]*>[\s\S]*?<\/button>/,
   );
   assert.notEqual(itemMatch, null, "the Editar captura menu item must exist");
   const itemBody = itemMatch?.[0] ?? "";
@@ -862,7 +862,7 @@ test("card menu item exposes the platform-aware shortcut hint with aria-keyshort
   // The action label must still read literally `Editar captura`.
   assert.match(
     itemBody,
-    />\s*Editar captura\s*</,
+    /\$t\("history\.card\.edit_capture"\)/,
     "the menu item must keep the visible 'Editar captura' label",
   );
 });

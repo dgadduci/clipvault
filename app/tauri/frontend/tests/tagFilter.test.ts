@@ -66,21 +66,26 @@ test("TagFilter declares the documented accessibility surface", () => {
   );
 });
 
-test("TagFilter renders Todas as the first option", () => {
-  // The `desktop-filtering` spec pins `Todas` as the first option
+test("TagFilter renders the localized all option first", () => {
+  // The `desktop-filtering` spec pins the all sentinel as the first option
   // so the default view reproduces the pre-tag-filter rail
   // byte-for-byte. A regression that reorders the options or
   // drops the sentinel would silently default the rail to an
   // unfiltered view that is functionally correct but no longer
   // matches the contract.
   assert.ok(
-    /display_name:\s*"Todas"/.test(tagFilterSource),
-    "the combobox must synthesize a Todas row",
+    /display_name:\s*""/.test(tagFilterSource),
+    "the combobox must synthesize an all row without hardcoding its label",
   );
   const firstRowMatch = tagFilterSource.match(
-    /\{\s*kind:\s*"all",\s*key:\s*"all",\s*display_name:\s*"Todas"\s*,?\s*\}/,
+    /\{\s*kind:\s*"all",\s*key:\s*"all",\s*display_name:\s*""\s*,?\s*\}/,
   );
-  assert.ok(firstRowMatch, "the first option MUST be the Todas sentinel");
+  assert.ok(firstRowMatch, "the first option MUST be the all sentinel");
+  assert.match(
+    tagFilterSource,
+    /option\.kind === "all"\s*\?\s*\$t\("filter\.all"\)/,
+    "the all sentinel must render the translated filter label",
+  );
 });
 
 test("TagFilter is documented as a stable testid", () => {
@@ -247,18 +252,17 @@ test("TagFilter never echoes the stable tag id as visible content", () => {
     "the rendered label must read from option.display_name",
   );
   assert.ok(
-    /\{option\.kind === "all"\s*\?\s*option\.display_name/.test(tagFilterSource),
-    "the Todas row must read from the all-branch display_name",
+    /option\.kind === "all"\s*\?\s*\$t\("filter\.all"\)\s*:\s*option\.option\.display_name/.test(tagFilterSource),
+    "the all row must use localized copy and tag rows must use display_name",
   );
-  // The trigger label must use the resolved display_name too;
-  // the id must never reach the visible surface.
+  // The trigger label must use the localized all key or the resolved
+  // display_name; the id must never reach the visible surface.
   assert.ok(
-    /labelForSelected/.test(tagFilterSource),
-    "the trigger must derive its label from the labelForSelected helper",
+    /triggerLabel\s*=\s*selected\.kind === "all"\s*\?\s*\$t\("filter\.all"\)/.test(tagFilterSource),
+    "the trigger must use the localized all label",
   );
   assert.ok(
-    /options\.find\([^)]+\)\?\.display_name/.test(tagFilterSource) ||
-      /\.display_name\s*\?\?\s*"Tag"/.test(tagFilterSource),
+    /options\.find\(\(option\)\s*=>\s*option\.id\s*===\s*selected\.tagId\)\?\.display_name/.test(tagFilterSource),
     "the trigger label must read from options[].display_name",
   );
 });

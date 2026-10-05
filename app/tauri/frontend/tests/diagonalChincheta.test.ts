@@ -291,7 +291,7 @@ test("HistoryCard pin button keeps a dark background in both states so the yello
   // NOT change the background — only the icon colour.
   assert.match(
     source,
-    /\.card-actions\s+:global\(\.pin\),\s*\.card-actions\s+:global\(\.menu-trigger\)\s*\{[^}]*background:\s*#1f2937/s,
+    /\.card-actions\s+:global\(\.pin\),\s*\.card-actions\s+:global\(\.note-trigger\),\s*\.card-actions\s+:global\(\.menu-trigger\)\s*\{[^}]*background:\s*#1f2937/s,
   );
   // The pinned override must NOT override `background`; it only
   // changes the icon colour to the documented yellow.
@@ -351,10 +351,13 @@ test("HistoryCard pin control keeps the documented data-testid, aria and click w
   assert.match(source, /data-testid="history-card-pin-filled"/);
   assert.match(source, /data-testid="history-card-pin-outline"/);
   assert.match(source, /aria-pressed=\{entry\.is_pinned\}/);
-  assert.match(source, /title=\{entry\.is_pinned \? "Desanclar" : "Anclar"\}/);
   assert.match(
     source,
-    /aria-label=\{entry\.is_pinned \? `Desanclar entrada \$\{displayTitle\}` : `Anclar entrada \$\{displayTitle\}`\}/,
+    /title=\{entry\.is_pinned \? \$t\("history\.card\.unpin"\) : \$t\("history\.card\.pin"\)\}/,
+  );
+  assert.match(
+    source,
+    /aria-label=\{entry\.is_pinned\s*\?\s*\$t\("history\.card\.unpin_entry",\s*\{\s*title:\s*displayTitle\s*\}\)\s*:\s*\$t\("history\.card\.pin_entry",\s*\{\s*title:\s*displayTitle\s*\}\)\}/,
   );
   assert.match(source, /data-pinned=\{entry\.is_pinned \? "true" : "false"\}/);
   assert.match(source, /on:click=\{handlePinClick\}/);

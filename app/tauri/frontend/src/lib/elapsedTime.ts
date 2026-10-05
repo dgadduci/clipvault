@@ -81,12 +81,10 @@ export function formatElapsedTime(
   if (delta > MINUTE_MS) {
     // Tolerate small clock skew (≤1 min in the future) but anything
     // larger means the row was inserted with a `created_at` ahead of
-    // the current clock — the helper labels it as "Recién capturado"
-    // instead of producing a negative counter.
-    return {
-      visual: short.format(0, "second"),
-      accessible: long.format(0, "second"),
-    };
+    // the current clock. Use a product translation instead of an
+    // Intl-relative "now" label for that case.
+    const justCaptured = translate("time.just_captured", {}, locale);
+    return { visual: justCaptured, accessible: justCaptured };
   }
   const elapsed = Math.max(0, now.getTime() - capturedAt.getTime());
   if (elapsed < MINUTE_MS) {

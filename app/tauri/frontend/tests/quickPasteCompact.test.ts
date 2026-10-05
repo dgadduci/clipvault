@@ -647,8 +647,8 @@ test("content type icon and label share the documented helpers", () => {
   assert.equal(contentTypeIconId("text"), "cv-icon-text");
   assert.equal(contentTypeIconId("image"), "cv-icon-image");
   assert.equal(contentTypeIconId("unknown"), "cv-icon-fallback");
-  assert.equal(contentTypeIconLabel("text"), "Texto");
-  assert.equal(contentTypeIconLabel("image"), "Imagen");
+  assert.equal(contentTypeIconLabel("text", "es"), "Texto");
+  assert.equal(contentTypeIconLabel("image", "es"), "Imagen");
 });
 
 test("source-app accessible label keeps the documented contract", () => {
@@ -664,9 +664,9 @@ test("source-app accessible label keeps the documented contract", () => {
 
 test("elapsed time formatter is deterministic and respects the input", () => {
   const now = new Date("2026-09-01T10:16:12Z");
-  const label = formatElapsedTime("2026-09-01T10:11:12Z", now);
-  assert.equal(label.visual, "Hace 5 min");
-  assert.equal(label.accessible, "Capturado hace 5 minutos");
+  const label = formatElapsedTime("2026-09-01T10:11:12Z", now, "es");
+  assert.equal(label.visual, "hace 5 min");
+  assert.equal(label.accessible, "hace 5 minutos");
 });
 
 test("image preview text is a localised placeholder, never the empty sentinel", () => {

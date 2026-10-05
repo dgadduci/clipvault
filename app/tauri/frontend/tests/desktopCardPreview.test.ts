@@ -117,10 +117,7 @@ test("HistoryCard menu exposes Previsualizar as a `history-card-preview` item", 
     cardSource.includes('data-testid="history-card-preview"'),
     "the menu must expose a Previsualizar item with the documented test id",
   );
-  // The label is rendered between the opening and closing tag;
-  // Svelte may add whitespace, so the assertion just confirms
-  // the literal `Previsualizar` substring appears inside the
-  // menu item template.
+  // The menu label comes from the localized preview-capture key.
   const menuItemMatch = cardSource.match(
     /<button[^>]*data-testid="history-card-preview"[^>]*>([\s\S]*?)<\/button>/,
   );
@@ -128,9 +125,10 @@ test("HistoryCard menu exposes Previsualizar as a `history-card-preview` item", 
     menuItemMatch,
     "the menu item with history-card-preview testid must be a button element",
   );
-  assert.ok(
-    menuItemMatch![1].includes("Previsualizar"),
-    "the menu item must show the documented label Previsualizar",
+  assert.match(
+    menuItemMatch![1],
+    /\$t\("history\.card\.preview_capture"\)/,
+    "the menu item must use the localized preview-capture label",
   );
 });
 

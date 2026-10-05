@@ -76,7 +76,7 @@ test("remoteOriginLabel uses the peer_display_name when present", () => {
   );
   assert.match(
     helper[0],
-    /Importadas de \$\{peerName\}/,
+    /return translateText\("collections\.imported_from",\s*\{\s*peer:\s*peerName\s*\}\);/,
     "remoteOriginLabel must format the visible peer name as 'Importadas de <peer>'",
   );
 });
@@ -97,7 +97,7 @@ test("remoteOriginLabel falls back to a generic safe label when peer name is emp
   );
   assert.match(
     helper[0],
-    /Importadas de equipo remoto/,
+    /return translateText\("collections\.imported_remote"\);/,
     "remoteOriginLabel must surface a generic safe fallback label",
   );
   assert.equal(

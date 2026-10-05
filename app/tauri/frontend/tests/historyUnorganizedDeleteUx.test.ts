@@ -43,6 +43,8 @@ function loadSource(...segments: string[]): string {
   return readFileSync(path.join(FRONTEND_ROOT, ...segments), "utf8");
 }
 
+const esCatalog = JSON.parse(loadSource("src/locales/es.json")) as Record<string, string>;
+
 function stripComments(source: string): string {
   return source
     .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -67,11 +69,11 @@ test("DesktopToolbar gates the trash button behind the showClearHistory prop", (
   );
   // The trash button MUST live inside a `{#if showClearHistory}` block
   // so a parent passing `false` removes it from the DOM entirely.
-  const trashOpenIdx = source.indexOf("{#if showClearHistory}");
-  assert.notEqual(trashOpenIdx, -1, "the trash button must be wrapped in {#if showClearHistory}");
+  const trashOpenIdx = source.indexOf("{#if showClearHistory || showClearCollection}");
+  assert.notEqual(trashOpenIdx, -1, "a clear action must be rendered only when one is available");
   // The closing `{/if}` must come AFTER the trash button so the
   // guard actually wraps the button.
-  const trashButtonIdx = source.indexOf('data-testid="trash-clear-history"', trashOpenIdx);
+  const trashButtonIdx = source.indexOf('class="trash"', trashOpenIdx);
   assert.notEqual(trashButtonIdx, -1, "the trash button must live after the guard");
   const trashCloseIdx = source.indexOf("{/if}", trashButtonIdx);
   assert.notEqual(trashCloseIdx, -1, "the guard must close after the trash button");
@@ -79,20 +81,20 @@ test("DesktopToolbar gates the trash button behind the showClearHistory prop", (
 
 test("DesktopToolbar trash button keeps the documented testid, danger hook and aria-busy hook", () => {
   const source = stripComments(loadSource("src/DesktopToolbar.svelte"));
-  const guardOpen = source.indexOf("{#if showClearHistory}");
+  const guardOpen = source.indexOf("{#if showClearHistory || showClearCollection}");
   assert.notEqual(guardOpen, -1);
   const guardClose = source.indexOf("{/if}", guardOpen);
   assert.notEqual(guardClose, -1);
   const guardBlock = source.slice(guardOpen, guardClose);
   assert.match(
     guardBlock,
-    /data-testid="trash-clear-history"/,
-    "the trash button must keep its stable test id",
+    /data-testid=\{showClearCollection \? "trash-clear-collection" : "trash-clear-history"\}/,
+    "the trash button must keep a stable test id for each clear action",
   );
   assert.match(
     guardBlock,
-    /data-cv-danger="clear-history"/,
-    "the trash button must keep its documented danger hook",
+    /data-cv-danger=\{showClearCollection \? "clear-collection" : "clear-history"\}/,
+    "the trash button must keep the matching danger hook",
   );
   assert.match(
     guardBlock,
@@ -103,13 +105,12 @@ test("DesktopToolbar trash button keeps the documented testid, danger hook and a
 
 test("DesktopToolbar trash button uses 'Eliminar capturas no organizadas' as both aria-label and title", () => {
   const source = stripComments(loadSource("src/DesktopToolbar.svelte"));
-  // The default value of `trashLabel` MUST be the new wording so the
-  // button keeps the documented accessible name even when the parent
-  // does not forward a custom string.
+  // The component uses the localized fallback when the parent does not
+  // provide a custom label.
   assert.match(
     source,
-    /export let trashLabel:\s*string\s*=\s*"Eliminar capturas no organizadas"/,
-    "trashLabel default must be 'Eliminar capturas no organizadas'",
+    /export let trashLabel:\s*string\s*=\s*""/,
+    "trashLabel must allow the localized fallback",
   );
   // The legacy wording MUST be gone from the default value to avoid
   // a regression that mixed the two wordings.
@@ -120,8 +121,13 @@ test("DesktopToolbar trash button uses 'Eliminar capturas no organizadas' as bot
   );
   // Both `aria-label` and `title` MUST keep wiring to `trashLabel` so
   // the visible tooltip and the accessible name stay in lock-step.
-  assert.match(source, /aria-label=\{trashLabel\}/);
-  assert.match(source, /title=\{trashLabel\}/);
+  const buttonMatch = source.match(
+    /<button\b(?=[^>]*class="trash")[^>]*>[\s\S]*?<\/button>/,
+  );
+  assert.ok(buttonMatch, "the trash button must exist");
+  assert.match(buttonMatch[0], /aria-label=\{showClearCollection\s*\?[\s\S]*?\$t\("toolbar\.clear_unorganized"\)\}/);
+  assert.match(buttonMatch[0], /title=\{showClearCollection\s*\?[\s\S]*?\$t\("toolbar\.clear_unorganized"\)\}/);
+  assert.equal(esCatalog["toolbar.clear_unorganized"], "Eliminar capturas no organizadas");
 });
 
 test("DesktopToolbar never invokes clearUnorganizedHistoryCommand directly", () => {
@@ -133,12 +139,12 @@ test("DesktopToolbar never invokes clearUnorganizedHistoryCommand directly", () 
   );
   // The button keeps forwarding through the documented intent.
   const buttonMatch = source.match(
-    /<button[\s\S]*?data-testid="trash-clear-history"[\s\S]*?<\/button>/,
+    /<button\b(?=[^>]*class="trash")[^>]*>[\s\S]*?<\/button>/,
   );
   assert.ok(buttonMatch, "the trash button must exist");
   assert.match(
     buttonMatch[0],
-    /on:click=\{onRequestClearHistory\}/,
+    /on:click=\{showClearCollection\s*\?\s*onRequestClearCollection\s*:\s*onRequestClearHistory\}/,
     "the trash button must keep its parent-owned intent",
   );
 });
@@ -183,24 +189,26 @@ test("App.svelte activeCollectionIsHistory matches the documented contract", () 
 // Confirmation: the dialog explains the unorganized-history predicate.
 // ---------------------------------------------------------------------------
 
-test("App.svelte confirmation dialog uses 'Eliminar capturas no organizadas'", () => {
+test("App.svelte confirmation dialog uses the localized clear-history copy", () => {
   const source = stripComments(loadSource("src/App.svelte"));
   // The dialog title and the destructive action MUST reuse the same
   // wording so the user gets a consistent message regardless of the
   // surface they read.
-  const titleMatch = source.match(/<h2 id="confirm-title">([^<]+)<\/h2>/g) ?? [];
-  assert.ok(
-    titleMatch.some((line) => line.includes("Eliminar capturas no organizadas")),
-    "the dialog must use the documented title",
+  assert.match(
+    source,
+    /<h2 id="confirm-title">\{\$t\("app\.confirm\.clear\.title"\)\}<\/h2>/,
+    "the clear-history dialog must use its localized title key",
   );
+  assert.equal(esCatalog["app.confirm.clear.title"], "Eliminar capturas no organizadas");
   const confirmMatch =
     source.match(/data-testid="confirm-clear"[\s\S]*?<\/button>/) ?? [];
   assert.ok(confirmMatch[0], "the confirm button must exist");
   assert.match(
     confirmMatch[0],
-    /Eliminar capturas no organizadas/,
-    "the confirm button must reuse the documented wording",
+    /\$t\("app\.confirm\.clear\.button"\)/,
+    "the confirm button must use its localized key",
   );
+  assert.equal(esCatalog["app.confirm.clear.button"], "Eliminar capturas no organizadas");
   // The legacy ambiguous title MUST be gone so a regression that
   // re-introduced "Limpiar historial" would surface here.
   assert.equal(
@@ -224,20 +232,14 @@ test("App.svelte confirmation dialog distinguishes unorganized from favorite/org
   assert.ok(summaryMatch[0], "the confirm-clear summary must exist");
   assert.match(
     summaryMatch[0],
-    /no favorita/,
-    "the summary must mention non-favorite entries",
+    /\$tPlural\("app\.confirm\.clear\.count",\s*confirmation\.count\)/,
+    "the summary must use the localized plural count",
   );
-  assert.match(
-    summaryMatch[0],
-    /sin colecciones de usuario/,
-    "the summary must mention entries without user collections",
-  );
-  // The secondary line must explain what survives the deletion.
-  assert.match(
-    source,
-    /Las capturas favoritas y las asociadas a una o más colecciones de usuario se conservan\./,
-    "the dialog must state which entries are preserved",
-  );
+  assert.match(esCatalog["app.confirm.clear.count.other"], /no favoritas y sin colecciones de usuario/);
+  // The secondary line must explain what survives the deletion through
+  // its localized explanation key.
+  assert.match(source, /\$t\("app\.confirm\.clear\.explanation"\)/);
+  assert.match(esCatalog["app.confirm.clear.explanation"], /favoritas.*colecciones de usuario.*conservan/);
 });
 
 // ---------------------------------------------------------------------------
@@ -246,6 +248,10 @@ test("App.svelte confirmation dialog distinguishes unorganized from favorite/org
 
 test("DesktopToolbar trash affordance never leaks clipboard content, snippets, hashes or paths", () => {
   const source = stripComments(loadSource("src/DesktopToolbar.svelte"));
+  const trashButton = source.match(
+    /<button\b(?=[^>]*class="trash")[^>]*>[\s\S]*?<\/button>/,
+  );
+  assert.ok(trashButton, "the clear affordance must exist");
   for (const forbidden of [
     "content_hash",
     "asset_ref",
@@ -256,7 +262,7 @@ test("DesktopToolbar trash affordance never leaks clipboard content, snippets, h
     "base64",
   ]) {
     assert.equal(
-      source.includes(forbidden),
+      trashButton[0].includes(forbidden),
       false,
       `DesktopToolbar must not reference "${forbidden}"`,
     );

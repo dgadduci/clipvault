@@ -83,7 +83,7 @@ test("card menu exposes the documented Editar título entry as the first title a
     "Editar título must be listed before Restaurar título",
   );
   // The label and the role must follow the menu contract.
-  assert.match(cardSource, /Editar título/);
+  assert.match(cardSource, /\$t\("history\.card\.edit_title"\)/);
   assert.match(cardSource, /role="menuitem"/);
   assert.match(cardSource, /on:click=\{\(\) => startEditTitle\(\)\}/);
 });
@@ -294,7 +294,7 @@ test("card editor keeps the legacy Restaurar título label and behaviour intact"
   // The legacy "Restaurar título" action must keep its Spanish
   // label so a regression that rewrites it to English surfaces
   // here as a failed assertion.
-  assert.match(cardSource, /Restaurar título/);
+  assert.match(cardSource, /\$t\("history\.card\.restore_title"\)/);
   const restoreBlock = cardSource.match(
     /data-testid="history-card-restore-title"[\s\S]*?<\/button>/,
   );

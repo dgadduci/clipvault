@@ -33,12 +33,14 @@ workspace SHALL declare a compatible minimum Rust version.
 
 ### Requirement: Canonical frontend toolchain and dependency graph
 
-The frontend SHALL use Node.js 20 LTS with npm 10 as its declared development
+The frontend SHALL use Node.js 24 LTS with npm 11 as its declared development
 baseline, and `app/tauri/frontend/package-lock.json` SHALL remain the single
 tracked npm dependency lockfile. The frontend SHALL ship its tests as a
 TypeScript transpile + Node test runner pipeline so `npm test` succeeds on
-Node 20 LTS without depending on Node 22-only flags or third-party
-TypeScript runners.
+Node 24 LTS without depending on experimental type-stripping flags or third-party
+TypeScript runners. The pipeline SHALL place compiled tests outside
+`node_modules` and SHALL execute the compiled test files instead of silently
+accepting an empty test run.
 
 #### Scenario: Clean frontend installation
 
@@ -55,20 +57,31 @@ TypeScript runners.
 - **AND** `npm run check`, `npm run build` and `npm test` run from the
   frontend directory without an implicit package-manager migration
 
-#### Scenario: Frontend test pipeline runs on Node 20 LTS
+#### Scenario: Frontend test pipeline runs on Node 24 LTS
 
 - **WHEN** a developer runs `npm test` from `app/tauri/frontend`
 - **THEN** the script invokes `tsc --noCheck -p tsconfig.test.json`
-  followed by `node --test` against the transpiled output under
-  `app/tauri/frontend/node_modules/.cache/clipvault-test-build/tests/`
+  followed by `node --test` against the compiled `*.test.js` files under
+  `app/tauri/frontend/test-build/tests/`
 - **AND** the script does NOT depend on `--experimental-strip-types`,
   `--experimental-transform-types` or any Node 22-only flag
 - **AND** no third-party TypeScript runner (`tsx`, `ts-node`, `swc-node`)
   is added to `devDependencies`
 - **AND** no `@types/node` is added to `devDependencies`
-- **AND** the cache directory is recreated on every `npm ci` /
-  `npm test` invocation and is matched by `**/node_modules` in
-  `.gitignore`, so it is never committed
+- **AND** the compiled tests live outside `node_modules` and the test runner
+  reports at least one test executed
+- **AND** the generated `test-build/` directory is ignored by `.gitignore` and
+  is never committed
+
+#### Scenario: Frontend test assertions follow localized behavior
+
+- **WHEN** the complete compiled frontend test suite runs on Node 24 LTS
+- **THEN** every test file is discovered and executed
+- **AND** assertions for visible text use current translation keys and locale
+  catalogs rather than obsolete hardcoded component strings
+- **AND** interaction assertions verify current handler and delegation behavior
+- **AND** a capture timestamp in the future uses the localized
+  `time.just_captured` label in all supported locales
 
 ### Requirement: Canonical development commands
 

@@ -45,14 +45,12 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // When the test is compiled to
-// `node_modules/.cache/clipvault-test-build/tests/`, seven parent
-// directories separate the file from the repository root. The
+// `test-build/tests/`, five parent directories separate the file
+// from the repository root. The
 // helper walks them up so the regression tests work regardless of
 // where the runner drops the compiled bundle.
 const REPO_ROOT = path.resolve(
   __dirname,
-  "..",
-  "..",
   "..",
   "..",
   "..",

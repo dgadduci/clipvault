@@ -36,7 +36,7 @@ test("QuickVault resolves imported icons and exposes the name as a tag only", ()
   );
   assert.match(
     QUICK_PASTE,
-    /sourceAppPresentationAccessibleLabel\(entry, importedSourceApp\)/,
+    /sourceAppPresentationAccessibleLabel\(entry, importedSourceApp,\s*\$t\)/,
   );
   assert.match(QUICK_PASTE, /title=\{sourceAppLabel\}/);
   assert.match(QUICK_PASTE, /aria-label=\{sourceAppLabel\}/);

@@ -770,7 +770,7 @@ test("localPeerProfileUpdateCommand returns the refreshed available profile", as
     } satisfies LocalPeerProfileResponse;
   });
   const result = await localPeerProfileUpdateCommand({ name: "Studio" });
-  assert.equal(observed?.update, { name: "Studio" });
+  assert.deepEqual(observed?.update, { name: "Studio" });
   assert.equal(result.kind, "available");
   if (result.kind !== "available") return;
   assert.equal(result.profile.display_name, "Studio");
@@ -793,7 +793,7 @@ test("localPeerProfileUpdateCommand clears the name with null", async () => {
     } satisfies LocalPeerProfileResponse;
   });
   const result = await localPeerProfileUpdateCommand({ name: null });
-  assert.equal(observed?.update, { name: null });
+  assert.deepEqual(observed?.update, { name: null });
   assert.equal(result.kind, "available");
   if (result.kind !== "available") return;
   assert.equal(result.profile.display_name, null);

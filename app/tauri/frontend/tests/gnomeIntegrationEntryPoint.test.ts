@@ -27,7 +27,7 @@ test("the applicable GNOME diagnostics card offers an explicit configuration ent
     /gnomeStatus\?\.kind === "ready" && gnomeStatus\.payload\.applicable/,
   );
   assert.match(source, /data-testid="gnome-configure"/);
-  assert.match(source, /Configurar integración GNOME/);
+  assert.match(source, /\$t\("development\.configure_gnome"\)/);
   assert.match(source, /dispatch\("configureGnome", gnomeStatus\)/);
 });
 
@@ -54,19 +54,19 @@ test("an installed GNOME integration can explicitly reinstall the bundled resour
 
   assert.match(modal, /data-testid="gnome-reinstall-action"/);
   assert.match(modal, /on:click=\{activate\}/);
-  assert.match(modal, /Reinstalar extensión/);
-  assert.match(modal, /cerrá la sesión GNOME y volvé a iniciarla/);
+  assert.match(modal, /\$t\("gnome\.install\.reinstall"\)/);
+  assert.match(modal, /\$t\("gnome\.status\.activation_pending"\)/);
   assert.doesNotMatch(modal, /deshabilitala\/habilitala/);
 });
 
 test("GNOME command errors are actionable and never stringified as an IPC object", () => {
   assert.match(
     describeGnomeIntegrationError({ kind: "bundled_missing", message: "/private/path" }),
-    /no incluye los archivos/i,
+    /gnome\.error\.bundled_missing/,
   );
   assert.match(
     describeGnomeIntegrationError({ kind: "listener_error", message: "/run/user/1000" }),
-    /conexión local/i,
+    /gnome\.error\.listener/,
   );
   assert.equal(
     describeGnomeIntegrationError({ kind: "install_error", message: "/home/diego/private" }).includes(
@@ -74,5 +74,5 @@ test("GNOME command errors are actionable and never stringified as an IPC object
     ),
     false,
   );
-  assert.equal(describeGnomeIntegrationError({}), "No se pudo completar la operación de integración GNOME. Reintentá.");
+  assert.equal(describeGnomeIntegrationError({}), "gnome.error.generic");
 });

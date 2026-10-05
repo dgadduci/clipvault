@@ -353,9 +353,8 @@ test("HistoryCard exposes an accessible tooltip on the type icon", () => {
     "the type icon must record data-content-type",
   );
   assert.ok(
-    /contentTypeIconLabel/.test(typeIconBlock![0]) ||
-      /contentTypeIconLabel\(entry\.content_type\)/.test(historyCardSource),
-    "the type icon must derive the label from contentTypeIconLabel",
+    /\$t\(contentTypeTranslationKey\(entry\.content_type\)\)/.test(historyCardSource),
+    "the type icon label must use the localized content-type translation key",
   );
 });
 

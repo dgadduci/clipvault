@@ -1,7 +1,7 @@
 {
   "name": "clipvault-frontend",
   "private": true,
-  "version": "0.0.18",
+  "version": "0.0.19",
   "type": "module",
   "description": "Svelte + TypeScript frontend for the ClipVault desktop shell",
   "scripts": {
@@ -10,7 +10,7 @@
     "locales:check": "node scripts/validate-locales.mjs",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "tsc --noCheck -p tsconfig.test.json && node --test --test-reporter=spec node_modules/.cache/clipvault-test-build/tests/"
+    "test": "tsc --noCheck -p tsconfig.test.json && node --test --test-reporter=spec test-build/tests/*.test.js"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.1",
@@ -29,7 +29,7 @@
     "vite": "^5.4.0"
   },
   "engines": {
-    "node": ">=20.0.0 <21.0.0",
-    "npm": ">=10.0.0 <11.0.0"
+    "node": ">=24.0.0 <25.0.0",
+    "npm": ">=11.0.0 <12.0.0"
   }
 }

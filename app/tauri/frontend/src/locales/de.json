@@ -111,6 +111,7 @@
   "tray.resume_captures": "Erfassung fortsetzen ({shortcut})",
   "tray.quit": "ClipVault beenden",
   "time.unknown": "Unbekanntes Datum",
+  "time.just_captured": "Gerade erfasst",
   "size.unknown": "Unbekannte Größe",
   "content_type.text": "Text",
   "content_type.url": "URL",

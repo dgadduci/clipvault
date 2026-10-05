@@ -392,7 +392,7 @@ test("ClipboardPreview keeps code_language and highlighting data attributes", ()
     "the highlighted preview must keep the cv-preview-code class",
   );
   assert.ok(
-    previewSource.includes("Código · {codeLanguageLabel}"),
+    /\$t\("preview\.code_language",\s*\{\s*language:\s*codeLanguageLabel\s*\}\)/.test(previewSource),
     "the highlighted preview must keep the 'Código · <Lenguaje>' badge markup",
   );
 });

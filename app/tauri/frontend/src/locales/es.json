@@ -111,6 +111,7 @@
   "tray.resume_captures": "Reanudar capturas ({shortcut})",
   "tray.quit": "Salir de ClipVault",
   "time.unknown": "Fecha desconocida",
+  "time.just_captured": "Recién capturado",
   "size.unknown": "Tamaño desconocido",
   "content_type.text": "Texto",
   "content_type.url": "URL",

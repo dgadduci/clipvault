@@ -265,8 +265,8 @@ test("the TagFilter combobox exposes its selection through the stable testid con
   // The combobox MUST keep the `Todas` sentinel so the default
   // view reproduces the pre-tag-filter rail byte-for-byte.
   assert.ok(
-    /display_name:\s*"Todas"/.test(tagFilterSource),
-    "TagFilter must synthesize the Todas sentinel",
+    /kind:\s*"all",\s*key:\s*"all",\s*display_name:\s*""/.test(tagFilterSource),
+    "TagFilter must synthesize the all sentinel without a hardcoded locale label",
   );
 });
 

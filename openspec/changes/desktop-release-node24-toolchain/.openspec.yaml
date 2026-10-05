@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-05
+goal: Alinear el toolchain de frontend con Node.js 24 LTS y preparar una base
+  verificable para publicar ClipVault 0.0.19.

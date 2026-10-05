@@ -254,15 +254,16 @@ test("quickPasteMenuActions: rich entry yields rich + plain actions plus Previsu
   assert.equal(actions[2].kind, "preview");
 });
 
-test("quickPasteMenuActions: plain entry yields one Copiar action plus Previsualizar", () => {
+test("quickPasteMenuActions: editable plain entry yields Copiar, Editar captura and Previsualizar", () => {
   const actions = quickPasteMenuActions(textEntry(), "Captured plain", {
     copyBusy: false,
   });
-  assert.equal(actions.length, 2);
+  assert.equal(actions.length, 3);
   assert.equal(actions[0].kind, "copy");
   assert.equal(actions[0].mode, "plain");
   assert.equal(actions[0].disabled, false);
-  assert.equal(actions[1].kind, "preview");
+  assert.equal(actions[1].kind, "edit");
+  assert.equal(actions[2].kind, "preview");
   // The compact Quick Paste palette MUST NOT expose the disabled
   // rich-text variant for a non-rich entry: the design collapses the
   // rail's two-action shape into a single `Copiar` action so the row

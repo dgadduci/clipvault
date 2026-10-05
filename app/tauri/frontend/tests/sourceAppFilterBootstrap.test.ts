@@ -204,16 +204,25 @@ test("selectCollectionFromSidebar resets the source-app filter to Todas and relo
   const body = switchBlock[0];
   assert.match(
     body,
+    /await selectCollectionById\(event\.detail\.collectionId\)/,
+    "the sidebar event must delegate to the shared collection-switch controller",
+  );
+  const selectByIdMatch = source.match(
+    /async function selectCollectionById\([\s\S]*?\n  \}/,
+  );
+  assert.ok(selectByIdMatch, "selectCollectionById must exist");
+  assert.match(
+    selectByIdMatch[0],
     /if\s*\(sourceAppFilter\.kind\s*!==\s*"all"\)\s*\{[\s\S]*?sourceAppFilter\s*=\s*\{\s*kind:\s*"all"\s*\}/,
-    "collection switch must reset the source-app filter to Todas",
+    "collection switch must reset the source-app filter to all",
   );
   assert.match(
-    body,
+    selectByIdMatch[0],
     /await refreshSourceAppOptions\(targetCollectionId\)/,
     "collection switch must request options for the destination id immediately",
   );
   assert.match(
-    body,
+    selectByIdMatch[0],
     /await refreshEntries\(\)/,
     "collection switch must refresh the rail",
   );

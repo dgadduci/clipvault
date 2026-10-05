@@ -512,8 +512,17 @@ test("Enter, Shift+Enter and row click all funnel through confirmEntry", () => {
   assert.ok(enterMatch, "handleEnter must exist in QuickPaste.svelte");
   assert.match(
     enterMatch[0],
-    /confirmEntry\(entryId, \{ shiftKey:/,
-    "handleEnter must delegate to confirmEntry with the shiftKey flag",
+    /confirmEntry\(entryId, \{ hideAfterSuccess: true \}\)/,
+    "normal Enter must delegate without selecting the plain-text variant",
+  );
+  const keydownMatch = quickPasteSource.match(
+    /function onWindowKeydown\(event: KeyboardEvent\)[\s\S]*?\n  \}/,
+  );
+  assert.ok(keydownMatch, "the window keyboard handler must exist");
+  assert.match(
+    keydownMatch[0],
+    /event\.shiftKey[\s\S]*?confirmEntry\(entryId, \{ shiftKey: true, hideAfterSuccess: true \}\)/,
+    "Shift+Enter must dispatch the plain-text variant through confirmEntry",
   );
 
   const clickMatch = quickPasteSource.match(

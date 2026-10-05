@@ -354,7 +354,7 @@ test("LinkedPeers surfaces a gray pill for trusted but unavailable peers", () =>
   // The template must use the helper to surface the pill copy.
   assert.match(
     linkedPeersSource,
-    /\{\s*#if isActive\(entry\)\s*\}\s*Activo\s*\{\s*:else if isTrustedUnavailable\(entry\)\s*\}\s*No disponible/,
+    /\{\s*#if isActive\(entry\)\s*\}\s*\{\$t\("peers\.status\.active"\)\}\s*\{:else if isTrustedUnavailable\(entry\)\}\s*\{\$t\("peers\.status\.unavailable"\)\}/,
     "the template must show Activo / No disponible based on the helpers",
   );
 });

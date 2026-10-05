@@ -59,8 +59,14 @@ test("DesktopToolbar trash button carries the documented accessibility hooks", (
   // visible focus ring; a regression that drops any of them would
   // hide the destructive shortcut from screen-reader or
   // keyboard-only users.
-  assert.match(source, /aria-label=\{trashLabel\}/);
-  assert.match(source, /title=\{trashLabel\}/);
+  assert.match(
+    source,
+    /aria-label=\{showClearCollection\s*\?\s*clearCollectionLabel\s*:\s*trashLabel\s*\|\|\s*\$t\("toolbar\.clear_unorganized"\)\}/,
+  );
+  assert.match(
+    source,
+    /title=\{showClearCollection\s*\?\s*clearCollectionLabel\s*:\s*trashLabel\s*\|\|\s*\$t\("toolbar\.clear_unorganized"\)\}/,
+  );
   assert.match(
     source,
     /\.trash:focus-visible\s*\{[^}]*outline:/,
@@ -82,8 +88,8 @@ test("DesktopToolbar trash SVG is local and free of remote or emoji fallbacks", 
   const trashButton = trashButtonMatch[0];
   assert.match(
     trashButton,
-    /data-testid="trash-clear-history"/,
-    "the trash button must keep its stable test id",
+    /data-testid=\{showClearCollection\s*\?\s*"trash-clear-collection"\s*:\s*"trash-clear-history"\}/,
+    "the trash button must keep stable test ids for each clear action",
   );
   // The shape is documented locally: a single SVG with hand-written
   // path data. A regression that introduces an emoji, a remote
@@ -119,7 +125,7 @@ test("DesktopToolbar trash button is the only path to clear history", () => {
   assert.ok(trashButtonMatch, "the toolbar trash button must exist");
   assert.match(
     trashButtonMatch[0],
-    /on:click=\{onRequestClearHistory\}/,
+    /on:click=\{showClearCollection\s*\?\s*onRequestClearCollection\s*:\s*onRequestClearHistory\}/,
     "the trash button must keep its parent-owned intent",
   );
   assert.doesNotMatch(
@@ -150,12 +156,12 @@ test("HistoryCard delete menu item uses the documented danger colour", () => {
   // affordance. The accessible name is preserved on the button.
   assert.match(
     source,
-    /<span class="visually-hidden">\{\`Eliminar \$\{displayTitle\}\`\}<\/span>/,
+    /aria-label=\{\$t\("history\.card\.delete_for",\s*\{\s*title:\s*displayTitle\s*\}\)\}/,
     "the card delete button keeps an accessible label",
   );
   assert.match(
     source,
-    /aria-label=\{\`Eliminar \$\{displayTitle\}\`\}/,
+    /title=\{\$t\("history\.card\.delete_entry_for",\s*\{\s*title:\s*displayTitle\s*\}\)\}/,
     "the card delete button keeps the screen-reader name",
   );
 });
@@ -206,12 +212,12 @@ test("OrganizationSidebar delete icon is local, accessible and replaces the lega
   assert.doesNotMatch(buttonMatch[0], /src="https?:/);
   assert.match(
     buttonMatch[0],
-    /aria-label=\{\`Eliminar \$\{collection\.name\}\`\}/,
+    /aria-label=\{\$t\("collections\.delete",\s*\{\s*name:\s*collection\.name\s*\}\)\}/,
     "the accessible label must mention the collection name",
   );
   assert.match(
     buttonMatch[0],
-    /title=\{\`Eliminar \$\{collection\.name\}\`\}/,
+    /title=\{\$t\("collections\.delete",\s*\{\s*name:\s*collection\.name\s*\}\)\}/,
     "the title must mention the collection name",
   );
   // The legacy filled-trash path is the regression we replace.
