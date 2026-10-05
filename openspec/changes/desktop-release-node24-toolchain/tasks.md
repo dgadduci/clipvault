@@ -85,4 +85,6 @@
   macOS x64/arm64, `.deb` y AppImage de Linux, cuatro sidecars `.sig` y
   `latest.json`. Las siete entradas del manifiesto usan los assets correctos
   y cada firma coincide con su sidecar; los `.dmg` no son paquetes de updater.
-- [ ] 5.4 Publicar el borrador sólo tras la revisión explícita del usuario.
+- [x] 5.4 Publicar el borrador tras la revisión explícita del usuario. La
+  release `v0.0.19` quedó publicada el 2026-10-05:
+  https://github.com/dgadduci/clipvault/releases/tag/v0.0.19
