@@ -74,7 +74,8 @@
 
 ## 5. Candidato y publicación
 
-- [ ] 5.1 Integrar y subir el commit validado a `main`.
+- [x] 5.1 Integrar y subir el candidato validado a `main` en el commit
+  `f8b0d96` (`build: prepare v0.0.19 release candidate`).
 - [ ] 5.2 Crear y subir el tag `v0.0.19` para que GitHub Actions genere el
   borrador; no publicar automáticamente.
 - [ ] 5.3 Revisar jobs, instaladores para todos los targets, firmas `.sig` y
