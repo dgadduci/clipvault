@@ -62,13 +62,12 @@
   `openspec validate desktop-release-node24-toolchain --strict`. Confirmado
   con `cargo metadata --locked --no-deps`, manifests/lockfiles en `0.0.19`,
   `npm run locales:check` y validación OpenSpec estricta.
-- [ ] 4.5 Completar y registrar en Ubuntu un build local de producción
-  `deb,appimage` y comprobar que “Acerca de” ofrece la acción de actualización.
-  El host disponible es Arch Linux: produjo el `.deb`, pero `linuxdeploy`
-  falló al procesar secciones ELF `.relr.dyn` para AppImage; esto no sustituye
-  la validación en Ubuntu.
-- [ ] 4.6 Completar y registrar en macOS un build local de producción
-  `app,dmg` y comprobar que “Acerca de” ofrece la acción de actualización.
+- [x] 4.5 El usuario confirmó que el build de producción `deb,appimage` y la
+  acción de actualización en “Acerca de” pasaron en Ubuntu. En el host Arch de
+  desarrollo, `linuxdeploy` no pudo procesar secciones ELF `.relr.dyn`; esa
+  limitación no afectó la prueba realizada en Ubuntu.
+- [x] 4.6 El usuario confirmó que el build de producción `app,dmg` y la acción
+  de actualización en “Acerca de” pasaron en macOS.
 - [x] 4.7 Revisar el diff y `git diff --check`; no hay archivos generados ni
   secretos en el cambio. `test-build/` y `dist/` permanecen ignorados.
 
