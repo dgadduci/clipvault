@@ -80,6 +80,9 @@
 - [x] 5.2 Crear y subir el tag anotado `v0.0.19`; inició el workflow
   `desktop-release.yml` (run `37370613055`) para generar un borrador, sin
   publicar automáticamente.
-- [ ] 5.3 Revisar jobs, instaladores para todos los targets, firmas `.sig` y
-  enlaces de `latest.json` en el borrador `v0.0.19`.
+- [x] 5.3 Revisar el run `37370613055` y los artefactos del borrador
+  `v0.0.19`: todos los jobs pasaron; están los `.dmg` y `.app.tar.gz` de
+  macOS x64/arm64, `.deb` y AppImage de Linux, cuatro sidecars `.sig` y
+  `latest.json`. Las siete entradas del manifiesto usan los assets correctos
+  y cada firma coincide con su sidecar; los `.dmg` no son paquetes de updater.
 - [ ] 5.4 Publicar el borrador sólo tras la revisión explícita del usuario.
