@@ -1,6 +1,6 @@
 # Propuesta: configuración accesible de integraciones de escritorio
 
-## Por qué
+## Why
 
 Las integraciones de GNOME y KDE Wayland están agrupadas hoy bajo
 **Development**, junto a diagnósticos y controles técnicos. Una persona que
@@ -8,7 +8,7 @@ solo quiere usar ClipVault difícilmente buscará allí cómo habilitar una
 función. Además, las pantallas actuales exponen estados y valores técnicos que
 no ayudan a completar la configuración.
 
-## Cambios
+## What Changes
 
 - Agregar **Integraciones de escritorio** a Configuración general en Linux
   cuando la sesión detectada tenga una integración compatible y aplicable.
@@ -31,9 +31,9 @@ no ayudan a completar la configuración.
 
 Se revisaron `keyboard-shortcuts`, `desktop-toolbar-layout` y
 `gnome-wayland-integration` antes de tocar los componentes. Esta implementación
-conserva el editor de atajos, los callbacks de la barra y la entrada de
-configuración GNOME desde su diagnóstico. Los cambios activos quedan sin
-archivar porque sus verificaciones pendientes exceden este alcance.
+conserva el editor de atajos y los callbacks de la barra, y traslada la gestión
+GNOME/KDE de Development a Configuración general. Los demás cambios activos
+quedan sin archivar porque sus verificaciones pendientes exceden este alcance.
 
 ## Impacto
 

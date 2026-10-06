@@ -1,4 +1,11 @@
-## ADDED Requirements
+# desktop-integration-settings Specification
+
+## Purpose
+Define cómo encontrar y administrar las integraciones GNOME y KDE aplicables
+desde Configuración general, con estados y acciones comprensibles para las
+personas usuarias.
+
+## Requirements
 
 ### Requirement: Encontrar la configuración de escritorio
 
@@ -51,13 +58,20 @@ estado de consentimiento.
 - **THEN** ClipVault explica el siguiente paso con palabras sencillas
 - **AND** no muestra un estado conectado antes de verificar la conexión
 
-#### Scenario: Diagnóstico técnico
+#### Scenario: Estado para la persona usuaria
 
 - **WHEN** la persona abre la vista de usuario
 - **THEN** ClipVault no muestra backend, versión de protocolo, identificadores
   técnicos, rutas internas, variables de entorno ni errores sin localizar
-- **AND** Development conserva el diagnóstico detallado disponible para
-  soporte y desarrollo
+- **AND** muestra estados y acciones en lenguaje cotidiano
+
+#### Scenario: Development no contiene la configuración de integraciones
+
+- **WHEN** la persona abre Development
+- **THEN** no encuentra tarjetas, estados ni acciones de las integraciones
+  GNOME o KDE
+- **AND** su configuración y estado se consultan solo en Configuración general
+  → Integraciones de escritorio
 
 ### Requirement: Localizar todo texto de producto
 
