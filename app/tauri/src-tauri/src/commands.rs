@@ -2751,7 +2751,7 @@ mod gnome_commands {
     }
 
     #[tauri::command]
-    pub fn clipvault_gnome_integration_uninstall(
+    pub async fn clipvault_gnome_integration_uninstall(
         state: State<'_, SharedState>,
     ) -> Result<crate::gnome_integration::GnomeIntegrationPayload, CommandError> {
         let gnome_state = state
@@ -2760,11 +2760,20 @@ mod gnome_commands {
             .as_ref()
             .ok_or_else(|| CommandError::new("feature_disabled", "feature disabled"))?
             .clone();
-        let installation = gnome_state
-            .uninstall(state.context())
-            .map_err(|error| CommandError::new("uninstall_error", error.to_string()))?;
-        gnome_state.stop_listener();
-        let _ = installation;
+        let context = state.context().clone();
+        let fallback = state.adapters().active_app();
+        let operation_state = gnome_state.clone();
+        tauri::async_runtime::spawn_blocking(move || operation_state.uninstall(&context, fallback))
+            .await
+            .map_err(|_| {
+                CommandError::new("disable_error", "GNOME integration shutdown worker failed")
+            })?
+            .map_err(|error| match error {
+                crate::gnome_integration::InstallError::Disable(_) => {
+                    CommandError::new("disable_error", "GNOME extension could not be disabled")
+                }
+                _ => CommandError::new("uninstall_error", "GNOME integration cleanup failed"),
+            })?;
         Ok(gnome_state.payload())
     }
 

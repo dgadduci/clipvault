@@ -12,9 +12,10 @@
    de apagado mientras procesa una conexión persistente; el comando Tauri no
    ejecuta esperas bloqueantes en el hilo de interfaz ni espera un `join` que
    pueda quedar bloqueado por una lectura de socket sin límite.
-4. ClipVault retira sus archivos locales, cambia el consentimiento a
-   `disabled`, actualiza el estado técnico y vuelve a consultar el estado para
-   la interfaz.
+4. ClipVault guarda el consentimiento como `disabled` y actualiza el estado
+   técnico antes de retirar los archivos locales. Si la limpieza local falla,
+   la extensión sigue desactivada y la interfaz conserva una acción de
+   recuperación; ClipVault no la reactiva implícitamente.
 5. La interfaz deja de mostrar progreso y presenta **Deshabilitada**, con la
    acción para habilitarla de nuevo. Ese estado debe mantenerse al reiniciar
    ClipVault.

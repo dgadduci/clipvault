@@ -386,6 +386,17 @@ mod tests {
             .expect("save accepted");
         let loaded = service.load_consent(&context).expect("load");
         assert_eq!(loaded, GnomeConsentDecision::Accepted);
+
+        service
+            .save_consent(&context, GnomeConsentDecision::Disabled)
+            .expect("save disabled");
+        let restarted = GnomeIntegrationService::new(fixed_clock(time::OffsetDateTime::UNIX_EPOCH));
+        assert_eq!(
+            restarted
+                .load_consent(&context)
+                .expect("reload after restart"),
+            GnomeConsentDecision::Disabled
+        );
     }
 
     #[test]

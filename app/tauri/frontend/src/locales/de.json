@@ -677,6 +677,7 @@
   "gnome.loading": "Integrationsstatus wird geladen…",
   "gnome.error.bundled_missing": "Dieser Build enthält keine GNOME-Erweiterungsdateien. Starten Sie ClipVault mit dem aktuellen Build neu.",
   "gnome.error.install": "Die lokale Erweiterung konnte nicht installiert werden. Prüfen Sie, ob Ihr Benutzerverzeichnis GNOME-Erweiterungen zulässt, und versuchen Sie es erneut.",
+  "gnome.error.disable": "ClipVault konnte die GNOME-Erweiterung nicht deaktivieren. Versuchen Sie es erneut.",
   "gnome.error.listener": "Die lokale GNOME-Verbindung konnte nicht vorbereitet werden. Ihre Entscheidung und die installierte Erweiterung bleiben gespeichert. Versuchen Sie es ohne erneute Zustimmung noch einmal; schließen Sie andere ClipVault-Instanzen, falls der Fehler bestehen bleibt.",
   "gnome.error.consent": "Ihre Integrationsentscheidung konnte nicht gespeichert werden. Versuchen Sie es erneut.",
   "gnome.error.feature_disabled": "Die GNOME-Integration ist in diesem Build nicht enthalten.",

@@ -509,6 +509,7 @@ impl ListenerTransport for UnixListenerTransport {
     fn accept(&self) -> io::Result<Box<dyn PeerStream + Send>> {
         let (stream, _) = self.listener.accept()?;
         stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(READ_TIMEOUT))?;
         Ok(Box::new(stream))
     }
 }
@@ -568,7 +569,12 @@ impl<T: ListenerTransport + 'static> GnomeShellListener<T> {
             .transport
             .accept()
             .map_err(|error| ListenerError::Accept(error.to_string()))?;
-        process_peer(peer, &self.snapshot, self.event_sink.as_ref())?;
+        process_peer(
+            peer,
+            &self.snapshot,
+            self.event_sink.as_ref(),
+            Some(self.alive.as_ref()),
+        )?;
         Ok(())
     }
 }
@@ -657,7 +663,9 @@ fn run_listener_loop<T: ListenerTransport + 'static>(
         match transport.accept() {
             Ok(peer) => {
                 backoff = INITIAL_BACKOFF;
-                if let Err(error) = process_peer(peer, &snapshot, event_sink.as_ref()) {
+                if let Err(error) =
+                    process_peer(peer, &snapshot, event_sink.as_ref(), Some(alive.as_ref()))
+                {
                     let stable = stable_error_label(&error);
                     snapshot.set_state(GnomeIntegrationState::CommunicationError);
                     snapshot.set_detail(Some(stable));
@@ -779,14 +787,29 @@ fn process_peer(
     peer: Box<dyn PeerStream + Send>,
     snapshot: &SharedGnomeSnapshot,
     event_sink: Option<&GnomeShellEventSink>,
+    alive: Option<&AtomicBool>,
 ) -> Result<(), ListenerError> {
     let mut peer = peer;
     let mut reader = BufReader::new(Read::by_ref(&mut peer));
     let mut handshake_seen = false;
+    let mut line = String::new();
     loop {
-        let mut line = String::new();
+        if alive.is_some_and(|alive| !alive.load(Ordering::Acquire)) {
+            return Ok(());
+        }
         let read = match reader.read_line(&mut line) {
             Ok(n) => n,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                if alive.is_some_and(|alive| !alive.load(Ordering::Acquire)) {
+                    return Ok(());
+                }
+                continue;
+            }
             Err(error) => {
                 if error.kind() == io::ErrorKind::UnexpectedEof {
                     return Ok(());
@@ -802,6 +825,7 @@ fn process_peer(
         }
         let trimmed = line.trim_end_matches(['\n', '\r']);
         if trimmed.is_empty() {
+            line.clear();
             continue;
         }
         let envelope: WireEnvelope = match serde_json::from_str(trimmed) {
@@ -853,6 +877,7 @@ fn process_peer(
                 // the connected extension. Ignore it without changing any
                 // snapshot state or invoking the callback.
                 if !handshake_seen {
+                    line.clear();
                     continue;
                 }
                 if let Some(event_sink) = event_sink {
@@ -861,6 +886,7 @@ fn process_peer(
             }
             "toggle_capture" => {
                 if !handshake_seen {
+                    line.clear();
                     continue;
                 }
                 if let Some(event_sink) = event_sink {
@@ -869,6 +895,7 @@ fn process_peer(
             }
             _ => {}
         }
+        line.clear();
     }
 }
 
@@ -1325,6 +1352,38 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_interrupts_an_idle_persistent_peer() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let socket = temp.path().join("clipvault-focus.sock");
+        let transport = std::sync::Arc::new(UnixListenerTransport::bind(&socket).expect("bind"));
+        let snapshot = SharedGnomeSnapshot::new();
+        let handle = spawn_listener_thread_with_socket(snapshot.clone(), transport, socket.clone());
+        let mut peer = std::os::unix::net::UnixStream::connect(&socket).expect("connect");
+        let hello = format!("{{\"v\":{PROTOCOL_VERSION},\"kind\":\"hello\"}}\n");
+        std::io::Write::write_all(&mut peer, hello.as_bytes()).expect("send hello");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while snapshot.state() != GnomeIntegrationState::Connected
+            && std::time::Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(snapshot.state(), GnomeIntegrationState::Connected);
+        thread::sleep(Duration::from_millis(25));
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            handle.shutdown();
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("shutdown should finish while the peer remains connected");
+        assert!(!socket.exists(), "shutdown must remove its socket file");
+        drop(peer);
+    }
+
+    #[test]
     fn listener_handle_is_send_for_tauri_managed_state() {
         fn assert_send<T: Send>() {}
 
@@ -1378,7 +1437,7 @@ mod tests {
             .expect("close writer");
         let snapshot = SharedGnomeSnapshot::new();
         let error =
-            process_peer(Box::new(server), &snapshot, None).expect_err("app_id before hello");
+            process_peer(Box::new(server), &snapshot, None, None).expect_err("app_id before hello");
         assert!(matches!(error, ListenerError::Frame(_)));
         assert!(snapshot.active_app_id().is_none());
     }
@@ -1402,7 +1461,7 @@ mod tests {
         client
             .shutdown(std::net::Shutdown::Write)
             .expect("close writer");
-        process_peer(Box::new(server), &snapshot, None).expect("process peer");
+        process_peer(Box::new(server), &snapshot, None, None).expect("process peer");
         let app = probe.active_application().expect("ok").expect("app");
         assert_eq!(app.identifier, "firefox.desktop");
     }
@@ -1427,7 +1486,7 @@ mod tests {
             .shutdown(std::net::Shutdown::Write)
             .expect("close writer");
 
-        process_peer(Box::new(server), &snapshot, Some(&sink)).expect("process peer");
+        process_peer(Box::new(server), &snapshot, Some(&sink), None).expect("process peer");
 
         assert_eq!(events.load(Ordering::SeqCst), 1);
         assert_eq!(snapshot.state(), GnomeIntegrationState::Connected);
@@ -1448,7 +1507,7 @@ mod tests {
             "{{\"v\":{PROTOCOL_VERSION},\"kind\":\"toggle_capture\"}}\n{{\"v\":{PROTOCOL_VERSION},\"kind\":\"hello\"}}\n{{\"v\":{PROTOCOL_VERSION},\"kind\":\"toggle_capture\"}}\n"
         );
         let peer = MemoryPeer(std::io::Cursor::new(payload.into_bytes()));
-        process_peer(Box::new(peer), &snapshot, Some(&sink)).expect("process peer");
+        process_peer(Box::new(peer), &snapshot, Some(&sink), None).expect("process peer");
 
         assert_eq!(events.load(Ordering::SeqCst), 1);
         assert_eq!(snapshot.state(), GnomeIntegrationState::Connected);

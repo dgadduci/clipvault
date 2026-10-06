@@ -95,6 +95,21 @@ test("integration status is translated to a user-friendly category", () => {
   );
 });
 
+test("disabled GNOME consent stays disabled and offers reactivation after status reload", () => {
+  const modal = loadSource("src/GnomeIntegrationModal.svelte");
+  const status = gnomeStatus({
+    consent: "disabled",
+    technical_state: "not_installed",
+    installed: false,
+  });
+
+  assert.equal(gnomeIntegrationStatusKind(status), "disabled");
+  assert.match(
+    modal,
+    /status\.payload\.consent === "disabled"[\s\S]*?applyConsent\("accepted"\)/,
+  );
+});
+
 test("refresh updates both integrations and exposes localized errors", () => {
   const modal = loadSource("src/DesktopIntegrationsModal.svelte");
 

@@ -11,6 +11,7 @@
 const GNOME_ERROR_MESSAGES: Record<string, string> = {
   bundled_missing: "gnome.error.bundled_missing",
   install_error: "gnome.error.install",
+  disable_error: "gnome.error.disable",
   listener_error: "gnome.error.listener",
   consent_error: "gnome.error.consent",
   feature_disabled: "gnome.error.feature_disabled",

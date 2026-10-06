@@ -74,6 +74,10 @@ test("GNOME command errors are actionable and never stringified as an IPC object
     describeGnomeIntegrationError({ kind: "listener_error", message: "/run/user/1000" }),
     /gnome\.error\.listener/,
   );
+  assert.match(
+    describeGnomeIntegrationError({ kind: "disable_error", message: "private process output" }),
+    /gnome\.error\.disable/,
+  );
   assert.equal(
     describeGnomeIntegrationError({ kind: "install_error", message: "/home/diego/private" }).includes(
       "/home/diego",
@@ -81,4 +85,13 @@ test("GNOME command errors are actionable and never stringified as an IPC object
     false,
   );
   assert.equal(describeGnomeIntegrationError({}), "gnome.error.generic");
+});
+
+test("GNOME disable keeps the UI busy only until the command settles", () => {
+  const modal = loadSource("src/GnomeIntegrationModal.svelte");
+
+  assert.match(
+    modal,
+    /async function deactivate\(\): Promise<void> \{[\s\S]*?await gnomeIntegrationUninstallCommand\(\);[\s\S]*?finally \{\s*finishAction\(\);\s*\}/,
+  );
 });

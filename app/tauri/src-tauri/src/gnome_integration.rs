@@ -19,9 +19,9 @@ use clipvault_core::{
 };
 use clipvault_platform::{
     spawn_listener_thread_with_socket_and_events, GnomeConsentDecision as PlatformConsentDecision,
-    GnomeIntegrationService as PlatformIntegrationService, GnomeShellEventSink, ListenerHandle,
-    SharedGnomeSnapshot, UnixListenerTransport, GNOME_BACKEND_NAME, GNOME_EXTENSION_UUID,
-    GNOME_PROTOCOL_VERSION,
+    GnomeExtensionsActionOutcome, GnomeIntegrationService as PlatformIntegrationService,
+    GnomeShellEventSink, ListenerHandle, SharedGnomeSnapshot, UnixListenerTransport,
+    GNOME_BACKEND_NAME, GNOME_EXTENSION_UUID, GNOME_PROTOCOL_VERSION,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -244,18 +244,43 @@ impl GnomeIntegrationState {
         })
     }
 
-    /// Uninstall the bundled extension. Records `disabled` so the
-    /// consent persists even after the directory is removed.
+    /// Disable the loaded GNOME extension, stop the local listener and remove
+    /// the bundled files. A failed GNOME action leaves consent and installation
+    /// untouched so the operation can be retried without losing the active state.
     pub fn uninstall(
         &self,
         context: &clipvault_core::AppContext,
+        fallback: Arc<dyn clipvault_platform::ActiveApplicationProbe>,
     ) -> Result<clipvault_platform::Installation, InstallError> {
-        self.record_consent(context, GnomeConsentDecision::Disabled)
-            .map_err(|error| InstallError::Consent(error.to_string()))?;
         let platform_service = match self.live.lock().as_ref() {
             Some(handle) => handle.platform_service.clone(),
-            None => self.ensure_platform_service(GnomeConsentDecision::Disabled),
+            None => self.ensure_platform_service(self.core_service.load_consent_from_cache()),
         };
+
+        match platform_service.disable_extension() {
+            GnomeExtensionsActionOutcome::Started => {}
+            GnomeExtensionsActionOutcome::Unavailable => {
+                return Err(InstallError::Disable("unavailable".to_string()));
+            }
+            GnomeExtensionsActionOutcome::Failed => {
+                return Err(InstallError::Disable("failed".to_string()));
+            }
+            GnomeExtensionsActionOutcome::TimedOut => {
+                return Err(InstallError::Disable("timeout".to_string()));
+            }
+        }
+
+        // GNOME has confirmed that it unloaded the extension. Stop the local
+        // connection and restore the ordinary active-app probe before cleanup.
+        self.stop_listener();
+        context.swap_active_app_probe(fallback);
+        self.record_consent(context, GnomeConsentDecision::Disabled)
+            .map_err(|error| InstallError::Consent(error.to_string()))?;
+        let disabled_state =
+            convert_technical_state_from_platform(platform_service.snapshot().state());
+        self.record_technical_state(context, disabled_state)
+            .map_err(|error| InstallError::Consent(error.to_string()))?;
+
         let outcome = platform_service
             .uninstall()
             .map_err(|error| InstallError::Installer(error.to_string()))?;
@@ -640,6 +665,7 @@ pub struct InstallResult {
 pub enum InstallError {
     Consent(String),
     Bundled(String),
+    Disable(String),
     Installer(String),
     Listener(String),
 }
@@ -649,6 +675,7 @@ impl std::fmt::Display for InstallError {
         match self {
             InstallError::Consent(message) => write!(f, "consent: {message}"),
             InstallError::Bundled(message) => write!(f, "bundled: {message}"),
+            InstallError::Disable(message) => write!(f, "disable: {message}"),
             InstallError::Installer(message) => write!(f, "installer: {message}"),
             InstallError::Listener(message) => write!(f, "listener: {message}"),
         }

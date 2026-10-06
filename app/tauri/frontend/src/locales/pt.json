@@ -677,6 +677,7 @@
   "gnome.loading": "Carregando o estado da integração…",
   "gnome.error.bundled_missing": "Esta versão não inclui os arquivos da extensão GNOME. Reinicie o ClipVault usando a versão atual.",
   "gnome.error.install": "Não foi possível instalar a extensão local. Verifique se o diretório do usuário permite criar extensões GNOME e tente novamente.",
+  "gnome.error.disable": "O ClipVault não conseguiu desativar a extensão do GNOME. Tente novamente.",
   "gnome.error.listener": "Não foi possível preparar a conexão local com o GNOME. Sua escolha e a extensão instalada foram salvas. Tente novamente sem escolher outra vez; feche outras instâncias do ClipVault se o problema continuar.",
   "gnome.error.consent": "Não foi possível salvar sua decisão sobre a integração. Tente novamente.",
   "gnome.error.feature_disabled": "A integração GNOME não está incluída nesta versão.",

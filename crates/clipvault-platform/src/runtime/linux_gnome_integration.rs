@@ -30,8 +30,10 @@
 
 use std::fmt;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -52,6 +54,8 @@ pub const UNIX_SOCKET_BASENAME: &str = "clipvault-focus.sock";
 
 const GNOME_EXTENSIONS_COMMAND: &str = "/usr/bin/gnome-extensions";
 const GNOME_EXTENSIONS_APP_COMMAND: &str = "/usr/bin/gnome-extensions-app";
+const GNOME_DISABLE_TIMEOUT: Duration = Duration::from_secs(5);
+const GNOME_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Result of invoking a fixed GNOME Extensions action. The listener handshake,
 /// rather than a successful process exit, remains the confirmation that the
@@ -61,11 +65,13 @@ pub enum GnomeExtensionsActionOutcome {
     Started,
     Unavailable,
     Failed,
+    TimedOut,
 }
 
 /// Small, injectable adapter for the public GNOME Extensions interfaces.
 pub trait GnomeExtensionsController: Send + Sync {
     fn enable_clipvault(&self) -> GnomeExtensionsActionOutcome;
+    fn disable_clipvault(&self) -> GnomeExtensionsActionOutcome;
     fn manager_available(&self) -> bool;
     fn open_manager(&self) -> GnomeExtensionsActionOutcome;
 }
@@ -90,6 +96,23 @@ impl GnomeExtensionsController for SystemGnomeExtensionsController {
         }
     }
 
+    fn disable_clipvault(&self) -> GnomeExtensionsActionOutcome {
+        if !std::path::Path::new(GNOME_EXTENSIONS_COMMAND).is_file() {
+            return GnomeExtensionsActionOutcome::Unavailable;
+        }
+        let child = Command::new(GNOME_EXTENSIONS_COMMAND)
+            .arg("disable")
+            .arg(EXTENSION_UUID)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        match child {
+            Ok(mut child) => wait_for_command(&mut child, GNOME_DISABLE_TIMEOUT),
+            Err(_) => GnomeExtensionsActionOutcome::Failed,
+        }
+    }
+
     fn manager_available(&self) -> bool {
         std::path::Path::new(GNOME_EXTENSIONS_APP_COMMAND).is_file()
     }
@@ -101,6 +124,34 @@ impl GnomeExtensionsController for SystemGnomeExtensionsController {
         match Command::new(GNOME_EXTENSIONS_APP_COMMAND).spawn() {
             Ok(_child) => GnomeExtensionsActionOutcome::Started,
             Err(_) => GnomeExtensionsActionOutcome::Failed,
+        }
+    }
+}
+
+fn wait_for_command(child: &mut Child, timeout: Duration) -> GnomeExtensionsActionOutcome {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    GnomeExtensionsActionOutcome::Started
+                } else {
+                    GnomeExtensionsActionOutcome::Failed
+                };
+            }
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(GNOME_COMMAND_POLL_INTERVAL);
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return GnomeExtensionsActionOutcome::TimedOut;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return GnomeExtensionsActionOutcome::Failed;
+            }
         }
     }
 }
@@ -266,6 +317,18 @@ impl GnomeIntegrationService {
         self.extensions.enable_clipvault()
     }
 
+    /// Ask GNOME Shell to unload the extension. A successful process exit is
+    /// required before the caller stops the listener or removes the bundle.
+    pub fn disable_extension(&self) -> GnomeExtensionsActionOutcome {
+        let outcome = self.extensions.disable_clipvault();
+        if outcome == GnomeExtensionsActionOutcome::Started {
+            self.snapshot.set_state(GnomeIntegrationState::Disabled);
+            self.snapshot.set_active_app_id(None);
+            self.snapshot.set_detail::<String>(None);
+        }
+        outcome
+    }
+
     pub fn extensions_manager_available(&self) -> bool {
         self.extensions.manager_available()
     }
@@ -412,6 +475,8 @@ mod tests {
     struct FakeExtensionsController {
         enable_calls: AtomicUsize,
         enable_outcome: GnomeExtensionsActionOutcome,
+        disable_calls: AtomicUsize,
+        disable_outcome: GnomeExtensionsActionOutcome,
         manager_available: bool,
         open_outcome: GnomeExtensionsActionOutcome,
     }
@@ -420,6 +485,11 @@ mod tests {
         fn enable_clipvault(&self) -> GnomeExtensionsActionOutcome {
             self.enable_calls.fetch_add(1, Ordering::Relaxed);
             self.enable_outcome
+        }
+
+        fn disable_clipvault(&self) -> GnomeExtensionsActionOutcome {
+            self.disable_calls.fetch_add(1, Ordering::Relaxed);
+            self.disable_outcome
         }
 
         fn manager_available(&self) -> bool {
@@ -436,6 +506,8 @@ mod tests {
         let controller = Arc::new(FakeExtensionsController {
             enable_calls: AtomicUsize::new(0),
             enable_outcome: GnomeExtensionsActionOutcome::Started,
+            disable_calls: AtomicUsize::new(0),
+            disable_outcome: GnomeExtensionsActionOutcome::Started,
             manager_available: true,
             open_outcome: GnomeExtensionsActionOutcome::Started,
         });
@@ -450,10 +522,15 @@ mod tests {
             GnomeExtensionsActionOutcome::Started
         );
         assert_eq!(
+            service.disable_extension(),
+            GnomeExtensionsActionOutcome::Started
+        );
+        assert_eq!(
             service.open_extensions_manager(),
             GnomeExtensionsActionOutcome::Started
         );
         assert_eq!(controller.enable_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(controller.disable_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -461,6 +538,8 @@ mod tests {
         let controller = Arc::new(FakeExtensionsController {
             enable_calls: AtomicUsize::new(0),
             enable_outcome: GnomeExtensionsActionOutcome::Failed,
+            disable_calls: AtomicUsize::new(0),
+            disable_outcome: GnomeExtensionsActionOutcome::Unavailable,
             manager_available: false,
             open_outcome: GnomeExtensionsActionOutcome::Unavailable,
         });
@@ -482,6 +561,85 @@ mod tests {
             GnomeIntegrationState::ActivationPending
         );
         assert!(!service.status().extensions_manager_available);
+    }
+
+    #[test]
+    fn disable_failure_preserves_the_accepted_integration_state() {
+        let controller = Arc::new(FakeExtensionsController {
+            enable_calls: AtomicUsize::new(0),
+            enable_outcome: GnomeExtensionsActionOutcome::Started,
+            disable_calls: AtomicUsize::new(0),
+            disable_outcome: GnomeExtensionsActionOutcome::Failed,
+            manager_available: true,
+            open_outcome: GnomeExtensionsActionOutcome::Started,
+        });
+        let service = GnomeIntegrationService::with_extensions_controller(
+            GnomeConsentDecision::Accepted,
+            controller.clone(),
+        );
+        service
+            .snapshot()
+            .set_state(GnomeIntegrationState::Identified);
+        service
+            .snapshot()
+            .set_active_app_id(Some("org.example.Editor.desktop".to_string()));
+
+        assert_eq!(
+            service.disable_extension(),
+            GnomeExtensionsActionOutcome::Failed
+        );
+        assert_eq!(service.consent(), GnomeConsentDecision::Accepted);
+        assert_eq!(
+            service.snapshot().state(),
+            GnomeIntegrationState::Identified
+        );
+        assert_eq!(
+            service.snapshot().active_app_id().as_deref(),
+            Some("org.example.Editor.desktop")
+        );
+        assert_eq!(controller.disable_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn successful_disable_clears_the_active_application_snapshot() {
+        let controller = Arc::new(FakeExtensionsController {
+            enable_calls: AtomicUsize::new(0),
+            enable_outcome: GnomeExtensionsActionOutcome::Started,
+            disable_calls: AtomicUsize::new(0),
+            disable_outcome: GnomeExtensionsActionOutcome::Started,
+            manager_available: true,
+            open_outcome: GnomeExtensionsActionOutcome::Started,
+        });
+        let service = GnomeIntegrationService::with_extensions_controller(
+            GnomeConsentDecision::Accepted,
+            controller,
+        );
+        service
+            .snapshot()
+            .set_state(GnomeIntegrationState::Identified);
+        service
+            .snapshot()
+            .set_active_app_id(Some("org.example.Editor.desktop".to_string()));
+
+        assert_eq!(
+            service.disable_extension(),
+            GnomeExtensionsActionOutcome::Started
+        );
+        assert_eq!(service.snapshot().state(), GnomeIntegrationState::Disabled);
+        assert!(service.snapshot().active_app_id().is_none());
+    }
+
+    #[test]
+    fn timed_out_gnome_command_is_terminated_and_reaped() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn sleep helper");
+
+        let outcome = wait_for_command(&mut child, Duration::from_millis(50));
+
+        assert_eq!(outcome, GnomeExtensionsActionOutcome::TimedOut);
+        assert!(child.try_wait().expect("check child status").is_some());
     }
 
     #[test]
