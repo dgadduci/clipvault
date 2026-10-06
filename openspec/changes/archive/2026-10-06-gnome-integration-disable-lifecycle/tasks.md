@@ -27,8 +27,9 @@
   localizar los mensajes modificados en los cinco idiomas.
 - [x] 3.2 Ejecutar las pruebas relevantes de controller, listener y frontend;
   validar OpenSpec y revisar el diff.
-- [ ] 3.3 Repetir la prueba manual en Ubuntu GNOME Wayland: desactivar una
+- [x] 3.3 Repetir la prueba manual en Ubuntu GNOME Wayland: desactivar una
   integración conectada, confirmar que ClipVault sigue respondiendo, cerrar y
   volver a abrir ClipVault, verificar `disabled` y habilitarla nuevamente.
+  **Prueba manual aprobada por el usuario en Ubuntu GNOME Wayland (2026-10-06).**
 - [x] 3.4 Conservar como aprobada la prueba manual KDE ya reportada; repetirla
   solo si los cambios terminan afectando KDE.

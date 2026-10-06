@@ -1,6 +1,6 @@
 # Propuesta: desactivación GNOME sin bloquear ClipVault
 
-## Por qué
+## Why
 
 En la prueba manual de Ubuntu GNOME Wayland, la acción **Deshabilitar** dejó
 ClipVault sin responder hasta que hubo que forzar su cierre. Al volver a
@@ -15,7 +15,7 @@ conexión con una lectura bloqueante. El código actual no solicita primero a
 GNOME que desactive la extensión y el cierre del listener puede esperar sin
 límite.
 
-## Cambios
+## What Changes
 
 - Solicitar a GNOME que desactive la extensión mediante `gnome-extensions`
   y el UUID fijo de ClipVault antes de retirar sus archivos locales.
@@ -31,7 +31,7 @@ límite.
 - Conservar la privacidad, la operación local, el consentimiento explícito y
   el adaptador testeable de escritorio.
 
-## Impacto
+## Impact
 
 - Ciclo de vida GNOME en `clipvault-platform` y el adaptador Tauri.
 - El flujo de configuración y desactivación de Integraciones de escritorio.
