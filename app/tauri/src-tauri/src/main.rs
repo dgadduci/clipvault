@@ -337,6 +337,8 @@ fn main() {
             commands::clipvault_retention_preview,
             commands::clipvault_settings_get,
             commands::clipvault_settings_set,
+            commands::clipvault_contextual_desktop_setup_dismissals_get,
+            commands::clipvault_contextual_desktop_setup_dismiss,
             commands::clipvault_keyboard_shortcuts_get,
             commands::clipvault_keyboard_shortcut_set,
             commands::clipvault_capture_control_get,

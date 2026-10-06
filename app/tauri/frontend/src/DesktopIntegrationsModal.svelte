@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import GnomeIntegrationModal from "./GnomeIntegrationModal.svelte";
   import {
     gnomeIntegrationStatusCommand,
@@ -13,11 +13,13 @@
   import { kdeIntegrationStatusKind } from "./lib/desktopIntegrationSettings";
   import { t } from "./lib/localization";
   import type {
+    DesktopSetupIntegration,
     GnomeIntegrationStatusResponse,
     KdeKwinIntegrationPayload,
   } from "./types";
 
   export let open = false;
+  export let focusIntegration: DesktopSetupIntegration | null = null;
 
   let gnomeStatus: GnomeIntegrationStatusResponse | null = null;
   let kdeStatus: KdeKwinIntegrationPayload | null = null;
@@ -27,6 +29,8 @@
   let gnomeBusy = false;
   let kdeBusy = false;
   let requestId = 0;
+  let gnomeFocusTarget: HTMLElement | null = null;
+  let kdeFocusTarget: HTMLElement | null = null;
 
   $: if (open) void refreshStatus();
 
@@ -64,6 +68,12 @@
       kdeError = "settings.desktop_integrations.error";
     }
     loading = false;
+    if (focusIntegration !== null) {
+      await tick();
+      if (currentRequest !== requestId || !open) return;
+      if (focusIntegration === "gnome") gnomeFocusTarget?.focus();
+      if (focusIntegration === "kde") kdeFocusTarget?.focus();
+    }
   }
 
   async function runKdeAction(
@@ -111,7 +121,11 @@
   </div>
 
   {#if showGnome && gnomeStatus?.kind === "ready" && !loading}
-    <div data-testid="desktop-integrations-gnome">
+    <div
+      bind:this={gnomeFocusTarget}
+      tabindex="-1"
+      data-testid="desktop-integrations-gnome"
+    >
       <GnomeIntegrationModal
         initial={gnomeStatus}
         on:actionStarted={() => (gnomeBusy = true)}
@@ -121,7 +135,12 @@
   {/if}
 
   {#if showKde && kdeStatus}
-    <article class="integration-card" data-testid="desktop-integrations-kde">
+    <article
+      bind:this={kdeFocusTarget}
+      class="integration-card"
+      tabindex="-1"
+      data-testid="desktop-integrations-kde"
+    >
       <h3>{$t("development.kde.title")}</h3>
       <p class="muted">{$t("settings.desktop_integrations.kde.description")}</p>
       <p class="integration-status" role="status" data-testid="kde-friendly-status">

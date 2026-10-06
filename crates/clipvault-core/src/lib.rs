@@ -260,7 +260,10 @@ pub use settings::{
     HotkeySpec, Settings, SettingsUpdate, ValidationCode, ValidationError,
     HOTKEY_SETTING_STORAGE_KEY, MAX_IDENTIFIER_LENGTH,
 };
-pub use settings_service::{SettingsService, SettingsServiceError};
+pub use settings_service::{
+    ContextualDesktopSetupDismissals, DesktopSetupIntegration, SettingsService,
+    SettingsServiceError,
+};
 pub use source_app::{
     SourceApplicationOption, SourceApplicationsError, SourceApplicationsQuery,
     SourceApplicationsScope, SourceApplicationsSnapshot,

@@ -14,10 +14,12 @@ import type {
   CollectionClearResponse,
   CollectionDeletionPreview,
   CopyResponse,
+  ContextualDesktopSetupDismissals,
   CreateManualTextResponse,
   DatabasePath,
   DeleteResponse,
   Diagnostics,
+  DesktopSetupIntegration,
   EntryRecord,
   GnomeConsentDecision,
   GnomeIntegrationInstallResult,
@@ -291,6 +293,21 @@ export const retentionPreviewCommand: ClipvaultCommand<RetentionPreview> = () =>
 
 export const settingsGetCommand: ClipvaultCommand<Settings> = () =>
   invoke<Settings>("clipvault_settings_get");
+
+export const contextualDesktopSetupDismissalsGetCommand:
+  ClipvaultCommand<ContextualDesktopSetupDismissals> = () =>
+    invoke<ContextualDesktopSetupDismissals>(
+      "clipvault_contextual_desktop_setup_dismissals_get",
+    );
+
+export const contextualDesktopSetupDismissCommand: ClipvaultCommandArg<
+  ContextualDesktopSetupDismissals,
+  { integration: DesktopSetupIntegration }
+> = (args) =>
+  invoke<ContextualDesktopSetupDismissals>(
+    "clipvault_contextual_desktop_setup_dismiss",
+    { integration: args.integration },
+  );
 
 export const settingsSetCommand: ClipvaultCommandArg<
   Settings,
@@ -1266,9 +1283,11 @@ export type {
   CaptureResponse,
   ClearResponse,
   Collection,
+  ContextualDesktopSetupDismissals,
   CopyResponse,
   DeleteResponse,
   Diagnostics,
+  DesktopSetupIntegration,
   EntryRecord,
   GnomeConsentDecision,
   GnomeIntegrationInstallResult,

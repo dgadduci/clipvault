@@ -1207,6 +1207,15 @@ export interface CommandError {
 // `gnome-wayland-integration` capability.
 // ---------------------------------------------------------------------------
 
+/** Integration identifiers accepted by the local setup-guidance preference. */
+export type DesktopSetupIntegration = "gnome" | "kde";
+
+/** User-local dismissal flags, separate from integration consent. */
+export interface ContextualDesktopSetupDismissals {
+  gnome_dismissed: boolean;
+  kde_dismissed: boolean;
+}
+
 /**
  * Tauri command name the frontend uses to read the GNOME Shell
  * integration status.

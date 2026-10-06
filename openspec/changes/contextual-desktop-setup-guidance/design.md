@@ -37,6 +37,10 @@ Configuración o desde el menú de la bandeja.
   marcar el aviso como leído.
 - El estado de ocultamiento se almacena localmente por identificador estable
   de integración (GNOME o KDE), sin datos de uso ni registro remoto.
+- Se reutiliza `app_settings` con las claves booleanas
+  `contextual_desktop_setup_guidance_dismissed_gnome` y
+  `contextual_desktop_setup_guidance_dismissed_kde`. La ausencia equivale a
+  `false`; no se requiere una migración de SQLite.
 
 ## No duplicar guías por distribución
 

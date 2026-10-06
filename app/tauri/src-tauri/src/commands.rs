@@ -13,13 +13,14 @@ use clipvault_core::{
 };
 use clipvault_core::{
     ActiveAppDiagnostics, Capabilities, ClearOutcome, ClipboardAssetStore,
-    CodeLanguageServiceError, CopyOutcome, DeleteOutcome, HotkeySpec, IgnoredAppEntry,
-    IgnoredAppError, LocalSettingsReader, ManualTextCreationOutcome, PasteMode, PasteOutcome,
-    PickAndAddOutcome, PlatformGuidance, PlatformGuidanceId, PlatformSettingsTarget,
-    RetentionOutcome, RetentionPolicy, RetentionPreview, RichTextAssetStore, SetFavoriteResult,
-    SetTitleOutcome, Settings, SettingsNavigator, SettingsOpenOutcome, SettingsServiceError,
-    SettingsUpdate, TitleValidationError, UpdateTextHistoryOutcome, ValidationCode,
-    ValidationError, WatchTickOutcome,
+    CodeLanguageServiceError, ContextualDesktopSetupDismissals, CopyOutcome, DeleteOutcome,
+    DesktopSetupIntegration, HotkeySpec, IgnoredAppEntry, IgnoredAppError, LocalSettingsReader,
+    ManualTextCreationOutcome, PasteMode, PasteOutcome, PickAndAddOutcome, PlatformGuidance,
+    PlatformGuidanceId, PlatformSettingsTarget, RetentionOutcome, RetentionPolicy,
+    RetentionPreview, RichTextAssetStore, SetFavoriteResult, SetTitleOutcome, Settings,
+    SettingsNavigator, SettingsOpenOutcome, SettingsServiceError, SettingsUpdate,
+    TitleValidationError, UpdateTextHistoryOutcome, ValidationCode, ValidationError,
+    WatchTickOutcome,
 };
 use clipvault_platform::{
     read_icon_bytes, read_source_app_icon_bytes, ActiveAppError, IconReadError,
@@ -988,6 +989,27 @@ pub fn run_retention(context: &clipvault_core::AppContext) {
 #[tauri::command]
 pub fn clipvault_settings_get(state: State<'_, SharedState>) -> Result<Settings, CommandError> {
     Ok(state.context().settings().load(state.context()))
+}
+
+#[tauri::command]
+pub fn clipvault_contextual_desktop_setup_dismissals_get(
+    state: State<'_, SharedState>,
+) -> Result<ContextualDesktopSetupDismissals, CommandError> {
+    Ok(state
+        .context()
+        .settings()
+        .contextual_desktop_setup_dismissals(state.context())?)
+}
+
+#[tauri::command]
+pub fn clipvault_contextual_desktop_setup_dismiss(
+    state: State<'_, SharedState>,
+    integration: DesktopSetupIntegration,
+) -> Result<ContextualDesktopSetupDismissals, CommandError> {
+    Ok(state
+        .context()
+        .settings()
+        .dismiss_contextual_desktop_setup_guidance(state.context(), integration)?)
 }
 
 pub use crate::keyboard_shortcuts::KeyboardShortcutsSnapshot;

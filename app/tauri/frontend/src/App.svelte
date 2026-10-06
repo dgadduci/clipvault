@@ -13,6 +13,7 @@
     CollectionDeleteResponse,
     CollectionDeletionPreview,
     Diagnostics,
+    DesktopSetupIntegration,
     EntryRecord,
     OrganizationSnapshot,
     PeerImportedSourceAppPresentation,
@@ -32,6 +33,8 @@
   import {
     activeApplicationCommand,
     clearUnorganizedHistoryCommand,
+    contextualDesktopSetupDismissCommand,
+    contextualDesktopSetupDismissalsGetCommand,
     collectionsCreateCommand,
     collectionsDeleteCommand,
     collectionsDeletePreviewCommand,
@@ -41,6 +44,7 @@
     collectionsSetColorCommand,
     deleteEntryCommand,
     diagnosticsCommand,
+    gnomeIntegrationStatusCommand,
     entryCollectionsCommand,
     entryNoteIdsCommand,
     entryCollectionsSetCommand,
@@ -57,11 +61,13 @@
     refreshCapabilitiesCommand,
     searchEntriesCommand,
     setFavoriteCommand,
+    kdeKwinIntegrationStatusCommand,
     sourceApplicationsCommand,
     peerPairingSnapshotCommand,
     unorganizedClearableCountCommand,
   } from "./lib/tauri";
   import { retryGuidance } from "./lib/guidance";
+  import { contextualDesktopSetupCandidates } from "./lib/contextualDesktopSetupGuidance";
   import { startAutomaticUpdateCheck } from "./lib/applicationUpdates";
   import { runSearch } from "./lib/search";
   import {
@@ -131,6 +137,7 @@
   import AboutModal from "./AboutModal.svelte";
   import ClipboardPreview from "./ClipboardPreview.svelte";
   import CreateTextEntryModal from "./CreateTextEntryModal.svelte";
+  import ContextualDesktopSetupCard from "./ContextualDesktopSetupCard.svelte";
 
   /**
    * Single source of truth for the visual tokens, computed at module
@@ -159,6 +166,11 @@
     | "about";
 
   let diagnostics: Diagnostics | null = null;
+  let contextualSetupIntegrations: DesktopSetupIntegration[] = [];
+  let contextualSetupLookupStarted = false;
+  let contextualSetupRequestId = 0;
+  let contextualSetupFirstFrame: number | null = null;
+  let contextualSetupSecondFrame: number | null = null;
   let capabilities: Capabilities | null = null;
   let activeApp: ActiveApplicationResponse | null = null;
   let entries: EntryRecord[] = [];
@@ -228,6 +240,7 @@
   let nonEditableTextNoticeReturnFocus: HTMLElement | null = null;
   let openModal: ModalId = null;
   let modalReturnFocus: HTMLElement | null = null;
+  let desktopIntegrationFocus: DesktopSetupIntegration | null = null;
   let keyboardShortcutReturnModal: ModalId = null;
   /** The global pairing prompt can appear even while Settings is closed. */
   let pairingRow: PeerRow | null = null;
@@ -608,6 +621,7 @@
       error = err instanceof Error ? err.message : String(err);
     } finally {
       loading = false;
+      scheduleContextualSetupLookup();
     }
   }
 
@@ -2101,8 +2115,12 @@
   }
 
   function closeModal(): void {
+    const closedModal = openModal;
     openModal = null;
     modalReturnFocus = null;
+    if (closedModal === "desktop_integrations" && contextualSetupLookupStarted) {
+      void loadContextualSetupGuidance();
+    }
   }
 
   function onOpenDevelopment(event: MouseEvent): void {
@@ -2110,7 +2128,84 @@
   }
 
   function onOpenDesktopIntegrations(): void {
+    desktopIntegrationFocus = null;
     openModalWith("desktop_integrations", modalReturnFocus);
+  }
+
+  function onConfigureDesktopSetup(
+    integration: DesktopSetupIntegration,
+    trigger: HTMLElement,
+  ): void {
+    desktopIntegrationFocus = integration;
+    openModalWith("desktop_integrations", trigger);
+  }
+
+  async function dismissContextualSetup(
+    integration: DesktopSetupIntegration,
+  ): Promise<void> {
+    await contextualDesktopSetupDismissCommand({ integration });
+    contextualSetupIntegrations = contextualSetupIntegrations.filter(
+      (candidate) => candidate !== integration,
+    );
+  }
+
+  function scheduleContextualSetupLookup(): void {
+    if (
+      contextualSetupLookupStarted ||
+      loading ||
+      error !== null ||
+      diagnostics?.platform_os !== "linux" ||
+      diagnostics.display_server !== "wayland"
+    ) {
+      return;
+    }
+    contextualSetupLookupStarted = true;
+    // Wait through two paints so this optional platform probe cannot delay the
+    // main workspace appearing or the first interaction with it.
+    contextualSetupFirstFrame = requestAnimationFrame(() => {
+      contextualSetupFirstFrame = null;
+      contextualSetupSecondFrame = requestAnimationFrame(() => {
+        contextualSetupSecondFrame = null;
+        void loadContextualSetupGuidance();
+      });
+    });
+  }
+
+  async function loadContextualSetupGuidance(): Promise<void> {
+    const requestId = ++contextualSetupRequestId;
+    const [gnomeResult, kdeResult, dismissalsResult] = await Promise.allSettled([
+      gnomeIntegrationStatusCommand(),
+      kdeKwinIntegrationStatusCommand(),
+      contextualDesktopSetupDismissalsGetCommand(),
+    ]);
+    if (
+      requestId !== contextualSetupRequestId ||
+      !diagnostics ||
+      dismissalsResult.status !== "fulfilled"
+    ) {
+      return;
+    }
+    const candidates = contextualDesktopSetupCandidates(
+      diagnostics,
+      gnomeResult.status === "fulfilled" ? gnomeResult.value : null,
+      kdeResult.status === "fulfilled" ? kdeResult.value : null,
+      dismissalsResult.value,
+    );
+    if (
+      gnomeResult.status === "rejected" &&
+      !dismissalsResult.value.gnome_dismissed &&
+      contextualSetupIntegrations.includes("gnome")
+    ) {
+      candidates.push("gnome");
+    }
+    if (
+      kdeResult.status === "rejected" &&
+      !dismissalsResult.value.kde_dismissed &&
+      contextualSetupIntegrations.includes("kde")
+    ) {
+      candidates.push("kde");
+    }
+    contextualSetupIntegrations = candidates;
   }
 
   function onOpenPrivacy(event: MouseEvent): void {
@@ -2449,6 +2544,15 @@
   });
 
   onDestroy(() => {
+    contextualSetupRequestId += 1;
+    if (contextualSetupFirstFrame !== null) {
+      cancelAnimationFrame(contextualSetupFirstFrame);
+      contextualSetupFirstFrame = null;
+    }
+    if (contextualSetupSecondFrame !== null) {
+      cancelAnimationFrame(contextualSetupSecondFrame);
+      contextualSetupSecondFrame = null;
+    }
     disposeKeyboardShortcutUpdates();
     stopPairingInvitationRefresh();
     if (collectionDropRejectedTimer !== null) {
@@ -2530,6 +2634,13 @@
         on:select-peer={(e) => selectPeer(e.detail.peerId)}
       />
       <div class="layout-main" data-testid="layout-main">
+        {#each contextualSetupIntegrations as integration (integration)}
+          <ContextualDesktopSetupCard
+            {integration}
+            onConfigure={onConfigureDesktopSetup}
+            onDismiss={dismissContextualSetup}
+          />
+        {/each}
         {#if collectionDropRejected}
           <p
             class="collection-drop-rejected"
@@ -2978,6 +3089,7 @@
 >
   <DesktopIntegrationsModal
     open={openModal === "desktop_integrations"}
+    focusIntegration={desktopIntegrationFocus}
   />
 </Modal>
 

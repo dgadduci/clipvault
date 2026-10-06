@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use clipvault_db::{AppSettingsRepository, IgnoredAppRepository};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::bootstrap::AppContext;
@@ -39,6 +40,42 @@ pub enum SettingsServiceError {
     AppSettings(#[from] clipvault_db::AppSettingsError),
     #[error("ignored apps error: {0}")]
     IgnoredApps(#[from] clipvault_db::IgnoredAppsError),
+}
+
+const CONTEXTUAL_SETUP_GUIDANCE_DISMISSED_GNOME_KEY: &str =
+    "contextual_desktop_setup_guidance_dismissed_gnome";
+const CONTEXTUAL_SETUP_GUIDANCE_DISMISSED_KDE_KEY: &str =
+    "contextual_desktop_setup_guidance_dismissed_kde";
+
+/// Stable integration identifiers for the locally dismissible first-run
+/// desktop setup guidance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopSetupIntegration {
+    Gnome,
+    Kde,
+}
+
+impl DesktopSetupIntegration {
+    fn dismissal_setting_key(self) -> &'static str {
+        match self {
+            Self::Gnome => CONTEXTUAL_SETUP_GUIDANCE_DISMISSED_GNOME_KEY,
+            Self::Kde => CONTEXTUAL_SETUP_GUIDANCE_DISMISSED_KDE_KEY,
+        }
+    }
+}
+
+fn dismissal_preference_is_true(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("true")
+}
+
+/// Per-integration local dismissal state. These values are independent of
+/// the consent stored by the GNOME and KDE integration lifecycles.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextualDesktopSetupDismissals {
+    pub gnome_dismissed: bool,
+    pub kde_dismissed: bool,
 }
 
 #[derive(Clone)]
@@ -84,6 +121,45 @@ impl SettingsService {
     /// service field.
     pub fn peer_identity(&self) -> PeerIdentityService {
         self.peer_identity.clone()
+    }
+
+    /// Read the local dismissal preferences for GNOME and KDE setup guidance.
+    /// Missing rows preserve the default of showing a relevant first-run hint.
+    pub fn contextual_desktop_setup_dismissals(
+        &self,
+        context: &AppContext,
+    ) -> Result<ContextualDesktopSetupDismissals, SettingsServiceError> {
+        let mut db = context.database().lock();
+        let repo = AppSettingsRepository::new(db.connection_mut());
+        let gnome_dismissed = repo
+            .get(CONTEXTUAL_SETUP_GUIDANCE_DISMISSED_GNOME_KEY)?
+            .map(|setting| dismissal_preference_is_true(&setting.value))
+            .unwrap_or(false);
+        let kde_dismissed = repo
+            .get(CONTEXTUAL_SETUP_GUIDANCE_DISMISSED_KDE_KEY)?
+            .map(|setting| dismissal_preference_is_true(&setting.value))
+            .unwrap_or(false);
+        Ok(ContextualDesktopSetupDismissals {
+            gnome_dismissed,
+            kde_dismissed,
+        })
+    }
+
+    /// Persist that the user dismissed one integration's contextual hint.
+    /// This does not read or modify the integration's consent state.
+    pub fn dismiss_contextual_desktop_setup_guidance(
+        &self,
+        context: &AppContext,
+        integration: DesktopSetupIntegration,
+    ) -> Result<ContextualDesktopSetupDismissals, SettingsServiceError> {
+        let mut db = context.database().lock();
+        AppSettingsRepository::new(db.connection_mut()).set(
+            integration.dismissal_setting_key(),
+            "true",
+            self.clock.now(),
+        )?;
+        drop(db);
+        self.contextual_desktop_setup_dismissals(context)
     }
 
     /// Return the persisted local clipboard-capture preference. Existing
@@ -949,5 +1025,41 @@ mod tests {
         assert!(parse_local_clipboard_capture_enabled(Some("unknown")));
         assert!(parse_local_clipboard_capture_enabled(Some(" true ")));
         assert!(!parse_local_clipboard_capture_enabled(Some(" false ")));
+    }
+
+    #[test]
+    fn contextual_setup_dismissals_are_local_per_integration_and_separate_from_consent() {
+        use crate::test_support::isolated_harness;
+        use std::sync::Arc;
+
+        let (_dir, context) = isolated_harness();
+        let probe = Arc::new(clipvault_platform::NoopActiveApplicationProbe);
+        let gate = crate::privacy::PrivacyGate::new(
+            crate::privacy::CoreBlacklistMatcher::with_ignored(probe, vec![]),
+        );
+        let service = SettingsService::new(Arc::new(crate::clock::SystemClock), gate);
+
+        assert_eq!(
+            service
+                .contextual_desktop_setup_dismissals(&context)
+                .expect("read defaults"),
+            ContextualDesktopSetupDismissals::default()
+        );
+        let dismissals = service
+            .dismiss_contextual_desktop_setup_guidance(&context, DesktopSetupIntegration::Gnome)
+            .expect("dismiss GNOME hint");
+        assert!(dismissals.gnome_dismissed);
+        assert!(!dismissals.kde_dismissed);
+        assert_eq!(
+            service
+                .contextual_desktop_setup_dismissals(&context)
+                .expect("reload dismissals"),
+            dismissals
+        );
+        let dismissals = service
+            .dismiss_contextual_desktop_setup_guidance(&context, DesktopSetupIntegration::Kde)
+            .expect("dismiss KDE hint");
+        assert!(dismissals.gnome_dismissed);
+        assert!(dismissals.kde_dismissed);
     }
 }

@@ -1,13 +1,13 @@
 # Propuesta: activación sencilla de integraciones Wayland
 
-## Por qué
+## Why
 
 La configuración GNOME actual pide primero aceptar el consentimiento y luego
 volver a pulsar para instalar la extensión. En KDE la persona ya tiene una
 acción conjunta para consentir y activar. Las diferencias no responden a una
 necesidad del usuario y hacen que GNOME parezca más difícil de lo que es.
 
-## Cambios
+## What Changes
 
 - Combinar el consentimiento explícito y la instalación local de GNOME en una
   sola acción **Configurar integración**.
@@ -39,7 +39,7 @@ incluyendo sus APIs soportadas para habilitación y recarga. No se debe usar
 una API privada o un mecanismo que eluda el consentimiento para ahorrar un
 paso.
 
-## Impacto
+## Impact
 
 - Servicios de instalación y activación GNOME/KDE, adaptadores Tauri y vista
   Integraciones de escritorio.
