@@ -121,7 +121,7 @@
   import DesktopToolbar from "./DesktopToolbar.svelte";
   import Modal from "./Modal.svelte";
   import DevelopmentModal from "./DevelopmentModal.svelte";
-  import GnomeIntegrationModal from "./GnomeIntegrationModal.svelte";
+  import DesktopIntegrationsModal from "./DesktopIntegrationsModal.svelte";
   import GeneralSettingsModal from "./GeneralSettingsModal.svelte";
   import KeyboardShortcutsModal from "./KeyboardShortcutsModal.svelte";
   import PrivacyModal from "./PrivacyModal.svelte";
@@ -151,7 +151,7 @@
     | null
     | "development"
     | "general_settings"
-    | "gnome_integration"
+    | "desktop_integrations"
     | "privacy"
     | "peer_sharing"
     | "peer_pairing"
@@ -2117,15 +2117,17 @@
     const status = event.detail;
     if (status.kind !== "ready" || !status.payload.applicable) return;
     gnomeIntegrationStatus = status;
-    // The Development modal is replaced, so retain the toolbar trigger
-    // already captured for it as the focus-return destination.
-    openModalWith("gnome_integration", modalReturnFocus);
+    // Keep the original desktop trigger as the focus-return destination while
+    // moving the user into the normal settings surface.
+    openModalWith("desktop_integrations", modalReturnFocus);
   }
 
-  function onGnomeStatusChanged(
-    event: CustomEvent<GnomeIntegrationStatusResponse>,
-  ): void {
-    gnomeIntegrationStatus = event.detail;
+  function onOpenDesktopIntegrations(): void {
+    openModalWith("desktop_integrations", modalReturnFocus);
+  }
+
+  function onGnomeStatusChanged(status: GnomeIntegrationStatusResponse): void {
+    gnomeIntegrationStatus = status;
   }
 
   function onOpenPrivacy(event: MouseEvent): void {
@@ -2982,19 +2984,21 @@
     on:entriesChanged={(e) => onModalEntriesChanged(e)}
     on:pasteFailed={(e) => onPasteFailed(e)}
     on:configureGnome={onConfigureGnome}
+    on:openDesktopIntegrations={onOpenDesktopIntegrations}
   />
 </Modal>
 
 <Modal
-  open={openModal === "gnome_integration"}
-  titleId="gnome-integration-title"
-  title={$t("app.modal.gnome")}
+  open={openModal === "desktop_integrations"}
+  titleId="desktop-integrations-title"
+  title={$t("settings.desktop_integrations.title")}
   returnFocusTo={modalReturnFocus}
   onClose={closeModal}
 >
-  <GnomeIntegrationModal
-    initial={gnomeIntegrationStatus}
-    on:statusChanged={onGnomeStatusChanged}
+  <DesktopIntegrationsModal
+    open={openModal === "desktop_integrations"}
+    initialGnomeStatus={gnomeIntegrationStatus}
+    on:gnomeStatusChanged={(event) => onGnomeStatusChanged(event.detail)}
   />
 </Modal>
 
@@ -3010,6 +3014,7 @@
     platformOs={diagnostics?.platform_os ?? null}
     displayServer={diagnostics?.display_server ?? null}
     on:keyboardShortcutsRequested={onOpenKeyboardShortcuts}
+    on:desktopIntegrationsRequested={onOpenDesktopIntegrations}
   />
 </Modal>
 

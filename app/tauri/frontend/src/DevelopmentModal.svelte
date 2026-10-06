@@ -17,12 +17,7 @@
     captureTickCommand,
     diagnosticsCommand,
     gnomeIntegrationStatusCommand,
-    kdeKwinIntegrationActivateCommand,
-    kdeKwinIntegrationDeclineCommand,
-    kdeKwinIntegrationDisableCommand,
-    kdeKwinIntegrationRetryCommand,
     kdeKwinIntegrationStatusCommand,
-    kdeKwinIntegrationUninstallCommand,
     pasteEntryCommand,
     platformCapabilitiesCommand,
     recentEntriesCommand,
@@ -66,6 +61,7 @@
     pasteFailed: PasteResponse;
     gnomeStatusChanged: GnomeIntegrationStatusResponse;
     configureGnome: GnomeIntegrationStatusResponse;
+    openDesktopIntegrations: void;
   }>();
 
   async function refreshDiagnostics(): Promise<void> {
@@ -103,21 +99,6 @@
     kdeKwinError = null;
     try {
       kdeKwinStatus = await kdeKwinIntegrationStatusCommand();
-    } catch (err) {
-      kdeKwinError = "development.error.kde";
-    } finally {
-      kdeKwinBusy = false;
-    }
-  }
-
-  async function runKdeKwinAction(
-    action: () => Promise<KdeKwinIntegrationPayload>,
-  ): Promise<void> {
-    if (kdeKwinBusy) return;
-    kdeKwinBusy = true;
-    kdeKwinError = null;
-    try {
-      kdeKwinStatus = await action();
     } catch (err) {
       kdeKwinError = "development.error.kde";
     } finally {
@@ -396,55 +377,13 @@
       >
         {kdeKwinBusy ? $t("development.refreshing") : $t("development.kde.check")}
       </button>
-      {#if kdeKwinStatus?.applicable && (!kdeKwinStatus.enabled || kdeKwinStatus.consent !== "accepted")}
+      {#if kdeKwinStatus?.applicable}
         <button
           type="button"
-          class="primary"
-          on:click={() => runKdeKwinAction(kdeKwinIntegrationActivateCommand)}
-          disabled={kdeKwinBusy}
-          data-testid="kde-kwin-activate"
+          on:click={() => dispatch("openDesktopIntegrations")}
+          data-testid="kde-kwin-open-settings"
         >
-          {kdeKwinBusy ? $t("development.processing") : $t("development.kde.activate")}
-        </button>
-      {/if}
-      {#if kdeKwinStatus?.applicable && kdeKwinStatus.consent === "unknown"}
-        <button
-          type="button"
-          class="secondary"
-          on:click={() => runKdeKwinAction(kdeKwinIntegrationDeclineCommand)}
-          disabled={kdeKwinBusy}
-          data-testid="kde-kwin-decline"
-        >
-          {$t("development.kde.decline")}
-        </button>
-      {/if}
-      {#if kdeKwinStatus?.applicable && kdeKwinStatus.installed && kdeKwinStatus.enabled}
-        <button
-          type="button"
-          on:click={() => runKdeKwinAction(kdeKwinIntegrationDisableCommand)}
-          disabled={kdeKwinBusy}
-          data-testid="kde-kwin-disable"
-        >
-          {$t("development.kde.disable")}
-        </button>
-        <button
-          type="button"
-          class="secondary"
-          on:click={() => runKdeKwinAction(kdeKwinIntegrationUninstallCommand)}
-          disabled={kdeKwinBusy}
-          data-testid="kde-kwin-uninstall"
-        >
-          {$t("development.kde.uninstall")}
-        </button>
-      {/if}
-      {#if kdeKwinStatus?.applicable && kdeKwinStatus.consent === "accepted" && kdeKwinStatus.installed && kdeKwinStatus.enabled && kdeKwinStatus.technical_state !== "identified"}
-        <button
-          type="button"
-          on:click={() => runKdeKwinAction(kdeKwinIntegrationRetryCommand)}
-          disabled={kdeKwinBusy}
-          data-testid="kde-kwin-retry"
-        >
-          {$t("development.kde.retry")}
+          {$t("development.kde.open_settings")}
         </button>
       {/if}
     </div>

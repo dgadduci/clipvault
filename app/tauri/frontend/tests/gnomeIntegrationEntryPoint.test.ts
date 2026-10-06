@@ -42,10 +42,10 @@ test("opening GNOME configuration only forwards the status snapshot to the modal
   assert.equal(entryPoint.includes("gnomeIntegrationSetConsentCommand"), false);
   assert.equal(entryPoint.includes("gnomeIntegrationInstallCommand"), false);
 
-  assert.match(app, /import GnomeIntegrationModal from "\.\/GnomeIntegrationModal\.svelte"/);
-  assert.match(app, /\| "gnome_integration"/);
-  assert.match(app, /open=\{openModal === "gnome_integration"\}/);
-  assert.match(app, /initial=\{gnomeIntegrationStatus\}/);
+  assert.match(app, /import DesktopIntegrationsModal from "\.\/DesktopIntegrationsModal\.svelte"/);
+  assert.match(app, /\| "desktop_integrations"/);
+  assert.match(app, /open=\{openModal === "desktop_integrations"\}/);
+  assert.match(app, /initialGnomeStatus=\{gnomeIntegrationStatus\}/);
   assert.match(app, /on:configureGnome=\{onConfigureGnome\}/);
 });
 
@@ -55,7 +55,8 @@ test("an installed GNOME integration can explicitly reinstall the bundled resour
   assert.match(modal, /data-testid="gnome-reinstall-action"/);
   assert.match(modal, /on:click=\{activate\}/);
   assert.match(modal, /\$t\("gnome\.install\.reinstall"\)/);
-  assert.match(modal, /\$t\("gnome\.status\.activation_pending"\)/);
+  assert.match(modal, /settings\.desktop_integrations\.status\.\$\{gnomeIntegrationStatusKind\(status\)\}/);
+  assert.doesNotMatch(modal, /payload\.(backend|protocol_version|identifier|detail)/);
   assert.doesNotMatch(modal, /deshabilitala\/habilitala/);
 });
 

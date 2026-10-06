@@ -1,9 +1,9 @@
 <script lang="ts">
   /**
-   * Modal hosting the GNOME Shell integration consent flow. The
-   * surface is opt-in: it never appears on macOS, X11 or non-GNOME
-   * Wayland sessions. The bridge is metadata-only; the panel never
-   * reflects clipboard content or environment variables.
+   * GNOME integration settings embedded in the shared desktop
+   * integrations view. The surface is opt-in and only appears in a
+   * compatible GNOME Wayland session. The bridge is metadata-only; the
+   * panel never reflects clipboard content or environment variables.
    */
   import { createEventDispatcher } from "svelte";
   import {
@@ -13,6 +13,7 @@
     gnomeIntegrationStatusCommand,
     gnomeIntegrationUninstallCommand,
   } from "./lib/tauri";
+  import { gnomeIntegrationStatusKind } from "./lib/desktopIntegrationSettings";
   import { describeGnomeIntegrationError } from "./lib/gnomeIntegrationError";
   import { t } from "./lib/localization";
   import type {
@@ -32,7 +33,19 @@
     statusChanged: GnomeIntegrationStatusResponse;
     installStarted: void;
     deactivated: void;
+    actionStarted: void;
+    actionFinished: void;
   }>();
+
+  function beginAction(): void {
+    busy = true;
+    dispatch("actionStarted");
+  }
+
+  function finishAction(): void {
+    busy = false;
+    dispatch("actionFinished");
+  }
 
   async function refresh(): Promise<void> {
     lastError = null;
@@ -48,7 +61,7 @@
 
   async function applyConsent(decision: GnomeConsentDecision): Promise<void> {
     if (busy) return;
-    busy = true;
+    beginAction();
     lastError = null;
     lastAction = decision === "accepted" ? "accept" : "decline";
     try {
@@ -60,13 +73,13 @@
     } catch (err) {
       lastError = describeGnomeIntegrationError(err);
     } finally {
-      busy = false;
+      finishAction();
     }
   }
 
   async function activate(): Promise<void> {
     if (busy) return;
-    busy = true;
+    beginAction();
     lastError = null;
     try {
       dispatch("installStarted");
@@ -75,13 +88,13 @@
     } catch (err) {
       lastError = describeGnomeIntegrationError(err);
     } finally {
-      busy = false;
+      finishAction();
     }
   }
 
   async function deactivate(): Promise<void> {
     if (busy) return;
-    busy = true;
+    beginAction();
     lastError = null;
     try {
       await gnomeIntegrationUninstallCommand();
@@ -90,13 +103,13 @@
     } catch (err) {
       lastError = describeGnomeIntegrationError(err);
     } finally {
-      busy = false;
+      finishAction();
     }
   }
 
   async function retry(): Promise<void> {
     if (busy) return;
-    busy = true;
+    beginAction();
     lastError = null;
     try {
       await gnomeIntegrationRetryCommand();
@@ -104,7 +117,7 @@
     } catch (err) {
       lastError = describeGnomeIntegrationError(err);
     } finally {
-      busy = false;
+      finishAction();
     }
   }
 
@@ -115,8 +128,13 @@
   $: shouldShowDeclined =
     status?.kind === "ready" && status.payload.consent === "declined";
   $: isInstalled = status?.kind === "ready" && status.payload.installed;
-  $: technicalState = status?.kind === "ready" ? status.payload.technical_state : null;
-  $: identifier = status?.kind === "ready" ? status.payload.identifier : null;
+  $: if (initial) status = initial;
+  $: statusSummaryKey =
+    status?.kind === "ready"
+      ? gnomeIntegrationStatusKind(status) === "pending"
+        ? "settings.desktop_integrations.status.pending.gnome"
+        : `settings.desktop_integrations.status.${gnomeIntegrationStatusKind(status)}`
+      : "settings.desktop_integrations.status.unsupported";
 </script>
 
 <section
@@ -127,63 +145,25 @@
   <header>
     <h2>{$t("gnome.title")}</h2>
     <p class="muted">
-      {$t("gnome.description")}
+      {$t("settings.desktop_integrations.gnome.description")}
     </p>
   </header>
 
   {#if status?.kind === "not_applicable"}
     <article class="card-block">
-      <p class="muted">
-        {$t("gnome.not_applicable", { session: status.session, desktop: status.desktop })}
-      </p>
+      <p class="muted">{$t("settings.desktop_integrations.unavailable")}</p>
     </article>
   {:else if status?.kind === "not_configured"}
     <article class="card-block">
-      <p class="muted">
-        {$t("gnome.not_available_build", { reason: status.reason })}
-      </p>
+      <p class="muted">{$t("settings.desktop_integrations.unavailable")}</p>
     </article>
   {:else if status?.kind === "ready" && status.payload.applicable}
-<article class="card-block">
-    <h3>{$t("gnome.status.title")}</h3>
-    <dl class="diag-list">
-      <dt>{$t("gnome.status.session")}</dt>
-      <dd><code>{status.payload.session}</code></dd>
-      <dt>{$t("gnome.status.backend")}</dt>
-      <dd><code>{status.payload.backend}</code></dd>
-      <dt>{$t("gnome.status.protocol_version")}</dt>
-      <dd><code>{status.payload.protocol_version}</code></dd>
-      <dt>{$t("gnome.status.technical_state")}</dt>
-      <dd><code>{technicalState ?? $t("common.unknown")}</code></dd>
-      <dt>{$t("gnome.status.published_identifier")}</dt>
-      <dd><code>{identifier ?? $t("common.none")}</code></dd>
-      {#if status.payload.detail}
-        <dt>{$t("gnome.status.detail")}</dt>
-        <dd><code>{status.payload.detail}</code></dd>
-      {/if}
-    </dl>
-    {#if technicalState === "activation_pending"}
-      <p class="muted">
-        {$t("gnome.status.activation_pending")}
+    <article class="card-block" data-testid="gnome-integration-status">
+      <h3>{$t("gnome.status.title")}</h3>
+      <p class="muted" role="status" data-testid="gnome-friendly-status">
+        {$t(statusSummaryKey)}
       </p>
-    {:else if technicalState === "connected"}
-      <p class="muted">
-        {$t("gnome.status.connected")}
-      </p>
-    {:else if technicalState === "identified" || technicalState === "no_active_application"}
-      <p class="muted">
-        {$t("gnome.status.identified")}
-      </p>
-    {:else if technicalState === "disconnected" || technicalState === "communication_error"}
-      <p class="muted">
-        {$t("gnome.status.disconnected")}
-      </p>
-    {:else if technicalState === "incompatible"}
-      <p class="muted">
-        {$t("gnome.status.incompatible")}
-      </p>
-    {/if}
-  </article>
+    </article>
 
     {#if shouldShowConsent}
       <article class="card-block" data-testid="gnome-consent-card">
@@ -348,25 +328,6 @@
   ul {
     margin: 0;
     padding-left: 1.1rem;
-  }
-
-  .diag-list {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 0.85rem;
-    row-gap: 0.25rem;
-    margin: 0;
-  }
-
-  .diag-list dt {
-    color: var(--cv-fg-muted, #94a3b8);
-    font-weight: 500;
-  }
-
-  .diag-list dd {
-    margin: 0;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    word-break: break-all;
   }
 
   .row {

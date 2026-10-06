@@ -4,6 +4,8 @@
   import {
     captureControlGetCommand,
     captureControlSetCommand,
+    gnomeIntegrationStatusCommand,
+    kdeKwinIntegrationStatusCommand,
     settingsGetCommand,
     settingsSetCommand,
   } from "./lib/tauri.ts";
@@ -13,6 +15,7 @@
   } from "./lib/captureControlUpdates.ts";
   import { captureToggleShortcutLabel } from "./lib/clipboardCaptureControl.ts";
   import { keyboardShortcuts } from "./lib/keyboardShortcuts.ts";
+  import { hasManageableDesktopIntegration } from "./lib/desktopIntegrationSettings.ts";
   import { createEventDispatcher } from "svelte";
   import {
     localeStore,
@@ -25,7 +28,10 @@
   export let platformOs: string | null = null;
   export let displayServer: string | null = null;
 
-  const dispatch = createEventDispatcher<{ keyboardShortcutsRequested: void }>();
+  const dispatch = createEventDispatcher<{
+    keyboardShortcutsRequested: void;
+    desktopIntegrationsRequested: void;
+  }>();
 
   let captureEnabled: boolean | null = null;
   let shareNotesEnabled: boolean | null = null;
@@ -34,12 +40,37 @@
   let saving = false;
   let errorKey: string | null = null;
   let requestId = 0;
+  let integrationAvailabilityRequestId = 0;
+  let desktopIntegrationsAvailable = false;
+  let desktopIntegrationsAvailabilityError = false;
   let disposed = false;
   let unlisten: (() => void) | null = null;
   let unlistenError: (() => void) | null = null;
 
   $: shortcut = $keyboardShortcuts && captureToggleShortcutLabel(platformOs);
   $: if (open) void loadSettings();
+  $: if (open) void loadDesktopIntegrationAvailability();
+
+  async function loadDesktopIntegrationAvailability(): Promise<void> {
+    const currentRequest = ++integrationAvailabilityRequestId;
+    desktopIntegrationsAvailable = false;
+    desktopIntegrationsAvailabilityError = false;
+    if (platformOs !== "linux") return;
+
+    const [gnomeResult, kdeResult] = await Promise.allSettled([
+      gnomeIntegrationStatusCommand(),
+      kdeKwinIntegrationStatusCommand(),
+    ]);
+    if (currentRequest !== integrationAvailabilityRequestId) return;
+
+    const gnome = gnomeResult.status === "fulfilled" ? gnomeResult.value : null;
+    const kde = kdeResult.status === "fulfilled" ? kdeResult.value : null;
+    desktopIntegrationsAvailable = hasManageableDesktopIntegration(gnome, kde);
+
+    if (gnomeResult.status === "rejected" || kdeResult.status === "rejected") {
+      desktopIntegrationsAvailabilityError = true;
+    }
+  }
 
   async function loadSettings(): Promise<void> {
     const currentRequest = ++requestId;
@@ -147,6 +178,7 @@
 
   onDestroy(() => {
     disposed = true;
+    integrationAvailabilityRequestId += 1;
     unlisten?.();
     unlisten = null;
     unlistenError?.();
@@ -166,6 +198,24 @@
       >{$t("keyboard_shortcuts.open")}</button>
     </div>
   </article>
+  {#if desktopIntegrationsAvailable}
+    <article data-testid="desktop-integrations-setting">
+      <h3>{$t("settings.desktop_integrations.title")}</h3>
+      <p class="muted">{$t("settings.desktop_integrations.entry_description")}</p>
+      {#if desktopIntegrationsAvailabilityError}
+        <p class="error" role="status">{$t("settings.desktop_integrations.error")}</p>
+      {/if}
+      <div class="controls">
+        <button
+          type="button"
+          on:click={() => dispatch("desktopIntegrationsRequested")}
+          data-testid="desktop-integrations-open"
+        >
+          {$t("settings.desktop_integrations.open")}
+        </button>
+      </div>
+    </article>
+  {/if}
   <article data-testid="language-setting">
     <h3>{$t("settings.language.title")}</h3>
     <p class="muted">{$t("settings.language.description")}</p>

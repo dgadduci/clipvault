@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-10-05
+goal: Hacer que la configuración de las integraciones opcionales de GNOME y KDE Wayland sea fácil de encontrar y comprensible para usuarios no técnicos.
