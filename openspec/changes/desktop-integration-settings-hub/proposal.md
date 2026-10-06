@@ -12,8 +12,8 @@ no ayudan a completar la configuración.
 
 - Agregar **Integraciones de escritorio** a Configuración general en Linux
   cuando la sesión detectada tenga una integración compatible y aplicable.
-- Reubicar allí la configuración de GNOME y KDE Plasma Wayland. Conservar en
-  Development los diagnósticos y acciones de desarrollo.
+- Reubicar allí toda la configuración de GNOME y KDE Plasma Wayland. Quitar
+  de Development las tarjetas y los accesos de gestión de ambas integraciones.
 - Presentar el estado en lenguaje cotidiano, con la siguiente acción clara y
   las acciones existentes de reintentar, desactivar o desinstalar cuando
   correspondan.
@@ -38,6 +38,7 @@ archivar porque sus verificaciones pendientes exceden este alcance.
 ## Impacto
 
 - `app/tauri/frontend`: entrada de Configuración general y vista de
-  Integraciones de escritorio; retiro de controles de usuario de Development.
+  Integraciones de escritorio; Development deja de mostrar las tarjetas y
+  controles GNOME/KDE.
 - Catálogos de idioma: textos completos en los cinco idiomas disponibles.
 - No se agregan comandos, dependencias, permisos ni accesos de red.

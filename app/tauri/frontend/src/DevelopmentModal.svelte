@@ -16,15 +16,12 @@
     activeApplicationCommand,
     captureTickCommand,
     diagnosticsCommand,
-    gnomeIntegrationStatusCommand,
-    kdeKwinIntegrationStatusCommand,
     pasteEntryCommand,
     platformCapabilitiesCommand,
     recentEntriesCommand,
     refreshCapabilitiesCommand,
   } from "./lib/tauri";
   import { shouldEnablePasteButton } from "./lib/guidance";
-  import { describeGnomeIntegrationError } from "./lib/gnomeIntegrationError";
   import { t } from "./lib/localization";
   import { createEventDispatcher } from "svelte";
   import type {
@@ -32,8 +29,6 @@
     Capabilities,
     Diagnostics,
     EntryRecord,
-    GnomeIntegrationStatusResponse,
-    KdeKwinIntegrationPayload,
     PasteResponse,
   } from "./types";
 
@@ -47,21 +42,12 @@
   let tickResult: string | null = null;
   let capRefreshBusy = false;
   let refreshError: string | null = null;
-  let gnomeStatus: GnomeIntegrationStatusResponse | null = null;
-  let gnomeBusy = false;
-  let gnomeError: string | null = null;
-  let kdeKwinStatus: KdeKwinIntegrationPayload | null = null;
-  let kdeKwinBusy = false;
-  let kdeKwinError: string | null = null;
 
   const dispatch = createEventDispatcher<{
     refresh: void;
     capabilitiesChanged: Capabilities;
     entriesChanged: EntryRecord[];
     pasteFailed: PasteResponse;
-    gnomeStatusChanged: GnomeIntegrationStatusResponse;
-    configureGnome: GnomeIntegrationStatusResponse;
-    openDesktopIntegrations: void;
   }>();
 
   async function refreshDiagnostics(): Promise<void> {
@@ -79,41 +65,6 @@
     } catch (err) {
       refreshError = "development.error.refresh";
     }
-  }
-
-  async function refreshGnomeStatus(): Promise<void> {
-    gnomeError = null;
-    gnomeBusy = true;
-    try {
-      gnomeStatus = await gnomeIntegrationStatusCommand();
-      dispatch("gnomeStatusChanged", gnomeStatus);
-    } catch (err) {
-      gnomeError = describeGnomeIntegrationError(err);
-    } finally {
-      gnomeBusy = false;
-    }
-  }
-
-  async function refreshKdeKwinStatus(): Promise<void> {
-    kdeKwinBusy = true;
-    kdeKwinError = null;
-    try {
-      kdeKwinStatus = await kdeKwinIntegrationStatusCommand();
-    } catch (err) {
-      kdeKwinError = "development.error.kde";
-    } finally {
-      kdeKwinBusy = false;
-    }
-  }
-
-  function configureGnome(): void {
-    if (gnomeStatus?.kind !== "ready" || !gnomeStatus.payload.applicable) {
-      return;
-    }
-    // Opening the configuration surface is deliberately separate
-    // from querying diagnostics: this button never persists consent
-    // or installs the extension by itself.
-    dispatch("configureGnome", gnomeStatus);
   }
 
   async function refreshCapabilities(): Promise<void> {
@@ -282,112 +233,6 @@
     </div>
   </article>
 
-  <article class="card-block" data-testid="gnome-integration-card">
-    <h3 class="block-title">{$t("gnome.title")}</h3>
-    <p class="muted">
-      {$t("development.gnome.description")}
-    </p>
-    {#if gnomeStatus === null}
-      <p class="muted">{$t("development.status.on_demand")}</p>
-    {:else if gnomeStatus.kind === "not_applicable"}
-      <p><strong>{$t("development.status.not_applicable")}</strong> ({gnomeStatus.session}, {gnomeStatus.desktop}).</p>
-    {:else if gnomeStatus.kind === "not_configured"}
-      <p class="muted">{$t("development.gnome.not_configured", { reason: gnomeStatus.reason })}</p>
-    {:else if gnomeStatus.kind === "ready"}
-      <dl class="diag-list">
-        <dt>{$t("gnome.status.session")}</dt>
-        <dd><code>{gnomeStatus.payload.session}</code></dd>
-        <dt>{$t("development.status.consent")}</dt>
-        <dd><code>{gnomeStatus.payload.consent}</code></dd>
-        <dt>{$t("gnome.status.technical_state")}</dt>
-        <dd><code>{gnomeStatus.payload.technical_state}</code></dd>
-        <dt>{$t("gnome.status.published_identifier")}</dt>
-        <dd>
-          <code>{gnomeStatus.payload.identifier ?? $t("common.none")}</code>
-        </dd>
-        {#if gnomeStatus.payload.detail}
-          <dt>{$t("gnome.status.detail")}</dt>
-          <dd><code>{gnomeStatus.payload.detail}</code></dd>
-        {/if}
-      </dl>
-    {/if}
-    {#if gnomeError}
-      <p class="status error" role="alert" data-testid="gnome-debug-error">
-        {$t(gnomeError)}
-      </p>
-    {/if}
-    <div class="row">
-      <button
-        type="button"
-        on:click={refreshGnomeStatus}
-        disabled={gnomeBusy}
-        data-testid="gnome-debug-refresh"
-      >
-        {gnomeBusy ? $t("development.refreshing") : $t("development.refresh_gnome")}
-      </button>
-      {#if gnomeStatus?.kind === "ready" && gnomeStatus.payload.applicable}
-        <button
-          type="button"
-          on:click={configureGnome}
-          disabled={gnomeBusy}
-          data-testid="gnome-configure"
-        >
-          {$t("development.configure_gnome")}
-        </button>
-      {/if}
-    </div>
-  </article>
-
-  <article class="card-block" data-testid="kde-kwin-integration-card">
-    <h3 class="block-title">{$t("development.kde.title")}</h3>
-    <p class="muted">
-      {$t("development.kde.description")}
-    </p>
-    {#if kdeKwinStatus}
-      <dl class="diag-list">
-        <dt>{$t("gnome.status.session")}</dt>
-        <dd><code>{kdeKwinStatus.session}</code></dd>
-        <dt>{$t("development.status.consent")}</dt>
-        <dd><code>{kdeKwinStatus.consent}</code></dd>
-        <dt>{$t("gnome.status.technical_state")}</dt>
-        <dd><code>{kdeKwinStatus.technical_state}</code></dd>
-        <dt>{$t("development.kde.installed")}</dt>
-        <dd><code>{kdeKwinStatus.installed ? $t("common.yes") : $t("common.no")}</code></dd>
-        <dt>{$t("development.kde.enabled")}</dt>
-        <dd><code>{kdeKwinStatus.enabled ? $t("common.yes") : $t("common.no")}</code></dd>
-        {#if kdeKwinStatus.error}
-          <dt>{$t("development.error.label")}</dt>
-          <dd><code>{kdeKwinStatus.error}</code></dd>
-        {/if}
-      </dl>
-    {:else}
-      <p class="muted">{$t("development.kde.status_hint")}</p>
-    {/if}
-    {#if kdeKwinError}
-      <p class="status error" role="alert" data-testid="kde-kwin-error">
-        {$t(kdeKwinError)}
-      </p>
-    {/if}
-    <div class="row">
-      <button
-        type="button"
-        on:click={refreshKdeKwinStatus}
-        disabled={kdeKwinBusy}
-        data-testid="kde-kwin-refresh"
-      >
-        {kdeKwinBusy ? $t("development.refreshing") : $t("development.kde.check")}
-      </button>
-      {#if kdeKwinStatus?.applicable}
-        <button
-          type="button"
-          on:click={() => dispatch("openDesktopIntegrations")}
-          data-testid="kde-kwin-open-settings"
-        >
-          {$t("development.kde.open_settings")}
-        </button>
-      {/if}
-    </div>
-  </article>
 </section>
 
 <style>

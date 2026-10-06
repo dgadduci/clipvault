@@ -55,7 +55,6 @@
     const currentRequest = ++integrationAvailabilityRequestId;
     desktopIntegrationsAvailable = false;
     desktopIntegrationsAvailabilityError = false;
-    if (platformOs !== "linux") return;
 
     const [gnomeResult, kdeResult] = await Promise.allSettled([
       gnomeIntegrationStatusCommand(),

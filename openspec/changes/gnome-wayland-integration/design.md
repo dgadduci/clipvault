@@ -213,12 +213,11 @@ No mostrar rutas internas, UUID técnicos innecesarios, PID, títulos ni variabl
 
 El diagnóstico metadata-only debe incluir backend estable, estado, versión de protocolo y etapa. No debe incluir secretos, contenido ni rutas absolutas.
 
-El diagnóstico es también el punto de entrada explícito a la configuración:
-cuando el estado sea `ready` y `applicable = true`, su tarjeta debe ofrecer
-**Configurar integración GNOME**. El control abre el modal de consentimiento
-con el snapshot ya consultado; no acepta consentimiento, instala ni cambia la
-configuración por sí mismo. Las sesiones no aplicables y las builds sin la
-feature conservan sólo el diagnóstico informativo.
+La configuración consentida de GNOME se abre desde Configuración general →
+Integraciones de escritorio. El modal consulta el estado actual al abrirse y
+no acepta consentimiento ni instala la extensión automáticamente. Development
+ya no ofrece tarjetas, estados ni botones de gestión de GNOME; ese flujo fue
+trasladado por `desktop-integration-settings-hub`.
 
 Los errores tipados de los comandos Tauri se convierten a un mensaje breve y
 estable antes de mostrarse. La UI no debe interpolar un objeto de IPC como

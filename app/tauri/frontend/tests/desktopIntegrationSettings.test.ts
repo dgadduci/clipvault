@@ -98,7 +98,7 @@ test("refresh updates both integrations and exposes localized errors", () => {
   const modal = loadSource("src/DesktopIntegrationsModal.svelte");
 
   assert.match(modal, /const \[gnomeResult, kdeResult\] = await Promise\.allSettled/);
-  assert.match(modal, /dispatch\("gnomeStatusChanged", gnomeStatus\)/);
+  assert.match(modal, /gnomeStatus = gnomeResult\.value/);
   assert.match(modal, /on:click=\{refreshStatus\}/);
   assert.match(modal, /gnomeError = "settings\.desktop_integrations\.error"/);
   assert.match(modal, /kdeError = "settings\.desktop_integrations\.error"/);
@@ -113,7 +113,7 @@ test("General settings opens the shared desktop integrations modal", () => {
   assert.match(settings, /data-testid="desktop-integrations-setting"/);
   assert.match(settings, /desktopIntegrationsRequested/);
   assert.match(app, /on:desktopIntegrationsRequested=\{onOpenDesktopIntegrations\}/);
-  assert.match(app, /<DesktopIntegrationsModal[\s\S]*?initialGnomeStatus=\{gnomeIntegrationStatus\}/);
+  assert.match(app, /<DesktopIntegrationsModal\s+open=\{openModal === "desktop_integrations"\}/);
   assert.match(modal, /data-testid="desktop-integrations-kde-activate"/);
   assert.match(modal, /<GnomeIntegrationModal/);
   assert.doesNotMatch(modal, /technical_state\}/);
@@ -122,4 +122,17 @@ test("General settings opens the shared desktop integrations modal", () => {
     loadSource("src/GnomeIntegrationModal.svelte"),
     /settings\.desktop_integrations\.status\.pending\.gnome/,
   );
+  assert.match(settings, /Promise\.allSettled\(\[\s*gnomeIntegrationStatusCommand\(\),\s*kdeKwinIntegrationStatusCommand\(\)/);
+  assert.doesNotMatch(settings, /platformOs !== "linux"/);
+});
+
+test("Development no longer owns the GNOME or KDE integration settings", () => {
+  const development = loadSource("src/DevelopmentModal.svelte");
+  const app = loadSource("src/App.svelte");
+
+  assert.doesNotMatch(development, /gnomeIntegrationStatusCommand|kdeKwinIntegrationStatusCommand/);
+  assert.doesNotMatch(development, /gnome-integration-card|kde-kwin-integration-card/);
+  assert.doesNotMatch(development, /configureGnome|openDesktopIntegrations/);
+  assert.doesNotMatch(app, /on:configureGnome|on:openDesktopIntegrations/);
+  assert.match(app, /on:desktopIntegrationsRequested=\{onOpenDesktopIntegrations\}/);
 });

@@ -24,9 +24,15 @@ recibe una opción que prometa activar algo que ClipVault no puede ofrecer.
 - Mostrar solo las acciones válidas para el estado actual y reutilizar los
   comandos y servicios existentes para configurar, reintentar, desactivar o
   desinstalar.
-- Mantener en Development el diagnóstico detallado. La vista de usuario no
-  muestra nombres de backend, versión de protocolo, identificadores de
-  aplicación, rutas, variables de entorno ni errores técnicos sin traducir.
+- Development no muestra tarjetas, estados ni accesos de gestión GNOME/KDE.
+  La vista Integraciones de escritorio es el único lugar de la aplicación
+  para consultar y administrar estas integraciones.
+- La vista de usuario no muestra nombres de backend, versión de protocolo,
+  identificadores de aplicación, rutas, variables de entorno ni errores
+  técnicos sin traducir.
+- Consultar los adapters para decidir la disponibilidad, incluso si el
+  diagnóstico general todavía no se ha cargado. Los adapters informan si
+  GNOME o KDE son aplicables y evitan depender de una etiqueta de plataforma.
 
 ## Compatibilidad con las preferencias existentes
 

@@ -19,34 +19,19 @@ function loadSource(...segments: string[]): string {
   return readFileSync(path.join(FRONTEND_ROOT, ...segments), "utf8");
 }
 
-test("the applicable GNOME diagnostics card offers an explicit configuration entry point", () => {
-  const source = loadSource("src/DevelopmentModal.svelte");
-
-  assert.match(
-    source,
-    /gnomeStatus\?\.kind === "ready" && gnomeStatus\.payload\.applicable/,
-  );
-  assert.match(source, /data-testid="gnome-configure"/);
-  assert.match(source, /\$t\("development\.configure_gnome"\)/);
-  assert.match(source, /dispatch\("configureGnome", gnomeStatus\)/);
-});
-
-test("opening GNOME configuration only forwards the status snapshot to the modal", () => {
+test("GNOME and KDE configuration are only available from General Settings", () => {
   const development = loadSource("src/DevelopmentModal.svelte");
+  const settings = loadSource("src/GeneralSettingsModal.svelte");
   const app = loadSource("src/App.svelte");
 
-  const entryPoint = development.slice(
-    development.indexOf("function configureGnome"),
-    development.indexOf("async function refreshCapabilities"),
-  );
-  assert.equal(entryPoint.includes("gnomeIntegrationSetConsentCommand"), false);
-  assert.equal(entryPoint.includes("gnomeIntegrationInstallCommand"), false);
-
+  assert.doesNotMatch(development, /GNOME|KDE|gnome|kwin|desktopIntegrations/i);
+  assert.match(settings, /data-testid="desktop-integrations-setting"/);
+  assert.match(settings, /desktopIntegrationsRequested/);
   assert.match(app, /import DesktopIntegrationsModal from "\.\/DesktopIntegrationsModal\.svelte"/);
   assert.match(app, /\| "desktop_integrations"/);
   assert.match(app, /open=\{openModal === "desktop_integrations"\}/);
-  assert.match(app, /initialGnomeStatus=\{gnomeIntegrationStatus\}/);
-  assert.match(app, /on:configureGnome=\{onConfigureGnome\}/);
+  assert.match(app, /on:desktopIntegrationsRequested=\{onOpenDesktopIntegrations\}/);
+  assert.doesNotMatch(app, /on:configureGnome|on:openDesktopIntegrations/);
 });
 
 test("an installed GNOME integration can explicitly reinstall the bundled resource", () => {

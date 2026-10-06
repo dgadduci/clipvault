@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher, onDestroy } from "svelte";
+  import { onDestroy } from "svelte";
   import GnomeIntegrationModal from "./GnomeIntegrationModal.svelte";
   import {
     gnomeIntegrationStatusCommand,
@@ -18,9 +18,8 @@
   } from "./types";
 
   export let open = false;
-  export let initialGnomeStatus: GnomeIntegrationStatusResponse | null = null;
 
-  let gnomeStatus = initialGnomeStatus;
+  let gnomeStatus: GnomeIntegrationStatusResponse | null = null;
   let kdeStatus: KdeKwinIntegrationPayload | null = null;
   let loading = false;
   let gnomeError: string | null = null;
@@ -29,11 +28,6 @@
   let kdeBusy = false;
   let requestId = 0;
 
-  const dispatch = createEventDispatcher<{
-    gnomeStatusChanged: GnomeIntegrationStatusResponse;
-  }>();
-
-  $: if (initialGnomeStatus) gnomeStatus = initialGnomeStatus;
   $: if (open) void refreshStatus();
 
   $: showGnome =
@@ -60,7 +54,6 @@
 
     if (gnomeResult.status === "fulfilled") {
       gnomeStatus = gnomeResult.value;
-      dispatch("gnomeStatusChanged", gnomeStatus);
     } else {
       gnomeError = "settings.desktop_integrations.error";
     }
@@ -115,7 +108,6 @@
     <div data-testid="desktop-integrations-gnome">
       <GnomeIntegrationModal
         initial={gnomeStatus}
-        on:statusChanged={(event) => dispatch("gnomeStatusChanged", event.detail)}
         on:actionStarted={() => (gnomeBusy = true)}
         on:actionFinished={() => (gnomeBusy = false)}
       />

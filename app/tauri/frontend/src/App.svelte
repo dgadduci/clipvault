@@ -14,7 +14,6 @@
     CollectionDeletionPreview,
     Diagnostics,
     EntryRecord,
-    GnomeIntegrationStatusResponse,
     OrganizationSnapshot,
     PeerImportedSourceAppPresentation,
     PasteResponse,
@@ -162,7 +161,6 @@
   let diagnostics: Diagnostics | null = null;
   let capabilities: Capabilities | null = null;
   let activeApp: ActiveApplicationResponse | null = null;
-  let gnomeIntegrationStatus: GnomeIntegrationStatusResponse | null = null;
   let entries: EntryRecord[] = [];
   let error: string | null = null;
   let loading = true;
@@ -2111,23 +2109,8 @@
     openModalWith("development", event.currentTarget as HTMLElement | null);
   }
 
-  function onConfigureGnome(
-    event: CustomEvent<GnomeIntegrationStatusResponse>,
-  ): void {
-    const status = event.detail;
-    if (status.kind !== "ready" || !status.payload.applicable) return;
-    gnomeIntegrationStatus = status;
-    // Keep the original desktop trigger as the focus-return destination while
-    // moving the user into the normal settings surface.
-    openModalWith("desktop_integrations", modalReturnFocus);
-  }
-
   function onOpenDesktopIntegrations(): void {
     openModalWith("desktop_integrations", modalReturnFocus);
-  }
-
-  function onGnomeStatusChanged(status: GnomeIntegrationStatusResponse): void {
-    gnomeIntegrationStatus = status;
   }
 
   function onOpenPrivacy(event: MouseEvent): void {
@@ -2983,8 +2966,6 @@
     on:capabilitiesChanged={(e) => onModalCapabilitiesChanged(e)}
     on:entriesChanged={(e) => onModalEntriesChanged(e)}
     on:pasteFailed={(e) => onPasteFailed(e)}
-    on:configureGnome={onConfigureGnome}
-    on:openDesktopIntegrations={onOpenDesktopIntegrations}
   />
 </Modal>
 
@@ -2997,8 +2978,6 @@
 >
   <DesktopIntegrationsModal
     open={openModal === "desktop_integrations"}
-    initialGnomeStatus={gnomeIntegrationStatus}
-    on:gnomeStatusChanged={(event) => onGnomeStatusChanged(event.detail)}
   />
 </Modal>
 
