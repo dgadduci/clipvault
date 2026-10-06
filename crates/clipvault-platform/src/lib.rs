@@ -106,10 +106,13 @@ pub use runtime::linux_gnome_extension_installer::{
 };
 #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
 pub use runtime::linux_gnome_integration::{
-    detect_session as gnome_detect_session, DesktopEnvironment as GnomeDesktopEnvironment,
-    GnomeConsentDecision, GnomeIntegrationHandle, GnomeIntegrationService, GnomeIntegrationStatus,
+    detect_session as gnome_detect_session, gnome_extensions_manager_available,
+    open_gnome_extensions_manager, DesktopEnvironment as GnomeDesktopEnvironment,
+    GnomeConsentDecision, GnomeExtensionsActionOutcome, GnomeExtensionsController,
+    GnomeIntegrationHandle, GnomeIntegrationService, GnomeIntegrationStatus,
     SessionKind as GnomeSessionKind, SharedGnomeSnapshot as GnomeIntegrationSnapshot,
-    BACKEND_NAME as GNOME_BACKEND_NAME, EXTENSION_UUID as GNOME_EXTENSION_UUID,
+    SystemGnomeExtensionsController, BACKEND_NAME as GNOME_BACKEND_NAME,
+    EXTENSION_UUID as GNOME_EXTENSION_UUID,
 };
 #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
 pub use runtime::linux_gnome_shell_integration::{

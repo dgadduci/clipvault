@@ -1271,6 +1271,7 @@ export interface GnomeIntegrationPayload {
   consent: GnomeConsentDecision;
   technical_state: GnomeTechnicalState;
   installed: boolean;
+  extensions_manager_available: boolean;
   identifier: string | null;
   detail: string | null;
   uuid: string;

@@ -32,6 +32,7 @@ function gnomeStatus(
       consent: "unknown",
       technical_state: "not_installed",
       installed: false,
+      extensions_manager_available: false,
       identifier: null,
       detail: null,
       uuid: "clipvault@clipvault.app",
@@ -118,9 +119,14 @@ test("General settings opens the shared desktop integrations modal", () => {
   assert.match(modal, /<GnomeIntegrationModal/);
   assert.doesNotMatch(modal, /technical_state\}/);
   assert.match(modal, /settings\.desktop_integrations\.status\.pending\.kde/);
+  assert.match(modal, /kdeStatus = await kdeKwinIntegrationStatusCommand\(\)/);
   assert.match(
     loadSource("src/GnomeIntegrationModal.svelte"),
     /settings\.desktop_integrations\.status\.pending\.gnome/,
+  );
+  assert.match(
+    loadSource("src/GnomeIntegrationModal.svelte"),
+    /status\.payload\.extensions_manager_available/,
   );
   assert.match(settings, /Promise\.allSettled\(\[\s*gnomeIntegrationStatusCommand\(\),\s*kdeKwinIntegrationStatusCommand\(\)/);
   assert.doesNotMatch(settings, /platformOs !== "linux"/);

@@ -1230,6 +1230,9 @@ export const gnomeIntegrationSetConsentCommand: ClipvaultCommandArg<
 export const gnomeIntegrationInstallCommand: ClipvaultCommand<GnomeIntegrationInstallResult> =
   () => invoke<GnomeIntegrationInstallResult>("clipvault_gnome_integration_install");
 
+export const gnomeIntegrationOpenExtensionsCommand: ClipvaultCommand<boolean> =
+  () => invoke<boolean>("clipvault_gnome_integration_open_extensions");
+
 export const gnomeIntegrationUninstallCommand: ClipvaultCommand<GnomeIntegrationPayload> =
   () => invoke<GnomeIntegrationPayload>("clipvault_gnome_integration_uninstall");
 

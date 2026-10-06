@@ -211,10 +211,11 @@ impl GnomeIntegrationState {
     pub fn install(
         &self,
         context: &clipvault_core::AppContext,
-        bundled: &BundledBytes,
+        load_bundled: impl FnOnce() -> Result<BundledBytes, String>,
     ) -> Result<InstallResult, InstallError> {
         self.record_consent(context, GnomeConsentDecision::Accepted)
             .map_err(|error| InstallError::Consent(error.to_string()))?;
+        let bundled = load_bundled().map_err(InstallError::Bundled)?;
         let platform_service = self.ensure_platform_service(GnomeConsentDecision::Accepted);
         let outcome = platform_service
             .install(&bundled.metadata_json, &bundled.extension_js)
@@ -223,6 +224,10 @@ impl GnomeIntegrationState {
         let technical_state = convert_technical_state_from_platform(platform_state);
         self.record_technical_state(context, technical_state)
             .map_err(|error| InstallError::Consent(error.to_string()))?;
+        // Bring up the listener before asking GNOME to enable the extension,
+        // so an immediate Shell connection can complete its handshake.
+        self.start_listener().map_err(InstallError::Listener)?;
+        let _ = platform_service.enable_extension();
         // Hot-swap the cached probe to the GNOME-backed one. Until
         // the listener accepts the peer's handshake the new probe
         // surfaces `Unavailable`; once the first `app_id` lands the
@@ -301,6 +306,27 @@ impl GnomeIntegrationState {
         Ok(())
     }
 
+    /// Retry activation without asking for consent again. The listener
+    /// handshake remains the source of truth for the resulting state.
+    pub fn retry(&self, context: &clipvault_core::AppContext) -> Result<(), InstallError> {
+        let consent = self
+            .core_service
+            .load_consent(context)
+            .map_err(|error| InstallError::Consent(error.to_string()))?;
+        if !matches!(consent, GnomeConsentDecision::Accepted) {
+            return Err(InstallError::Consent("consent_required".to_string()));
+        }
+        let platform_service = self.ensure_platform_service(consent);
+        if !platform_service.installation().installed {
+            return Err(InstallError::Installer(
+                "extension_not_installed".to_string(),
+            ));
+        }
+        self.start_listener().map_err(InstallError::Listener)?;
+        let _ = platform_service.enable_extension();
+        Ok(())
+    }
+
     /// Stop the listener thread (if any). Safe to call repeatedly.
     pub fn stop_listener(&self) {
         let mut guard = self.live.lock();
@@ -317,8 +343,9 @@ impl GnomeIntegrationState {
     /// the payload reflects the persisted consent and the session
     /// even when no listener is live: the first launch must already
     /// surface `applicable = true` so the consent prompt is reachable
-    /// from the Development modal. The payload never carries absolute
-    /// paths or any other identifier that could fingerprint the host.
+    /// from Desktop integrations in General settings. The payload never
+    /// carries absolute paths or any other identifier that could fingerprint
+    /// the host.
     pub fn payload(&self) -> GnomeIntegrationPayload {
         let (session, desktop) = clipvault_platform::gnome_detect_session();
         if matches!(session, clipvault_platform::GnomeSessionKind::NonLinux) {
@@ -337,6 +364,7 @@ impl GnomeIntegrationState {
                 convert_consent_back(consent),
                 technical_state,
                 status.installed,
+                status.extensions_manager_available,
                 status.identifier,
                 status.detail,
             );
@@ -355,6 +383,7 @@ impl GnomeIntegrationState {
             stored_consent,
             technical_state,
             false,
+            clipvault_platform::gnome_extensions_manager_available(),
             None,
             None,
         )
@@ -460,6 +489,7 @@ pub struct GnomeIntegrationPayload {
     pub consent: String,
     pub technical_state: String,
     pub installed: bool,
+    pub extensions_manager_available: bool,
     pub identifier: Option<String>,
     pub detail: Option<String>,
     pub uuid: String,
@@ -476,6 +506,7 @@ impl GnomeIntegrationPayload {
             consent: GnomeConsentDecision::Unknown.as_str().to_string(),
             technical_state: GnomeTechnicalState::NotInstalled.as_str().to_string(),
             installed: false,
+            extensions_manager_available: false,
             identifier: None,
             detail: None,
             uuid: GNOME_EXTENSION_UUID.to_string(),
@@ -493,6 +524,7 @@ impl GnomeIntegrationPayload {
         consent: GnomeConsentDecision,
         technical_state: GnomeTechnicalState,
         installed: bool,
+        extensions_manager_available: bool,
         identifier: Option<String>,
         detail: Option<String>,
     ) -> Self {
@@ -510,6 +542,7 @@ impl GnomeIntegrationPayload {
             consent: consent.as_str().to_string(),
             technical_state: technical_state.as_str().to_string(),
             installed,
+            extensions_manager_available,
             identifier,
             detail,
             uuid: GNOME_EXTENSION_UUID.to_string(),
@@ -606,14 +639,18 @@ pub struct InstallResult {
 #[derive(Debug)]
 pub enum InstallError {
     Consent(String),
+    Bundled(String),
     Installer(String),
+    Listener(String),
 }
 
 impl std::fmt::Display for InstallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             InstallError::Consent(message) => write!(f, "consent: {message}"),
+            InstallError::Bundled(message) => write!(f, "bundled: {message}"),
             InstallError::Installer(message) => write!(f, "installer: {message}"),
+            InstallError::Listener(message) => write!(f, "listener: {message}"),
         }
     }
 }
@@ -759,6 +796,7 @@ mod tests {
             GnomeConsentDecision::Unknown,
             GnomeTechnicalState::NotInstalled,
             false,
+            false,
             None,
             None,
         );
@@ -774,6 +812,7 @@ mod tests {
             clipvault_platform::GnomeDesktopEnvironment::Gnome,
             GnomeConsentDecision::Accepted,
             GnomeTechnicalState::ActivationPending,
+            true,
             true,
             Some("firefox.desktop".to_string()),
             None,

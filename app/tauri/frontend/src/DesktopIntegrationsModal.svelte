@@ -73,9 +73,15 @@
     kdeBusy = true;
     kdeError = null;
     try {
-      kdeStatus = await action();
+      await action();
+      kdeStatus = await kdeKwinIntegrationStatusCommand();
     } catch {
       kdeError = "settings.desktop_integrations.error";
+      try {
+        kdeStatus = await kdeKwinIntegrationStatusCommand();
+      } catch {
+        // Keep the last known status visible alongside the operation error.
+      }
     } finally {
       kdeBusy = false;
     }

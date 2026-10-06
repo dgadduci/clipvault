@@ -8,6 +8,7 @@
   import { createEventDispatcher } from "svelte";
   import {
     gnomeIntegrationInstallCommand,
+    gnomeIntegrationOpenExtensionsCommand,
     gnomeIntegrationRetryCommand,
     gnomeIntegrationSetConsentCommand,
     gnomeIntegrationStatusCommand,
@@ -28,6 +29,7 @@
   let busy = false;
   let lastError: string | null = null;
   let lastAction: "accept" | "decline" | null = null;
+  let extensionsOpenFailed = false;
 
   const dispatch = createEventDispatcher<{
     statusChanged: GnomeIntegrationStatusResponse;
@@ -47,23 +49,46 @@
     dispatch("actionFinished");
   }
 
-  async function refresh(): Promise<void> {
-    lastError = null;
+  async function refresh(preserveError = false): Promise<void> {
+    if (!preserveError) lastError = null;
     try {
       status = await gnomeIntegrationStatusCommand();
+      extensionsOpenFailed = false;
       if (status) {
         dispatch("statusChanged", status);
       }
     } catch (err) {
-      lastError = describeGnomeIntegrationError(err);
+      if (!preserveError) lastError = describeGnomeIntegrationError(err);
+    }
+  }
+
+  async function refreshUntilConfirmed(): Promise<void> {
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await refresh();
+      if (
+        status?.kind === "ready" &&
+        ["connected", "identified", "no_active_application"].includes(
+          status.payload.technical_state,
+        )
+      ) {
+        return;
+      }
+      if (attempt < 5) {
+        await new Promise((resolve) => window.setTimeout(resolve, 350));
+      }
     }
   }
 
   async function applyConsent(decision: GnomeConsentDecision): Promise<void> {
     if (busy) return;
+    if (decision === "accepted") {
+      lastAction = "accept";
+      await activate();
+      return;
+    }
     beginAction();
     lastError = null;
-    lastAction = decision === "accepted" ? "accept" : "decline";
+    lastAction = "decline";
     try {
       const payload: GnomeIntegrationPayload = await gnomeIntegrationSetConsentCommand({
         decision,
@@ -72,6 +97,7 @@
       dispatch("statusChanged", status);
     } catch (err) {
       lastError = describeGnomeIntegrationError(err);
+      await refresh(true);
     } finally {
       finishAction();
     }
@@ -84,9 +110,10 @@
     try {
       dispatch("installStarted");
       await gnomeIntegrationInstallCommand();
-      await refresh();
+      await refreshUntilConfirmed();
     } catch (err) {
       lastError = describeGnomeIntegrationError(err);
+      await refresh(true);
     } finally {
       finishAction();
     }
@@ -102,6 +129,7 @@
       await refresh();
     } catch (err) {
       lastError = describeGnomeIntegrationError(err);
+      await refresh(true);
     } finally {
       finishAction();
     }
@@ -113,11 +141,20 @@
     lastError = null;
     try {
       await gnomeIntegrationRetryCommand();
-      await refresh();
+      await refreshUntilConfirmed();
     } catch (err) {
       lastError = describeGnomeIntegrationError(err);
+      await refresh(true);
     } finally {
       finishAction();
+    }
+  }
+
+  async function openExtensions(): Promise<void> {
+    try {
+      extensionsOpenFailed = !(await gnomeIntegrationOpenExtensionsCommand());
+    } catch {
+      extensionsOpenFailed = true;
     }
   }
 
@@ -128,11 +165,17 @@
   $: shouldShowDeclined =
     status?.kind === "ready" && status.payload.consent === "declined";
   $: isInstalled = status?.kind === "ready" && status.payload.installed;
+  $: canOpenExtensions =
+    status?.kind === "ready" &&
+    status.payload.extensions_manager_available &&
+    ["pending", "disconnected"].includes(gnomeIntegrationStatusKind(status));
   $: if (initial) status = initial;
   $: statusSummaryKey =
     status?.kind === "ready"
       ? gnomeIntegrationStatusKind(status) === "pending"
-        ? "settings.desktop_integrations.status.pending.gnome"
+        ? status.payload.extensions_manager_available && !extensionsOpenFailed
+          ? "settings.desktop_integrations.status.pending.gnome"
+          : "settings.desktop_integrations.status.pending.gnome.manual"
         : `settings.desktop_integrations.status.${gnomeIntegrationStatusKind(status)}`
       : "settings.desktop_integrations.status.unsupported";
 </script>
@@ -163,6 +206,19 @@
       <p class="muted" role="status" data-testid="gnome-friendly-status">
         {$t(statusSummaryKey)}
       </p>
+      {#if canOpenExtensions}
+        <div class="row">
+          <button
+            type="button"
+            class="secondary"
+            on:click={openExtensions}
+            disabled={busy}
+            data-testid="gnome-open-extensions"
+          >
+            {$t("gnome.extensions.open")}
+          </button>
+        </div>
+      {/if}
     </article>
 
     {#if shouldShowConsent}
@@ -288,7 +344,7 @@
     <article class="card-block">
       <p class="muted">{$t("gnome.loading")}</p>
       <div class="row">
-        <button type="button" on:click={refresh} data-testid="gnome-refresh">{$t("gnome.retry")}</button>
+        <button type="button" on:click={() => refresh()} data-testid="gnome-refresh">{$t("gnome.retry")}</button>
       </div>
     </article>
   {/if}

@@ -45,6 +45,26 @@ test("an installed GNOME integration can explicitly reinstall the bundled resour
   assert.doesNotMatch(modal, /deshabilitala\/habilitala/);
 });
 
+test("accepting GNOME consent starts installation and activation in the same action", () => {
+  const modal = loadSource("src/GnomeIntegrationModal.svelte");
+
+  assert.match(modal, /if \(decision === "accepted"\) \{[\s\S]*?await activate\(\)/);
+  assert.match(modal, /await gnomeIntegrationInstallCommand\(\);[\s\S]*?refreshUntilConfirmed\(\)/);
+  assert.match(modal, /gnomeIntegrationOpenExtensionsCommand/);
+  assert.match(modal, /extensionsOpenFailed/);
+});
+
+test("GNOME acceptance is persisted before bundled files are loaded, and errors retain it", () => {
+  const integration = loadSource("../src-tauri/src/gnome_integration.rs");
+  const modal = loadSource("src/GnomeIntegrationModal.svelte");
+  const persistIndex = integration.indexOf("self.record_consent(context, GnomeConsentDecision::Accepted)");
+  const loadIndex = integration.indexOf("let bundled = load_bundled()", persistIndex);
+
+  assert.notEqual(persistIndex, -1);
+  assert.ok(loadIndex > persistIndex);
+  assert.match(modal, /lastError = describeGnomeIntegrationError\(err\);\s*await refresh\(true\)/);
+});
+
 test("GNOME command errors are actionable and never stringified as an IPC object", () => {
   assert.match(
     describeGnomeIntegrationError({ kind: "bundled_missing", message: "/private/path" }),

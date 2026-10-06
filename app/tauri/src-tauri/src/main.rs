@@ -385,6 +385,7 @@ fn main() {
             commands::clipvault_gnome_integration_status,
             commands::clipvault_gnome_integration_set_consent,
             commands::clipvault_gnome_integration_install,
+            commands::clipvault_gnome_integration_open_extensions,
             commands::clipvault_gnome_integration_uninstall,
             commands::clipvault_gnome_integration_retry,
             commands::clipvault_kde_kwin_integration_status,

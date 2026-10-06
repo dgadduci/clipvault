@@ -2725,16 +2725,29 @@ mod gnome_commands {
             .as_ref()
             .ok_or_else(|| CommandError::new("feature_disabled", "feature disabled"))?
             .clone();
-        let bundled = crate::gnome_integration::read_bundled_extension(&handle)
-            .map_err(|error| CommandError::new("bundled_missing", error.to_string()))?;
         let result = gnome_state
-            .install(state.context(), &bundled)
-            .map_err(|error| CommandError::new("install_error", error.to_string()))?;
-        if let Err(error) = gnome_state.start_listener() {
-            let _ = gnome_state.uninstall(state.context());
-            return Err(CommandError::new("listener_error", error));
-        }
+            .install(state.context(), || {
+                crate::gnome_integration::read_bundled_extension(&handle)
+                    .map_err(|error| error.to_string())
+            })
+            .map_err(|error| match error {
+                crate::gnome_integration::InstallError::Bundled(message) => {
+                    CommandError::new("bundled_missing", message)
+                }
+                crate::gnome_integration::InstallError::Listener(message) => {
+                    CommandError::new("listener_error", message)
+                }
+                other => CommandError::new("install_error", other.to_string()),
+            })?;
         Ok(result)
+    }
+
+    #[tauri::command]
+    pub fn clipvault_gnome_integration_open_extensions() -> bool {
+        matches!(
+            clipvault_platform::open_gnome_extensions_manager(),
+            clipvault_platform::GnomeExtensionsActionOutcome::Started
+        )
     }
 
     #[tauri::command]
@@ -2766,8 +2779,16 @@ mod gnome_commands {
             .ok_or_else(|| CommandError::new("feature_disabled", "feature disabled"))?
             .clone();
         gnome_state
-            .start_listener()
-            .map_err(|error| CommandError::new("listener_error", error))?;
+            .retry(state.context())
+            .map_err(|error| match error {
+                crate::gnome_integration::InstallError::Consent(message) => {
+                    CommandError::new("consent_error", message)
+                }
+                crate::gnome_integration::InstallError::Listener(message) => {
+                    CommandError::new("listener_error", message)
+                }
+                other => CommandError::new("install_error", other.to_string()),
+            })?;
         Ok(gnome_state.payload())
     }
 }
@@ -2817,6 +2838,11 @@ mod gnome_commands {
         _handle: tauri::AppHandle<tauri::Wry>,
     ) -> Result<(), CommandError> {
         Err(CommandError::new("feature_disabled", "feature disabled"))
+    }
+
+    #[tauri::command]
+    pub fn clipvault_gnome_integration_open_extensions() -> bool {
+        false
     }
 
     #[tauri::command]

@@ -17,22 +17,20 @@
 //!    `~/.local/share/gnome-shell/extensions/<uuid>/` only when the
 //!    consent decision is `accepted`. The installation is atomic and
 //!    refuses foreign extensions.
-//! 4. **Activation** — `request_activation()` does NOT call GNOME's
-//!    enable APIs directly. The frontend asks the user to flip the
-//!    GNOME preferences toggle and reports the result through
-//!    `mark_active()`. Until that callback lands the diagnostics
-//!    surface reports `activation_pending` so the operator knows the
-//!    integration needs an explicit GNOME action.
-//! 5. **Listener** — once the install is active, the bootstrap (or
-//!    the `start_listener` helper) spawns the [`GnomeShellListener`]
-//!    and wires the `GnomeShellActiveApplication` probe into the
-//!    pipeline. Dropping the listener handle stops the thread.
+//! 4. **Listener and activation** — the listener binds before the
+//!    public `gnome-extensions enable UUID` interface is invoked. A
+//!    successful command is only an attempt; the listener handshake
+//!    is the only signal that marks the extension connected.
+//! 5. **Recovery** — if the command is unavailable or GNOME has not
+//!    loaded the extension, consent and installed files remain in
+//!    place so the user can open Extensions or retry later.
 
 #![cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
 #![allow(dead_code)]
 
 use std::fmt;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -51,6 +49,72 @@ pub use crate::runtime::linux_gnome_shell_integration::{
 
 /// Fixed server-side socket basename the listener binds.
 pub const UNIX_SOCKET_BASENAME: &str = "clipvault-focus.sock";
+
+const GNOME_EXTENSIONS_COMMAND: &str = "/usr/bin/gnome-extensions";
+const GNOME_EXTENSIONS_APP_COMMAND: &str = "/usr/bin/gnome-extensions-app";
+
+/// Result of invoking a fixed GNOME Extensions action. The listener handshake,
+/// rather than a successful process exit, remains the confirmation that the
+/// extension is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GnomeExtensionsActionOutcome {
+    Started,
+    Unavailable,
+    Failed,
+}
+
+/// Small, injectable adapter for the public GNOME Extensions interfaces.
+pub trait GnomeExtensionsController: Send + Sync {
+    fn enable_clipvault(&self) -> GnomeExtensionsActionOutcome;
+    fn manager_available(&self) -> bool;
+    fn open_manager(&self) -> GnomeExtensionsActionOutcome;
+}
+
+/// Production adapter. Executables and extension identity are fixed; no shell
+/// or frontend-provided command, path, or argument is accepted.
+#[derive(Debug, Default)]
+pub struct SystemGnomeExtensionsController;
+
+impl GnomeExtensionsController for SystemGnomeExtensionsController {
+    fn enable_clipvault(&self) -> GnomeExtensionsActionOutcome {
+        if !std::path::Path::new(GNOME_EXTENSIONS_COMMAND).is_file() {
+            return GnomeExtensionsActionOutcome::Unavailable;
+        }
+        match Command::new(GNOME_EXTENSIONS_COMMAND)
+            .arg("enable")
+            .arg(EXTENSION_UUID)
+            .output()
+        {
+            Ok(output) if output.status.success() => GnomeExtensionsActionOutcome::Started,
+            Ok(_) | Err(_) => GnomeExtensionsActionOutcome::Failed,
+        }
+    }
+
+    fn manager_available(&self) -> bool {
+        std::path::Path::new(GNOME_EXTENSIONS_APP_COMMAND).is_file()
+    }
+
+    fn open_manager(&self) -> GnomeExtensionsActionOutcome {
+        if !self.manager_available() {
+            return GnomeExtensionsActionOutcome::Unavailable;
+        }
+        match Command::new(GNOME_EXTENSIONS_APP_COMMAND).spawn() {
+            Ok(_child) => GnomeExtensionsActionOutcome::Started,
+            Err(_) => GnomeExtensionsActionOutcome::Failed,
+        }
+    }
+}
+
+/// Whether the known GNOME Extensions application is installed. This can be
+/// queried before the user creates a live integration service.
+pub fn gnome_extensions_manager_available() -> bool {
+    SystemGnomeExtensionsController.manager_available()
+}
+
+/// Open the known GNOME Extensions application, if it is installed.
+pub fn open_gnome_extensions_manager() -> GnomeExtensionsActionOutcome {
+    SystemGnomeExtensionsController.open_manager()
+}
 
 /// Persisted decision the user has made about the GNOME integration.
 /// Mirrors the consent states the spec documents.
@@ -93,6 +157,7 @@ pub struct GnomeIntegrationStatus {
     pub consent: String,
     pub state: String,
     pub installed: bool,
+    pub extensions_manager_available: bool,
     pub uuid: String,
     pub version: u32,
     pub identifier: Option<String>,
@@ -107,6 +172,7 @@ impl GnomeIntegrationStatus {
             consent: GnomeConsentDecision::Unknown.as_str().to_string(),
             state: GnomeIntegrationState::GnomeNotDetected.as_str().to_string(),
             installed: false,
+            extensions_manager_available: false,
             uuid: EXTENSION_UUID.to_string(),
             version: 0,
             identifier: None,
@@ -132,6 +198,7 @@ pub struct GnomeIntegrationService {
     installation: Arc<RwLock<Option<Installation>>>,
     consent: Arc<RwLock<GnomeConsentDecision>>,
     installer: Arc<ExtensionInstaller<SystemHostEnvironment>>,
+    extensions: Arc<dyn GnomeExtensionsController>,
 }
 
 impl fmt::Debug for GnomeIntegrationService {
@@ -140,6 +207,10 @@ impl fmt::Debug for GnomeIntegrationService {
             .field("consent", &*self.consent.read())
             .field("state", &self.snapshot.state_str())
             .field("installation", &*self.installation.read())
+            .field(
+                "extensions_manager_available",
+                &self.extensions.manager_available(),
+            )
             .finish()
     }
 }
@@ -149,6 +220,13 @@ impl GnomeIntegrationService {
     /// supplied initial consent decision. The snapshot is fresh —
     /// never populated — until the listener accepts a peer.
     pub fn new(initial_consent: GnomeConsentDecision) -> Self {
+        Self::with_extensions_controller(initial_consent, Arc::new(SystemGnomeExtensionsController))
+    }
+
+    pub fn with_extensions_controller(
+        initial_consent: GnomeConsentDecision,
+        extensions: Arc<dyn GnomeExtensionsController>,
+    ) -> Self {
         let installer = Arc::new(ExtensionInstaller::new(Arc::new(SystemHostEnvironment)));
         let snapshot = SharedGnomeSnapshot::new();
         let service = Self {
@@ -156,6 +234,7 @@ impl GnomeIntegrationService {
             installation: Arc::new(RwLock::new(None)),
             consent: Arc::new(RwLock::new(initial_consent)),
             installer,
+            extensions,
         };
         service.refresh_session_state();
         service
@@ -178,6 +257,21 @@ impl GnomeIntegrationService {
 
     pub fn installer(&self) -> &Arc<ExtensionInstaller<SystemHostEnvironment>> {
         &self.installer
+    }
+
+    /// Ask GNOME to enable the installed extension. The return value only
+    /// describes the command invocation; callers must use the listener state
+    /// to decide whether the integration is ready.
+    pub fn enable_extension(&self) -> GnomeExtensionsActionOutcome {
+        self.extensions.enable_clipvault()
+    }
+
+    pub fn extensions_manager_available(&self) -> bool {
+        self.extensions.manager_available()
+    }
+
+    pub fn open_extensions_manager(&self) -> GnomeExtensionsActionOutcome {
+        self.extensions.open_manager()
     }
 
     /// Re-evaluate `(session, desktop, install)` and update the
@@ -267,6 +361,7 @@ impl GnomeIntegrationService {
             consent: self.consent().as_str().to_string(),
             state: self.snapshot.state_str().to_string(),
             installed: installation.installed,
+            extensions_manager_available: self.extensions.manager_available(),
             uuid: installation.uuid.clone(),
             version: installation.version,
             identifier: self.snapshot.active_app_id(),
@@ -312,6 +407,82 @@ fn desktop_label(desktop: DesktopEnvironment) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakeExtensionsController {
+        enable_calls: AtomicUsize,
+        enable_outcome: GnomeExtensionsActionOutcome,
+        manager_available: bool,
+        open_outcome: GnomeExtensionsActionOutcome,
+    }
+
+    impl GnomeExtensionsController for FakeExtensionsController {
+        fn enable_clipvault(&self) -> GnomeExtensionsActionOutcome {
+            self.enable_calls.fetch_add(1, Ordering::Relaxed);
+            self.enable_outcome
+        }
+
+        fn manager_available(&self) -> bool {
+            self.manager_available
+        }
+
+        fn open_manager(&self) -> GnomeExtensionsActionOutcome {
+            self.open_outcome
+        }
+    }
+
+    #[test]
+    fn extensions_controller_is_injectable_and_manager_availability_is_reported() {
+        let controller = Arc::new(FakeExtensionsController {
+            enable_calls: AtomicUsize::new(0),
+            enable_outcome: GnomeExtensionsActionOutcome::Started,
+            manager_available: true,
+            open_outcome: GnomeExtensionsActionOutcome::Started,
+        });
+        let service = GnomeIntegrationService::with_extensions_controller(
+            GnomeConsentDecision::Accepted,
+            controller.clone(),
+        );
+
+        assert!(service.status().extensions_manager_available);
+        assert_eq!(
+            service.enable_extension(),
+            GnomeExtensionsActionOutcome::Started
+        );
+        assert_eq!(
+            service.open_extensions_manager(),
+            GnomeExtensionsActionOutcome::Started
+        );
+        assert_eq!(controller.enable_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn failed_enable_attempt_preserves_acceptance_and_pending_state() {
+        let controller = Arc::new(FakeExtensionsController {
+            enable_calls: AtomicUsize::new(0),
+            enable_outcome: GnomeExtensionsActionOutcome::Failed,
+            manager_available: false,
+            open_outcome: GnomeExtensionsActionOutcome::Unavailable,
+        });
+        let service = GnomeIntegrationService::with_extensions_controller(
+            GnomeConsentDecision::Accepted,
+            controller,
+        );
+        service
+            .snapshot()
+            .set_state(GnomeIntegrationState::ActivationPending);
+
+        assert_eq!(
+            service.enable_extension(),
+            GnomeExtensionsActionOutcome::Failed
+        );
+        assert_eq!(service.consent(), GnomeConsentDecision::Accepted);
+        assert_eq!(
+            service.snapshot().state(),
+            GnomeIntegrationState::ActivationPending
+        );
+        assert!(!service.status().extensions_manager_available);
+    }
 
     #[test]
     fn consent_defaults_to_unknown() {

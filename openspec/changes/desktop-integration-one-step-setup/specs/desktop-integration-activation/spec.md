@@ -14,8 +14,10 @@ no confirmó.
   explicación
 - **THEN** ClipVault guarda su decisión e instala localmente la extensión en
   el mismo recorrido iniciado por esa acción
+- **AND** intenta habilitarla mediante la interfaz pública de GNOME
 - **AND** no requiere una segunda pulsación para comenzar la instalación
-- **AND** muestra el estado comprobado y cualquier paso manual restante
+- **AND** muestra la conexión solo después de confirmarla y explica cualquier
+  paso manual restante
 
 #### Scenario: Configuración GNOME requiere volver a iniciar sesión
 
@@ -25,6 +27,8 @@ no confirmó.
   extensión o cerrar y volver a iniciar sesión
 - **AND** ofrece abrir Extensiones solo si existe un destino seguro conocido
 - **AND** no muestra la integración como activa antes de confirmar la conexión
+- **AND** permite abrir Extensiones si existe la aplicación del sistema
+- **AND** conserva el consentimiento y ofrece reintentar sin repetirlo
 
 #### Scenario: Configurar KDE Plasma Wayland
 
@@ -42,6 +46,7 @@ no confirmó.
 - **THEN** ClipVault indica que la integración no quedó lista
 - **AND** permite reintentar sin pedir otra vez el consentimiento ya guardado
 - **AND** conserva los datos y el estado previo seguros
+- **AND** al volver a consultar el estado muestra la decisión guardada
 
 #### Scenario: Rechazar, desactivar o retirar
 

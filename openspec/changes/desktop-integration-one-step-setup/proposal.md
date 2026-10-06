@@ -11,6 +11,9 @@ necesidad del usuario y hacen que GNOME parezca más difícil de lo que es.
 
 - Combinar el consentimiento explícito y la instalación local de GNOME en una
   sola acción **Configurar integración**.
+- Intentar habilitar la extensión GNOME con la herramienta oficial del
+  escritorio y confirmar el resultado mediante la conexión local; conservar
+  una guía manual cuando la sesión todavía requiera intervención.
 - Mantener en KDE una sola acción de consentimiento y activación, aclarando
   qué se instala y confirmando el estado real de KWin al terminar.
 - Tras la acción, mostrar progreso, resultado y el único paso manual que el
