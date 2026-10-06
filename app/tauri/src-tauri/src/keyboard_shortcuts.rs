@@ -76,12 +76,19 @@ pub async fn set(
     mut binding: HotkeySpec,
 ) -> Result<KeyboardShortcutsSnapshot, CommandError> {
     use clipvault_core::keyboard_shortcuts::{
-        same_shortcut, shortcut_conflict, validate_shortcut, KeyboardShortcutId,
+        is_reserved_development_shortcut, same_shortcut, shortcut_conflict, validate_shortcut,
+        KeyboardShortcutId,
     };
 
     let id = validate_shortcut(&binding)
         .map_err(|_| CommandError::new("keyboard_shortcut_invalid", "invalid shortcut"))?;
     binding.key = binding.key.trim().to_ascii_lowercase();
+    if is_reserved_development_shortcut(&binding) {
+        return Err(CommandError::new(
+            "keyboard_shortcut_conflict",
+            "shortcut conflicts with reserved Development shortcut",
+        ));
+    }
     let current = state
         .context()
         .settings()

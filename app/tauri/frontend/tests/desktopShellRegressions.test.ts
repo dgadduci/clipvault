@@ -349,14 +349,16 @@ test("Tauri config keeps a single main window with sensible min sizes", () => {
   assert.equal(main?.resizable, true);
   assert.ok((main?.minWidth ?? 0) > 0);
   assert.ok((main?.minHeight ?? 0) > 0);
-  // The change MUST NOT introduce a second desktop window just to
-  // measure the monitor; the only auxiliary window is the
-  // transient `quick-paste` surface that has existed since the
-  // MVP.
-  const transient = config.app.windows.find(
-    (window: { label: string }) => window.label !== "main",
+  // The startup splash is an auxiliary window; the Quick Paste
+  // surface remains a distinct transient window with its own label.
+  const quickPaste = config.app.windows.find(
+    (window: { label: string }) => window.label === "quick-paste",
   );
-  assert.equal(transient?.label, "quick-paste");
+  assert.ok(quickPaste, "quick-paste window must remain configured");
+  assert.ok(
+    config.app.windows.some((window: { label: string }) => window.label === "startup-splash"),
+    "startup splash must be a separate Tauri window",
+  );
 });
 
 test("main.rs resizes only the `main` window and never the quick-paste surface", () => {

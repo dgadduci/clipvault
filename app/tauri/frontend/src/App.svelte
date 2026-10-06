@@ -4,7 +4,8 @@
 
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import { listen } from "@tauri-apps/api/event";
+  import { emitTo, listen } from "@tauri-apps/api/event";
+  import { isTauri } from "@tauri-apps/api/core";
   import type {
     ActiveApplicationResponse,
     Capabilities,
@@ -63,6 +64,7 @@
     setFavoriteCommand,
     kdeKwinIntegrationStatusCommand,
     sourceApplicationsCommand,
+    startupStatusCommand,
     peerPairingSnapshotCommand,
     unorganizedClearableCountCommand,
   } from "./lib/tauri";
@@ -70,6 +72,7 @@
   import { contextualDesktopSetupCandidates } from "./lib/contextualDesktopSetupGuidance";
   import { startAutomaticUpdateCheck } from "./lib/applicationUpdates";
   import { runSearch } from "./lib/search";
+  import { matchesDevelopmentShortcut } from "./lib/developmentShortcut.ts";
   import {
     applyDestructive,
     isClearConfirmationRequired,
@@ -114,7 +117,8 @@
   } from "./lib/editTextShortcut";
   import { isEditableTextEntry } from "./types";
   import { visualTokenCss } from "./lib/visualTokens";
-  import { t, tPlural } from "./lib/localization.ts";
+  import { setLocale, t, tPlural } from "./lib/localization.ts";
+  import { waitForStartupStatus } from "./lib/startup.ts";
   import {
     dispatchTrayMenuAction,
     TRAY_MENU_ACTION_EVENT,
@@ -138,6 +142,7 @@
   import ClipboardPreview from "./ClipboardPreview.svelte";
   import CreateTextEntryModal from "./CreateTextEntryModal.svelte";
   import ContextualDesktopSetupCard from "./ContextualDesktopSetupCard.svelte";
+  import CircularLoadingIndicator from "./CircularLoadingIndicator.svelte";
 
   /**
    * Single source of truth for the visual tokens, computed at module
@@ -176,6 +181,12 @@
   let entries: EntryRecord[] = [];
   let error: string | null = null;
   let loading = true;
+  let collectionContentLoading = false;
+  let clearingOldCollectionContent = false;
+  let entriesLoadToken = 0;
+  let startupSplashConnected = false;
+  let initialDesktopLoadSettled = false;
+  let unlistenStartupSplash: (() => void) | null = null;
   let guidance: PlatformGuidance | null = null;
   let retryNotice: string | null = null;
   let retryError: string | null = null;
@@ -931,21 +942,31 @@
   }
 
   async function refreshEntries(): Promise<void> {
-    const [loadedEntries, noteIds] = await Promise.all([
-      loadEntries(),
-      entryNoteIdsCommand(),
-    ]);
-    entries = loadedEntries;
-    entryNoteIds = new Set(noteIds);
-    if (isFiltering) {
-      // A reload while the search filter is active must re-run the
-      // search so the rail keeps reflecting the latest captures; a
-      // stale list could otherwise hide rows the user expects to see.
-      await performSearch(searchQuery, { silent: true });
-    } else {
-      visibleEntries = entries;
-      await refreshPeerImportedSourceApps(entries);
-      await hydrateEntryOrganization(entries);
+    const requestToken = ++entriesLoadToken;
+    collectionContentLoading = true;
+    try {
+      const [loadedEntries, noteIds] = await Promise.all([
+        loadEntries(),
+        entryNoteIdsCommand(),
+      ]);
+      if (requestToken !== entriesLoadToken) return;
+      entries = loadedEntries;
+      entryNoteIds = new Set(noteIds);
+      if (isFiltering) {
+        // A reload while the search filter is active must re-run the
+        // search so the rail keeps reflecting the latest captures; a
+        // stale list could otherwise hide rows the user expects to see.
+        await performSearch(searchQuery, { silent: true });
+      } else {
+        visibleEntries = entries;
+        await refreshPeerImportedSourceApps(entries);
+        await hydrateEntryOrganization(entries);
+      }
+    } finally {
+      if (requestToken === entriesLoadToken) {
+        collectionContentLoading = false;
+        clearingOldCollectionContent = false;
+      }
     }
   }
 
@@ -1139,6 +1160,12 @@
     targetCollectionId: number | null,
   ): Promise<void> {
     selectedCollectionId = targetCollectionId;
+    clearingOldCollectionContent = true;
+    collectionContentLoading = true;
+    entriesLoadToken += 1;
+    entries = [];
+    visibleEntries = [];
+    entryNoteIds = new Set();
     peerImportedSourceAppsToken += 1;
     peerImportedSourceApps = new Map();
     // Switching collection MUST reset the source-app filter to
@@ -1174,8 +1201,14 @@
     // Reload the combobox options for the new scope and refresh
     // the rail so the cards reflect the new active collection
     // without stale options or stale rows.
-    await refreshSourceAppOptions(targetCollectionId);
-    await refreshEntries();
+    try {
+      await refreshSourceAppOptions(targetCollectionId);
+      await refreshEntries();
+    } catch (err) {
+      collectionContentLoading = false;
+      clearingOldCollectionContent = false;
+      organizationError = "app.error.generic";
+    }
   }
 
   async function handleCreateCollection(
@@ -1812,6 +1845,26 @@
     }
 
     const macos = shortcutPlatform === "macos";
+    if (matchesDevelopmentShortcut(event, macos)) {
+      if (
+        openModal !== null ||
+        guidance !== null ||
+        previewEntry !== null ||
+        isShortcutBlockedSurface(event.target)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const trigger = event.target instanceof HTMLElement
+        ? event.target
+        : document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      openModalWith("development", trigger);
+      return;
+    }
+
     if (matchesConfiguredShortcut(event, "open_entry_note", macos)) {
       if (
         openModal !== null ||
@@ -2121,10 +2174,6 @@
     if (closedModal === "desktop_integrations" && contextualSetupLookupStarted) {
       void loadContextualSetupGuidance();
     }
-  }
-
-  function onOpenDevelopment(event: MouseEvent): void {
-    openModalWith("development", event.currentTarget as HTMLElement | null);
   }
 
   function onOpenDesktopIntegrations(): void {
@@ -2478,21 +2527,56 @@
     visibleEntries = entries;
   }
 
-  onMount(() => {
+  function notifyStartupSplash(): void {
+    if (!isTauri() || !startupSplashConnected || !initialDesktopLoadSettled) return;
+    void emitTo("startup-splash", "clipvault://startup-ready").catch(() => undefined);
+  }
+
+  async function startDesktopAfterBootstrap(): Promise<void> {
+    let startup: { status: "pending" | "ready" | "failed"; language: string };
+    try {
+      startup = isTauri()
+        ? await waitForStartupStatus(startupStatusCommand)
+        : { status: "ready", language: "en" };
+    } catch {
+      startup = { status: "failed", language: "en" };
+    }
+    setLocale(startup.language);
+    if (startup.status === "failed") {
+      error = "startup_failed";
+      loading = false;
+      initialDesktopLoadSettled = true;
+      notifyStartupSplash();
+      return;
+    }
+
     void initializeKeyboardShortcuts();
     // Update metadata is checked in the background only for signed
     // production builds. A transient network failure never gates startup.
     startAutomaticUpdateCheck();
-    void refresh();
+    const initialRefresh = refresh();
     startPairingInvitationRefresh();
     // Boot the desktop-owned snapshot polling cadence so a fresh
     // `Observed` / `Removed` event the discovery runtime drained
-    // reaches the linked list and the remote rail without the
-    // user reopening the modal or restarting the app. The
-    // initial refresh inside `refresh()` already coalesces with
-    // this tick through the single-flight helper, so the first
-    // round trip is not duplicated.
+    // reaches the linked list + history rail without the user reopening
+    // the modal or restarting the app. The initial refresh coalesces
+    // with this tick through the single-flight helper.
     startPeerSnapshotRefresh();
+    await initialRefresh;
+    initialDesktopLoadSettled = true;
+    notifyStartupSplash();
+  }
+
+  onMount(() => {
+    listen<void>("clipvault://splash-ready", () => {
+      startupSplashConnected = true;
+      notifyStartupSplash();
+    }, { target: "main" })
+      .then((unlisten) => {
+        unlistenStartupSplash = unlisten;
+      })
+      .catch(() => undefined);
+    void startDesktopAfterBootstrap();
     registerQuickSearch(handleQuickSearchActivation)
       .then((unlisten) => {
         unlistenQuickSearch = unlisten;
@@ -2579,6 +2663,10 @@
       unlistenOrganizationUpdated();
       unlistenOrganizationUpdated = null;
     }
+    if (unlistenStartupSplash) {
+      unlistenStartupSplash();
+      unlistenStartupSplash = null;
+    }
     if (detachSearchShortcut) {
       detachSearchShortcut();
       detachSearchShortcut = null;
@@ -2610,7 +2698,11 @@
   {/if}
 
   {#if loading}
-    <p class="status">{$t("app.backend.connecting")}</p>
+    <CircularLoadingIndicator
+      variant="startup"
+      label={$t("app.startup.loading")}
+      testId="desktop-startup-loading"
+    />
   {:else if error}
     <p class="status error" role="alert">
       {$t("app.backend.connection_error")}
@@ -2681,7 +2773,6 @@
             tagFilter={tagFilter}
             tagFilterOptions={tagFilterOptions}
             onSearchInput={handleSearchInput}
-            onOpenDevelopment={onOpenDevelopment}
             onOpenGeneralSettings={onOpenGeneralSettings}
             onOpenPrivacy={onOpenPrivacy}
             onOpenPeerSharing={onOpenPeerSharing}
@@ -2725,27 +2816,43 @@
             onClose={() => closePeerRail()}
           />
         {:else}
-          <HistoryCardRail
-            entries={visibleEntries}
-            peerImportedSourceApps={peerImportedSourceApps}
-            {entryNoteIds}
-            allTags={organization?.tags ?? []}
-            allCollections={organization?.collections ?? []}
-            activeCollectionId={selectedCollectionId}
-            entryOrganization={entryOrganization}
-            entryOrganizationHydration={entryOrganizationHydration}
-            isFiltering={isFiltering}
-            bind:selectedEntryId={railSelectedEntryId}
-            onTogglePin={(entry) => toggleFavorite(entry)}
-            onRequestDelete={requestDelete}
-            onAfterMutation={(entry) => handleAfterMutation(entry)}
-            onAssignTags={(entry, tagIds) => handleAssignTags(entry, tagIds)}
-            onAssignCollections={(entry, collectionIds) =>
-              handleAssignCollections(entry, collectionIds)}
-            onRemoveFromCollection={(entry, collectionId) =>
-              handleRemoveFromCollection(entry, collectionId)}
-            onRequestPreview={(entry) => requestPreview(entry, document.activeElement instanceof HTMLElement ? document.activeElement : null)}
-          />
+          <div class="collection-content-stage" aria-busy={collectionContentLoading}>
+            <div
+              class="collection-content-rail"
+              class:clearing-old-content={clearingOldCollectionContent}
+              aria-hidden={clearingOldCollectionContent}
+              inert={clearingOldCollectionContent}
+            >
+              <HistoryCardRail
+                entries={visibleEntries}
+                peerImportedSourceApps={peerImportedSourceApps}
+                {entryNoteIds}
+                allTags={organization?.tags ?? []}
+                allCollections={organization?.collections ?? []}
+                activeCollectionId={selectedCollectionId}
+                entryOrganization={entryOrganization}
+                entryOrganizationHydration={entryOrganizationHydration}
+                isFiltering={isFiltering}
+                bind:selectedEntryId={railSelectedEntryId}
+                onTogglePin={(entry) => toggleFavorite(entry)}
+                onRequestDelete={requestDelete}
+                onAfterMutation={(entry) => handleAfterMutation(entry)}
+                onAssignTags={(entry, tagIds) => handleAssignTags(entry, tagIds)}
+                onAssignCollections={(entry, collectionIds) =>
+                  handleAssignCollections(entry, collectionIds)}
+                onRemoveFromCollection={(entry, collectionId) =>
+                  handleRemoveFromCollection(entry, collectionId)}
+                onRequestPreview={(entry) => requestPreview(entry, document.activeElement instanceof HTMLElement ? document.activeElement : null)}
+              />
+            </div>
+            {#if collectionContentLoading}
+              <CircularLoadingIndicator
+                variant="overlay"
+                label={$t("collections.loading")}
+                testId="collection-content-loading"
+              />
+            {/if}
+          </div>
         {/if}
       </div>
     </div>
@@ -3104,7 +3211,6 @@
     open={openModal === "general_settings"}
     platformOs={diagnostics?.platform_os ?? null}
     displayServer={diagnostics?.display_server ?? null}
-    on:keyboardShortcutsRequested={onOpenKeyboardShortcuts}
     on:desktopIntegrationsRequested={onOpenDesktopIntegrations}
   />
 </Modal>
@@ -3350,6 +3456,16 @@
      * `height: var(--cv-card-rail-height)` so the row only grows
      * through the toolbar + status line, never the desktop body. */
     min-height: 0;
+  }
+
+  .collection-content-stage {
+    position: relative;
+    min-width: 0;
+  }
+
+  .collection-content-rail.clearing-old-content {
+    visibility: hidden;
+    pointer-events: none;
   }
 
   /*

@@ -171,7 +171,7 @@ test("text-entry action follows the existing filter controls and precedes the ov
   );
 });
 
-test("DesktopToolbar menu exposes its configured actions through the existing callbacks", () => {
+test("DesktopToolbar menu exposes only the current configuration and utility actions", () => {
   const source = stripComments(loadSource("src/DesktopToolbar.svelte"));
   // The menu container must use `role="menu"` so screen readers
   // announce it as a popup menu.
@@ -182,11 +182,12 @@ test("DesktopToolbar menu exposes its configured actions through the existing ca
   // of `role="menuitem"` because the source also uses the role
   // inside a string literal that drives the focus lookup.
   const menuItemTestIds = new Set([
-    "open-development",
     "open-general-settings",
     "open-privacy",
+    "open-peer-sharing",
     "open-retention",
     "open-shortcut",
+    "open-about",
   ]);
   for (const testId of menuItemTestIds) {
     const matches = source.match(
@@ -213,11 +214,12 @@ test("DesktopToolbar menu exposes its configured actions through the existing ca
   // owned — the `on:click` handler calls `selectItem(onOpenX, event)`
   // which in turn invokes the documented callback.
   for (const callback of [
-    "onOpenDevelopment",
     "onOpenGeneralSettings",
     "onOpenPrivacy",
+    "onOpenPeerSharing",
     "onOpenRetention",
     "onOpenShortcut",
+    "onOpenAbout",
   ]) {
     assert.match(
       source,
@@ -228,11 +230,12 @@ test("DesktopToolbar menu exposes its configured actions through the existing ca
   // Each menu label must resolve from the shared catalog exactly
   // once, while the menu structure keeps it away from the toolbar row.
   for (const key of [
-    "toolbar.menu.development",
     "toolbar.menu.settings",
     "toolbar.menu.privacy",
+    "toolbar.menu.peer_sharing",
     "toolbar.menu.retention",
     "toolbar.menu.shortcut",
+    "toolbar.menu.about",
   ]) {
     assert.equal(source.split(`$t("${key}")`).length - 1, 1, `${key} must appear once`);
   }
@@ -301,12 +304,14 @@ test("DesktopToolbar renders the trash button outside the menu as a sibling of t
     false,
     "the trash button must live outside the menu",
   );
-  // The menu body must contain ONLY the four documented items.
+  // The menu body contains the current settings and utility items.
   for (const itemTestId of [
-    "open-development",
+    "open-general-settings",
     "open-privacy",
+    "open-peer-sharing",
     "open-retention",
     "open-shortcut",
+    "open-about",
   ]) {
     assert.ok(
       menuBody.includes(itemTestId),
@@ -319,17 +324,19 @@ test("DesktopToolbar renders the trash button outside the menu as a sibling of t
 // Toolbar callbacks: same signatures, same forwarding contract.
 // ---------------------------------------------------------------------------
 
-test("DesktopToolbar exports the four modal callbacks plus the trash and search callbacks", () => {
+test("DesktopToolbar exports its modal callbacks plus the trash and search callbacks", () => {
   const source = stripComments(loadSource("src/DesktopToolbar.svelte"));
   // The component must keep exporting every callback the parent
   // already wired through `App.svelte` so the parent never needs
   // to invent a new event flow.
   for (const callback of [
     "onSearchInput",
-    "onOpenDevelopment",
+    "onOpenGeneralSettings",
     "onOpenPrivacy",
+    "onOpenPeerSharing",
     "onOpenRetention",
     "onOpenShortcut",
+    "onOpenAbout",
     "onRequestClearHistory",
   ]) {
     assert.match(

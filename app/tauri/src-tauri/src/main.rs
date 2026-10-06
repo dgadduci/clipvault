@@ -19,7 +19,7 @@ mod tray;
 
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use clipvault_core::{RedactingMakeWriter, WatchTickOutcome};
 use tauri::menu::MenuEvent;
@@ -37,6 +37,53 @@ use crate::state::SharedState;
 use crate::tray::{menu_event_to_action, TauriTrayController};
 
 const WINDOW_LIFECYCLE_DEBUG_ENV: &str = "CLIPVAULT_DEBUG_WINDOW_LIFECYCLE";
+const STARTUP_STATUS_EVENT: &str = "clipvault://startup-status";
+
+#[derive(Clone, serde::Serialize)]
+struct StartupStatusSnapshot {
+    status: String,
+    language: String,
+}
+
+#[derive(Clone)]
+struct StartupStatus(Arc<Mutex<StartupStatusSnapshot>>);
+
+impl Default for StartupStatus {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(StartupStatusSnapshot {
+            status: "pending".to_string(),
+            language: "en".to_string(),
+        })))
+    }
+}
+
+impl StartupStatus {
+    fn snapshot(&self) -> StartupStatusSnapshot {
+        self.0
+            .lock()
+            .map(|snapshot| snapshot.clone())
+            .unwrap_or(StartupStatusSnapshot {
+                status: "failed".to_string(),
+                language: "en".to_string(),
+            })
+    }
+
+    fn set_ready(&self, language: String) {
+        if let Ok(mut snapshot) = self.0.lock() {
+            snapshot.language = language;
+            snapshot.status = "ready".to_string();
+        }
+    }
+
+    fn set_failed(&self) {
+        if let Ok(mut snapshot) = self.0.lock() {
+            snapshot.status = "failed".to_string();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+static GTK_APP_ACTIVATED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     // X11 thread-safety preflight: must run before Tauri/GTK or
@@ -64,226 +111,49 @@ fn main() {
         .setup(|app| {
             trace_main_window_lifecycle_for_app(app.handle(), "configured", None);
             trace_main_window_lifecycle_for_app(app.handle(), "setup_entered", None);
-
-            // Request the monitor-sized main window before building
-            // state. Linux also registers a one-shot correction for
-            // the first compositor-resolved size; it is disarmed before
-            // applying anything so later manual resizes stay user
-            // controlled. A monitor query failure keeps the defaults
-            // declared in `tauri.conf.json` and never blocks startup.
             resize_main_window_to_monitor(app);
             trace_main_window_lifecycle_for_app(app.handle(), "layout_completed", None);
 
-            let state = match build_state() {
-                Ok(state) => {
-                    trace_main_window_lifecycle_for_app(app.handle(), "state_built", None);
-                    state
-                }
-                Err(error) => {
-                    trace_main_window_lifecycle_for_app(app.handle(), "state_build_failed", None);
-                    error!(error = %error, "ClipVault bootstrap failed");
-                    return Err(error);
-                }
-            };
-
-            #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
-            configure_gnome_event_sink(&state, app.handle());
-
-            #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
-            configure_kde_capture_toggle_sink(&state, app.handle());
-
-            #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
-            if let Some(integration) = state.kde_kwin_integration.as_ref().cloned() {
-                let context = state.context.clone();
-                let fallback = state.adapters.active_app();
-                match crate::kde_kwin_integration::read_bundled_script(app.handle()) {
-                    Ok(template) => {
-                        let settings = state.context.settings().load(&state.context);
-                        let shortcuts = state
-                            .context
-                            .settings()
-                            .load_keyboard_shortcuts(&state.context);
-                        let bundled = match crate::kde_kwin_integration::configure_bundled_shortcuts(
-                            &template,
-                            &shortcuts,
-                            &settings.language,
-                        ) {
-                            Ok(value) => value,
-                            Err(error) => {
-                                warn!(error = %error, "KWin shortcut settings could not be prepared");
-                                template
-                            }
-                        };
-                        tauri::async_runtime::spawn(async move {
-                            if let Err(error) = integration
-                                .reactivate_if_consented(&context, fallback, &bundled)
-                                .await
-                            {
-                                warn!(
-                                    kind = error.stable_kind(),
-                                    "KWin integration startup failed"
-                                );
-                            }
-                        });
+            app.manage(StartupStatus::default());
+            let handle = app.handle().clone();
+            let status = app.state::<StartupStatus>().inner().clone();
+            std::thread::Builder::new()
+                .name("clipvault-startup".to_string())
+                .spawn(move || match build_state() {
+                    Ok(state) => {
+                        let setup_handle = handle.clone();
+                        let event_handle = handle.clone();
+                        let setup_status = status.clone();
+                        if let Err(error) = handle.run_on_main_thread(move || {
+                            trace_main_window_lifecycle_for_app(
+                                &setup_handle,
+                                "state_built",
+                                None,
+                            );
+                            let language = state
+                                .context
+                                .settings()
+                                .load(&state.context)
+                                .language;
+                            initialize_app_state(setup_handle, state);
+                            setup_status.set_ready(language);
+                            let _ = event_handle.emit(STARTUP_STATUS_EVENT, setup_status.snapshot());
+                        }) {
+                            error!(error = %error, "ClipVault startup could not return to the main thread");
+                            status.set_failed();
+                        }
                     }
                     Err(error) => {
-                        warn!(error = %error, "KWin integration script resources unavailable");
+                        trace_main_window_lifecycle_for_app(
+                            &handle,
+                            "state_build_failed",
+                            None,
+                        );
+                        error!(error = %error, "ClipVault bootstrap failed");
+                        status.set_failed();
+                        let _ = handle.emit(STARTUP_STATUS_EVENT, status.snapshot());
                     }
-                }
-            }
-
-            // Install and retain the Tauri-backed tray. Its managed state owns
-            // the native icon and is the sole dispatcher for native menu
-            // actions; the core retains no window-specific behavior.
-            let menu_handler = move |handle: &AppHandle<tauri::Wry>, event: MenuEvent| {
-                on_menu_event(handle.clone(), event);
-            };
-            let tray_handler = move |tray: &TrayIcon<tauri::Wry>, event: TrayIconEvent| {
-                on_tray_event(tray, event);
-            };
-            let initial_shortcuts = state
-                .context
-                .settings()
-                .load_keyboard_shortcuts(&state.context);
-            let capture_shortcut = initial_shortcuts
-                .iter()
-                .find(|binding| binding.id == "toggle_clipboard_capture")
-                .map(|binding| {
-                    commands::format_keyboard_shortcut(
-                        binding,
-                        state.context.platform().os_family == clipvault_core::OsFamily::Macos,
-                    )
-                })
-                .unwrap_or_default();
-            match TauriTrayController::install(
-                app.handle(),
-                state.watcher.is_capture_enabled(),
-                &state.context.settings().load(&state.context).language,
-                &capture_shortcut,
-                menu_handler,
-                tray_handler,
-            ) {
-                Ok(controller) => {
-                    app.manage(controller);
-                    info!("tray installed");
-                }
-                Err(error) => {
-                    warn!(error = %error, "tray installation failed; running without tray");
-                }
-            }
-            trace_main_window_lifecycle_for_app(app.handle(), "tray_configured", None);
-
-            // Apply the configured retention policy as part of the
-            // startup pass. Failures are logged but never block the
-            // first paint of the UI.
-            run_retention(&state.context);
-            trace_main_window_lifecycle_for_app(app.handle(), "retention_completed", None);
-
-            // Warm the active-app cache synchronously on the main
-            // thread before the background loop starts so the very
-            // first capture tick already sees a non-empty cache.
-            // `refresh_active_app_cached` skips the synchronous
-            // helper when called from the main thread (the typical
-            // Tauri-command path) and goes straight to the inner
-            // probe, so this warm-up is a single, fast call.
-            let _ = refresh_active_app_cached(&state.context, Some(app.handle()));
-            trace_main_window_lifecycle_for_app(app.handle(), "active_app_warmed", None);
-
-            // Register the managed state BEFORE spinning up the
-            // capture loop. The loop's first iteration runs in
-            // parallel with the rest of the setup callback; if the
-            // state is not yet managed when the loop fires, the
-            // diagnostics endpoint can race the loop and report
-            // `pending` forever even though the loop is alive.
-            // The macOS main-queue refresher is owned by `state`
-            // (installed exactly once inside `build_state`) and
-            // lives for the application's lifetime through this
-            // `SharedState` — the setup callback MUST NOT touch it.
-            app.manage(SharedState::new(state));
-            trace_main_window_lifecycle_for_app(app.handle(), "state_managed", None);
-
-            // Register the default Quick Search and clipboard-capture
-            // shortcuts after managed state is available to their callbacks.
-            if let Some(shared) = app.try_state::<SharedState>() {
-                let shortcuts = shared
-                    .context()
-                    .settings()
-                    .load_keyboard_shortcuts(shared.context());
-                for shortcut in shortcuts {
-                    let Some(id) = clipvault_core::keyboard_shortcuts::KeyboardShortcutId::parse(
-                        &shortcut.id,
-                    ) else {
-                        continue;
-                    };
-                    if !id.is_global() {
-                        continue;
-                    }
-                    #[cfg(target_os = "linux")]
-                    if shared.context().platform().display_server
-                        == clipvault_core::DisplayServer::Wayland
-                    {
-                        let mut integration_available = false;
-                        #[cfg(feature = "linux-gnome-shell-integration")]
-                        if let Some(gnome) = shared.app_state().gnome_integration.as_ref() {
-                            let payload = gnome.payload();
-                            if payload.applicable && payload.installed && payload.consent == "accepted" {
-                                let status = if gnome.update_global_shortcut(&shortcut).is_ok() {
-                                    "registered"
-                                } else {
-                                    "failed"
-                                };
-                                shared.set_shortcut_status(&shortcut.id, status);
-                                integration_available = true;
-                            }
-                        }
-                        #[cfg(feature = "linux-kde-kwin-integration")]
-                        if !integration_available {
-                            if let Some(kde) = shared.app_state().kde_kwin_integration.as_ref() {
-                                let payload = kde.payload();
-                                if payload.applicable
-                                    && payload.installed
-                                    && payload.enabled
-                                    && payload.consent == "accepted"
-                                {
-                                    // KWin reports the effective registration through its
-                                    // authenticated shortcut-status method after script reload.
-                                    integration_available = true;
-                                }
-                            }
-                        }
-                        if !integration_available {
-                            shared.set_shortcut_status(&shortcut.id, "unsupported");
-                        }
-                        continue;
-                    }
-                    let Some(binding) = platform_hotkey_binding(&shortcut) else {
-                        shared.set_shortcut_status(&shortcut.id, "unsupported");
-                        continue;
-                    };
-                    let outcome = register_global_shortcut(
-                        shared.app_state(),
-                        app.handle(),
-                        &binding,
-                    );
-                    shared.set_shortcut_status(&shortcut.id, outcome.kind());
-                    info!(id = shortcut.id, kind = outcome.kind(), "global shortcut registration");
-                }
-            }
-            trace_main_window_lifecycle_for_app(app.handle(), "hotkey_configured", None);
-
-            // Schedule the main-thread refresh of the active-app
-            // cache and start polling the clipboard from a background
-            // thread. The capture loop relies on the cached probe to
-            // resolve the source identifier at every tick so the
-            // blacklist can block content from ignored applications.
-            if let Some(shared) = app.try_state::<SharedState>() {
-                install_capture_loop(shared.app_state(), app.handle());
-            } else {
-                warn!("shared state not available; capture loop not installed");
-            }
-            trace_main_window_lifecycle_for_app(app.handle(), "capture_loop_configured", None);
-
-            trace_main_window_lifecycle_for_app(app.handle(), "setup_completed", None);
+                })?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -302,6 +172,9 @@ fn main() {
             }
 
             if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "startup-splash" {
+                    return;
+                }
                 // Hide instead of close: the application keeps running
                 // from the tray. Quit is initiated through the tray.
                 let _ = window.hide();
@@ -429,10 +302,216 @@ fn main() {
             commands::clipvault_peer_source_app_presentation_record_state,
             commands::clipvault_peer_source_app_presentation_forget,
             commands::clipvault_peer_import_source_app_presentations,
+            clipvault_startup_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ClipVault")
         .run(handle_run_event);
+}
+
+fn initialize_app_state(app: AppHandle<tauri::Wry>, state: bootstrap::AppState) {
+    #[cfg(all(target_os = "linux", feature = "linux-gnome-shell-integration"))]
+    configure_gnome_event_sink(&state, &app);
+
+    #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+    configure_kde_capture_toggle_sink(&state, &app);
+
+    #[cfg(all(target_os = "linux", feature = "linux-kde-kwin-integration"))]
+    if let Some(integration) = state.kde_kwin_integration.as_ref().cloned() {
+        let context = state.context.clone();
+        let fallback = state.adapters.active_app();
+        match crate::kde_kwin_integration::read_bundled_script(&app) {
+            Ok(template) => {
+                let settings = state.context.settings().load(&state.context);
+                let shortcuts = state
+                    .context
+                    .settings()
+                    .load_keyboard_shortcuts(&state.context);
+                let bundled = match crate::kde_kwin_integration::configure_bundled_shortcuts(
+                    &template,
+                    &shortcuts,
+                    &settings.language,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        warn!(error = %error, "KWin shortcut settings could not be prepared");
+                        template
+                    }
+                };
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = integration
+                        .reactivate_if_consented(&context, fallback, &bundled)
+                        .await
+                    {
+                        warn!(
+                            kind = error.stable_kind(),
+                            "KWin integration startup failed"
+                        );
+                    }
+                });
+            }
+            Err(error) => {
+                warn!(error = %error, "KWin integration script resources unavailable");
+            }
+        }
+    }
+
+    // Install and retain the Tauri-backed tray. Its managed state owns
+    // the native icon and is the sole dispatcher for native menu
+    // actions; the core retains no window-specific behavior.
+    let menu_handler = move |handle: &AppHandle<tauri::Wry>, event: MenuEvent| {
+        on_menu_event(handle.clone(), event);
+    };
+    let tray_handler = move |tray: &TrayIcon<tauri::Wry>, event: TrayIconEvent| {
+        on_tray_event(tray, event);
+    };
+    let initial_shortcuts = state
+        .context
+        .settings()
+        .load_keyboard_shortcuts(&state.context);
+    let capture_shortcut = initial_shortcuts
+        .iter()
+        .find(|binding| binding.id == "toggle_clipboard_capture")
+        .map(|binding| {
+            commands::format_keyboard_shortcut(
+                binding,
+                state.context.platform().os_family == clipvault_core::OsFamily::Macos,
+            )
+        })
+        .unwrap_or_default();
+    match TauriTrayController::install(
+        &app,
+        state.watcher.is_capture_enabled(),
+        &state.context.settings().load(&state.context).language,
+        &capture_shortcut,
+        menu_handler,
+        tray_handler,
+    ) {
+        Ok(controller) => {
+            app.manage(controller);
+            info!("tray installed");
+        }
+        Err(error) => {
+            warn!(error = %error, "tray installation failed; running without tray");
+        }
+    }
+    trace_main_window_lifecycle_for_app(&app, "tray_configured", None);
+
+    // Apply the configured retention policy as part of the
+    // startup pass. Failures are logged but never block the
+    // first paint of the UI.
+    run_retention(&state.context);
+    trace_main_window_lifecycle_for_app(&app, "retention_completed", None);
+
+    // Warm the active-app cache synchronously on the main
+    // thread before the background loop starts so the very
+    // first capture tick already sees a non-empty cache.
+    // `refresh_active_app_cached` skips the synchronous
+    // helper when called from the main thread (the typical
+    // Tauri-command path) and goes straight to the inner
+    // probe, so this warm-up is a single, fast call.
+    let _ = refresh_active_app_cached(&state.context, Some(&app));
+    trace_main_window_lifecycle_for_app(&app, "active_app_warmed", None);
+
+    // Register the managed state BEFORE spinning up the
+    // capture loop. The loop's first iteration runs in
+    // parallel with the rest of the setup callback; if the
+    // state is not yet managed when the loop fires, the
+    // diagnostics endpoint can race the loop and report
+    // `pending` forever even though the loop is alive.
+    // The macOS main-queue refresher is owned by `state`
+    // (installed exactly once inside `build_state`) and
+    // lives for the application's lifetime through this
+    // `SharedState` — the setup callback MUST NOT touch it.
+    app.manage(SharedState::new(state));
+    trace_main_window_lifecycle_for_app(&app, "state_managed", None);
+
+    // Register the default Quick Search and clipboard-capture
+    // shortcuts after managed state is available to their callbacks.
+    if let Some(shared) = app.try_state::<SharedState>() {
+        let shortcuts = shared
+            .context()
+            .settings()
+            .load_keyboard_shortcuts(shared.context());
+        for shortcut in shortcuts {
+            let Some(id) =
+                clipvault_core::keyboard_shortcuts::KeyboardShortcutId::parse(&shortcut.id)
+            else {
+                continue;
+            };
+            if !id.is_global() {
+                continue;
+            }
+            #[cfg(target_os = "linux")]
+            if shared.context().platform().display_server == clipvault_core::DisplayServer::Wayland
+            {
+                let mut integration_available = false;
+                #[cfg(feature = "linux-gnome-shell-integration")]
+                if let Some(gnome) = shared.app_state().gnome_integration.as_ref() {
+                    let payload = gnome.payload();
+                    if payload.applicable && payload.installed && payload.consent == "accepted" {
+                        let status = if gnome.update_global_shortcut(&shortcut).is_ok() {
+                            "registered"
+                        } else {
+                            "failed"
+                        };
+                        shared.set_shortcut_status(&shortcut.id, status);
+                        integration_available = true;
+                    }
+                }
+                #[cfg(feature = "linux-kde-kwin-integration")]
+                if !integration_available {
+                    if let Some(kde) = shared.app_state().kde_kwin_integration.as_ref() {
+                        let payload = kde.payload();
+                        if payload.applicable
+                            && payload.installed
+                            && payload.enabled
+                            && payload.consent == "accepted"
+                        {
+                            // KWin reports the effective registration through its
+                            // authenticated shortcut-status method after script reload.
+                            integration_available = true;
+                        }
+                    }
+                }
+                if !integration_available {
+                    shared.set_shortcut_status(&shortcut.id, "unsupported");
+                }
+                continue;
+            }
+            let Some(binding) = platform_hotkey_binding(&shortcut) else {
+                shared.set_shortcut_status(&shortcut.id, "unsupported");
+                continue;
+            };
+            let outcome = register_global_shortcut(shared.app_state(), &app, &binding);
+            shared.set_shortcut_status(&shortcut.id, outcome.kind());
+            info!(
+                id = shortcut.id,
+                kind = outcome.kind(),
+                "global shortcut registration"
+            );
+        }
+    }
+    trace_main_window_lifecycle_for_app(&app, "hotkey_configured", None);
+
+    // Schedule the main-thread refresh of the active-app
+    // cache and start polling the clipboard from a background
+    // thread. The capture loop relies on the cached probe to
+    // resolve the source identifier at every tick so the
+    // blacklist can block content from ignored applications.
+    if let Some(shared) = app.try_state::<SharedState>() {
+        install_capture_loop(shared.app_state(), &app);
+    } else {
+        warn!("shared state not available; capture loop not installed");
+    }
+    trace_main_window_lifecycle_for_app(&app, "capture_loop_configured", None);
+
+    trace_main_window_lifecycle_for_app(&app, "setup_completed", None);
+}
+
+#[tauri::command]
+fn clipvault_startup_status(status: tauri::State<'_, StartupStatus>) -> StartupStatusSnapshot {
+    status.snapshot()
 }
 
 /// Route metadata-free shortcut requests from the consented GNOME bridge.
@@ -482,6 +561,23 @@ fn configure_kde_capture_toggle_sink(
 fn handle_run_event<R: tauri::Runtime>(app: &AppHandle<R>, event: RunEvent) {
     if matches!(event, RunEvent::Ready) {
         trace_main_window_lifecycle_for_app(app, "runtime_ready", None);
+        #[cfg(target_os = "linux")]
+        if GTK_APP_ACTIVATED.swap(true, Ordering::AcqRel) {
+            let target = app
+                .try_state::<StartupStatus>()
+                .map(|status| {
+                    if status.snapshot().status == "ready" {
+                        "main"
+                    } else {
+                        "startup-splash"
+                    }
+                })
+                .unwrap_or("startup-splash");
+            if let Some(window) = app.get_webview_window(target) {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }
     }
 
     if let RunEvent::ExitRequested { .. } = event {

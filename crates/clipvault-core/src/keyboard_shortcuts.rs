@@ -155,6 +155,22 @@ pub fn same_shortcut(left: &HotkeySpec, right: &HotkeySpec) -> bool {
         && left.meta == right.meta
 }
 
+/// Whether an editable binding would consume the reserved Development chord
+/// on macOS or Linux. The stored `cmd_or_ctrl` modifier adapts per platform;
+/// the two reserved forms therefore differ only in the normalized `meta`
+/// modifier.
+pub fn is_reserved_development_shortcut(spec: &HotkeySpec) -> bool {
+    let reserved = |meta| HotkeySpec {
+        id: spec.id.clone(),
+        key: "d".to_string(),
+        cmd_or_ctrl: true,
+        shift: true,
+        alt: true,
+        meta,
+    };
+    same_shortcut(spec, &reserved(false)) || same_shortcut(spec, &reserved(true))
+}
+
 /// Return the ID of an action that would receive the same chord in a
 /// simultaneously active context. Global shortcuts conflict with every local
 /// action because the platform can consume their key event first.
@@ -230,6 +246,24 @@ mod tests {
         assert!(defaults
             .iter()
             .all(|binding| shortcut_conflict(binding, &defaults).is_none()));
+    }
+
+    #[test]
+    fn development_chords_are_reserved_on_macos_and_linux() {
+        let mut linux = default_keyboard_shortcuts().remove(0);
+        linux.key = "D".into();
+        linux.cmd_or_ctrl = true;
+        linux.alt = true;
+        linux.shift = true;
+        assert!(is_reserved_development_shortcut(&linux));
+
+        let mut macos = linux.clone();
+        macos.meta = true;
+        assert!(is_reserved_development_shortcut(&macos));
+
+        macos.meta = false;
+        macos.shift = false;
+        assert!(!is_reserved_development_shortcut(&macos));
     }
 
     #[test]

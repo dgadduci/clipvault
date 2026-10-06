@@ -39,6 +39,7 @@
     PeerSnapshot,
   } from "./types";
   import RemotePreviewCard from "./RemotePreviewCard.svelte";
+  import CircularLoadingIndicator from "./CircularLoadingIndicator.svelte";
   import { t, tPlural } from "./lib/localization.ts";
   import { remoteImageThumbnailCardKey } from "./lib/remoteImageThumbnailState";
   import {
@@ -703,6 +704,7 @@
   class="remote-history-rail"
   data-testid="remote-history-rail"
   aria-label={$t("remote.history.title")}
+  aria-busy={loading}
 >
   <header class="remote-history-rail-header">
     <h2 data-testid="remote-history-rail-title">
@@ -854,14 +856,11 @@
         </div>
       {/if}
       {#if loading}
-        <div
-          class="remote-history-rail-loading-overlay"
-          role="status"
-          aria-label={$t("remote.history.loading_previews")}
-          data-testid="remote-history-rail-loading"
-        >
-          <span class="remote-history-rail-spinner" aria-hidden="true"></span>
-        </div>
+        <CircularLoadingIndicator
+          variant="overlay"
+          label={$t("collections.loading")}
+          testId="remote-history-rail-loading"
+        />
       {/if}
     </div>
   {/if}
@@ -955,25 +954,6 @@
   .remote-history-rail-card-stage {
     position: relative;
     min-height: 16rem;
-  }
-  .remote-history-rail-loading-overlay {
-    position: absolute;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    pointer-events: none;
-    z-index: 1;
-  }
-  .remote-history-rail-spinner {
-    width: 2rem;
-    height: 2rem;
-    border: 3px solid var(--cv-border, #30363d);
-    border-top-color: var(--cv-accent, #60a5fa);
-    border-radius: 50%;
-    animation: remote-history-rail-spin 0.8s linear infinite;
-  }
-  @keyframes remote-history-rail-spin {
-    to { transform: rotate(360deg); }
   }
   .remote-history-rail-card-slot {
     display: contents;

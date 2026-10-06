@@ -19,7 +19,22 @@
         "minWidth": 720,
         "minHeight": 380,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "visible": false,
+        "focus": false
+      },
+      {
+        "label": "startup-splash",
+        "title": "ClipVault",
+        "url": "index.html",
+        "width": 360,
+        "height": 300,
+        "resizable": false,
+        "decorations": false,
+        "center": true,
+        "skipTaskbar": true,
+        "visible": true,
+        "focus": true
       },
       {
         "label": "quick-paste",

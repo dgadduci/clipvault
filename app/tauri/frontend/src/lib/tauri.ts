@@ -64,6 +64,7 @@ import type {
   WatchTickResponse,
   HotkeySpec,
 } from "../types.ts";
+import type { StartupStatus } from "./startup.ts";
 import type { ContentTypeValue } from "./contentType.ts";
 
 declare global {
@@ -86,6 +87,9 @@ function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 
 export const diagnosticsCommand: ClipvaultCommand<Diagnostics> = () =>
   invoke<Diagnostics>("clipvault_diagnostics");
+
+export const startupStatusCommand: ClipvaultCommand<StartupStatus> = () =>
+  invoke<StartupStatus>("clipvault_startup_status");
 
 export const databasePathCommand: ClipvaultCommand<DatabasePath> = () =>
   invoke<DatabasePath>("clipvault_database_path");

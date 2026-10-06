@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "startup-splash",
+  "description": "Allow the startup splash to close after the desktop is ready",
+  "windows": ["startup-splash"],
+  "permissions": ["core:window:allow-close"]
+}

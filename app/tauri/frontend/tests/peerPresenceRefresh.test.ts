@@ -271,28 +271,29 @@ test("App.svelte polling timer routes through the single-flight helper", () => {
   );
 });
 
-test("App.svelte installs and tears down exactly one polling interval", () => {
-  // `onMount` MUST call `startPeerSnapshotRefresh()` so the
-  // cadence begins as soon as the desktop mounts. `onDestroy`
-  // MUST call the matching stop helper so a hot reload or a
-  // remount never leaks a timer. A regression that paired
-  // `setInterval` with `clearInterval` outside `onDestroy`,
-  // or that started a second cadence, breaks here.
+test("App.svelte starts its polling interval after bootstrap and tears it down", () => {
+  // The desktop waits for backend readiness before starting its
+  // poll cadence. `onMount` hands off to the startup coordinator;
+  // `onDestroy` still stops the interval so a remount cannot leak.
   const mountMatch = appSource.match(/onMount\s*\(\s*\(\s*\)\s*=>\s*\{([\s\S]*?)\}\s*\)/);
   assert.ok(mountMatch, "App.svelte must declare an onMount hook");
-  assert.match(
-    mountMatch![1],
-    /startPeerSnapshotRefresh\(\)/,
-    "onMount must start the polling cadence",
+  const mountStart = appSource.indexOf("onMount(() =>");
+  const initialMountWork = appSource.slice(
+    mountStart,
+    appSource.indexOf("registerQuickSearch", mountStart),
   );
-  // The cadence MUST start AFTER the bootstrap refresh so the
-  // initial round trip and the first tick coalesce through the
-  // single-flight helper.
-  const startIdx = mountMatch![1].indexOf("startPeerSnapshotRefresh");
-  const refreshIdx = mountMatch![1].indexOf("void refresh()");
+  assert.match(
+    initialMountWork,
+    /startDesktopAfterBootstrap\(\)/,
+    "onMount must route startup through backend readiness",
+  );
+  const startupBody = extractFunctionBody(appSource, "async function startDesktopAfterBootstrap");
+  assert.match(startupBody, /startPeerSnapshotRefresh\(\)/, "bootstrap completion must start polling");
+  const startIdx = startupBody.indexOf("startPeerSnapshotRefresh");
+  const refreshIdx = startupBody.indexOf("const initialRefresh = refresh()");
   assert.ok(
     refreshIdx >= 0 && startIdx > refreshIdx,
-    "the polling cadence must start after the bootstrap refresh",
+    "the polling cadence must start after the initial refresh begins",
   );
 
   const destroyMatch = appSource.match(

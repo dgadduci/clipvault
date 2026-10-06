@@ -8,7 +8,7 @@
    *     Ctrl F on every other supported host);
    *   - one ellipsis button that opens an accessible menu exposing
    *     desktop settings and secondary actions. The menu is the single
-   *     affordance for those four callbacks — there is no second
+   *     affordance for those configuration callbacks — there is no second
    *     toolbar surface that renders them inline;
    *   - the global clear-history trash icon, kept as a sibling of
    *     the ellipsis button (immediately to its right) so the
@@ -97,7 +97,6 @@
    */
   export let tagFilterOptions: TagFilterOptionValue[] = [];
   export let onSearchInput: (value: string) => void = () => {};
-  export let onOpenDevelopment: (event: MouseEvent) => void = () => {};
   export let onOpenGeneralSettings: (event: MouseEvent) => void = () => {};
   export let onOpenPrivacy: (event: MouseEvent) => void = () => {};
   export let onOpenPeerSharing: (event: MouseEvent) => void = () => {};
@@ -361,15 +360,6 @@
             use:anchorPopupToViewport={{ anchor: () => ellipsisEl, align: "end" }}
             on:keydown={onMenuKeydown}
           >
-            <button
-              type="button"
-              role="menuitem"
-              class="menu-item"
-              data-testid="open-development"
-              on:click={(event) => selectItem(onOpenDevelopment, event)}
-            >
-              {$t("toolbar.menu.development")}
-            </button>
             <button
               type="button"
               role="menuitem"

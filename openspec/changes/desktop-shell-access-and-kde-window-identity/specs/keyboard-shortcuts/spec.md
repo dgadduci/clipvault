@@ -1,10 +1,4 @@
-# keyboard-shortcuts Specification
-
-## Purpose
-Define configurable keyboard shortcuts in ClipVault and how users view and
-change the bindings available in the main window.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Open the keyboard shortcuts dialog with a configurable shortcut
 
@@ -12,14 +6,22 @@ ClipVault SHALL provide a configurable main-window shortcut that opens the
 existing keyboard shortcuts dialog. The action SHALL use the shared shortcut
 registry and SHALL appear as a row in that dialog with its current binding and
 main-window context. Its default SHALL be `⌘⇧K` on macOS and
-`Ctrl+Shift+K` on Linux. The overflow menu SHALL provide a standalone item
-that opens the dialog. General Settings MUST NOT contain a duplicate entry
-that opens the dialog.
+`Ctrl+Shift+K` on Linux. The overflow menu SHALL retain a standalone
+shortcut menu item that opens this dialog, keeping its current label and
+callback. General Settings MUST NOT contain a duplicate entry that opens
+this dialog.
 
 #### Scenario: Open the dialog from the standalone menu item or shortcut
 
-- **WHEN** the user selects the standalone menu item or presses the active
-  `open_keyboard_shortcuts` binding in the main window
+- **WHEN** the user selects the existing standalone shortcut menu item or
+  presses the active `open_keyboard_shortcuts` binding in the main window
+- **THEN** the existing keyboard shortcuts dialog opens
+- **AND** it does not create a second dialog or a new window
+
+#### Scenario: Open the dialog from the main window
+
+- **WHEN** the user presses the active `open_keyboard_shortcuts` binding in
+  the main window while no modal or text-editing field is active
 - **THEN** the existing keyboard shortcuts dialog opens
 - **AND** it does not create a second dialog or a new window
 

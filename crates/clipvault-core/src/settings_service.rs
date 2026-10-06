@@ -15,7 +15,8 @@ use thiserror::Error;
 use crate::bootstrap::AppContext;
 use crate::clock::Clock;
 use crate::keyboard_shortcuts::{
-    default_keyboard_shortcuts, validate_shortcut, KeyboardShortcutId,
+    default_keyboard_shortcuts, is_reserved_development_shortcut, validate_shortcut,
+    KeyboardShortcutId,
 };
 use crate::management::{RetentionPolicy, RETENTION_SETTING_KEY};
 use crate::peer_discovery::PeerDiscoveryRuntime;
@@ -203,7 +204,9 @@ impl SettingsService {
                         value.id = id.as_str().to_string();
                         value
                     })
-                    .filter(|value| validate_shortcut(value).is_ok());
+                    .filter(|value| {
+                        validate_shortcut(value).is_ok() && !is_reserved_development_shortcut(value)
+                    });
                 if let Some(value) = stored {
                     value
                 } else if id == KeyboardShortcutId::OpenQuickPaste {
@@ -213,7 +216,10 @@ impl SettingsService {
                             value.id = id.as_str().to_string();
                             value
                         })
-                        .filter(|value| validate_shortcut(value).is_ok())
+                        .filter(|value| {
+                            validate_shortcut(value).is_ok()
+                                && !is_reserved_development_shortcut(value)
+                        })
                         .unwrap_or(default)
                 } else {
                     default
@@ -231,6 +237,9 @@ impl SettingsService {
         shortcut: &HotkeySpec,
     ) -> Result<(), SettingsServiceError> {
         let id = validate_shortcut(shortcut).map_err(|_| ValidationError::invalid_hotkey())?;
+        if is_reserved_development_shortcut(shortcut) {
+            return Err(ValidationError::invalid_hotkey().into());
+        }
         let value = shortcut.as_setting_value();
         if value.is_empty() {
             return Err(ValidationError::invalid_hotkey().into());
@@ -732,6 +741,31 @@ mod tests {
             .expect("loaded open shortcut");
         assert_eq!(open.key, "q");
         assert_eq!(open.id, KeyboardShortcutId::OpenQuickPaste.as_str());
+    }
+
+    #[test]
+    fn keyboard_shortcut_persistence_rejects_reserved_development_chords() {
+        use crate::keyboard_shortcuts::default_keyboard_shortcuts;
+        use crate::test_support::isolated_harness;
+
+        let (_dir, context) = isolated_harness();
+        let service = minimal_service();
+        let mut binding = default_keyboard_shortcuts().remove(0);
+        binding.key = "d".to_string();
+        binding.cmd_or_ctrl = true;
+        binding.alt = true;
+        binding.shift = true;
+
+        assert!(matches!(
+            service.persist_keyboard_shortcut(&context, &binding),
+            Err(SettingsServiceError::Validation(_))
+        ));
+
+        binding.meta = true;
+        assert!(matches!(
+            service.persist_keyboard_shortcut(&context, &binding),
+            Err(SettingsServiceError::Validation(_))
+        ));
     }
 
     #[test]

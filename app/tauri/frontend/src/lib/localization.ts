@@ -75,7 +75,9 @@ export const LANGUAGE_CHANGED_EVENT = "clipvault://language-changed";
 
 let initialization: Promise<void> | undefined;
 
-export function initializeLocalization(): Promise<void> {
+export function initializeLocalization(
+  options: { waitForBackend?: boolean } = {},
+): Promise<void> {
   if (initialization) return initialization;
   initialization = (async () => {
     try {
@@ -87,10 +89,15 @@ export function initializeLocalization(): Promise<void> {
       // Browser preview and test environments do not expose Tauri events.
     }
 
+    if (options.waitForBackend === false) return;
+
     try {
-      const { settingsGetCommand } = await import("./tauri.ts");
-      const settings = await settingsGetCommand();
-      setLocale(settings.language);
+      const [{ startupStatusCommand }, { waitForStartupStatus }] = await Promise.all([
+        import("./tauri.ts"),
+        import("./startup.ts"),
+      ]);
+      const startup = await waitForStartupStatus(startupStatusCommand);
+      setLocale(startup.language);
     } catch {
       setLocale("en");
     }

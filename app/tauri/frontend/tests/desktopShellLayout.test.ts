@@ -88,7 +88,6 @@ test("modal coordinator enforces the single-open invariant", () => {
 // ---------------------------------------------------------------------------
 
 type ToolbarIntent =
-  | "open-development"
   | "open-privacy"
   | "open-retention"
   | "open-shortcut"
@@ -107,14 +106,12 @@ function createToolbarStub(): {
   };
 }
 
-test("toolbar intents route the four modal triggers to the right callback", () => {
+test("toolbar intents route the ordinary modal triggers to their callbacks", () => {
   const stub = createToolbarStub();
-  stub.click("open-development");
   stub.click("open-privacy");
   stub.click("open-retention");
   stub.click("open-shortcut");
   assert.deepEqual(stub.intents, [
-    "open-development",
     "open-privacy",
     "open-retention",
     "open-shortcut",
@@ -123,10 +120,8 @@ test("toolbar intents route the four modal triggers to the right callback", () =
 
 test("toolbar trash icon surfaces a clear-history intent distinct from the modal triggers", () => {
   const stub = createToolbarStub();
-  stub.click("open-development");
   stub.click("request-clear-history");
   assert.deepEqual(stub.intents, [
-    "open-development",
     "request-clear-history",
   ]);
 });

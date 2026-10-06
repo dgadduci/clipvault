@@ -11,16 +11,32 @@ function source(...segments: string[]): string {
 
 test("remote preview rail shows a centered, non-blocking loading status and keeps stale-load guards", () => {
   const rail = source("src/RemoteHistoryRail.svelte");
-  assert.match(rail, /class="remote-history-rail-loading-overlay"/);
-  assert.match(rail, /role="status"/);
-  assert.match(rail, /remote\.history\.loading_previews/);
-  assert.match(rail, /pointer-events:\s*none/);
+  const indicator = source("src/CircularLoadingIndicator.svelte");
+  const merge = source("src/lib/remoteHistoryMerge.ts");
+  assert.match(rail, /CircularLoadingIndicator/);
+  assert.match(rail, /testId="remote-history-rail-loading"/);
+  assert.match(rail, /aria-busy=\{loading\}/);
+  assert.match(rail, /collections\.loading/);
+  assert.match(indicator, /pointer-events:\s*none/);
+  assert.match(indicator, /prefers-reduced-motion/);
   assert.match(rail, /generation !== loadGeneration/);
+  assert.match(merge, /if \(textOutcome\.kind === "text-error"\)[\s\S]*?loading: false/);
+  assert.match(merge, /if \(imageOutcome\.kind === "image-error"\)[\s\S]*?loading: false/);
   assert.match(
     rail,
     /Promise\.all\([\s\S]*publishFirstPageRows\(textPromise\)[\s\S]*publishFirstPageRows\(imagePromise\)/,
   );
   assert.match(rail, /if \(cached\.loading\)[\s\S]*?loadInitialPage/);
+});
+
+test("local collection refresh hides stale rows and reuses the shared busy indicator", () => {
+  const app = source("src/App.svelte");
+  assert.match(app, /entries = \[\];[\s\S]*visibleEntries = \[\];/);
+  assert.match(app, /entriesLoadToken/);
+  assert.match(app, /class:clearing-old-content=\{clearingOldCollectionContent\}/);
+  assert.match(app, /testId="collection-content-loading"/);
+  assert.match(app, /aria-busy=\{collectionContentLoading\}/);
+  assert.match(app, /async function refreshEntries\(\)[\s\S]*?finally \{[\s\S]*?collectionContentLoading = false/);
 });
 
 test("remote import feedback names the local collection, truncates visually, and expires only success states", () => {

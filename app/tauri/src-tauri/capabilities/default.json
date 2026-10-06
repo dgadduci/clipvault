@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for the ClipVault bootstrap shell",
-  "windows": ["main", "quick-paste"],
+  "windows": ["main", "startup-splash", "quick-paste"],
   "permissions": [
     "core:default",
     "core:window:allow-show",

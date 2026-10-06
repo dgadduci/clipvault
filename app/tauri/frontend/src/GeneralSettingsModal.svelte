@@ -29,7 +29,6 @@
   export let displayServer: string | null = null;
 
   const dispatch = createEventDispatcher<{
-    keyboardShortcutsRequested: void;
     desktopIntegrationsRequested: void;
   }>();
 
@@ -186,17 +185,6 @@
 </script>
 
 <section class="general-settings" data-testid="general-settings-modal">
-  <article data-testid="keyboard-shortcuts-setting">
-    <h3>{$t("keyboard_shortcuts.title")}</h3>
-    <p class="muted">{$t("keyboard_shortcuts.description")}</p>
-    <div class="controls">
-      <button
-        type="button"
-        data-testid="keyboard-shortcuts-open"
-        on:click={() => dispatch("keyboardShortcutsRequested")}
-      >{$t("keyboard_shortcuts.open")}</button>
-    </div>
-  </article>
   {#if desktopIntegrationsAvailable}
     <article data-testid="desktop-integrations-setting">
       <h3>{$t("settings.desktop_integrations.title")}</h3>
