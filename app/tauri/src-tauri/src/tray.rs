@@ -174,6 +174,8 @@ fn get_or_create_main_window<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<WebviewWindow<R>, clipvault_platform::TrayError> {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        #[cfg(target_os = "linux")]
+        apply_linux_main_window_icon(&window);
         return Ok(window);
     }
 
@@ -189,11 +191,26 @@ fn get_or_create_main_window<R: Runtime>(
 
     let builder = WebviewWindowBuilder::from_config(app, config)
         .map_err(clipvault_platform::TrayError::backend)?;
-    match builder.build() {
+    let window = match builder.build() {
         Ok(window) => Ok(window),
         Err(error) => app
             .get_webview_window(MAIN_WINDOW_LABEL)
             .ok_or_else(|| clipvault_platform::TrayError::backend(error)),
+    }?;
+    #[cfg(target_os = "linux")]
+    apply_linux_main_window_icon(&window);
+    Ok(window)
+}
+
+/// Apply the bundled square brand icon directly to the native Linux window.
+/// KWin uses the app ID and its desktop entry for grouping, but the native
+/// window icon is still needed by X11 and by shells that fall back to it.
+#[cfg(target_os = "linux")]
+pub(crate) fn apply_linux_main_window_icon<R: Runtime>(window: &WebviewWindow<R>) {
+    let result = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
+        .and_then(|icon| window.set_icon(icon));
+    if let Err(error) = result {
+        warn!(error = %error, "failed to apply the ClipVault icon to the main window");
     }
 }
 
@@ -379,12 +396,10 @@ impl TauriTrayController {
             ])
             .build()?;
 
+        let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
         let icon = TrayIconBuilder::with_id("clipvault-tray")
-            .icon(
-                app.default_window_icon()
-                    .cloned()
-                    .unwrap_or_else(|| tauri::image::Image::new_owned(vec![0u8; 4], 1, 1)),
-            )
+            .icon(tray_icon)
+            .icon_as_template(cfg!(target_os = "macos"))
             .menu(&initial_menu)
             .on_menu_event(on_menu_event)
             .on_tray_icon_event(on_tray_event)
@@ -450,6 +465,16 @@ mod tests {
         test::{mock_app, MockRuntime},
         WebviewUrl, WebviewWindowBuilder,
     };
+
+    #[test]
+    fn bundled_main_window_icon_is_a_decodable_square_png() {
+        let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
+            .expect("decode bundled main window icon");
+
+        assert_eq!(icon.width(), 512);
+        assert_eq!(icon.height(), 512);
+        assert_eq!(icon.rgba().len(), 512 * 512 * 4);
+    }
 
     #[test]
     fn open_main_window_action_is_delivered_to_a_registered_main_window() {

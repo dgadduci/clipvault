@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ClipVault
+Exec=clipvault-app
+Icon=clipvault-app
+Terminal=false
+Categories=Utility;
+StartupWMClass=com.clipvault.desktop

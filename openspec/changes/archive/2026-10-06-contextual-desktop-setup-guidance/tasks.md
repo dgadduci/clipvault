@@ -33,3 +33,5 @@
   afectados, validación OpenSpec y `git diff --check`.
 - [x] 3.4 Revisar que no se agregaron permisos, comunicaciones de red,
   telemetría, rutas o datos de usuario a la persistencia.
+- [x] 3.5 El usuario aprobó las pruebas manuales en Arch KDE Plasma Wayland y
+  Ubuntu GNOME Wayland (2026-10-06).

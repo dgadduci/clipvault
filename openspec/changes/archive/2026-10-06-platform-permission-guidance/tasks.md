@@ -63,9 +63,5 @@
   no contiene texto del portapapeles, secretos, tokens ni claves
   privadas. La función `retryGuidance` del frontend no invoca el
   comando de pegado (test TypeScript en `tests/guidance.test.ts`).
-- [ ] 6.6.b Pendiente de verificación manual en una sesión real de
-  macOS con y sin Accesibilidad y en Linux X11/Wayland cuando haya
-  hosts disponibles. Esta parte no puede automatizarse de forma
-  fiable (hotkeys, panel de Ajustes del Sistema, captura y pegado
-  reales) y requiere una sesión interactiva. No se ha marcado como
-  completada.
+- [x] 6.6.b El usuario aprobó la prueba manual en macOS con y sin el permiso
+  de Accesibilidad, y en Ubuntu GNOME sobre Wayland y X11 (2026-10-06).

@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from "svelte";
   import { emitTo, listen } from "@tauri-apps/api/event";
   import { getCurrentWindow, Window } from "@tauri-apps/api/window";
-  import logo from "../../src-tauri/icons/icon.png";
+  import logo from "../../src-tauri/icons/clipvault-mark-distinct.png";
   import { setLocale, t } from "./lib/localization.ts";
   import { startupStatusCommand } from "./lib/tauri.ts";
   import {
@@ -126,8 +126,9 @@
     height: 1.25rem;
     border: 2px solid #30363d;
     border-top-color: #60a5fa;
+    border-right-color: #60a5fa;
     border-radius: 50%;
-    animation: clipvault-splash-spin 0.8s linear infinite;
+    animation: clipvault-splash-spin 0.72s linear infinite;
   }
 
   @keyframes clipvault-splash-spin {

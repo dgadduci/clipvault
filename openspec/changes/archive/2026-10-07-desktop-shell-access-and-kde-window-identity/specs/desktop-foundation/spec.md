@@ -10,12 +10,17 @@ loading has settled. After both conditions are met, the splash SHALL close
 and the main desktop SHALL be shown and focused. The startup flow MUST NOT
 show the main window's intermediate “Connecting to the backend” screen or
 briefly reveal the main window before the splash.
+The splash background SHALL use the same dark color at the native window and
+document levels from its first frame. The splash entry point SHALL load its
+small frontend module without eagerly evaluating the main desktop module.
 
 #### Scenario: Startup begins with the splash
 
 - **WHEN** the user launches ClipVault
 - **THEN** the splash with the local logo and localized tagline is shown
 - **AND** the main desktop window remains hidden during initial loading
+- **AND** the splash does not flash a white or blank webview background before
+  its content renders
 
 #### Scenario: Initial loading finishes before the minimum duration
 
@@ -42,3 +47,25 @@ briefly reveal the main window before the splash.
 - **THEN** its tagline uses the saved interface locale from the local
   en/es/pt/de/fr catalogs
 - **AND** English is used when no supported locale has been saved
+
+### Requirement: Application surfaces use the distinctive ClipVault mark
+
+ClipVault SHALL use a distinctive ClipVault mark as the source for its
+application icon assets on supported desktop operating systems. The mark
+SHALL combine a clip and a vault motif and SHALL NOT resemble a generic
+document, word processor, or writing tool icon. The icon formats bundled for
+macOS and Linux SHALL be regenerated from one square application icon
+composition using that mark. The startup splash SHALL show the transparent
+mark directly over its existing dark background.
+
+#### Scenario: Application bundles use the distinctive ClipVault mark
+
+- **WHEN** ClipVault is installed or launched from a supported desktop build
+- **THEN** the app icon and tray icon use the distinctive ClipVault mark
+- **AND** the app icon remains legible on light and dark desktop surfaces
+- **AND** it does not appear as a generic document or word processor icon
+
+#### Scenario: Startup splash uses the distinctive mark
+
+- **WHEN** the startup splash is displayed
+- **THEN** it shows the transparent ClipVault mark on the splash background

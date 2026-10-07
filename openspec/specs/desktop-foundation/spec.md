@@ -78,3 +78,73 @@ ClipVault SHALL expose a `clipvault_diagnostics` Tauri command that returns, in 
 
 - **WHEN** ClipVault has never captured any clipboard content
 - **THEN** `clipvault_diagnostics` still reports the database path, migration count and bootstrap timestamp successfully
+
+### Requirement: Startup splash gates the first desktop reveal
+
+At application startup, ClipVault SHALL keep the main desktop window hidden
+and show a splash window with the local application logo and a short,
+imaginative tagline. The splash SHALL remain visible for at least three
+seconds from its first visible frame and until initial backend and desktop
+loading has settled. After both conditions are met, the splash SHALL close
+and the main desktop SHALL be shown and focused. The startup flow MUST NOT
+show the main window's intermediate “Connecting to the backend” screen or
+briefly reveal the main window before the splash.
+The splash background SHALL use the same dark color at the native window and
+document levels from its first frame. The splash entry point SHALL load its
+small frontend module without eagerly evaluating the main desktop module.
+
+#### Scenario: Startup begins with the splash
+
+- **WHEN** the user launches ClipVault
+- **THEN** the splash with the local logo and localized tagline is shown
+- **AND** the main desktop window remains hidden during initial loading
+- **AND** the splash does not flash a white or blank webview background before
+  its content renders
+
+#### Scenario: Initial loading finishes before the minimum duration
+
+- **GIVEN** initial loading finishes in less than three seconds
+- **WHEN** three seconds have elapsed since the splash became visible
+- **THEN** the splash closes and the main desktop is shown and focused
+
+#### Scenario: Initial loading takes longer than the minimum duration
+
+- **GIVEN** initial loading is still in progress after three seconds
+- **WHEN** initial loading settles
+- **THEN** the splash closes and the main desktop is shown and focused
+
+#### Scenario: Initial loading settles with a recoverable error
+
+- **WHEN** initial loading finishes with a recoverable error
+- **THEN** the splash observes the same three-second minimum
+- **AND** the main desktop opens with its existing localized error and retry
+  control
+
+#### Scenario: Splash tagline follows the saved locale
+
+- **WHEN** the splash is shown
+- **THEN** its tagline uses the saved interface locale from the local
+  en/es/pt/de/fr catalogs
+- **AND** English is used when no supported locale has been saved
+
+### Requirement: Application surfaces use the distinctive ClipVault mark
+
+ClipVault SHALL use a distinctive ClipVault mark as the source for its
+application icon assets on supported desktop operating systems. The mark
+SHALL combine a clip and a vault motif and SHALL NOT resemble a generic
+document, word processor, or writing tool icon. The icon formats bundled for
+macOS and Linux SHALL be regenerated from one square application icon
+composition using that mark. The startup splash SHALL show the transparent
+mark directly over its existing dark background.
+
+#### Scenario: Application bundles use the distinctive ClipVault mark
+
+- **WHEN** ClipVault is installed or launched from a supported desktop build
+- **THEN** the app icon and tray icon use the distinctive ClipVault mark
+- **AND** the app icon remains legible on light and dark desktop surfaces
+- **AND** it does not appear as a generic document or word processor icon
+
+#### Scenario: Startup splash uses the distinctive mark
+
+- **WHEN** the startup splash is displayed
+- **THEN** it shows the transparent ClipVault mark on the splash background

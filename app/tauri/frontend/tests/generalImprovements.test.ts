@@ -19,6 +19,9 @@ test("remote preview rail shows a centered, non-blocking loading status and keep
   assert.match(rail, /collections\.loading/);
   assert.match(indicator, /pointer-events:\s*none/);
   assert.match(indicator, /prefers-reduced-motion/);
+  assert.match(indicator, /border-right-color:\s*var\(--cv-accent/);
+  assert.match(indicator, /animation:\s*clipvault-loading-spin\s+0\.72s linear infinite/);
+  assert.match(indicator, /@keyframes clipvault-loading-spin/);
   assert.match(rail, /generation !== loadGeneration/);
   assert.match(merge, /if \(textOutcome\.kind === "text-error"\)[\s\S]*?loading: false/);
   assert.match(merge, /if \(imageOutcome\.kind === "image-error"\)[\s\S]*?loading: false/);

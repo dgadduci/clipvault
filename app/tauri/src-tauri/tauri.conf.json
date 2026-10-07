@@ -29,6 +29,7 @@
         "url": "index.html",
         "width": 360,
         "height": 300,
+        "backgroundColor": "#0e1116",
         "resizable": false,
         "decorations": false,
         "center": true,

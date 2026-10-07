@@ -5,8 +5,18 @@
   },
   "bundle": {
     "linux": {
+      "appimage": {
+        "files": {
+          "/usr/share/applications/ClipVault.desktop": "desktop-launcher-hidden.desktop",
+          "/usr/share/applications/com.clipvault.desktop.desktop": "desktop-entry-wayland.desktop"
+        }
+      },
       "deb": {
-        "desktopTemplate": "desktop-template.desktop"
+        "desktopTemplate": "desktop-template.desktop",
+        "files": {
+          "/usr/share/applications/ClipVault.desktop": "desktop-launcher-hidden.desktop",
+          "/usr/share/applications/com.clipvault.desktop.desktop": "desktop-entry-wayland.desktop"
+        }
       }
     }
   }

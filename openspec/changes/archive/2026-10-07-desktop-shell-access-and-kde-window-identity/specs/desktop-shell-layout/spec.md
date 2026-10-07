@@ -64,7 +64,11 @@ The desktop SHALL show the existing circular loading indicator while content
 for any selected local or remote collection is loading or refreshing. The
 indicator SHALL expose an accessible, localized busy status, SHALL disappear
 when the operation succeeds or fails, and SHALL NOT present the previous
-collection's content as belonging to the newly selected collection.
+collection's content as belonging to the newly selected collection. In the
+normal motion setting, the indicator SHALL show a clearly visible continuous
+rotation. When reduced motion is requested, it SHALL remain a clear static
+busy indicator. The loading state SHALL remain bound to the asynchronous data
+operation and SHALL NOT be inferred from the animation.
 
 #### Scenario: Loading a local collection
 

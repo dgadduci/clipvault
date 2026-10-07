@@ -1,6 +1,6 @@
 # Propuesta: guía contextual de configuración
 
-## Por qué
+## Why
 
 Una integración opcional es difícil de descubrir si no se necesita para abrir
 ClipVault, pero un asistente obligatorio de primer inicio añade pasos incluso
@@ -8,7 +8,7 @@ para personas que no necesitan configurar nada. La aplicación ya detecta el
 sistema, el servidor gráfico y los estados de sus integraciones; puede mostrar
 una ayuda breve solo donde resulte útil.
 
-## Cambios
+## What Changes
 
 - En GNOME Wayland y KDE Plasma Wayland, mostrar una tarjeta pequeña y
   descartable en la ventana principal cuando la integración aplicable aún no

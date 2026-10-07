@@ -767,6 +767,7 @@ fn resize_main_window_to_monitor(app: &mut tauri::App) {
 
     #[cfg(target_os = "linux")]
     {
+        crate::tray::apply_linux_main_window_icon(&window);
         register_linux_initial_size_correction(window.clone());
         if let Some(layout) = linux_main_window_layout(&window) {
             apply_main_window_layout(&window, &layout);

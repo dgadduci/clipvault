@@ -42,8 +42,9 @@
     height: 2rem;
     border: 3px solid var(--cv-border, #30363d);
     border-top-color: var(--cv-accent, #60a5fa);
+    border-right-color: var(--cv-accent, #60a5fa);
     border-radius: 50%;
-    animation: clipvault-loading-spin 0.8s linear infinite;
+    animation: clipvault-loading-spin 0.72s linear infinite;
   }
 
   @keyframes clipvault-loading-spin {
