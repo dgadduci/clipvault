@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "clipvault-app"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "arboard",
  "clipvault-core",
@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "clipvault-core"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "base64 0.22.1",
  "clipvault-db",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "clipvault-db"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "dirs 5.0.1",
  "rusqlite",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "clipvault-platform"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -554,7 +554,7 @@ dependencies = [
 
 [[package]]
 name = "clipvault-search"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
