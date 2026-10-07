@@ -11,7 +11,7 @@
         "Description[en_GB]": "Publishes the focused application's desktop file name to the ClipVault clipboard manager over the session D-Bus so it can attribute captures to the originating application. The script only sends the validated identifier and a state marker; it never reads window titles, process IDs or clipboard contents.",
         "Icon": "preferences-system-windows-script-test",
         "Id": "clipvault-kde-source-app",
-        "License": "MIT",
+        "License": "GPLv3",
         "Name": "ClipVault KDE Source App",
         "Name[en_GB]": "ClipVault KDE Source App",
         "Version": "1.0"

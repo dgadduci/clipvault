@@ -1,6 +1,6 @@
 /*
     ClipVault - local clipboard manager for KDE Plasma Wayland.
-    SPDX-License-Identifier: MIT
+    SPDX-License-Identifier: GPL-3.0-only
 
     JavaScript entry point for the
     `clipvault-kde-source-app` KWin script.

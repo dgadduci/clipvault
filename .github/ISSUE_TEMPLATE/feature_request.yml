@@ -1,0 +1,36 @@
+name: Feature request / Propuesta de función
+description: Describe a problem and a possible improvement / Describe un problema y una posible mejora.
+title: "[Feature / Función]: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing an idea. You may write in English or Spanish.
+        Gracias por compartir una idea. Puedes escribir en inglés o español.
+
+        Please describe the user need rather than private clipboard data. / Describe la necesidad sin incluir datos privados del portapapeles.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem should this solve? / ¿Qué problema debería resolver?
+      placeholder: "I need to… / Necesito…"
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: What would help? / ¿Qué te ayudaría?
+      placeholder: "A possible approach… / Una posible solución…"
+  - type: input
+    id: environment
+    attributes:
+      label: Relevant platform / Plataforma relacionada
+      description: Include the operating system and, on Linux, the desktop and X11/Wayland session if relevant. / Indica el sistema operativo y, en Linux, el escritorio y la sesión X11/Wayland si corresponde.
+  - type: checkboxes
+    id: privacy-check
+    attributes:
+      label: Privacy check / Revisión de privacidad
+      options:
+        - label: This request contains no clipboard entries, credentials, tokens or other personal information. / Esta propuesta no contiene entradas del portapapeles, credenciales, tokens ni otra información personal.
+          required: true
