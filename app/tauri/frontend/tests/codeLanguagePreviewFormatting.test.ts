@@ -253,6 +253,26 @@ test("renderHighlightedCode HTML keeps the same number of lines as the input", (
   );
 });
 
+test("renderHighlightedCode keeps captured quotes and entity-like text visible", () => {
+  const source = `const message = "&quot; and 'quoted'";\n`;
+  const result = renderHighlightedCode(source, "javascript");
+  assert.equal(result.language, "javascript");
+
+  // This one-pass entity decode mirrors how the browser parses the
+  // highlighter's HTML. Decoding `&amp;` last keeps a captured literal
+  // `&quot;` visible as those exact characters rather than a quote.
+  const visible = result.html
+    .replace(/<[^>]+>/g, "")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+
+  assert.equal(visible, source);
+});
+
 test("renderHighlightedCode preserves Python four-space indentation in the output", () => {
   const source =
     "def greet(name):\n    message = f'Hello {name}'\n    print(message)\n\ngreet('world')\n";

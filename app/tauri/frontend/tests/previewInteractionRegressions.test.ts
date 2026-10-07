@@ -137,15 +137,23 @@ test("rich preview does not trim leading or trailing whitespace", () => {
   assert.ok(preview.endsWith("\n"), "trailing blank lines must survive");
 });
 
-test("rich preview escapes HTML-active characters through escapeForPreview", () => {
-  // The plain-text fallback path combines entryFullPreviewText and
-  // escapeForPreview so the preview never re-introduces script /
-  // event / navigation surfaces even when the content is hostile.
+test("shared preview source keeps quotes, ampersands and entity-like text verbatim", () => {
+  const original = `double "quotes", apostrophe ' and literal &quot; <script>alert(1)</script>\r\n\t`;
+  const entry = textEntry({ content: original });
+
+  assert.equal(entryFullPreviewText(entry), original);
+});
+
+test("escapeForPreview makes an HTML string safe without changing the canonical capture", () => {
+  // The shared preview now uses Svelte text interpolation for plain
+  // text. This helper remains covered for callers that construct HTML
+  // strings and must escape the markup-active characters first.
   const entry = textEntry({
     content: "<script>alert('x')</script>\n&\"<>\n",
   });
   const preview = entryFullPreviewText(entry);
   const escaped = escapeForPreview(preview);
+  assert.equal(entry.content, "<script>alert('x')</script>\n&\"<>\n");
   assert.equal(
     escaped.includes("<script>"),
     false,

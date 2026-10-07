@@ -502,13 +502,11 @@ test("Fix 4 — escapeForPreview escapes every HTML-active character", () => {
   assert.equal(escaped.includes("&quot;"), true);
 });
 
-test("Fix 4 — the Quick Paste preview overlay uses entryFullPreviewText, not the truncated row preview", () => {
-  // The template MUST consult the full-preview helper and feed it
-  // through `escapeForPreview`; the row's `renderPreview()` (which
-  // truncates with `entryPreviewText(..., 80)`) MUST NOT be reused
-  // in the preview branch. The desktop-card-preview change pins
-  // these helpers in the shared `ClipboardPreview.svelte`
-  // component so Quick Paste and Desktop consume one path.
+test("Fix 4 — the Quick Paste preview uses canonical text without pre-escaping it", () => {
+  // The template MUST consult the full-preview helper and render the
+  // plain text as a Svelte text node; the row's truncated preview MUST
+  // NOT be reused. The shared component keeps Quick Paste and Desktop
+  // on one path.
   const previewSource = readFileSync(
     resolvePath(process.cwd(), "src", "ClipboardPreview.svelte"),
     "utf8",
@@ -518,8 +516,13 @@ test("Fix 4 — the Quick Paste preview overlay uses entryFullPreviewText, not t
     "the shared preview must use entryFullPreviewText (no truncation)",
   );
   assert.ok(
+    previewSource.includes(">{fullText}</pre>"),
+    "the shared preview must bind the original full text as text",
+  );
+  assert.equal(
     previewSource.includes("escapeForPreview(entryFullPreviewText(entry))"),
-    "the shared preview must escape the text before rendering",
+    false,
+    "the shared preview must not pre-escape text before Svelte interpolates it",
   );
   // The overlay block in Quick Paste must consume the shared
   // component so the assertion verifies the actual template

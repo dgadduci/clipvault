@@ -6,7 +6,7 @@
  * preview overlay AND the Quick Paste preview overlay. The tests
  * pin the contract by inspecting the source so a regression that
  * re-implements the overlay locally, drops a forbidden mutation
- * path, forgets to escape the text, leaks a blob URL, or breaks
+ * path, renders captured text as active markup, leaks a blob URL, or breaks
  * the stale-response guard surfaces in CI.
  *
  * The component is intentionally inspect-only (no DOM / Svelte
@@ -78,17 +78,31 @@ test("ClipboardPreview declares a dialog role for the overlay", () => {
   );
 });
 
-test("ClipboardPreview uses entryFullPreviewText + escapeForPreview together", () => {
-  // The shared overlay must render the canonical, untruncated text
-  // through the typed escape helper so neither consumer can ship
-  // its own truncation / sanitisation pipeline.
+test("ClipboardPreview renders the canonical plain text through a safe Svelte text node", () => {
+  // Svelte escapes interpolated text at the DOM boundary. Pre-escaping
+  // here would make the user see entity spellings such as `&quot;`.
   assert.ok(
     previewSource.includes("entryFullPreviewText(entry)"),
     "the overlay must consult entryFullPreviewText (full canonical text)",
   );
   assert.ok(
+    previewSource.includes('$: fullText = entry == null ? "" : entryFullPreviewText(entry);'),
+    "the bound value must stay identical to the canonical capture",
+  );
+  const textIndex = previewSource.indexOf(">{fullText}</pre>");
+  assert.notEqual(textIndex, -1, "the plain-text preview must bind fullText");
+  const textElementStart = previewSource.lastIndexOf("<pre", textIndex);
+  const textElementEnd = previewSource.indexOf("</pre>", textIndex);
+  const textElement = previewSource.slice(textElementStart, textElementEnd);
+  assert.equal(
+    textElement.includes("{@html"),
+    false,
+    "captured plain text must be inserted as a text node, never active HTML",
+  );
+  assert.equal(
     previewSource.includes("escapeForPreview(entryFullPreviewText(entry))"),
-    "the overlay must escape the text through escapeForPreview before rendering",
+    false,
+    "the plain text branch must not pre-encode the capture as HTML entities",
   );
 });
 

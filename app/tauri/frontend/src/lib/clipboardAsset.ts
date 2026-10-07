@@ -371,9 +371,10 @@ export function entryPreviewText(
  * separators, consecutive tab characters, leading indentation and
  * consecutive empty lines — so the `<pre>` the overlay mounts
  * (with `white-space: pre-wrap`) renders the captured block
- * byte-for-byte. The renderer pairs this string with
- * `escapeForPreview` so the preview never re-introduces HTML
- * active content.
+ * byte-for-byte. The shared Svelte preview renders this value as a
+ * text interpolation: Svelte escapes markup at the DOM boundary while
+ * keeping the visible captured characters unchanged. Do not pre-encode
+ * it as HTML entities before a text interpolation.
  *
  * The whitespace contract is intentionally identical to
  * `entryRawContent` so the two surfaces — Desktop preview and
@@ -436,12 +437,12 @@ export function entryRawContent(
 }
 
 /**
- * Escape a plain-text capture into a safe representation the
- * preview overlay can render inside a `<pre>` element without
- * re-introducing the active content the spec explicitly forbids.
+ * Escape plain text for a caller that must construct an HTML string.
+ * This helper is not for Svelte text interpolations: those should receive
+ * the original string so the visible characters remain unchanged.
  *
- * The overlay MUST NEVER execute scripts, fire event handlers or
- * navigate through HTML anchors; escaping every character —
+ * An HTML string built from this output MUST NEVER execute scripts, fire
+ * event handlers or navigate through HTML anchors; escaping every character —
  * including `&`, `<`, `>` and the quote marks — closes the entire
  * HTML / script injection surface and keeps the preview safe even
  * for hostile captures. The exact mapped characters and their

@@ -14,8 +14,8 @@
    *     metadata through the existing tokens and helpers so the two
    *     surfaces look identical;
    *   - renders the canonical full text via `entryFullPreviewText`
-   *     and `escapeForPreview` so neither caller has to bring its
-   *     own truncation / sanitisation logic;
+   *     as a Svelte text node, so the visible characters stay intact
+   *     while the framework safely escapes markup;
    *   - resolves image rows through the existing
    *     `createClipboardAssetResolver` and `clipboardAssetCommand`,
    *     keeping the loading / loaded / error three-state machine
@@ -58,7 +58,6 @@
     createClipboardAssetResolver,
     entryFullPreviewText,
     entryRawContent,
-    escapeForPreview,
     hasRenderableImage,
     isImageEntry,
   } from "./lib/clipboardAsset.ts";
@@ -240,8 +239,6 @@
     close();
   }
 
-  $: safeText =
-    entry == null ? "" : escapeForPreview(entryFullPreviewText(entry));
   $: fullText = entry == null ? "" : entryFullPreviewText(entry);
   /**
    * Raw textual content of the entry, with no whitespace collapse and
@@ -250,8 +247,8 @@
    * lines the source application produced survive both the
    * highlighting and the subsequent `<pre>` mount. The
    * `entryFullPreviewText` helper above preserves the same
-   * whitespace characters so the plain-text fallback path renders
-   * the captured block byte-for-byte, the same way the highlighted
+   * whitespace characters so the plain-text path renders the
+   * captured block byte-for-byte, the same way the highlighted
    * branch does — both surfaces consult the same canonical helper.
    */
   $: rawText = entry == null ? "" : entryRawContent(entry);
@@ -383,7 +380,7 @@
             class="cv-preview-text"
             data-testid="{testIdPrefix}-text"
             data-content-type={record.content_type}
-          >{safeText}</pre>
+          >{fullText}</pre>
         {/if}
       </div>
       <footer class="cv-preview-footer">
