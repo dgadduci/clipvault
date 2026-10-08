@@ -15,11 +15,10 @@ ClipVault.
 
 ## Capturas
 
-Incluir una captura real de la interfaz actual con entradas totalmente
-sintéticas, creada en un perfil de prueba. Incluir como máximo una animación
-corta si demuestra un flujo que no se explica en una captura; no publicar una
-grabación del escritorio personal. El README y la imagen social usarán recursos
-del proyecto y mantendrán contraste y legibilidad en pantalla pequeña.
+Incluir capturas actuales de la interfaz que el usuario revisó y aprobó
+explícitamente para publicación. El README y la imagen social usarán recursos
+del proyecto y mantendrán contraste y legibilidad en pantalla pequeña. No
+incluir credenciales ni secretos en las imágenes.
 
 ## GitHub About y social preview
 

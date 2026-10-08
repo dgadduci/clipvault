@@ -47,10 +47,10 @@ explicará sus límites.
 ## Idiomas y contenido visual
 
 El contenido público de estos cambios tendrá versiones equivalentes en inglés
-y español, con navegación entre idiomas. Las capturas utilizarán una base de
-datos de demostración con entradas inventadas. La imagen social será un asset
-de repositorio aparte, de 1280×640 px, con el logo actual y una descripción
-breve; no incluirá capturas de clipboard real.
+y español, con navegación entre idiomas. Las capturas aportadas por el usuario
+se publicarán con su aprobación explícita; no incluirán credenciales ni
+secretos. La imagen social será un asset de repositorio aparte, de 1280×640 px,
+con el logo actual y una descripción breve.
 
 La descripción de privacidad debe explicar la operación local sin afirmar que
 la aplicación nunca se conecta a Internet: `docs/releases.md` documenta las

@@ -33,8 +33,9 @@ claims based only on roadmap plans.
 ### Requirement: Public project identity uses accurate, privacy-safe assets and metadata
 
 The repository SHALL provide a current social preview and reviewable GitHub
-About metadata. Public product imagery SHALL use synthetic data and the current
-ClipVault identity.
+About metadata. Public product imagery SHALL use synthetic data or be
+explicitly approved by the user for publication, and SHALL use the current
+ClipVault identity. Images SHALL NOT expose credentials or secrets.
 
 #### Scenario: GitHub displays the project social preview
 

@@ -47,8 +47,8 @@ propios para poder ejecutarse y validarse por separado.
 - No se publicarán instaladores, no se cambiarán configuraciones del
   repositorio remoto y no se anunciará soporte para Windows como parte de estos
   cambios.
-- Las capturas usarán datos sintéticos y no expondrán historial personal,
-  rutas, nombres de usuario ni secretos.
+- Las capturas aportadas por el usuario solo se publicarán con su aprobación
+  explícita. No se publicarán credenciales ni secretos.
 
 ## Resultado esperado
 

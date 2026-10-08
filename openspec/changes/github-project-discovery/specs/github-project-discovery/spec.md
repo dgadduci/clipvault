@@ -28,8 +28,8 @@ guide, and a support route. The path SHALL be available in English and Spanish.
 
 - **WHEN** repository documentation or social preview includes product imagery
 - **THEN** the imagery represents the current application and logo
-- **AND** all clipboard entries, account names and paths shown are synthetic
-- **AND** the image contains no user data or secrets
+- **AND** user-provided imagery has explicit user approval for public release
+- **AND** the image contains no credentials or secrets
 
 #### Scenario: A user looks for help
 

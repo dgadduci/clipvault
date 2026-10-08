@@ -10,7 +10,8 @@ presentarlos como un recorrido claro en lugar de repetir instrucciones.
 ## Qué cambia
 
 - Crear un README de raíz en inglés con versión equivalente en español.
-- Explicar ClipVault en una frase, mostrar capturas con datos de demostración,
+- Explicar ClipVault en una frase y mostrar capturas actuales aprobadas por el
+  usuario para publicación,
   enlazar los releases y dirigir a las guías de instalación, privacidad,
   soporte y contribución.
 - Enumerar solo capacidades presentes en la versión pública enlazada.
@@ -22,8 +23,8 @@ presentarlos como un recorrido claro en lugar de repetir instrucciones.
 - Publicar una release, cambiar settings del repositorio remoto o modificar la
   página de GitHub desde una API.
 - Afirmar soporte para Windows, paquetes no publicados o funciones del roadmap.
-- Usar datos reales de clipboard, telemetría o imágenes que expongan datos
-  personales.
+- Exponer credenciales o secretos, o publicar capturas sin aprobación explícita
+  del usuario para uso público.
 - Hacer afirmaciones absolutas como “sin conexiones a Internet”; el actualizador
   consulta GitHub y eso debe describirse de forma precisa.
 
