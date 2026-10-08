@@ -12,9 +12,15 @@ y por sesión Linux cuando cambien los pasos.
 - **macOS:** usar el `.dmg` oficial de la arquitectura correspondiente. Explicar
   el aviso de Gatekeeper de los builds ad-hoc solo con los pasos seguros que ya
   documenta `docs/releases.md`; no recomendar desactivar Gatekeeper.
-- **Ubuntu GNOME:** presentar primero el `.deb` oficial y el flujo gráfico
-  disponible en la versión Ubuntu que se haya probado. Añadir AppImage como
-  alternativa cuando el usuario prefiera no instalar el paquete del sistema.
+- **`.deb` Linux:** presentarlo para Ubuntu y derivados compatibles de Debian/
+  Ubuntu (por ejemplo, Linux Mint), x86_64, sujeto a que estén disponibles las
+  dependencias declaradas por el paquete. Describir como flujo comprobado sólo
+  la instalación gráfica probada en Ubuntu GNOME; los nombres de menús pueden
+  variar en otras distribuciones.
+- **AppImage Linux:** presentarlo como el formato portátil publicado para la
+  mayoría de distribuciones Linux x86_64, incluida Arch. Aclarar que puede
+  requerir soporte FUSE y que la disponibilidad del formato no equivale a una
+  prueba de cada distribución, escritorio o sesión.
 - **Arch KDE Plasma:** usar el AppImage oficial si es la ruta verificada. No
   presentar el `.deb` como paquete de Arch ni afirmar que exista paquete AUR,
   RPM o integración del sistema que el proyecto no publique.
@@ -30,8 +36,11 @@ enlazarlos y preferir una URL estable a la última versión publicada.
 
 ## Combinaciones y primera ejecución
 
-La guía distinguirá macOS, Ubuntu GNOME y Arch KDE Plasma. Para Linux anotará
-por separado X11 y Wayland, el formato usado y el resultado manual conocido.
+La guía distinguirá macOS, Ubuntu GNOME y Arch KDE Plasma. El selector de
+descargas describirá las familias de distribuciones compatibles con los
+formatos publicados, mientras la matriz anotará sólo las combinaciones
+Linux/sesión probadas manualmente. Para Linux anotará por separado X11 y
+Wayland, el formato usado y el resultado manual conocido.
 Como mínimo registrará las combinaciones que el mantenedor confirme como
 probadas: Ubuntu GNOME Wayland y Arch KDE Plasma Wayland. El estado de Ubuntu
 GNOME X11 se comprobará por separado; no se deducirá del resultado Wayland.

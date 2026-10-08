@@ -7,6 +7,11 @@ Spanish for macOS, Ubuntu GNOME and Arch KDE Plasma. The guides SHALL use only
 official artifacts and SHALL distinguish Linux desktop sessions where
 installation or runtime steps differ.
 
+The Linux download selector SHALL describe the distribution families suited
+to each published package format. It SHALL distinguish package-format
+applicability from manual verification of a specific distribution, desktop or
+session.
+
 #### Scenario: macOS user installs ClipVault
 
 - **WHEN** a macOS user follows the guide
@@ -33,6 +38,18 @@ installation or runtime steps differ.
   an AUR package exists
 - **AND** it distinguishes optional KDE integration from steps required to
   launch the application
+
+#### Scenario: A Linux user selects a package for another distribution
+
+- **WHEN** a user on an x86_64 Debian/Ubuntu-based distribution or another
+  mainstream Linux distribution selects a download
+- **THEN** the guide identifies the `.deb` for Ubuntu and compatible
+  Debian/Ubuntu derivatives, and the AppImage as the portable format for most
+  other Linux distributions
+- **AND** it notes that `.deb` dependency availability and AppImage runtime
+  requirements such as FUSE can vary
+- **AND** it keeps untested distributions and desktop sessions marked as
+  unverified
 
 #### Scenario: A user follows a first-run instruction
 

@@ -8,10 +8,19 @@ Download ClipVault from the [latest official release](https://github.com/dgadduc
 | --- | --- | --- |
 | Mac with Apple silicon | `ClipVault_0.0.20_aarch64.dmg` | Disk image (`.dmg`) |
 | Mac with Intel processor | `ClipVault_0.0.20_x64.dmg` | Disk image (`.dmg`) |
-| Ubuntu GNOME, 64-bit Intel/AMD | `ClipVault_0.0.20_amd64.deb` | Ubuntu software installer |
-| Arch Linux with KDE Plasma Wayland, 64-bit Intel/AMD | `ClipVault_0.0.20_amd64.AppImage` | AppImage |
+| Ubuntu and compatible Debian/Ubuntu-based distributions (e.g. Linux Mint), x86_64 | `ClipVault_0.0.20_amd64.deb` | Debian package installer (`.deb`) |
+| Most other x86_64 Linux distributions (e.g. Arch, Fedora, openSUSE) | `ClipVault_0.0.20_amd64.AppImage` | AppImage |
 
 The file names include the release version. If a newer version is listed, choose the file with the same operating system and processor suffix. Linux ARM packages, RPM, Flatpak, Snap, AUR and native Arch packages are not published.
+
+For Linux, use the `.deb` on Ubuntu and compatible Debian/Ubuntu derivatives
+such as Linux Mint, provided the package dependencies are available. The
+AppImage is the portable format for most other x86_64 distributions; some
+systems may need FUSE to run it. These package recommendations describe format
+fit, not manual test coverage. The verification table below lists the
+distribution and session combinations checked so far. See the AppImage
+[FUSE troubleshooting guide](https://docs.appimage.org/user-guide/troubleshooting/fuse.html)
+if it reports a FUSE error.
 
 ## macOS
 
@@ -28,6 +37,13 @@ The release is built without Apple notarization, so macOS may show a security wa
 
 The same `.deb` installation steps apply to Ubuntu GNOME sessions using Wayland and X11. The desktop session can affect runtime integration, but it does not change which package to download.
 
+The same x86_64 `.deb` can also be used on compatible Debian/Ubuntu-based
+distributions such as Linux Mint when the package's declared dependencies are
+available. Open it with that distribution's package installer or software
+manager; the screens and menu names may differ. The steps below describe the
+tested Ubuntu GNOME flow, and the other distributions are not listed as
+manually verified unless noted in the verification table.
+
 1. Download `ClipVault_0.0.20_amd64.deb` from the [latest release](https://github.com/dgadduci/clipvault/releases/latest). It is for 64-bit Intel/AMD computers.
 2. Open **Files**, then open **Downloads**.
 3. Double-click the `.deb` file. Ubuntu opens its software installer. Select **Install** and enter your computer password if requested.
@@ -37,7 +53,12 @@ The published `.deb` was installed and opened successfully in Ubuntu GNOME Wayla
 
 ## Arch Linux with KDE Plasma
 
-The official Linux download for this configuration is the x86_64 AppImage. ClipVault does not publish an AUR or native Arch package.
+The x86_64 AppImage is the published portable format for most other Linux
+distributions as well, including Arch, Fedora and openSUSE. Some systems may
+need FUSE to run it; see the [AppImage FUSE troubleshooting guide](https://docs.appimage.org/user-guide/troubleshooting/fuse.html).
+The steps below were checked on Arch KDE Plasma Wayland; desktop menus and
+integration can differ elsewhere. ClipVault does not publish an AUR or native
+Arch package.
 
 1. In Dolphin, open your **Home** folder and create a folder named `Applications` if it does not already exist.
 2. Download `ClipVault_0.0.20_amd64.AppImage` from the [latest release](https://github.com/dgadduci/clipvault/releases/latest), then move it from **Downloads** to `Home/Applications`.
@@ -69,7 +90,7 @@ Linux X11 and Wayland are separate session types. A check on one does not establ
 | Ubuntu GNOME Wayland | Published `.deb` installed and opened successfully | Passed |
 | Ubuntu GNOME X11 | Published `.deb` installed and opened successfully | Passed |
 | Arch KDE Plasma Wayland | Published AppImage launched from `Home/Applications`; new panel shortcut created. Previous launcher still points to an old path | Passed; previous launcher remains |
-| Other Linux distributions and desktops | Not established by these checks | Not documented as supported |
+| Other Linux distributions and desktops | AppImage is the published portable format for most x86_64 distributions; specific combinations are not established by these checks | Not manually verified |
 
 ## Privacy and help
 

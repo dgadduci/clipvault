@@ -8,10 +8,20 @@ Descarga ClipVault desde el [último release oficial](https://github.com/dgadduc
 | --- | --- | --- |
 | Mac con Apple silicon | `ClipVault_0.0.20_aarch64.dmg` | Imagen de disco (`.dmg`) |
 | Mac con procesador Intel | `ClipVault_0.0.20_x64.dmg` | Imagen de disco (`.dmg`) |
-| Ubuntu GNOME, Intel/AMD de 64 bits | `ClipVault_0.0.20_amd64.deb` | Instalador de software de Ubuntu |
-| Arch Linux con KDE Plasma Wayland, Intel/AMD de 64 bits | `ClipVault_0.0.20_amd64.AppImage` | AppImage |
+| Ubuntu y distribuciones compatibles basadas en Debian/Ubuntu (p. ej., Linux Mint), x86_64 | `ClipVault_0.0.20_amd64.deb` | Instalador de paquetes Debian (`.deb`) |
+| La mayoría de las demás distribuciones Linux x86_64 (p. ej., Arch, Fedora, openSUSE) | `ClipVault_0.0.20_amd64.AppImage` | AppImage |
 
 Los nombres incluyen la versión del release. Si aparece una versión más nueva, elige el archivo que tenga el mismo sistema operativo y sufijo de procesador. No se publican paquetes Linux ARM, RPM, Flatpak, Snap, AUR ni un paquete nativo para Arch.
+
+En Linux, usa el `.deb` en Ubuntu y en distribuciones compatibles derivadas
+de Debian/Ubuntu, como Linux Mint, siempre que estén disponibles las
+dependencias del paquete. El AppImage es el formato portátil para la mayoría
+de las demás distribuciones x86_64; algunos sistemas pueden necesitar FUSE
+para ejecutarlo. Estas recomendaciones describen el formato adecuado, no las
+pruebas manuales. La matriz indica qué combinaciones de distribución y sesión
+se comprobaron. Consulta la
+[guía de solución de problemas de FUSE de AppImage](https://docs.appimage.org/user-guide/troubleshooting/fuse.html)
+si aparece un error de FUSE.
 
 ## macOS
 
@@ -28,6 +38,14 @@ El release se compila sin notarización de Apple, por lo que macOS podría mostr
 
 Los pasos para instalar el `.deb` son iguales en las sesiones Ubuntu GNOME con Wayland y X11. La sesión puede afectar algunas integraciones durante el uso, pero no cambia qué paquete debes descargar.
 
+El mismo `.deb` x86_64 también puede usarse en distribuciones compatibles
+basadas en Debian/Ubuntu, como Linux Mint, si están disponibles las
+dependencias declaradas por el paquete. Ábrelo con el instalador o gestor de
+software de esa distribución; las pantallas y los nombres de menú pueden
+variar. Los pasos siguientes describen el flujo probado en Ubuntu GNOME; las
+demás distribuciones no se consideran verificadas manualmente salvo que la
+matriz lo indique.
+
 1. Descarga `ClipVault_0.0.20_amd64.deb` desde el [último release](https://github.com/dgadduci/clipvault/releases/latest). Es para equipos Intel/AMD de 64 bits.
 2. Abre **Archivos** y luego **Descargas**.
 3. Haz doble clic en el archivo `.deb`. Ubuntu abrirá su instalador de software. Selecciona **Instalar** e ingresa la contraseña del equipo si te la solicita.
@@ -37,7 +55,13 @@ El `.deb` publicado se instaló y abrió correctamente en Ubuntu GNOME Wayland y
 
 ## Arch Linux con KDE Plasma
 
-La descarga oficial para esta configuración es el AppImage x86_64. ClipVault no publica un paquete AUR ni un paquete nativo para Arch.
+El AppImage x86_64 es el formato portátil publicado también para la mayoría
+de las demás distribuciones Linux, incluidas Arch, Fedora y openSUSE. Algunos
+sistemas pueden necesitar FUSE para ejecutarlo; consulta la
+[guía de solución de problemas de FUSE de AppImage](https://docs.appimage.org/user-guide/troubleshooting/fuse.html).
+Los pasos siguientes se probaron en Arch KDE Plasma Wayland; los menús y la
+integración pueden variar en otros entornos. ClipVault no publica un paquete
+AUR ni un paquete nativo para Arch.
 
 1. En Dolphin, abre la carpeta **Personal** y crea una carpeta llamada `Applications` si todavía no existe.
 2. Descarga `ClipVault_0.0.20_amd64.AppImage` desde el [último release](https://github.com/dgadduci/clipvault/releases/latest) y muévelo de **Descargas** a `Personal/Applications`.
@@ -70,7 +94,7 @@ Linux X11 y Wayland son sesiones diferentes. Una prueba en una no confirma el co
 | Ubuntu GNOME Wayland | El `.deb` publicado se instaló y abrió correctamente | Completado |
 | Ubuntu GNOME X11 | El `.deb` publicado se instaló y abrió correctamente | Completado |
 | Arch KDE Plasma Wayland | El AppImage publicado se abrió desde `Personal/Applications` y se creó un nuevo acceso del panel; el lanzador anterior aún apunta a una ruta vieja | Completado; el lanzador anterior permanece |
-| Otras distribuciones y escritorios Linux | Estas pruebas no lo determinan | No se documentan como compatibles |
+| Otras distribuciones y escritorios Linux | El AppImage es el formato portátil publicado para la mayoría de las distribuciones x86_64; estas pruebas no determinan combinaciones concretas | No verificado manualmente |
 
 ## Privacidad y ayuda
 

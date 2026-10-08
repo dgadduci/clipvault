@@ -36,6 +36,11 @@
   entre inglés y español.
 - [x] 2.6 Enlazar desde ambas guías a releases, soporte y ajustes de integración
   correspondientes a la versión actual.
+- [x] 2.7 Ampliar las dos filas Linux de “Choose your download” para indicar
+  `.deb` en Ubuntu y derivados Debian/Ubuntu compatibles (por ejemplo, Linux
+  Mint) y AppImage para la mayoría de distribuciones x86_64, sin agregar filas.
+- [x] 2.8 Distinguir la compatibilidad esperada del formato de las distribuciones
+  y sesiones verificadas manualmente; mencionar dependencias `.deb` y FUSE.
 
 ## 3. Validación
 
@@ -49,3 +54,5 @@
   identificados y que no se prometa compatibilidad universal.
 - [x] 3.4 Validar OpenSpec en modo estricto para el cambio y el spec paraguas;
   revisar EN/ES en paralelo. Las validaciones finalizaron correctamente.
+- [x] 3.5 Validar el alcance de los formatos Linux y la paridad de las dos guías;
+  conservar en la matriz únicamente las configuraciones verificadas.
