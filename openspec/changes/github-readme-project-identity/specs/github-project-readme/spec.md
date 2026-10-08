@@ -30,6 +30,13 @@ claims based only on roadmap plans.
 - **AND** planned capabilities and unverified configurations are identified
   as such or omitted
 
+#### Scenario: A visitor scans the feature overview
+- **WHEN** the README summarizes the current application
+- **THEN** it covers clipboard capture, manual text entries and editing,
+  search and organization, Quick Paste, and opt-in local-network sharing
+- **AND** it describes peer captures as items the user explicitly imports,
+  without implying automatic history synchronization
+
 ### Requirement: Public project identity uses accurate, privacy-safe assets and metadata
 
 The repository SHALL provide a current social preview and reviewable GitHub

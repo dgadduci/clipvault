@@ -13,6 +13,12 @@ portapapeles para macOS y Linux. Las funciones enumeradas se comprobarán contra
 la última versión publicada; no se copiarán listas de CopyQ ni del roadmap de
 ClipVault.
 
+El resumen de funciones describirá las capacidades de la release vigente:
+captura y edición de texto, organización y notas, búsqueda, Quick Paste y
+compartición optativa en red local. La transferencia entre equipos requiere
+vincularlos e importar de forma explícita cada elemento elegido; no se
+presentará como sincronización automática.
+
 ## Capturas
 
 Incluir capturas actuales de la interfaz que el usuario revisó y aprobó
