@@ -10,19 +10,33 @@ teclado.
 
 ![Vista social de ClipVault](docs/assets/github-social-preview.png)
 
-ClipVault guarda el historial del portapapeles en tu equipo. Puede capturar
-texto, texto con formato e imágenes, y ayudarte a encontrar y organizar los
-elementos con búsqueda local, favoritos, colecciones y etiquetas. Quick Paste
-ofrece una vista compacta para reutilizar elementos recientes.
+ClipVault conserva localmente el historial del portapapeles: texto, texto con
+formato e imágenes. También permite crear capturas de texto manualmente. Usa
+la ventana completa para editar y organizar capturas, o abre Quick Paste para
+encontrar un elemento reciente desde una vista compacta y pensada para el
+teclado. También puedes vincular equipos ClipVault de la misma red local para
+consultar e importar capturas seleccionadas.
 
 ## Funciones
 
-- Busca el historial desde la aplicación de escritorio o Quick Paste.
-- Conserva elementos importantes con favoritos y organízalos con colecciones
-  y etiquetas.
-- Consulta texto, texto con formato e imágenes en el mismo historial.
-- Pausa la captura del portapapeles cuando quieras.
-- Configura atajos de teclado para acceder rápidamente.
+- Captura automáticamente texto, texto con formato e imágenes del
+  portapapeles; muestra la aplicación de origen cuando está disponible.
+- Crea capturas de texto directamente en ClipVault, edita su contenido y sus
+  títulos, y añade notas para conservar el contexto.
+- Busca en el historial local y filtra por colección, etiqueta, tipo de
+  contenido o aplicación de origen.
+- Organiza capturas en colecciones, asígnales etiquetas, márcalas como
+  favoritas y fija las más importantes.
+- **Quick Paste:** abre su ventana compacta con un atajo de teclado; busca una
+  captura reciente y cópiala para pegarla en la aplicación donde estabas
+  trabajando, sin abrir la ventana completa del historial.
+- **Compartición en red local:** activa la función y vincula equipos ClipVault
+  de la misma red para consultar las capturas recientes de texto e imágenes de
+  un equipo de confianza. Importa solo las que elijas; quedan guardadas en tu
+  historial local y no hay sincronización automática.
+- Pausa la captura, excluye aplicaciones determinadas y elige cuánto tiempo
+  conservar el historial.
+- Configura atajos de teclado para abrir la ventana principal y Quick Paste.
 
 ## Capturas
 

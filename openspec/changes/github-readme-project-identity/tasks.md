@@ -17,6 +17,9 @@
   plataformas, descargas oficiales, enlaces y navegación a guías.
 - [x] 2.2.2 Añadir las capturas actuales aprobadas por el usuario a los README
   en inglés y español.
+- [x] 2.2.3 Ampliar el resumen de funciones en ambos README con capacidades de
+  `v0.0.20` y aclarar que los elementos de equipos vinculados se importan por
+  decisión del usuario, sin sincronización automática del historial.
 - [x] 2.3 Añadir una explicación local-first precisa y enlazar los detalles del
   actualizador sin afirmar que no hay conexiones de red.
 - [x] 2.4 Revisar que ambos README no describan como actuales funciones del

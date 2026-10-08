@@ -9,19 +9,31 @@ copied items with a keyboard-first desktop app.
 
 ![ClipVault social preview](docs/assets/github-social-preview.png)
 
-ClipVault keeps clipboard history on your computer. It can capture text, rich
-text and images, then help you find and organize items with local search,
-favorites, collections and tags. Quick Paste gives you a compact way to reuse
-recent items.
+ClipVault keeps a local history of clipboard text, rich text and images, and
+also lets you create text captures manually. Use the full history window to
+edit and organize captures, or open Quick Paste for a compact, keyboard-first
+way to find a recent item. Paired ClipVault devices can also browse and import
+selected captures over the local network.
 
 ## What it includes
 
-- Search clipboard history from the desktop app or Quick Paste.
-- Keep important items with favorites; organize items with collections and
-  tags.
-- Review captured text, rich text and images in the same history.
-- Pause clipboard capture when you want a break.
-- Use configurable keyboard shortcuts for quick access.
+- Automatically capture clipboard text, rich text and images; see the source
+  app when it is available.
+- Create text captures directly in ClipVault, edit their text and titles, and
+  add notes to keep context with each capture.
+- Search the local history and filter by collection, tag, content type or
+  source app.
+- Organize captures in collections, assign tags, mark favorites and pin
+  important items.
+- **Quick Paste:** open its compact window with a keyboard shortcut, find a
+  recent capture and copy it to paste into the app you were already using,
+  without opening the full history window.
+- **Local network sharing:** enable sharing and pair ClipVault devices on the
+  same network to browse a trusted device's recent text and image captures.
+  Import only the items you choose; imports are saved locally and history is
+  not synchronized automatically.
+- Pause capture, exclude selected apps and choose how long to retain history.
+- Configure keyboard shortcuts for the main window and Quick Paste.
 
 ## Screenshots
 
