@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Support / Ayuda
+    url: https://github.com/dgadduci/clipvault/blob/main/SUPPORT.md
+    about: Get help with ClipVault / Obtén ayuda sobre ClipVault.
+  - name: Security policy / Política de seguridad
+    url: https://github.com/dgadduci/clipvault/security/policy
+    about: Check the current security reporting route; do not post details publicly / Consulta el canal disponible; no publiques detalles.

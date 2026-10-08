@@ -1,0 +1,61 @@
+name: Bug report / Informe de error
+description: Report a reproducible problem / Informa un problema reproducible.
+title: "[Bug / Error]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. You may write in English or Spanish.
+        Gracias por reportarlo. Puedes escribir en inglés o español.
+
+        **Privacy / Privacidad:** Never paste clipboard entries, credentials, tokens, private keys or database files here. Review screenshots and logs before attaching them.
+        **Privacidad:** No pegues aquí contenido del portapapeles, credenciales, tokens, claves privadas ni bases de datos. Revisa las capturas y los logs antes de adjuntarlos.
+  - type: input
+    id: version
+    attributes:
+      label: ClipVault version / Versión de ClipVault
+      description: The version shown in About / La versión que aparece en Acerca de.
+      placeholder: "0.0.20"
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system / Sistema operativo
+      options:
+        - macOS
+        - Ubuntu
+        - Arch Linux
+        - Other Linux / Otra distribución Linux
+        - Other / Otro
+    validations:
+      required: true
+  - type: input
+    id: desktop-session
+    attributes:
+      label: Desktop and session / Escritorio y sesión
+      description: For Linux, include GNOME/KDE and X11/Wayland when known. / En Linux, indica GNOME/KDE y X11/Wayland si los conoces.
+      placeholder: "GNOME on Wayland / GNOME con Wayland"
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce / Pasos para reproducirlo
+      description: Use synthetic text only; never include private clipboard content. / Usa solo texto inventado; no incluyas contenido privado del portapapeles.
+      placeholder: "1. Open… / 1. Abre…"
+    validations:
+      required: true
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected and actual result / Resultado esperado y resultado obtenido
+      placeholder: "I expected… but… / Esperaba… pero…"
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy-check
+    attributes:
+      label: Privacy check / Revisión de privacidad
+      options:
+        - label: I checked that this report contains no clipboard data, credentials, tokens or other personal information. / Revisé que este reporte no contenga datos del portapapeles, credenciales, tokens ni otra información personal.
+          required: true
