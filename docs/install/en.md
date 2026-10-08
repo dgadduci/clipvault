@@ -13,6 +13,17 @@ Download ClipVault from the [latest official release](https://github.com/dgadduc
 
 The file names include the release version. If a newer version is listed, choose the file with the same operating system and processor suffix. Linux ARM packages, RPM, Flatpak, Snap, AUR and native Arch packages are not published.
 
+The `v0.0.20` release does not include an RPM. The updated release workflow
+will produce `ClipVault-<version>-1.x86_64.rpm` for a future release. RPM
+installation has not yet been checked on Fedora, openSUSE or another RPM-based
+distribution, so none is listed as verified or supported here.
+
+When an RPM appears on the release page, install the local file with your
+distribution's package manager. For example, Fedora uses
+`sudo dnf install ./ClipVault-<version>-1.x86_64.rpm`; openSUSE uses
+`sudo zypper install ./ClipVault-<version>-1.x86_64.rpm`. These commands do not
+mean those distributions have passed ClipVault's installation checks.
+
 For Linux, use the `.deb` on Ubuntu and compatible Debian/Ubuntu derivatives
 such as Linux Mint, provided the package dependencies are available. The
 AppImage is the portable format for most other x86_64 distributions; some

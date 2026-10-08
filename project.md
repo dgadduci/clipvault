@@ -144,7 +144,7 @@ Windows puede considerarse en el futuro, pero no forma parte del alcance inicial
 Artefactos objetivo:
 
 - macOS: `.app` y `.dmg`.
-- Linux: `.AppImage` y `.deb`; `.rpm` queda para una etapa posterior.
+- Linux: `.AppImage`, `.deb` y `.rpm` para x86_64.
 
 ## Requisitos no funcionales
 

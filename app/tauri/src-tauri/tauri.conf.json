@@ -61,7 +61,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "appimage", "deb"],
+    "targets": ["app", "dmg", "appimage", "deb", "rpm"],
     "createUpdaterArtifacts": false,
     "resources": [
       "resources/gnome-extension/metadata.json",

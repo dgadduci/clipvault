@@ -1,7 +1,7 @@
 # Desktop releases and updater keys
 
 The desktop release workflow builds macOS Apple Silicon and Intel installers
-and Linux x86_64 AppImage and Debian packages. It creates a **draft** GitHub
+and Linux x86_64 AppImage, Debian and RPM packages. It creates a **draft** GitHub
 Release for a `vMAJOR.MINOR.PATCH` tag. Draft releases are not offered to
 installed clients; publish the draft only after reviewing its installers,
 signatures and `latest.json` manifest.
@@ -10,8 +10,9 @@ The client checks GitHub Releases over HTTPS. The request contains the app
 version, operating system and architecture needed to select an update. It does
 not include clipboard history, capture titles, local paths or local entry IDs.
 The user must choose **Download and install**; after installation, a separate
-action relaunches ClipVault. Linux `.deb` updates use the operating system's
-authorization flow, while AppImage updates replace the AppImage directly.
+action relaunches ClipVault. Linux `.deb` and RPM updates use the operating
+system's authorization flow, while AppImage updates replace the AppImage
+directly.
 
 ## Tauri updater key
 
@@ -73,7 +74,7 @@ membership and a separate CI credential setup.
 1. Bump the Cargo workspace, Tauri and frontend versions together.
 2. Push a `vMAJOR.MINOR.PATCH` tag whose commit is reachable from `main`.
 3. Review the draft's macOS `.dmg` and `.app.tar.gz` artifacts, Linux
-   `.AppImage` and `.deb` artifacts, Tauri signatures and `latest.json`.
+   `.AppImage`, `.deb` and `.rpm` artifacts, Tauri signatures and `latest.json`.
 4. Test updates from each supported installer type, including accepting and
    cancelling the Linux `.deb` authorization prompt.
 5. Publish the draft only after those checks pass. The first client install
@@ -81,4 +82,4 @@ membership and a separate CI credential setup.
 
 Never publish a draft whose manifest points an installer type at another
 bundle's artifact. The updater selects Linux assets using both architecture and
-installer type (`appimage` or `deb`).
+installer type (`appimage`, `deb` or `rpm`).

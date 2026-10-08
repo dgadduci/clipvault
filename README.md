@@ -52,10 +52,12 @@ selected captures over the local network.
 
 ## Downloads and platforms
 
-Official releases provide macOS disk images for Apple silicon and Intel, plus
-Linux x86_64 DEB and AppImage packages. The installation guide lists the
-tested and pending desktop/session combinations; a check on one Linux session
-does not establish support for another.
+The current `v0.0.20` release provides macOS disk images for Apple silicon and
+Intel, plus Linux x86_64 DEB and AppImage packages. The updated release
+workflow is set up to include RPM packages in future releases; RPM
+distribution compatibility remains pending manual installation checks. The
+installation guide lists tested and pending desktop/session combinations; a
+check on one Linux session does not establish support for another.
 
 - [Download the latest release](https://github.com/dgadduci/clipvault/releases/latest)
 - [Choose an installer and read first-run steps](docs/install/README.md)

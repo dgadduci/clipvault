@@ -17,6 +17,18 @@
           "/usr/share/applications/ClipVault.desktop": "desktop-launcher-hidden.desktop",
           "/usr/share/applications/com.clipvault.desktop.desktop": "desktop-entry-wayland.desktop"
         }
+      },
+      "rpm": {
+        "desktopTemplate": "desktop-template.desktop",
+        "depends": [
+          "gtk3",
+          "libayatana-appindicator3.so.1()(64bit)",
+          "libwebkit2gtk-4.1.so.0()(64bit)"
+        ],
+        "files": {
+          "/usr/share/applications/ClipVault.desktop": "desktop-launcher-hidden.desktop",
+          "/usr/share/applications/com.clipvault.desktop.desktop": "desktop-entry-wayland.desktop"
+        }
       }
     }
   }

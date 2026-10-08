@@ -110,7 +110,7 @@ jobs:
           - label: Linux x86_64
             runner: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
-            args: --bundles appimage,deb
+            args: --bundles appimage,deb,rpm
     steps:
       - name: Check out source
         uses: actions/checkout@v4

@@ -2,10 +2,10 @@
 
 ## Roles y coordinación
 
-- **Codex es la LLM arquitecta:** analiza problemas, releva el repositorio, define la arquitectura, toma decisiones técnicas y prepara los artefactos OpenSpec.
-- **MiniMax es la LLM implementadora:** ejecuta las tareas aprobadas en OpenSpec, modifica el código y verifica la implementación.
+- **Codex es la LLM arquitecta e implementadora:** analiza problemas, releva el repositorio, define la arquitectura, prepara los artefactos OpenSpec, ejecuta las tareas aprobadas, modifica el código y verifica la implementación.
+- **MiniMax ya no participa en el flujo de trabajo.**
 - **OpenSpec es la fuente común de verdad:** las decisiones relevantes deben quedar reflejadas en `proposal.md`, `design.md`, `specs/` y `tasks.md`.
-- Si la implementación revela una contradicción o una decisión arquitectónica nueva, MiniMax debe pausar y solicitar actualizar OpenSpec antes de continuar.
+- Si la implementación revela una contradicción o una decisión arquitectónica nueva, Codex debe pausar y actualizar OpenSpec antes de continuar.
 
 ## Contexto obligatorio
 
@@ -22,7 +22,7 @@ No asumir que una funcionalidad está aprobada solo porque aparece en el roadmap
 
 - Todo cambio sustancial debe comenzar con una propuesta OpenSpec.
 - Codex prepara y mantiene coherentes propuesta, diseño, especificaciones y tareas.
-- MiniMax implementa únicamente las tareas pendientes del cambio seleccionado.
+- Tras la selección o aprobación del usuario, Codex implementa únicamente las tareas pendientes del cambio seleccionado.
 - Las tareas se marcan como completadas inmediatamente después de verificarlas.
 - Antes de entregar, ejecutar la validación de OpenSpec y revisar el diff.
 - No implementar snippets, reglas, transformaciones, CLI, import/export o detección avanzada de secretos si no forman parte del cambio aprobado.

@@ -55,8 +55,10 @@ consultar e importar capturas seleccionadas.
 
 ## Descargas y plataformas
 
-Los releases oficiales ofrecen imágenes de disco para macOS Apple silicon e
-Intel, además de paquetes DEB y AppImage para Linux x86_64. La guía de
+El release actual `v0.0.20` ofrece imágenes de disco para macOS Apple silicon e
+Intel, además de paquetes DEB y AppImage para Linux x86_64. El workflow
+actualizado está configurado para incluir paquetes RPM en futuros releases;
+falta comprobar manualmente su instalación en distribuciones RPM. La guía de
 instalación indica qué combinaciones de escritorio y sesión están comprobadas
 y cuáles siguen pendientes; una prueba en una sesión Linux no confirma el
 comportamiento de otra.

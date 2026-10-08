@@ -73,7 +73,7 @@ instead.
 Linux:
 
 ```text
-cargo tauri build --bundles deb,appimage
+cargo tauri build --bundles deb,appimage,rpm
 ```
 
 macOS:
