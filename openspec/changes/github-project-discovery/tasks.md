@@ -16,6 +16,6 @@
 - [x] 1.6 Revisar el recorrido publicado desde GitHub hasta las guías y releases;
   ambos README y las guías EN/ES están en `main`, y el usuario confirmó las
   instalaciones y primeros inicios en las plataformas documentadas.
-- [ ] 1.7 Completar la identidad de GitHub. La descripción, el sitio web y los
-  topics ya están aplicados y verificados; falta subir la imagen social desde
-  **Settings → Social preview**.
+- [x] 1.7 Completar la identidad de GitHub. La descripción, el sitio web y los
+  topics están aplicados y verificados; el usuario confirmó que cargó la imagen
+  social desde **Settings → Social preview**.
