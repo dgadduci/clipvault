@@ -1,7 +1,8 @@
 # GitHub About / Información de GitHub
 
-Values to review and apply manually after this change is merged to the default
-branch. These notes do not change repository settings.
+The description, website and topics below were applied after this change was
+merged to `main`. The social preview image still needs to be uploaded from the
+repository settings page.
 
 ## English
 
@@ -11,15 +12,14 @@ branch. These notes do not change repository settings.
   tauri, rust, svelte
 - **Social preview:** docs/assets/github-social-preview.png (1280 × 640 px)
 
-To apply the values, open the repository page, use the edit control next to
-**About**, and update the description, website and topics. To upload the social
-preview, open **Settings → General → Social preview** and upload the PNG.
+To finish the social preview, open the repository page, choose **Settings →
+Social preview**, and upload the PNG.
 
 ## Español
 
-Revisa y aplica estos valores manualmente después de integrar el cambio en la
-rama predeterminada. Estas instrucciones no modifican la configuración del
-repositorio.
+La descripción, el sitio web y los temas siguientes se aplicaron después de
+integrar este cambio en `main`. La imagen social todavía debe cargarse desde la
+configuración del repositorio.
 
 - **Descripción:** Historial local del portapapeles para macOS y Linux.
 - **Sitio web:** https://github.com/dgadduci/clipvault/tree/main/docs/install
@@ -27,7 +27,5 @@ repositorio.
   tauri, rust, svelte
 - **Vista social:** docs/assets/github-social-preview.png (1280 × 640 px)
 
-Para aplicar los valores, abre la página del repositorio, usa el control de
-edición junto a **About** y actualiza la descripción, el sitio web y los
-temas. Para cargar la vista social, abre **Settings → General → Social
-preview** y sube el archivo PNG.
+Para completar la vista social, abre la página del repositorio, ve a
+**Settings → Social preview** y sube el archivo PNG.

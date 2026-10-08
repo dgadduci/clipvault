@@ -5,8 +5,8 @@
   `GPLv3` y su cabecera SPDX `GPL-3.0-only`.
 - [x] 1.2 Añadir el texto estándar completo de GNU GPL v3 en `LICENSE` y
   verificar que Cargo acepta el identificador SPDX.
-- [ ] 1.3 Después de publicar la rama, confirmar que GitHub identifica la
-  licencia desde el archivo `LICENSE`.
+- [x] 1.3 Después de integrar la rama en `main`, confirmar que GitHub identifica
+  la licencia desde `LICENSE`; la metadata pública informa `GPL-3.0`.
 
 ## 2. Soporte y contribución
 
