@@ -1,8 +1,8 @@
 # GitHub About / Información de GitHub
 
-The description, website and topics below were applied after this change was
-merged to `main`. The social preview image still needs to be uploaded from the
-repository settings page.
+The description, website, topics and social preview below were applied after
+this change was merged to `main`. The social preview upload was confirmed by
+the repository maintainer.
 
 ## English
 
@@ -12,14 +12,14 @@ repository settings page.
   tauri, rust, svelte
 - **Social preview:** docs/assets/github-social-preview.png (1280 × 640 px)
 
-To finish the social preview, open the repository page, choose **Settings →
-Social preview**, and upload the PNG.
+The PNG is the raster export of `docs/assets/github-social-preview.svg`, sized
+to 1280 × 640 px for GitHub's social preview.
 
 ## Español
 
-La descripción, el sitio web y los temas siguientes se aplicaron después de
-integrar este cambio en `main`. La imagen social todavía debe cargarse desde la
-configuración del repositorio.
+La descripción, el sitio web, los temas y la vista social siguientes se
+aplicaron después de integrar este cambio en `main`. El mantenedor confirmó la
+carga de la vista social desde la configuración del repositorio.
 
 - **Descripción:** Historial local del portapapeles para macOS y Linux.
 - **Sitio web:** https://github.com/dgadduci/clipvault/tree/main/docs/install
@@ -27,5 +27,5 @@ configuración del repositorio.
   tauri, rust, svelte
 - **Vista social:** docs/assets/github-social-preview.png (1280 × 640 px)
 
-Para completar la vista social, abre la página del repositorio, ve a
-**Settings → Social preview** y sube el archivo PNG.
+El PNG es la exportación rasterizada de `docs/assets/github-social-preview.svg`,
+con dimensiones de 1280 × 640 px para la vista social de GitHub.
