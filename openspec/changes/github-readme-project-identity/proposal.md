@@ -20,8 +20,9 @@ presentarlos como un recorrido claro en lugar de repetir instrucciones.
 
 ## Fuera de alcance
 
-- Publicar una release, cambiar settings del repositorio remoto o modificar la
-  página de GitHub desde una API.
+- Publicar una release, cambiar otros settings del repositorio remoto o
+  automatizar futuras modificaciones de GitHub. Los topics de este cambio sólo
+  se aplican tras una solicitud explícita del usuario.
 - Afirmar soporte para Windows, paquetes no publicados o funciones del roadmap.
 - Exponer credenciales o secretos, o publicar capturas sin aprobación explícita
   del usuario para uso público.

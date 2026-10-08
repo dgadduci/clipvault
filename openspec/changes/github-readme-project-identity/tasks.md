@@ -33,6 +33,9 @@
   logo vigente y comprobar legibilidad a tamaño reducido.
 - [x] 3.3 Escribir pasos manuales para aplicar About y cargar la social preview
   desde la configuración del repositorio.
+- [x] 3.4 Priorizar topics de producto/plataforma: retirar `rust`, `tauri` y
+  `svelte`, añadir `local-network-sharing`, reflejarlo en `docs/github-about.md`
+  y confirmar el resultado en GitHub tras solicitud explícita.
 
 ## 4. Validación
 

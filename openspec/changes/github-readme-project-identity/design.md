@@ -30,9 +30,15 @@ incluir credenciales ni secretos en las imágenes.
 
 Proponer una descripción corta, topics y website que reflejen la aplicación y
 sus plataformas actuales. Guardar los valores en un archivo documentado de
-metadata para revisión, pero aplicar los cambios de About y subir la imagen
-social en GitHub de forma manual una vez revisados. No automatizar escritura en
-la configuración remota en este cambio.
+metadata para revisión. Aplicar cambios puntuales de About y social preview
+sólo tras una solicitud explícita del usuario; no automatizar escrituras
+futuras a la configuración remota.
+
+Los topics priorizan el producto, sus funciones y plataformas. Mantener
+`clipboard-manager`, `clipboard-history`, `local-first`, `macos` y `linux`;
+añadir `local-network-sharing` para describir la transferencia optativa entre
+equipos. Omitir topics de implementación como `rust`, `tauri` y `svelte`. Los
+cambios remotos se realizan sólo tras una solicitud explícita del usuario.
 
 Crear `docs/assets/github-social-preview.png` en 1280×640 px con el logo
 vigente, nombre ClipVault y una descripción breve. No debe repetir una lista

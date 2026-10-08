@@ -10,8 +10,8 @@ the repository maintainer.
   searchable history, Quick Paste, collections, and optional local network
   sharing.
 - **Website:** https://github.com/dgadduci/clipvault/tree/main/docs/install
-- **Topics:** clipboard-manager, clipboard-history, local-first, macos, linux,
-  tauri, rust, svelte
+- **Topics:** clipboard-manager, clipboard-history, local-first,
+  local-network-sharing, macos, linux
 - **Social preview:** docs/assets/github-social-preview.png (1280 × 640 px)
 
 The PNG is the raster export of `docs/assets/github-social-preview.svg`, sized
@@ -27,8 +27,8 @@ carga de la vista social desde la configuración del repositorio.
   Linux, con búsqueda, Quick Paste, colecciones y uso compartido opcional por
   red local.
 - **Sitio web:** https://github.com/dgadduci/clipvault/tree/main/docs/install
-- **Temas:** clipboard-manager, clipboard-history, local-first, macos, linux,
-  tauri, rust, svelte
+- **Temas:** clipboard-manager, clipboard-history, local-first,
+  local-network-sharing, macos, linux
 - **Vista social:** docs/assets/github-social-preview.png (1280 × 640 px)
 
 El PNG es la exportación rasterizada de `docs/assets/github-social-preview.svg`,

@@ -57,6 +57,8 @@ ClipVault identity. Images SHALL NOT expose credentials or secrets.
 - **THEN** the description, topics and website link to the actual project,
   release and installation pages
 - **AND** the repository change does not silently mutate remote GitHub settings
+- **AND** any remote metadata update is made only after an explicit user request
+- **AND** topics prioritize product capabilities and platforms over implementation-stack labels
 
 #### Scenario: README privacy description mentions update checks
 
