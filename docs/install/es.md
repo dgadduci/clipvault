@@ -9,21 +9,24 @@ Descarga ClipVault desde el [último release oficial](https://github.com/dgadduc
 | Mac con Apple silicon | `ClipVault_0.0.20_aarch64.dmg` | Imagen de disco (`.dmg`) |
 | Mac con procesador Intel | `ClipVault_0.0.20_x64.dmg` | Imagen de disco (`.dmg`) |
 | Ubuntu y distribuciones compatibles basadas en Debian/Ubuntu (p. ej., Linux Mint), x86_64 | `ClipVault_0.0.20_amd64.deb` | Instalador de paquetes Debian (`.deb`) |
-| La mayoría de las demás distribuciones Linux x86_64 (p. ej., Arch, Fedora, openSUSE) | `ClipVault_0.0.20_amd64.AppImage` | AppImage |
+| Fedora y otros sistemas x86_64 basados en RPM | `ClipVault-0.0.20-1.x86_64.rpm` | Paquete RPM (`dnf` o `zypper`) |
+| La mayoría de las demás distribuciones Linux x86_64 (p. ej., Arch) | `ClipVault_0.0.20_amd64.AppImage` | AppImage |
 
-Los nombres incluyen la versión del release. Si aparece una versión más nueva, elige el archivo que tenga el mismo sistema operativo y sufijo de procesador. No se publican paquetes Linux ARM, RPM, Flatpak, Snap, AUR ni un paquete nativo para Arch.
+Los nombres incluyen la versión del release. Si aparece una versión más nueva, elige el archivo que tenga el mismo sistema operativo y sufijo de procesador. No se publican paquetes Linux ARM, Flatpak, Snap, AUR ni un paquete nativo para Arch.
 
-El release `v0.0.20` no incluye un RPM. El workflow actualizado generará
-`ClipVault-<version>-1.x86_64.rpm` en un release futuro. Todavía no se probó la
-instalación RPM en Fedora, openSUSE ni otra distribución basada en RPM, así que
-ninguna aparece aquí como verificada o compatible.
+El release `v0.0.20` incluye el RPM x86_64 para descarga directa. Instala el
+archivo local con el gestor de paquetes de tu distribución. Por ejemplo,
+Fedora usa `sudo dnf install ./ClipVault-0.0.20-1.x86_64.rpm` y openSUSE usa
+`sudo zypper install ./ClipVault-0.0.20-1.x86_64.rpm`.
 
-Cuando aparezca un RPM en la página del release, instala el archivo local con
-el gestor de paquetes de tu distribución. Por ejemplo, Fedora usa
-`sudo dnf install ./ClipVault-<version>-1.x86_64.rpm` y openSUSE usa
-`sudo zypper install ./ClipVault-<version>-1.x86_64.rpm`. Estos comandos no
-significan que esas distribuciones ya hayan superado las pruebas de instalación
-de ClipVault.
+En contenedores, el paquete se instaló y quitó en Fedora 44; `ldd` no encontró
+bibliotecas faltantes allí ni en la prueba reportada de openSUSE (no se registró
+la versión de openSUSE). Estas pruebas no abrieron la interfaz gráfica ni
+comprobaron que los datos del usuario se conserven al desinstalar, así que no
+establecen compatibilidad de escritorio para esas distribuciones. El RPM es
+una descarga directa y todavía no figura en el manifiesto firmado del
+actualizador Tauri; las actualizaciones RPM dentro de la aplicación aún no
+están disponibles.
 
 En Linux, usa el `.deb` en Ubuntu y en distribuciones compatibles derivadas
 de Debian/Ubuntu, como Linux Mint, siempre que estén disponibles las
@@ -106,7 +109,9 @@ Linux X11 y Wayland son sesiones diferentes. Una prueba en una no confirma el co
 | Ubuntu GNOME Wayland | El `.deb` publicado se instaló y abrió correctamente | Completado |
 | Ubuntu GNOME X11 | El `.deb` publicado se instaló y abrió correctamente | Completado |
 | Arch KDE Plasma Wayland | El AppImage publicado se abrió desde `Personal/Applications` y se creó un nuevo acceso del panel; el lanzador anterior aún apunta a una ruta vieja | Completado; el lanzador anterior permanece |
-| Otras distribuciones y escritorios Linux | El AppImage es el formato portátil publicado para la mayoría de las distribuciones x86_64; estas pruebas no determinan combinaciones concretas | No verificado manualmente |
+| Contenedor Fedora 44 (RPM) | No se probó el inicio del escritorio | Pasaron instalación, eliminación y `ldd` en contenedor |
+| Contenedor openSUSE (RPM) | No se probó el inicio del escritorio; no se registró la versión | `ldd` no encontró bibliotecas faltantes; no consta instalación del paquete |
+| Otras distribuciones y escritorios Linux | Hay AppImage para la mayoría de las distribuciones x86_64; estas pruebas no determinan combinaciones concretas | No verificado manualmente |
 
 ## Privacidad y ayuda
 

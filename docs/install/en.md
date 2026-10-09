@@ -9,20 +9,23 @@ Download ClipVault from the [latest official release](https://github.com/dgadduc
 | Mac with Apple silicon | `ClipVault_0.0.20_aarch64.dmg` | Disk image (`.dmg`) |
 | Mac with Intel processor | `ClipVault_0.0.20_x64.dmg` | Disk image (`.dmg`) |
 | Ubuntu and compatible Debian/Ubuntu-based distributions (e.g. Linux Mint), x86_64 | `ClipVault_0.0.20_amd64.deb` | Debian package installer (`.deb`) |
-| Most other x86_64 Linux distributions (e.g. Arch, Fedora, openSUSE) | `ClipVault_0.0.20_amd64.AppImage` | AppImage |
+| Fedora and other RPM-based x86_64 systems | `ClipVault-0.0.20-1.x86_64.rpm` | RPM package (`dnf` or `zypper`) |
+| Most other x86_64 Linux distributions (e.g. Arch) | `ClipVault_0.0.20_amd64.AppImage` | AppImage |
 
-The file names include the release version. If a newer version is listed, choose the file with the same operating system and processor suffix. Linux ARM packages, RPM, Flatpak, Snap, AUR and native Arch packages are not published.
+The file names include the release version. If a newer version is listed, choose the file with the same operating system and processor suffix. Linux ARM packages, Flatpak, Snap, AUR and native Arch packages are not published.
 
-The `v0.0.20` release does not include an RPM. The updated release workflow
-will produce `ClipVault-<version>-1.x86_64.rpm` for a future release. RPM
-installation has not yet been checked on Fedora, openSUSE or another RPM-based
-distribution, so none is listed as verified or supported here.
+Release `v0.0.20` includes the x86_64 RPM as a direct download. Install the
+local file with your distribution's package manager. For example, Fedora uses
+`sudo dnf install ./ClipVault-0.0.20-1.x86_64.rpm`; openSUSE uses
+`sudo zypper install ./ClipVault-0.0.20-1.x86_64.rpm`.
 
-When an RPM appears on the release page, install the local file with your
-distribution's package manager. For example, Fedora uses
-`sudo dnf install ./ClipVault-<version>-1.x86_64.rpm`; openSUSE uses
-`sudo zypper install ./ClipVault-<version>-1.x86_64.rpm`. These commands do not
-mean those distributions have passed ClipVault's installation checks.
+Container checks installed and removed the package on Fedora 44, and `ldd`
+reported no missing libraries there or in the reported openSUSE check (the
+openSUSE version was not recorded). These checks did not launch the desktop UI
+or verify user-data preservation after removal, so they do not establish
+desktop compatibility for either distribution. The RPM is a direct download
+and is not yet listed in the signed Tauri updater manifest; in-app RPM updates
+are not available yet.
 
 For Linux, use the `.deb` on Ubuntu and compatible Debian/Ubuntu derivatives
 such as Linux Mint, provided the package dependencies are available. The
@@ -101,7 +104,9 @@ Linux X11 and Wayland are separate session types. A check on one does not establ
 | Ubuntu GNOME Wayland | Published `.deb` installed and opened successfully | Passed |
 | Ubuntu GNOME X11 | Published `.deb` installed and opened successfully | Passed |
 | Arch KDE Plasma Wayland | Published AppImage launched from `Home/Applications`; new panel shortcut created. Previous launcher still points to an old path | Passed; previous launcher remains |
-| Other Linux distributions and desktops | AppImage is the published portable format for most x86_64 distributions; specific combinations are not established by these checks | Not manually verified |
+| Fedora 44 container (RPM) | No desktop launch check | Package install/removal and `ldd` check passed in a container |
+| openSUSE container (RPM) | No desktop launch check; distribution version not recorded | `ldd` reported no missing libraries; package installation was not recorded |
+| Other Linux distributions and desktops | AppImage is available for most x86_64 distributions; specific combinations are not established by these checks | Not manually verified |
 
 ## Privacy and help
 

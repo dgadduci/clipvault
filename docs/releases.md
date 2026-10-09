@@ -6,6 +6,11 @@ Release for a `vMAJOR.MINOR.PATCH` tag. Draft releases are not offered to
 installed clients; publish the draft only after reviewing its installers,
 signatures and `latest.json` manifest.
 
+The RPM was added to the already published `v0.0.20` release as a direct
+download on 2026-10-08. It has no Tauri updater signature and is not listed in
+that release's `latest.json`, so RPM installations cannot receive in-app
+updates from this artifact yet.
+
 The client checks GitHub Releases over HTTPS. The request contains the app
 version, operating system and architecture needed to select an update. It does
 not include clipboard history, capture titles, local paths or local entry IDs.
