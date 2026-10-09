@@ -29,6 +29,7 @@ app/tauri/src-tauri/gen
 
 # Local agent/tooling state
 /.codex/
+/scripts/
 /.opencode/node_modules/
 /.opencode/package.json
 /.opencode/package-lock.json
