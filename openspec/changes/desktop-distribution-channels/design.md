@@ -66,6 +66,9 @@ la actualización y no se debe describir como firma GPG del paquete RPM.
   del DMG.
 - Conservar la cuarentena que aplica macOS a las descargas de casks. El tap no
   usará --no-quarantine, xattr ni instrucciones para desactivar Gatekeeper.
+- Homebrew exige confiar explícitamente en casks de taps externos. La guía
+  ordenará `brew trust --cask dgadduci/tap/clipvault` antes de instalar; no
+  indicará `brew trust dgadduci/tap`, que otorgaría confianza a todo el tap.
 - Documentar la aprobación puntual de la aplicación mediante las opciones de
   macOS Privacy & Security si Gatekeeper bloquea el primer inicio.
 

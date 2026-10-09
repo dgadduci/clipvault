@@ -74,6 +74,27 @@ flow on the supported macOS versions before distributing broadly. Switching to
 Developer ID signing and notarization later requires an Apple Developer Program
 membership and a separate CI credential setup.
 
+## Homebrew tap
+
+The public [`dgadduci/tap`](https://github.com/dgadduci/homebrew-tap) cask
+installs the official macOS DMG for Apple Silicon or Intel from the matching
+GitHub Release. It has one SHA-256 per architecture and never uses
+`sha256 :no_check`.
+
+For each stable macOS release, update and review the cask's version, both DMG
+URLs and both SHA-256 values before publishing the cask change. The release
+workflow does not hold a cross-repository personal access token: updating the
+tap is a separately reviewed repository change. The cask declares
+`auto_updates true`, so new installs use Homebrew metadata while supported
+in-app updates remain subject to ClipVault's normal explicit confirmation flow.
+
+Homebrew requires users to trust this external cask before loading it. The
+supported command is `brew trust --cask dgadduci/tap/clipvault`; do not tell
+users to trust the entire tap. Homebrew preserves quarantine. Do not use
+`--no-quarantine`, `xattr`, or instructions to disable Gatekeeper. The per-app
+**Open Anyway** approval in macOS Privacy & Security remains the supported
+recovery path for an ad-hoc signed build.
+
 ## First installation and draft review
 
 1. Bump the Cargo workspace, Tauri and frontend versions together.

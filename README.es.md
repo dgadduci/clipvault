@@ -64,8 +64,15 @@ sigue sin verificarse. La guía de instalación indica qué combinaciones de
 escritorio y sesión están comprobadas y cuáles siguen pendientes; una prueba en
 una sesión Linux no confirma el comportamiento de otra.
 
+En macOS, ClipVault también está disponible desde el
+[tap oficial de Homebrew](https://github.com/dgadduci/homebrew-tap). Instala el
+mismo DMG oficial para la arquitectura de la Mac y verifica su SHA-256.
+Homebrew no elimina los controles de Gatekeeper; el primer inicio puede requerir
+aprobación manual.
+
 - [Descargar la última versión](https://github.com/dgadduci/clipvault/releases/latest)
 - [Elegir un instalador y consultar los primeros pasos](docs/install/README.md)
+- [Instalar con Homebrew](https://github.com/dgadduci/homebrew-tap)
 - [Ver detalles de releases y actualizaciones](docs/releases.md)
 
 ## Privacidad

@@ -10,10 +10,18 @@ sha256 :no_check.
 
 #### Scenario: User installs ClipVault from the tap
 
-- **WHEN** a user adds dgadduci/tap and installs the ClipVault cask
+- **WHEN** a user adds dgadduci/tap, explicitly trusts only the ClipVault cask
+  with `brew trust --cask dgadduci/tap/clipvault`, and installs it
 - **THEN** Homebrew downloads the official DMG for the user's Mac architecture
 - **AND** the cask version and SHA-256 match that release artifact
 - **AND** ClipVault is installed in the standard macOS Applications location
+
+#### Scenario: Homebrew requires trust for the external tap
+
+- **WHEN** Homebrew refuses to load ClipVault because dgadduci/tap is untrusted
+- **THEN** the installation guide instructs the user to run
+  `brew trust --cask dgadduci/tap/clipvault`
+- **AND** it does not instruct the user to trust all casks in dgadduci/tap
 
 #### Scenario: Cask metadata is updated for a release
 
@@ -27,9 +35,10 @@ sha256 :no_check.
 
 The Homebrew cask SHALL preserve macOS quarantine and Gatekeeper behavior. The
 tap and its documentation SHALL NOT disable or bypass Gatekeeper or instruct
-users to remove quarantine attributes. Documentation SHALL explain that the
-current ad-hoc signed DMG may require the user to approve ClipVault manually
-in macOS Privacy & Security before first launch.
+users to remove quarantine attributes. Documentation SHALL explain both the
+limited Homebrew cask-trust command and that the current ad-hoc signed DMG may
+require the user to approve ClipVault manually in macOS Privacy & Security
+before first launch.
 
 #### Scenario: Gatekeeper blocks the first launch
 

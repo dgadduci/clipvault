@@ -30,6 +30,9 @@ repositorio ni depender de que el proyecto sea aceptado en homebrew/cask.
 - Crear el tap público dgadduci/homebrew-tap con un cask de ClipVault que
   consuma los DMG oficiales para Apple Silicon e Intel, con versión y SHA-256
   verificables.
+- Indicar el paso de confianza explícita que exige Homebrew para este tap:
+  `brew trust --cask dgadduci/tap/clipvault`, limitado al cask de ClipVault y
+  no a todos los casks presentes o futuros del tap.
 - Documentar los comandos de instalación, actualización y los requisitos de
   compatibilidad para cada canal.
 - Explicar que Homebrew no elimina la cuarentena ni la advertencia de

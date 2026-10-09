@@ -44,22 +44,36 @@
 
 ## 2. Tap propio de Homebrew
 
-- [ ] 2.1 Crear dgadduci/homebrew-tap como repositorio público con el cask de
-  ClipVault y las URLs oficiales de DMG para ambas arquitecturas.
-- [ ] 2.2 Mantener la versión y SHA-256 de cada arquitectura sincronizados con
-  los artefactos del release; no usar sha256 :no_check.
+- [x] 2.1 Crear dgadduci/homebrew-tap como repositorio público con el cask de
+  ClipVault y las URLs oficiales de DMG para ambas arquitecturas. El tap
+  público contiene el commit `4ab8b36` con `Casks/clipvault.rb`.
+- [x] 2.2 Mantener la versión y SHA-256 de cada arquitectura sincronizados con
+  los artefactos del release; no usar sha256 :no_check. El cask de `v0.0.20`
+  declara ambos SHA-256 oficiales y pasó `brew style`; los valores se
+  contrastaron con los digests de assets de GitHub Releases.
 - [ ] 2.3 Verificar el cask e instalarlo en macOS Apple Silicon e Intel,
   comprobando el flujo real de Gatekeeper y la actualización propia de la app.
-- [ ] 2.4 Documentar cómo añadir el tap, instalar ClipVault y aprobar
-  puntualmente su primer inicio si Gatekeeper lo bloquea.
+  En Apple Silicon, Homebrew exigió confiar explícitamente en el cask; tras
+  instalarlo, Gatekeeper bloqueó el primer inicio y la aprobación puntual en
+  macOS Privacy & Security permitió abrir ClipVault. La misma instalación,
+  bloqueo esperado de Gatekeeper, aprobación puntual y apertura funcionaron en
+  Intel. Faltan persistencia tras reinstalación y una actualización real.
+- [x] 2.4 Documentar cómo añadir el tap, instalar ClipVault y aprobar
+  puntualmente su primer inicio si Gatekeeper lo bloquea, en el README del
+  tap y las guías de instalación en inglés y español. No se documentan
+  bypasses de cuarentena ni de Gatekeeper. La documentación también indica la
+  confianza limitada por cask que Homebrew exige para dgadduci/tap.
 
 ## 3. Documentación y cierre
 
-- [ ] 3.1 Actualizar las guías de instalación, releases y README en los idiomas
+- [x] 3.1 Actualizar las guías de instalación, releases y README en los idiomas
   aplicables, diferenciando claramente RPM descargable, tap propio y canales
-  existentes.
-- [ ] 3.2 Confirmar que no se afirma compatibilidad con distribuciones RPM no
-  verificadas ni que Homebrew elimina las advertencias de Gatekeeper.
+  existentes. Se actualizaron los README inglés/español, las guías de
+  instalación inglés/español y `docs/releases.md`.
+- [x] 3.2 Confirmar que no se afirma compatibilidad con distribuciones RPM no
+  verificadas ni que Homebrew elimina las advertencias de Gatekeeper. Las guías
+  conservan RPM como descarga directa sin soporte de escritorio declarado y
+  explican que Homebrew conserva cuarentena y Gatekeeper.
 - [ ] 3.3 Ejecutar las verificaciones relevantes, validar OpenSpec y revisar el
   diff y los archivos generados antes de cerrar el cambio. En esta sesión
   se verificó el bundle RPM y `git diff --check`; la validación por CLI queda

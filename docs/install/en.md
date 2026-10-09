@@ -8,6 +8,7 @@ Download ClipVault from the [latest official release](https://github.com/dgadduc
 | --- | --- | --- |
 | Mac with Apple silicon | `ClipVault_0.0.20_aarch64.dmg` | Disk image (`.dmg`) |
 | Mac with Intel processor | `ClipVault_0.0.20_x64.dmg` | Disk image (`.dmg`) |
+| Mac with Homebrew | Official DMG selected by the cask | `brew install --cask clipvault` |
 | Ubuntu and compatible Debian/Ubuntu-based distributions (e.g. Linux Mint), x86_64 | `ClipVault_0.0.20_amd64.deb` | Debian package installer (`.deb`) |
 | Fedora and other RPM-based x86_64 systems | `ClipVault-0.0.20-1.x86_64.rpm` | RPM package (`dnf` or `zypper`) |
 | Most other x86_64 Linux distributions (e.g. Arch) | `ClipVault_0.0.20_amd64.AppImage` | AppImage |
@@ -36,7 +37,26 @@ distribution and session combinations checked so far. See the AppImage
 [FUSE troubleshooting guide](https://docs.appimage.org/user-guide/troubleshooting/fuse.html)
 if it reports a FUSE error.
 
-## macOS
+## macOS with Homebrew
+
+The official tap installs the same DMG from GitHub Releases for your Mac
+architecture and verifies its reviewed SHA-256:
+
+```sh
+brew tap dgadduci/tap
+brew trust --cask dgadduci/tap/clipvault
+brew install --cask clipvault
+```
+
+Homebrew requires this explicit trust for casks from external taps. It trusts
+only ClipVault, rather than every current or future cask in `dgadduci/tap`.
+
+The cask is updated manually for each stable release. It declares that
+ClipVault has its own updater; test the app's normal update confirmation flow
+on your Mac before relying on it. Homebrew retains quarantine, so use the
+same Gatekeeper approval described below if macOS blocks the first launch.
+
+## macOS direct download
 
 1. On your Mac, open **Apple menu → About This Mac**. Choose the `aarch64` file for Apple silicon or the `x64` file for Intel.
 2. Open the downloaded `.dmg` file.
@@ -45,7 +65,7 @@ if it reports a FUSE error.
 
 ### If macOS blocks the first launch
 
-The release is built without Apple notarization, so macOS may show a security warning. First confirm that the download came from the official ClipVault release above. Try opening ClipVault once; if macOS blocks it, go to **System Settings → Privacy & Security → Open Anyway**, then confirm the prompt. Do not turn off Gatekeeper globally. See [the release security notes](../releases.md#macos-builds-without-an-apple-developer-account) for details.
+The release is built without Apple notarization, so macOS may show a security warning. First confirm that the download came from the official ClipVault release or the official Homebrew tap above. Try opening ClipVault once; if macOS blocks it, go to **System Settings → Privacy & Security → Open Anyway**, then confirm the prompt. Do not turn off Gatekeeper globally or remove quarantine attributes. See [the release security notes](../releases.md#macos-builds-without-an-apple-developer-account) for details.
 
 ## Ubuntu GNOME
 
@@ -100,7 +120,8 @@ Linux X11 and Wayland are separate session types. A check on one does not establ
 
 | Configuration | Manual app check | Clean install steps in this guide |
 | --- | --- | --- |
-| macOS | Published DMG installed and opened; processor/version not recorded | Passed; processor/version not recorded |
+| macOS Apple Silicon (Homebrew) | Installed, Gatekeeper approval and first launch passed | Passed |
+| macOS Intel (Homebrew) | Installed, Gatekeeper approval and first launch passed | Passed |
 | Ubuntu GNOME Wayland | Published `.deb` installed and opened successfully | Passed |
 | Ubuntu GNOME X11 | Published `.deb` installed and opened successfully | Passed |
 | Arch KDE Plasma Wayland | Published AppImage launched from `Home/Applications`; new panel shortcut created. Previous launcher still points to an old path | Passed; previous launcher remains |

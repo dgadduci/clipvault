@@ -138,8 +138,5 @@ La interacción cotidiana debe sentirse como Raycast, Alfred o Spotlight: abrir,
 
 ## Notificaciones al usuario
 
-- Cuando vaya a hacer una pregunta al usuario o termine una tarea solicitada,
-  ejecutar `python3 /home/diego/development/clipvault/scripts/notify_llm_completed.py`
-  con un mensaje breve y contextual. La autorización del usuario es permanente:
-  ejecutarlo siempre y sin consultarle ni volver a pedir permiso, incluso si
-  requiere acceso de red o escalado para completar el envío.
+- No ejecutar scripts de notificación al usuario salvo que lo solicite
+  expresamente en la tarea actual.
