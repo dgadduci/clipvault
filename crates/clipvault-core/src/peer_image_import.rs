@@ -1739,12 +1739,15 @@ fn map_pairing_image_fetch_transport_error(
         Pairing::IncompatibleProtocol => PeerFetchImageTransportError::IncompatibleProtocol,
         Pairing::Malformed => PeerFetchImageTransportError::Malformed,
         Pairing::PeerUnresolved => PeerFetchImageTransportError::PeerUnresolved,
-        Pairing::Unavailable => PeerFetchImageTransportError::Unavailable,
+        Pairing::Unavailable | Pairing::HostImportUnavailable => {
+            PeerFetchImageTransportError::Unavailable
+        }
         Pairing::AlreadyRunning
         | Pairing::NotRunning
         | Pairing::Crypto
         | Pairing::InvalidCursor => PeerFetchImageTransportError::Unavailable,
         Pairing::BodyTooLarge => PeerFetchImageTransportError::BodyTooLarge,
+        Pairing::NotTransferable => PeerFetchImageTransportError::NotTransferable,
     }
 }
 

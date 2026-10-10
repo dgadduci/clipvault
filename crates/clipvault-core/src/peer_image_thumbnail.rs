@@ -1056,12 +1056,15 @@ fn map_pairing_thumbnail_transport_error(
         }
         Pairing::Malformed => PeerFetchImageThumbnailTransportError::Malformed,
         Pairing::PeerUnresolved => PeerFetchImageThumbnailTransportError::PeerUnresolved,
-        Pairing::Unavailable => PeerFetchImageThumbnailTransportError::Unavailable,
+        Pairing::Unavailable | Pairing::HostImportUnavailable => {
+            PeerFetchImageThumbnailTransportError::Unavailable
+        }
         Pairing::AlreadyRunning
         | Pairing::NotRunning
         | Pairing::Crypto
         | Pairing::InvalidCursor => PeerFetchImageThumbnailTransportError::Unavailable,
         Pairing::BodyTooLarge => PeerFetchImageThumbnailTransportError::BodyTooLarge,
+        Pairing::NotTransferable => PeerFetchImageThumbnailTransportError::NotTransferable,
     }
 }
 

@@ -1447,6 +1447,8 @@ fn map_pairing_image_transport_error(
         | Pairing::NotRunning
         | Pairing::Unavailable
         | Pairing::Crypto
+        | Pairing::HostImportUnavailable
+        | Pairing::NotTransferable
         | Pairing::BodyTooLarge => PeerImageHistoryTransportError::Unavailable,
     }
 }

@@ -3192,6 +3192,8 @@ fn map_pairing_transport_error(
         | Pairing::NotRunning
         | Pairing::Unavailable
         | Pairing::Crypto
+        | Pairing::HostImportUnavailable
+        | Pairing::NotTransferable
         | Pairing::BodyTooLarge => PeerHistoryTransportError::Unavailable,
     }
 }

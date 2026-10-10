@@ -1518,6 +1518,16 @@ pub enum TransportError {
     Crypto,
     #[error("peer transport rejected a malformed advertisement or wire payload")]
     Malformed,
+    /// The remote host still supports history browsing but has
+    /// not installed the handler required to fetch a text body.
+    /// This is a capability mismatch, not a transient network
+    /// failure.
+    #[error("peer transport host does not support text imports")]
+    HostImportUnavailable,
+    /// The remote entry disappeared after it was previewed or is
+    /// intentionally excluded from transfer.
+    #[error("peer transport rejected a non-transferable remote entry")]
+    NotTransferable,
     /// The remote peer presented a `peer_id` that does not match
     /// a persisted `known_peers` row, or its TLS cert
     /// fingerprint did not match the pinned value the runtime

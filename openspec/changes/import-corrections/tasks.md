@@ -16,3 +16,14 @@
 
 - [x] 3.1 Ejecutar los tests frontend relevantes, validar OpenSpec y revisar
   el diff sin registrar contenido remoto ni archivos generados.
+
+## 4. Rechazos de fetch de capturas existentes
+
+- [x] 4.1 Conservar `not_found` y `not_transferable` como rechazo tipado desde
+  TLS hasta `PeerImportOutcome::NotTransferable`.
+- [x] 4.2 Conservar `not_available` como resultado tipado de host sin capacidad
+  de importación y exponerlo sin filtrar detalles del protocolo.
+- [ ] 4.3 Mostrar feedback localizado para captura no transferible y host que
+  requiere actualización, con regresiones de frontend y core.
+- [ ] 4.4 Ejecutar los tests Rust/frontend relevantes, validar OpenSpec y
+  revisar el diff final.

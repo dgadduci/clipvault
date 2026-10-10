@@ -54,3 +54,16 @@ test("import preparation copy is localized in every supported language", () => {
     assert.ok(catalog["remote.import.preparing"].trim().length > 0);
   }
 });
+
+test("text import explains an older host instead of showing a generic unavailable error", () => {
+  const card = source("src", "RemotePreviewCard.svelte");
+  const types = source("src", "types.ts");
+
+  assert.match(types, /kind: "host_import_unavailable"/);
+  assert.match(card, /case "host_import_unavailable":\s+return "remote\.import\.host_update_required"/);
+  for (const locale of ["en", "es", "pt", "de", "fr"]) {
+    const catalog = JSON.parse(source("src", "locales", `${locale}.json`));
+    assert.equal(typeof catalog["remote.import.host_update_required"], "string");
+    assert.ok(catalog["remote.import.host_update_required"].trim().length > 0);
+  }
+});

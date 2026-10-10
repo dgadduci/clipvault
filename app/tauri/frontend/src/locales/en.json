@@ -338,6 +338,7 @@
   "remote.import.duplicate": "Imported (already existed)",
   "remote.import.image_unsupported": "This device does not support image imports.",
   "remote.import.unavailable": "Not available",
+  "remote.import.host_update_required": "Update ClipVault on the other device to import this capture.",
   "remote.import.image_too_large": "Image is too large",
   "remote.import.image_invalid": "Invalid image",
   "remote.import.not_transferable": "Not transferable",

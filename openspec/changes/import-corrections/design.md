@@ -1,75 +1,80 @@
 ## Context
 
-`RemoteHistoryRail` obtiene previews y sincroniza en paralelo el estado
-`trusted`/`active` del peer con los servicios de historial, importación de
-texto e imagen. El rail puede renderizar una fila antes de que esa promesa
-termine. `RemotePreviewCard` recibe `peerStateReady`, pero la acción de importar
-texto no lo usa; el importador, cuyo cache aún está vacío, rechaza la solicitud
-como `PeerUnavailable`. La UI reduce esa respuesta a un mensaje genérico de no
-disponibilidad.
+`RemoteHistoryRail` ya descarta sus filas y muestra un placeholder cuando el
+peer seleccionado no es `trusted && present`; por lo tanto, una card visible
+no puede provenir de un peer inactivo o no confiable. La causa está después del
+preview metadata-only: el host responde `FetchTextUnavailable { reason:
+not_available }` cuando no tiene instalado un `FetchTextHostHandler`, algo
+propio de una versión anterior. Además, TLS traduce `not_found` y
+`not_transferable` a `TransportError::Malformed`, con lo que el core los
+presenta como una indisponibilidad genérica en vez de como una captura que ya
+no se puede importar.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Hacer que toda acción de importar use el mismo estado de peer que habilitó el
-  preview.
-- Impedir una solicitud de importación durante la ventana de sincronización.
-- Mantener el core, TLS, el contrato metadata-only y los gates de seguridad
-  existentes sin cambios de permisos.
-- Expresar el estado transitorio con texto localizado y probar la regresión.
+- Mantener la protección existente que espera el estado sincronizado del peer.
+- Conservar las razones de rechazo de un fetch sin inspeccionar contenido.
+- Explicar de manera localizada si la instancia origen necesita actualizarse o
+  si la captura ya no es transferible.
+- Probar el mapeo desde TLS al core y el feedback de la card.
 
 **Non-Goals:**
 
 - Reintentar automáticamente una importación fallida.
 - Cambiar el protocolo de pares, el formato de previews o la persistencia.
 - Convertir errores reales de transporte, revocación o peer inactivo en éxito.
+- Permitir que un cliente actual importe desde un host que no implementa fetch;
+  esa capacidad requiere actualizar el host.
 
 ## Decisions
 
-### La card bloquea importación hasta `peerStateReady`
+### El preview no implica que el host pueda entregar el cuerpo
 
-La acción de Importar deshabilitará el control y no llamará los comandos Tauri
-mientras la instantánea activa no esté sincronizada. El preview permanece
-visible porque ya es metadata-only y no presupone que el importador esté listo.
-Esto reutiliza la señal existente en lugar de agregar un nuevo round-trip.
+Listar una captura y descargar su contenido son capacidades distintas. El host
+sin `FetchTextHostHandler` ya usa la razón estable `not_available`; el cliente
+la preservará como `HostImportUnavailable` hasta la UI. La card explicará que
+el equipo que contiene la captura necesita una versión compatible. No se
+reintenta ni se degrada la seguridad: un cliente no puede implementar el
+handler ausente en otro equipo.
 
-Se descarta importar y reintentar tras `PeerUnavailable`: ese error también
-representa revocación o peer inactivo, por lo que reintentar ocultaría un estado
-de seguridad real y podría enviar tráfico innecesario.
+Se descarta inferir compatibilidad a partir del preview, porque el protocolo
+permite explícitamente que una versión anterior liste historial pero responda
+`not_available` al fetch.
 
-### Invalidación por generación conserva la seguridad ante cambios de peer
+### Rechazos de captura permanecen tipados
 
-El rail ya incrementa una generación cuando cambia la instantánea de peer. La
-preparación sólo será verdadera cuando la promesa de esa generación termine y
-el peer siga seleccionado. Al cambiar, bloquear o desvincular, se revoca de
-inmediato antes de que una respuesta tardía pueda habilitar otra card.
+Se agregará una variante específica de error de transporte para
+`not_found`/`not_transferable` y otra para `not_available`. TLS las obtiene de
+la razón protocolar estable; el adaptador del core las transforma en resultados
+de importación explícitos y el bridge no necesita exponer el texto de la razón.
 
-Se descarta derivar preparación solamente de que existan filas, porque una fila
-puede pertenecer a una solicitud previa o llegar antes de sincronizar los
-servicios de importación.
+Se descarta usar `Malformed` como contenedor de rechazos esperables del host:
+confunde una captura eliminada con una respuesta dañada y fuerza copy erróneo.
 
-### Mensaje localizado para preparación transitoria
+### Mensajes localizados por causa recuperable
 
-El botón y su estado accesible usarán una nueva clave en los cinco catálogos.
-Los resultados `peer_unavailable` y `transport_unavailable` reales conservan
-su copy existente; la preparación no se presenta como un error.
+El feedback existente de preparación se conserva. Las nuevas claves en los
+cinco catálogos describirán una captura no transferible y un host que requiere
+actualización. El contenido, nombres de peers y razones wire no se interpolan.
 
 ## Risks / Trade-offs
 
-- [Sincronización lenta] → La acción queda deshabilitada brevemente, pero el
-  preview sigue disponible y se evita una falsa indisponibilidad.
-- [Regresión de imágenes] → La misma señal debe gatear texto e imágenes; los
-  tests cubren ambos caminos de forma estructural.
-- [Respuesta tardía] → La generación y la limpieza actual invalidan la
-  preparación antes de actualizar la UI.
+- [Host antiguo] → La importación no puede completarse hasta actualizar y
+  reiniciar el equipo origen; el feedback evita presentar ese caso como fallo
+  de red.
+- [Compatibilidad] → Las nuevas variantes son internas y se derivan de razones
+  wire ya existentes, por lo que no cambia el mensaje ni el límite de payload.
+- [Regresión de errores] → Tests de TLS y core fijan que una captura ausente o
+  no transferible no termine como transporte no disponible.
 
 ## Migration Plan
 
-No hay migración de datos ni protocolo. Desplegar junto con tests de frontend;
-si se revierte, se restaura la interacción previa sin modificar capturas ni
-colecciones locales.
+No hay migración de datos ni protocolo. El cliente y el host deben actualizarse
+para habilitar la importación de una captura existente; si se revierte, no se
+modifican capturas ni colecciones locales.
 
 ## Open Questions
 
-Ninguna. El estado `peerStateReady` y la generación ya existen en el rail.
+Ninguna.

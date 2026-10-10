@@ -74,6 +74,10 @@ pub enum PeerImportOutcome {
     /// The fetch transport rejected the request. The renderer
     /// surfaces the typed reason without retrying blindly.
     TransportUnavailable { reason: &'static str },
+    /// The authenticated host can list history but cannot yet
+    /// fetch text bodies because it needs a compatible ClipVault
+    /// update. No local entry was created.
+    HostImportUnavailable,
     /// The body the host returned exceeded the 1 MiB cap. The
     /// runtime collapsed the rejection into a typed outcome
     /// without persisting anything.
@@ -245,6 +249,10 @@ pub enum PeerFetchTransportError {
     IncompatibleProtocol,
     #[error("peer fetch transport rejected a malformed payload")]
     Malformed,
+    /// The remote host can list history but does not implement
+    /// text-body fetches yet.
+    #[error("peer fetch transport host does not support text imports")]
+    HostImportUnavailable,
     /// The remote entry disappeared or is no longer
     /// transferrable.
     #[error("peer fetch transport rejected a non-transferrable entry")]
@@ -270,6 +278,7 @@ impl PeerFetchTransportError {
             Self::Blocked => "blocked",
             Self::IncompatibleProtocol => "incompatible_protocol",
             Self::Malformed => "malformed",
+            Self::HostImportUnavailable => "not_available",
             Self::NotTransferable => "not_transferable",
             Self::BodyTooLarge => "body_too_large",
             Self::PersistenceUnavailable => "persistence_unavailable",
@@ -990,6 +999,9 @@ impl PeerImportService {
                     reason: "not_trusted",
                 },
                 PeerFetchTransportError::NotTransferable => PeerImportOutcome::NotTransferable,
+                PeerFetchTransportError::HostImportUnavailable => {
+                    PeerImportOutcome::HostImportUnavailable
+                }
                 PeerFetchTransportError::BodyTooLarge => PeerImportOutcome::BodyTooLarge,
                 PeerFetchTransportError::PersistenceUnavailable => {
                     PeerImportOutcome::PersistenceError {
@@ -1347,6 +1359,8 @@ fn map_pairing_transport_error(
         Pairing::Blocked => PeerFetchTransportError::Blocked,
         Pairing::IncompatibleProtocol => PeerFetchTransportError::IncompatibleProtocol,
         Pairing::Malformed => PeerFetchTransportError::Malformed,
+        Pairing::HostImportUnavailable => PeerFetchTransportError::HostImportUnavailable,
+        Pairing::NotTransferable => PeerFetchTransportError::NotTransferable,
         Pairing::PeerUnresolved => PeerFetchTransportError::PeerUnresolved,
         Pairing::Unavailable => PeerFetchTransportError::Unavailable,
         Pairing::AlreadyRunning
@@ -1683,6 +1697,42 @@ mod tests {
                 reason: "not_active"
             }
         ));
+    }
+
+    #[test]
+    fn import_keeps_host_capability_and_missing_capture_rejections_typed() {
+        let cases = [
+            (
+                PeerFetchTransportError::HostImportUnavailable,
+                PeerImportOutcome::HostImportUnavailable,
+            ),
+            (
+                PeerFetchTransportError::NotTransferable,
+                PeerImportOutcome::NotTransferable,
+            ),
+        ];
+
+        for (transport_error, expected) in cases {
+            let persistence = StdArc::new(InMemoryImportPersistence::new());
+            let transport = StdArc::new(ScriptedFetchTransport::new(Err(transport_error)));
+            let service = PeerImportService::new(
+                transport,
+                persistence,
+                fixed_clock(OffsetDateTime::now_utc()),
+            );
+            service.record_peer_state(
+                "peer-a",
+                PeerImportTrustState {
+                    trusted: true,
+                    active: true,
+                },
+            );
+
+            assert_eq!(
+                service.import("peer-a", "fingerprint", "entry-1", "Equipo A"),
+                expected
+            );
+        }
     }
 
     #[test]

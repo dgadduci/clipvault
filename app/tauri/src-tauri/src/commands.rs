@@ -4224,6 +4224,10 @@ pub enum PeerImportResponse {
     /// The fetch transport rejected the request. The renderer
     /// surfaces the typed reason without retrying blindly.
     TransportUnavailable { reason: &'static str },
+    /// The authenticated host can list history but needs a
+    /// compatible ClipVault update before it can fetch text
+    /// bodies. No local entry was created.
+    HostImportUnavailable,
     /// The body the host returned exceeded the 1 MiB cap. The
     /// runtime collapsed the rejection into a typed outcome
     /// without persisting anything.
@@ -4282,6 +4286,7 @@ impl PeerImportResponse {
             Core::TransportUnavailable { reason } => {
                 PeerImportResponse::TransportUnavailable { reason }
             }
+            Core::HostImportUnavailable => PeerImportResponse::HostImportUnavailable,
             Core::BodyTooLarge => PeerImportResponse::BodyTooLarge,
             Core::InvalidUtf8 => PeerImportResponse::InvalidUtf8,
             Core::NotTransferable => PeerImportResponse::NotTransferable,

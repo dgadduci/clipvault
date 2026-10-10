@@ -1057,6 +1057,10 @@ export type PeerImportResponse =
         | "body_too_large"
         | "persistence_unavailable";
     }
+  | {
+      /** The peer can list previews but needs an update to fetch text bodies. */
+      kind: "host_import_unavailable";
+    }
   | { kind: "body_too_large" }
   | { kind: "invalid_utf8" }
   | { kind: "not_transferable" }

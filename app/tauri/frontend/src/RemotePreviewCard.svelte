@@ -359,6 +359,8 @@
         return "remote.import.unavailable";
       case "transport_unavailable":
         return "remote.import.unavailable";
+      case "host_import_unavailable":
+        return "remote.import.host_update_required";
       case "body_too_large":
         return "remote.import.body_too_large";
       case "invalid_utf8":

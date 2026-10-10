@@ -5035,24 +5035,26 @@ async fn dial_fetch_text_async(
             })
         }
         PairingMessage::FetchTextUnavailable { reason, .. } => {
-            // Translate the host's stable snake_case reason onto
-            // a typed `TransportError` variant the runtime
-            // already branches on. `not_found` /
-            // `not_transferable` collapse to a generic
-            // `Malformed` so the importer can branch on the
-            // fetch-specific outcome; other unknown reasons
-            // collapse to `Unavailable` so a forward-compatible
-            // host cannot crash an older client.
-            match reason.as_str() {
-                "not_found" | "not_transferable" => Err(super::TransportError::Malformed),
-                "not_trusted" | "not_active" => Err(super::TransportError::Revoked),
-                "pin_invalid" => Err(super::TransportError::KeyMismatch),
-                "persistence_unavailable" => Err(super::TransportError::Unavailable),
-                "body_too_large" => Err(super::TransportError::BodyTooLarge),
-                _ => Err(super::TransportError::Unavailable),
-            }
+            Err(fetch_text_unavailable_error(&reason))
         }
         _ => Err(super::TransportError::IncompatibleProtocol),
+    }
+}
+
+/// Map a stable host-side text-fetch rejection onto the typed transport
+/// taxonomy. The wire reason is never forwarded to product UI, but keeping
+/// these expected rejections distinct prevents a deleted/non-transferable
+/// capture or an older host from masquerading as a generic network outage.
+#[cfg(feature = "local-peer-pairing-tls")]
+fn fetch_text_unavailable_error(reason: &str) -> super::TransportError {
+    match reason {
+        "not_found" | "not_transferable" => super::TransportError::NotTransferable,
+        "not_available" => super::TransportError::HostImportUnavailable,
+        "not_trusted" | "not_active" => super::TransportError::Revoked,
+        "pin_invalid" => super::TransportError::KeyMismatch,
+        "persistence_unavailable" => super::TransportError::Unavailable,
+        "body_too_large" => super::TransportError::BodyTooLarge,
+        _ => super::TransportError::Unavailable,
     }
 }
 
@@ -5428,6 +5430,20 @@ mod tests {
     fn deterministic_material(seed_byte: u8) -> LocalIdentityMaterial {
         let seed = [seed_byte; 32];
         LocalIdentityMaterial::from_seed(seed).expect("material")
+    }
+
+    #[test]
+    fn text_fetch_rejections_keep_capability_and_transferability_distinct() {
+        assert!(matches!(
+            fetch_text_unavailable_error("not_available"),
+            super::TransportError::HostImportUnavailable
+        ));
+        for reason in ["not_found", "not_transferable"] {
+            assert!(matches!(
+                fetch_text_unavailable_error(reason),
+                super::TransportError::NotTransferable
+            ));
+        }
     }
 
     /// Inbound and outbound session ids land in one runtime map.

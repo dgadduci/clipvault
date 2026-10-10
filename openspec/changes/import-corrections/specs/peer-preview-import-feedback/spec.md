@@ -18,3 +18,18 @@ transport failure and SHALL be available in every supported UI language.
 - **WHEN** the current peer state is synchronized
 - **THEN** the preparation text is removed and the normal import control is
   available
+
+#### Scenario: Host needs an update to import
+
+- **WHEN** an authenticated current peer returns the stable fetch rejection
+  `not_available`
+- **THEN** the card communicates with localized text that the remote ClipVault
+  instance must be updated
+- **AND** it does not expose the wire reason or the remote content
+
+#### Scenario: Existing capture is no longer transferable
+
+- **WHEN** an authenticated current peer returns `not_found` or
+  `not_transferable` for a previewed text capture
+- **THEN** the card shows the existing localized non-transferable feedback
+- **AND** it does not present the rejection as a generic transport failure

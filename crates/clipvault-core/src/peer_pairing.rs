@@ -766,6 +766,8 @@ fn map_transport_error_to_pairing_error(
         | TransportError::NotRunning
         | TransportError::Crypto
         | TransportError::Malformed
+        | TransportError::HostImportUnavailable
+        | TransportError::NotTransferable
         | TransportError::BodyTooLarge => PairingError::TransportUnavailable,
     }
 }
