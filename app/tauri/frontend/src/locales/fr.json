@@ -332,6 +332,7 @@
   "remote.preview.image_placeholder": "Espace réservé de l’image distante",
   "remote.import.action": "Importer",
   "remote.import.loading": "Importation…",
+  "remote.import.preparing": "Préparation de l’importation…",
   "remote.import.success": "Importée",
   "remote.import.duplicate_collection": "La capture existe déjà dans « {collection} »",
   "remote.import.duplicate": "Importée (déjà présente)",

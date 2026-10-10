@@ -332,6 +332,7 @@
   "remote.preview.image_placeholder": "Remote image placeholder",
   "remote.import.action": "Import",
   "remote.import.loading": "Importing…",
+  "remote.import.preparing": "Preparing import…",
   "remote.import.success": "Imported",
   "remote.import.duplicate_collection": "Capture already exists in “{collection}”",
   "remote.import.duplicate": "Imported (already existed)",

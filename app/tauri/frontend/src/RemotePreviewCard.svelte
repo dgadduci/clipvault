@@ -49,6 +49,7 @@
     supportsRemoteSourceAppPresentation,
     validatedRemoteSourceAppName,
   } from "./lib/remoteSourceAppPresentation";
+  import { canImportRemoteEntry } from "./lib/remoteImportReadiness";
 
   export let row: PeerHistoryRow;
   /**
@@ -152,6 +153,13 @@
   $: peerSupportsImagePreviewThumbnail = (() => {
     return isImageRow && supportsRemoteImageThumbnails(peerCapability);
   })();
+  $: importReady = canImportRemoteEntry({
+    peerId,
+    peerStateReady,
+    isImageRow,
+    peerSupportsImageImport,
+    busy,
+  });
   $: peerSupportsSourceAppPresentation = supportsRemoteSourceAppPresentation(peerCapability);
   $: sourceAppName = peerSupportsSourceAppPresentation
     ? validatedRemoteSourceAppName(row.source_app_name ?? null)
@@ -366,7 +374,8 @@
     }
   }
   async function importEntry(): Promise<void> {
-    if (peerId === null || busy) return;
+    if (peerId === null || !importReady) return;
+    const importPeerId = peerId;
     // Defence in depth: refuse the import locally when the
     // peer did not advertise the `image_import` capability. The
     // host enforces the same gate so the bridge never carries a
@@ -384,7 +393,7 @@
     try {
       if (isImageRow) {
         const outcome = await peerImageFetchCommand({
-          peer_id: peerId,
+          peer_id: importPeerId,
           remote_entry_id: row.remote_entry_id,
           display_name: displayName ?? "",
         });
@@ -397,7 +406,7 @@
         );
       } else {
         const outcome = await peerImportFetchCommand({
-          peer_id: peerId,
+          peer_id: importPeerId,
           remote_entry_id: row.remote_entry_id,
           display_name: displayName ?? "",
         });
@@ -768,13 +777,17 @@
               role="menuitem"
               class="remote-preview-card-menu-item"
               data-testid="remote-preview-card-import"
-              disabled={busy || peerId === null || !peerSupportsImageImport}
-              aria-disabled={busy || peerId === null || !peerSupportsImageImport}
+              disabled={!importReady}
+              aria-disabled={!importReady}
               aria-busy={busy}
+              aria-label={!peerStateReady ? $t("remote.import.preparing") : undefined}
+              title={!peerStateReady ? $t("remote.import.preparing") : undefined}
               on:click={importEntry}
             >
               {busy
                 ? $t("remote.import.loading")
+                : !peerStateReady
+                  ? $t("remote.import.preparing")
                 : isImageRow && !peerSupportsImageImport
                   ? $t("peers.status.unavailable")
                   : $t("remote.import.action")}

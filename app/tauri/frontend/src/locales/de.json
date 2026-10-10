@@ -332,6 +332,7 @@
   "remote.preview.image_placeholder": "Platzhalter für Remote-Bild",
   "remote.import.action": "Importieren",
   "remote.import.loading": "Wird importiert…",
+  "remote.import.preparing": "Import wird vorbereitet…",
   "remote.import.success": "Importiert",
   "remote.import.duplicate_collection": "Eintrag ist in „{collection}“ bereits vorhanden",
   "remote.import.duplicate": "Importiert (bereits vorhanden)",

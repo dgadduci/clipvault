@@ -332,6 +332,7 @@
   "remote.preview.image_placeholder": "Marcador de imagem remota",
   "remote.import.action": "Importar",
   "remote.import.loading": "Importando…",
+  "remote.import.preparing": "Preparando importação…",
   "remote.import.success": "Importado",
   "remote.import.duplicate_collection": "A captura já existe em “{collection}”",
   "remote.import.duplicate": "Importado (já existia)",

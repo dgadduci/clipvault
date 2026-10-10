@@ -311,7 +311,7 @@ test("remote rail records thumbnail trust state before rendering requests", () =
   );
   assert.match(
     remoteRail,
-    /peerStateReady=\{thumbnailPeerStateReady\}/,
+    /peerStateReady=\{peerImportStateReady\}/,
     "cards must wait for the state command before opening the thumbnail route",
   );
   assert.match(remoteCard, /!shouldRequestRemoteImageThumbnail\(\{/);

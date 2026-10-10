@@ -107,7 +107,10 @@
   let exhausted = false;
   let textBuffer: RemoteRailRow[] = [];
   let imageBuffer: RemoteRailRow[] = [];
-  let thumbnailPeerStateReady = false;
+  // The same generation-scoped synchronization seeds history, text import,
+  // image import and thumbnail services. Preview rows may render first, but
+  // cards must not request import until this becomes true.
+  let peerImportStateReady = false;
   let peerStateSyncKey: string | null = null;
   let peerStateSyncPromise: Promise<void> | null = null;
   let peerStateSyncGeneration = 0;
@@ -220,7 +223,7 @@
   $: if (peerId !== activePeerId) {
     activePeerId = peerId;
     loadGeneration += 1;
-    thumbnailPeerStateReady = false;
+    peerImportStateReady = false;
     error = null;
     if (peerId === null) {
       forgetRail();
@@ -293,7 +296,7 @@
       return peerStateSyncPromise;
     }
     peerStateSyncKey = syncKey;
-    thumbnailPeerStateReady = false;
+    peerImportStateReady = false;
     const generation = ++peerStateSyncGeneration;
     peerStateSyncPromise = Promise.all([
       peerHistoryRecordStateCommand(peerState),
@@ -304,7 +307,7 @@
     ])
       .then(() => {
         if (generation === peerStateSyncGeneration && peerId === targetPeerId) {
-          thumbnailPeerStateReady = true;
+          peerImportStateReady = true;
         }
       })
       .catch((error: unknown) => {
@@ -332,7 +335,7 @@
     peerStateSyncGeneration += 1;
     peerStateSyncKey = null;
     peerStateSyncPromise = null;
-    thumbnailPeerStateReady = false;
+    peerImportStateReady = false;
   }
 
   /**
@@ -825,7 +828,7 @@
                   peerId={peerId}
                   displayName={activeEntry?.display_name ?? null}
                   peerCapability={activePeerCapability}
-                  peerStateReady={thumbnailPeerStateReady}
+                  peerStateReady={peerImportStateReady}
                   selected={selectedRemoteEntryId === item.row.remote_entry_id}
                   onSelect={selectRemoteEntry}
                   onCardRef={(el) => registerCardRef(item.row.remote_entry_id, el)}
@@ -845,7 +848,7 @@
                   displayName={activeEntry?.display_name ?? null}
                   isImageRow={true}
                   peerCapability={activePeerCapability}
-                  peerStateReady={thumbnailPeerStateReady}
+                  peerStateReady={peerImportStateReady}
                   selected={selectedRemoteEntryId === item.row.remote_entry_id}
                   onSelect={selectRemoteEntry}
                   onCardRef={(el) => registerCardRef(item.row.remote_entry_id, el)}
