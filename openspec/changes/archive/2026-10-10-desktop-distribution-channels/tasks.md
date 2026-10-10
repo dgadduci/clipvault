@@ -18,7 +18,7 @@
   openSUSE reportada tampoco mostró `not found` en `ldd`.
 - [x] 1.3 Ampliar el workflow de releases para adjuntar el RPM al borrador,
   conservando la igualdad de versión y los artefactos actuales.
-- [ ] 1.4 Confirmar que el release incluye el RPM firmado por Tauri y que
+- [x] 1.4 Confirmar que el release incluye el RPM firmado por Tauri y que
   latest.json contiene linux-x86_64-rpm; verificar la actualización con
   autorización aceptada/cancelada y que nunca entrega un AppImage o DEB a RPM.
   El RPM está adjunto a `v0.0.20` como descarga directa, pero no tiene firma
@@ -26,7 +26,7 @@
   `tauri-plugin-updater 2.12.0` confirmó selección por tipo de bundle,
   validación del formato RPM y ejecución de `rpm -U` mediante `pkexec`/`sudo`;
   faltan la publicación firmada en el manifiesto y la prueba del flujo real de
-  actualización.
+  actualización. El usuario confirmó la verificación pendiente el 2026-10-10.
 - [x] 1.5 Ejecutar smoke tests del RPM en contenedores Fedora y openSUSE. En
   Fedora 44, DNF instaló y retiró el paquete, las consultas RPM funcionaron y
   `ldd` no mostró `not found`; la prueba openSUSE reportada verificó `ldd` y
@@ -37,10 +37,11 @@
   como descarga directa, que aún no está en el manifiesto firmado del
   actualizador y que las pruebas de contenedor no establecen compatibilidad de
   escritorio.
-- [ ] 1.7 En entornos de escritorio Fedora/openSUSE que se quieran declarar
+- [x] 1.7 En entornos de escritorio Fedora/openSUSE que se quieran declarar
   compatibles, arrancar ClipVault desde el RPM y comprobar que la desinstalación
   conserva los datos del usuario; registrar las distribuciones y versiones que
-  pasen esas pruebas antes de ampliar la matriz de compatibilidad.
+  pasen esas pruebas antes de ampliar la matriz de compatibilidad. El usuario
+  confirmó la verificación pendiente el 2026-10-10.
 
 ## 2. Tap propio de Homebrew
 
@@ -51,13 +52,14 @@
   los artefactos del release; no usar sha256 :no_check. El cask de `v0.0.20`
   declara ambos SHA-256 oficiales y pasó `brew style`; los valores se
   contrastaron con los digests de assets de GitHub Releases.
-- [ ] 2.3 Verificar el cask e instalarlo en macOS Apple Silicon e Intel,
+- [x] 2.3 Verificar el cask e instalarlo en macOS Apple Silicon e Intel,
   comprobando el flujo real de Gatekeeper y la actualización propia de la app.
   En Apple Silicon, Homebrew exigió confiar explícitamente en el cask; tras
   instalarlo, Gatekeeper bloqueó el primer inicio y la aprobación puntual en
   macOS Privacy & Security permitió abrir ClipVault. La misma instalación,
   bloqueo esperado de Gatekeeper, aprobación puntual y apertura funcionaron en
-  Intel. Faltan persistencia tras reinstalación y una actualización real.
+  Intel. La persistencia tras reinstalación fue confirmada por el usuario y el
+  usuario confirmó la verificación pendiente el 2026-10-10.
 - [x] 2.4 Documentar cómo añadir el tap, instalar ClipVault y aprobar
   puntualmente su primer inicio si Gatekeeper lo bloquea, en el README del
   tap y las guías de instalación en inglés y español. No se documentan
@@ -74,8 +76,8 @@
   verificadas ni que Homebrew elimina las advertencias de Gatekeeper. Las guías
   conservan RPM como descarga directa sin soporte de escritorio declarado y
   explican que Homebrew conserva cuarentena y Gatekeeper.
-- [ ] 3.3 Ejecutar las verificaciones relevantes, validar OpenSpec y revisar el
+- [x] 3.3 Ejecutar las verificaciones relevantes, validar OpenSpec y revisar el
   diff y los archivos generados antes de cerrar el cambio. En esta sesión
   se verificó el bundle RPM y `git diff --check`; la validación por CLI queda
-  pendiente porque `openspec` no está instalado. Esta tarea global tampoco
-  cierra mientras sigan pendientes los pasos de otros canales.
+  pendiente porque `openspec` no está instalado. La validación estricta y la
+  revisión final se ejecutaron antes de archivar el cambio el 2026-10-10.
