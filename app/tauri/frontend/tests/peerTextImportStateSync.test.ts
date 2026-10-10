@@ -36,22 +36,27 @@ test("remote peer selection synchronizes the import eligibility cache", () => {
   assert.ok(refresh, "RemoteHistoryRail must retain refreshPeerState");
   assert.match(
     refresh[0],
-    /peerHistoryRecordStateCommand\(peerState\)/,
+    /peerHistoryRecordStateCommand\(state\)/,
     "the history cache must continue receiving the selected peer state",
   );
   assert.match(
     refresh[0],
-    /peerImportRecordStateCommand\(peerState\)/,
+    /peerImportRecordStateCommand\(state\)/,
     "the import cache must receive the same selected peer state before Importar",
   );
   assert.match(
     refresh[0],
-    /trusted:\s*entry\?\.trust_state\s*===\s*["']trusted["']/,
-    "the import cache must use the snapshot's trust state",
+    /peerStateSynchronizer\.synchronize\(\s*peerState/,
+    "the peer-state bridge writes must remain ordered for each selected peer",
   );
   assert.match(
     refresh[0],
-    /active:\s*entry\?\.is_present\s*\?\?\s*false/,
-    "the import cache must use the snapshot's presence state",
+    /remotePeerStateFromSnapshot\(targetPeerId, snapshot\)/,
+    "the import cache must use the current snapshot's trust state",
+  );
+  assert.match(
+    refresh[0],
+    /if\s*\(\s*peerState\s*===\s*null\s*\)/,
+    "the import cache must wait for a complete snapshot before mirroring state",
   );
 });

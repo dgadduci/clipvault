@@ -23,7 +23,18 @@
   TLS hasta `PeerImportOutcome::NotTransferable`.
 - [x] 4.2 Conservar `not_available` como resultado tipado de host sin capacidad
   de importación y exponerlo sin filtrar detalles del protocolo.
-- [ ] 4.3 Mostrar feedback localizado para captura no transferible y host que
+- [x] 4.3 Mostrar feedback localizado para captura no transferible y host que
   requiere actualización, con regresiones de frontend y core.
 - [ ] 4.4 Ejecutar los tests Rust/frontend relevantes, validar OpenSpec y
   revisar el diff final.
+
+## 5. Orden de estado del peer
+
+- [x] 5.1 No sincronizar un estado de importación antes de conocer el snapshot
+  completo; revocar el estado cuando un snapshot conocido no contenga al peer.
+- [x] 5.2 Serializar por peer las escrituras de estado hacia los servicios de
+  historial e importación y mantener deshabilitada la acción hasta que la
+  instantánea actual termine.
+- [x] 5.3 Añadir una regresión frontend que cubra el snapshot tardío y la
+  finalización invertida de las sincronizaciones.
+- [ ] 5.4 Ejecutar las verificaciones relevantes y revisar el diff final.

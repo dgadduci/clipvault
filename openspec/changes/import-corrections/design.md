@@ -10,6 +10,13 @@ propio de una versión anterior. Además, TLS traduce `not_found` y
 presenta como una indisponibilidad genérica en vez de como una captura que ya
 no se puede importar.
 
+El rail también intenta sincronizar los caches de servicios al reaccionar a
+cambios de `peerId` y de `snapshot`. Durante el primer render el snapshot puede
+ser nulo y esa sincronización registra falsamente el peer como no confiable e
+inactivo. Cuando luego llega el snapshot correcto se inicia otra sincronización
+sin orden de finalización garantizado por el bridge. Una respuesta vieja puede
+persistir última y provocar `PeerUnavailable` al importar una card ya visible.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -19,6 +26,9 @@ no se puede importar.
 - Explicar de manera localizada si la instancia origen necesita actualizarse o
   si la captura ya no es transferible.
 - Probar el mapeo desde TLS al core y el feedback de la card.
+- Hacer monotónica la aplicación local de una instantánea de peer: no enviar
+  estados desconocidos y no permitir que una sincronización anterior sobrescriba
+  la más reciente.
 
 **Non-Goals:**
 
@@ -53,6 +63,20 @@ de importación explícitos y el bridge no necesita exponer el texto de la razó
 Se descarta usar `Malformed` como contenedor de rechazos esperables del host:
 confunde una captura eliminada con una respuesta dañada y fuerza copy erróneo.
 
+### La sincronización de estado requiere una instantánea conocida y ordenada
+
+El rail no llamará los comandos `record_state` mientras el snapshot completo
+sea desconocido. Si el snapshot ya fue recibido y no contiene al peer
+seleccionado, sí registra el estado inactivo para revocar los caches. Para cada
+peer, las escrituras de estado se encadenarán en el orden en que el rail observa
+las instantáneas; una finalización tardía no puede adelantar ni reemplazar la
+última transición. La señal `peerStateReady` sólo se activa después de completar
+la escritura de la instantánea actual.
+
+Se descarta confiar sólo en una generación de UI: ésta descarta actualizaciones
+visuales tardías, pero no impone orden en los comandos Tauri que ya fueron
+enviados al core.
+
 ### Mensajes localizados por causa recuperable
 
 El feedback existente de preparación se conserva. Las nuevas claves en los
@@ -68,6 +92,10 @@ actualización. El contenido, nombres de peers y razones wire no se interpolan.
   wire ya existentes, por lo que no cambia el mensaje ni el límite de payload.
 - [Regresión de errores] → Tests de TLS y core fijan que una captura ausente o
   no transferible no termine como transporte no disponible.
+- [Snapshot tardío] → La sincronización permanece deshabilitada hasta conocer
+  el peer; las pruebas fijan que un estado provisional no llegue al importador.
+- [Cambios rápidos de presencia] → La cola por peer conserva cada transición en
+  orden y la última determina cuándo se habilita la acción.
 
 ## Migration Plan
 

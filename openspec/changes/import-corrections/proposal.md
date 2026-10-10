@@ -8,6 +8,12 @@ incorrectamente las respuestas `not_found` y `not_transferable` a un error de
 transporte genérico. El preview sólo prueba que el host puede listar
 metadatos; no prueba que pueda entregar el cuerpo de una captura.
 
+Además, el rail puede enviar un estado provisional `trusted=false, active=false`
+antes de recibir el snapshot del peer. La actualización correcta llega en una
+segunda llamada asíncrona, pero el bridge no conserva un orden entre ambas: la
+primera puede terminar después y sobrescribir el estado activo del importador.
+Así, una card visible se rechaza localmente como peer no disponible.
+
 ## What Changes
 
 - Conservar la espera actual de sincronización de confianza/actividad antes de
@@ -18,6 +24,10 @@ metadatos; no prueba que pueda entregar el cuerpo de una captura.
 - Preservar `not_available` como señal de capacidad del host y comunicar que
   el equipo origen debe actualizar ClipVault, sin intentar importar ni mutar
   el historial local.
+- No registrar un estado de peer hasta conocer el snapshot completo y
+  serializar las transiciones por peer para que un estado provisional o viejo
+  nunca pueda sobrescribir el estado que habilitó el preview. Un snapshot ya
+  recibido que no contenga al peer sí revoca su estado como inactivo.
 - Añadir regresiones de protocolo, core y frontend que cubran ambas rutas y
   mantengan el comportamiento independiente del sistema operativo.
 
@@ -39,7 +49,8 @@ metadatos; no prueba que pueda entregar el cuerpo de una captura.
 ## Impact
 
 - Frontend: `RemotePreviewCard.svelte`, tipos, catálogos de traducción y
-  regresiones frontend.
+  regresiones frontend, más `RemoteHistoryRail.svelte` para la sincronización
+  ordenada del estado de peer.
 - Core/Tauri/TLS: se conserva el gate de confianza existente y se amplía la
   taxonomía tipada de rechazos del fetch, sin modificar contenido, permisos ni
   el formato de los mensajes del protocolo.

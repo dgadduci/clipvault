@@ -43,6 +43,10 @@
   import { t, tPlural } from "./lib/localization.ts";
   import { remoteImageThumbnailCardKey } from "./lib/remoteImageThumbnailState";
   import {
+    RemotePeerStateSynchronizer,
+    remotePeerStateFromSnapshot,
+  } from "./lib/remotePeerStateSync";
+  import {
     INITIAL_CURSORS,
     applyResponses as mergeResponses,
     pickNextCursors,
@@ -114,6 +118,9 @@
   let peerStateSyncKey: string | null = null;
   let peerStateSyncPromise: Promise<void> | null = null;
   let peerStateSyncGeneration = 0;
+  // Tauri invokes are independent. Keep each peer's state writes ordered so a
+  // late provisional state cannot overwrite a later active snapshot.
+  const peerStateSynchronizer = new RemotePeerStateSynchronizer();
   // Start detached from the prop so the initial reactive pass treats an
   // already-selected peer exactly like a later selection. Initialising this
   // from `peerId` skipped the only branch that loads the first remote page.
@@ -283,14 +290,17 @@
    * an unknown peer when the user explicitly chooses Importar.
    */
   function refreshPeerState(targetPeerId: string): Promise<void> {
-    const entry = (snapshot?.entries ?? []).find(
-      (candidate) => candidate.peer_id === targetPeerId,
-    );
-    const peerState = {
-      peer_id: targetPeerId,
-      trusted: entry?.trust_state === "trusted",
-      active: entry?.is_present ?? false,
-    };
+    // Until the complete snapshot arrives, there is no trustworthy state to
+    // mirror into the runtime caches. A known snapshot that lacks this peer is
+    // different: it intentionally records inactive below and revokes import.
+    const peerState = remotePeerStateFromSnapshot(targetPeerId, snapshot);
+    if (peerState === null) {
+      peerImportStateReady = false;
+      peerStateSyncKey = null;
+      peerStateSyncPromise = null;
+      peerStateSyncGeneration += 1;
+      return Promise.resolve();
+    }
     const syncKey = `${targetPeerId}\u0000${peerState.trusted}\u0000${peerState.active}`;
     if (syncKey === peerStateSyncKey && peerStateSyncPromise !== null) {
       return peerStateSyncPromise;
@@ -298,13 +308,16 @@
     peerStateSyncKey = syncKey;
     peerImportStateReady = false;
     const generation = ++peerStateSyncGeneration;
-    peerStateSyncPromise = Promise.all([
-      peerHistoryRecordStateCommand(peerState),
-      peerImportRecordStateCommand(peerState),
-      peerImageRecordStateCommand(peerState),
-      peerImageImportRecordStateCommand(peerState),
-      peerImageThumbnailRecordStateCommand(peerState),
-    ])
+    peerStateSyncPromise = peerStateSynchronizer.synchronize(
+      peerState,
+      (state) => Promise.all([
+        peerHistoryRecordStateCommand(state),
+        peerImportRecordStateCommand(state),
+        peerImageRecordStateCommand(state),
+        peerImageImportRecordStateCommand(state),
+        peerImageThumbnailRecordStateCommand(state),
+      ]).then(() => undefined),
+    )
       .then(() => {
         if (generation === peerStateSyncGeneration && peerId === targetPeerId) {
           peerImportStateReady = true;

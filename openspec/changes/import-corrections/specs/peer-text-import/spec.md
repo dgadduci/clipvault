@@ -22,6 +22,14 @@ The core SHALL retain its existing eligibility gate as defense in depth.
 - **AND** existing typed outcomes for actual peer or transport failures remain
   unchanged
 
+#### Scenario: Deferred snapshot cannot revoke a visible peer import
+
+- **WHEN** the renderer received a remote preview after a trusted active
+  snapshot, but an earlier snapshot synchronization finishes later
+- **THEN** the import service retains the latest trusted active state
+- **AND** the explicit text import is allowed to reach its authenticated fetch
+  flow
+
 #### Scenario: Host does not implement text fetch
 
 - **WHEN** the authenticated remote host replies to the text-fetch request with

@@ -28,6 +28,26 @@ it can enable an import.
   synchronization finishes
 - **THEN** the earlier completion does not enable import for the current rows
 
+#### Scenario: Snapshot arrives after the rail mounts
+
+- **WHEN** the selected peer id is known but its snapshot has not arrived yet
+- **THEN** ClipVault does not record a synthetic untrusted or inactive state
+  with any import service
+- **AND** the import action remains disabled until the peer snapshot is known
+
+#### Scenario: Known snapshot removes the selected peer
+
+- **WHEN** a received peer snapshot no longer contains the selected peer
+- **THEN** ClipVault records that peer as inactive with its import services
+- **AND** any previously enabled import action is revoked
+
+#### Scenario: Peer snapshot transitions arrive out of order at the bridge
+
+- **WHEN** the rail observes more than one trusted/presence state for the same
+  selected peer while previous bridge writes are still pending
+- **THEN** the bridge writes are applied in observation order
+- **AND** a prior state cannot overwrite the latest state used to enable import
+
 #### Scenario: Visible preview belongs to the current eligible peer
 
 - **WHEN** a remote preview card is visible

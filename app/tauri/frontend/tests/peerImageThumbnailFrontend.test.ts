@@ -306,7 +306,7 @@ test("remote card identity isolates equal remote IDs across peers and snapshots"
 test("remote rail records thumbnail trust state before rendering requests", () => {
   assert.match(
     remoteRail,
-    /peerImageThumbnailRecordStateCommand\(peerState\)/,
+    /peerImageThumbnailRecordStateCommand\(state\)/,
     "the active peer trust/presence state must seed the thumbnail runtime before fetch",
   );
   assert.match(
