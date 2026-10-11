@@ -2761,6 +2761,7 @@ where
 fn envelope_payload_limit(message: &PairingMessage) -> usize {
     match message {
         PairingMessage::ListRecentTextAck { .. } => HISTORY_MAX_RESPONSE_BYTES,
+        PairingMessage::FetchTextAck { .. } => FETCH_TEXT_MAX_RESPONSE_BYTES,
         PairingMessage::ListRecentImagesAck { .. } => IMAGE_HISTORY_MAX_RESPONSE_BYTES,
         PairingMessage::FetchImageAck { .. } => FETCH_IMAGE_MAX_RESPONSE_BYTES,
         PairingMessage::FetchImageThumbnailAck { .. } => FETCH_IMAGE_THUMBNAIL_MAX_RESPONSE_BYTES,
@@ -6365,9 +6366,9 @@ mod tests {
     #[test]
     fn tls_routing_for_history_envelope_round_trip() {
         use super::super::{
-            FetchSourceAppPresentationHostHandler, HistoryHostHandler, HistoryHostResponse,
-            HostSourceAppPresentationResponse, PeerHistorySnapshot, PeerTransport as _,
-            TlsPeerTransport,
+            FetchSourceAppPresentationHostHandler, FetchTextHostHandler, HistoryHostHandler,
+            HistoryHostResponse, HostFetchResponse, HostSourceAppPresentationResponse,
+            PeerHistorySnapshot, PeerTransport as _, TlsPeerTransport,
         };
         use std::sync::Mutex as StdMutex;
 
@@ -6463,6 +6464,33 @@ mod tests {
             })))
         };
 
+        // Keep the fetch body deliberately above the small request-envelope
+        // limit. A successful fetch acknowledgement has its own authenticated
+        // response budget, so this must not be truncated to the 8 KiB request
+        // ceiling after a preview has already succeeded.
+        let fetch_handler: Arc<dyn FetchTextHostHandler> = {
+            struct FixedFetchHandler {
+                expected_peer_id: String,
+            }
+            impl FetchTextHostHandler for FixedFetchHandler {
+                fn fetch_text(&self, peer_id: &str, remote_entry_id: &str) -> HostFetchResponse {
+                    assert_eq!(peer_id, self.expected_peer_id);
+                    assert_eq!(remote_entry_id, "entry-7");
+                    HostFetchResponse::Ok {
+                        title: Some("Large remote text".to_string()),
+                        content_type: "text".to_string(),
+                        body: "x".repeat(super::MAX_INBOUND_PAYLOAD + 1),
+                        source_app_name: None,
+                        source_app_icon_bytes: None,
+                        capture_note: None,
+                    }
+                }
+            }
+            Arc::new(FixedFetchHandler {
+                expected_peer_id: client_peer_id.clone(),
+            })
+        };
+
         // Host listener: install with the host-side handler so
         // the first inbound `ListRecentText` envelope lands on a
         // productive handler instead of `not_available`.
@@ -6482,7 +6510,7 @@ mod tests {
             host_sink,
             None,
             Some(Arc::clone(&host_handler)),
-            None,
+            Some(Arc::clone(&fetch_handler)),
             None,
             None,
             None,
@@ -6600,6 +6628,21 @@ mod tests {
             format!("valid:{}", super::super::HISTORY_MAX_PAGE_ROWS)
         );
         assert_eq!(first.snapshot_id.len(), 64);
+
+        // A visible preview must be importable when the authenticated body is
+        // legal but larger than the generic pairing request envelope. This
+        // exercises the productive FetchText acknowledgement over the same
+        // two real TLS listeners as the history browse above.
+        let fetched = super::fetch_text(
+            &client_transport,
+            &host_peer_id,
+            &host_cert_fingerprint,
+            "entry-7",
+        )
+        .expect("large text body imports over mTLS");
+        assert_eq!(fetched.peer_id, host_peer_id);
+        assert_eq!(fetched.remote_entry_id, "entry-7");
+        assert_eq!(fetched.body.len(), super::MAX_INBOUND_PAYLOAD + 1);
 
         // 2. Second page after the signed `next_cursor` succeeds
         //    with the trailing rows and no further cursor.
@@ -6726,6 +6769,9 @@ mod tests {
         bare_client
             .arm_pin(&host_peer_id, &bare_fingerprint)
             .expect("arm pin bare");
+        bare_host
+            .arm_pin(&client_peer_id, &client_cert_fingerprint)
+            .expect("arm client pin on bare host");
         std::thread::sleep(std::time::Duration::from_millis(150));
         let err = super::list_recent_text(
             &bare_client,
@@ -6736,6 +6782,13 @@ mod tests {
         )
         .expect_err("no handler must surface typed unavailability");
         assert!(matches!(err, super::super::TransportError::Unavailable));
+
+        let err = super::fetch_text(&bare_client, &host_peer_id, &bare_fingerprint, "entry-7")
+            .expect_err("a host without FetchText must surface its capability result");
+        assert!(matches!(
+            err,
+            super::super::TransportError::HostImportUnavailable
+        ));
 
         // Sanity pin: the productive transport never leaks the
         // per-peer pinned fingerprint, the raw cert bytes, the

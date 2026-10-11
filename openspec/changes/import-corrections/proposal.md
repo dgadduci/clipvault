@@ -5,8 +5,11 @@ genérico “not available” aun cuando el preview sea válido. El protocolo us
 ese motivo cuando el equipo origen no tiene instalado el handler de fetch
 (por ejemplo, porque todavía ejecuta una versión anterior), y además reduce
 incorrectamente las respuestas `not_found` y `not_transferable` a un error de
-transporte genérico. El preview sólo prueba que el host puede listar
-metadatos; no prueba que pueda entregar el cuerpo de una captura.
+transporte genérico. También aplicaba por error el límite pequeño de una
+petición de pairing a un `FetchTextAck`: un cuerpo legal de más de 8 KiB hacía
+que el host cerrara la sesión y el cliente lo tradujera a indisponibilidad. El
+preview sólo prueba que el host puede listar metadatos; no prueba que pueda
+entregar el cuerpo de una captura.
 
 Además, el rail puede enviar un estado provisional `trusted=false, active=false`
 antes de recibir el snapshot del peer. La actualización correcta llega en una
@@ -24,6 +27,9 @@ Así, una card visible se rechaza localmente como peer no disponible.
 - Preservar `not_available` como señal de capacidad del host y comunicar que
   el equipo origen debe actualizar ClipVault, sin intentar importar ni mutar
   el historial local.
+- Aplicar al `FetchTextAck` el presupuesto de respuesta de importación ya
+  definido, distinto del límite de la petición de pairing, para que un cuerpo
+  de texto legal no se convierta en una desconexión de transporte.
 - No registrar un estado de peer hasta conocer el snapshot completo y
   serializar las transiciones por peer para que un estado provisional o viejo
   nunca pueda sobrescribir el estado que habilitó el preview. Un snapshot ya
@@ -51,7 +57,8 @@ Así, una card visible se rechaza localmente como peer no disponible.
 - Frontend: `RemotePreviewCard.svelte`, tipos, catálogos de traducción y
   regresiones frontend, más `RemoteHistoryRail.svelte` para la sincronización
   ordenada del estado de peer.
-- Core/Tauri/TLS: se conserva el gate de confianza existente y se amplía la
-  taxonomía tipada de rechazos del fetch, sin modificar contenido, permisos ni
+- Core/Tauri/TLS: se conserva el gate de confianza existente, se amplía la
+  taxonomía tipada de rechazos del fetch y se aplica el presupuesto ya
+  establecido para respuestas de texto, sin modificar contenido, permisos ni
   el formato de los mensajes del protocolo.
 - No se agregan dependencias, llamadas de red, telemetría ni persistencia nueva.

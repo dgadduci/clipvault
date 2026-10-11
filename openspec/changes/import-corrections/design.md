@@ -17,6 +17,13 @@ inactivo. Cuando luego llega el snapshot correcto se inicia otra sincronización
 sin orden de finalización garantizado por el bridge. Una respuesta vieja puede
 persistir última y provocar `PeerUnavailable` al importar una card ya visible.
 
+Finalmente, el escritor de envelopes usa el límite correspondiente a cada
+respuesta autenticada. `FetchTextAck` no estaba incluido en esa selección y
+heredaba el máximo de una petición de pairing (8 KiB), aunque su lector y
+contrato autorizan una respuesta de importación mayor. El host cerraba la
+sesión cuando el texto era válido pero superaba ese límite, y el cliente lo
+presentaba como una indisponibilidad genérica.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -29,6 +36,8 @@ persistir última y provocar `PeerUnavailable` al importar una card ya visible.
 - Hacer monotónica la aplicación local de una instantánea de peer: no enviar
   estados desconocidos y no permitir que una sincronización anterior sobrescriba
   la más reciente.
+- Garantizar que el ACK de importación de texto use su límite de respuesta
+  autenticada, no el presupuesto de la solicitud de pairing.
 
 **Non-Goals:**
 
@@ -63,6 +72,19 @@ de importación explícitos y el bridge no necesita exponer el texto de la razó
 Se descarta usar `Malformed` como contenedor de rechazos esperables del host:
 confunde una captura eliminada con una respuesta dañada y fuerza copy erróneo.
 
+### El ACK de importación usa su presupuesto de respuesta
+
+`FetchTextAck` se serializa con `FETCH_TEXT_MAX_RESPONSE_BYTES`, que ya
+incluye el cuerpo UTF-8 limitado, los metadatos y la posible atribución. El
+límite pequeño de `MAX_INBOUND_PAYLOAD` queda reservado para solicitudes y
+envelopes de pairing que no transportan un cuerpo importable. La prueba TLS
+de dos listeners envía un cuerpo superior a ese límite pequeño y verifica que
+el preview y la importación completan el mismo flujo autenticado.
+
+Se descarta elevar el límite genérico de todos los mensajes: debilitaría el
+presupuesto de solicitudes sin necesidad y ampliaría la superficie de memoria
+para rutas que no importan contenido.
+
 ### La sincronización de estado requiere una instantánea conocida y ordenada
 
 El rail no llamará los comandos `record_state` mientras el snapshot completo
@@ -90,6 +112,9 @@ actualización. El contenido, nombres de peers y razones wire no se interpolan.
   de red.
 - [Compatibilidad] → Las nuevas variantes son internas y se derivan de razones
   wire ya existentes, por lo que no cambia el mensaje ni el límite de payload.
+- [Cuerpo de texto grande] → El ACK usa únicamente el límite de respuesta de
+  importación ya documentado; una regresión de TLS protege que no vuelva a
+  heredar el límite de una petición pequeña.
 - [Regresión de errores] → Tests de TLS y core fijan que una captura ausente o
   no transferible no termine como transporte no disponible.
 - [Snapshot tardío] → La sincronización permanece deshabilitada hasta conocer

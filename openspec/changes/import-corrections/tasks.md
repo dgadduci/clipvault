@@ -25,7 +25,9 @@
   de importación y exponerlo sin filtrar detalles del protocolo.
 - [x] 4.3 Mostrar feedback localizado para captura no transferible y host que
   requiere actualización, con regresiones de frontend y core.
-- [ ] 4.4 Ejecutar los tests Rust/frontend relevantes, validar OpenSpec y
+- [ ] 4.4 Verificar con dos listeners TLS reales que un `FetchTextAck` mayor
+  que el presupuesto de una petición de pairing usa el límite de respuesta de
+  importación; ejecutar los tests Rust/frontend relevantes, validar OpenSpec y
   revisar el diff final.
 
 ## 5. Orden de estado del peer

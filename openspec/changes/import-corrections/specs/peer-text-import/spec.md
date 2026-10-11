@@ -43,3 +43,12 @@ The core SHALL retain its existing eligibility gate as defense in depth.
   `not_transferable`
 - **THEN** the import outcome is `NotTransferable`
 - **AND** no local entry is created
+
+#### Scenario: Transferable text exceeds the pairing request budget
+
+- **WHEN** an authenticated host returns a transferable text body whose
+  serialized `FetchTextAck` exceeds the generic pairing request budget but is
+  within the documented text-import response limit
+- **THEN** ClipVault sends and accepts the import acknowledgement
+- **AND** the importer continues with its existing local validation and commit
+- **AND** it does not report the body as a generic transport unavailability
