@@ -1,0 +1,63 @@
+# peer-import-readiness Specification
+
+## Purpose
+
+Specify how remote import actions wait for a current, synchronized peer state
+without hiding a readable preview or turning local synchronization delays into
+transport errors.
+
+## Requirements
+
+### Requirement: Remote import waits for synchronized peer state
+
+ClipVault SHALL keep a remote preview visible while its selected peer state is
+being synchronized, but SHALL NOT enable a text or image import until that same
+peer's trusted and active state has been registered with the corresponding
+import service and is both trusted and active. A peer change, block, unlink,
+loss of presence or stale synchronization response MUST revoke readiness before
+it can enable an import.
+
+#### Scenario: Preview appears before import state is ready
+
+- **WHEN** a remote preview row is rendered while peer-state synchronization is
+  still pending
+- **THEN** the preview remains readable and the import action is unavailable
+- **AND** activating it sends no fetch request and creates no local entry
+
+#### Scenario: Current peer state finishes synchronization
+
+- **WHEN** synchronization for the currently selected trusted active peer
+  completes
+- **THEN** its remote rows enable the matching explicit import action
+
+#### Scenario: Stale synchronization completes after peer change
+
+- **WHEN** the user selects, blocks or unlinks another peer before an earlier
+  synchronization finishes
+- **THEN** the earlier completion does not enable import for the current rows
+
+#### Scenario: Snapshot arrives after the rail mounts
+
+- **WHEN** the selected peer id is known but its snapshot has not arrived yet
+- **THEN** ClipVault does not record a synthetic untrusted or inactive state
+  with any import service
+- **AND** the import action remains disabled until the peer snapshot is known
+
+#### Scenario: Known snapshot removes the selected peer
+
+- **WHEN** a received peer snapshot no longer contains the selected peer
+- **THEN** ClipVault records that peer as inactive with its import services
+- **AND** any previously enabled import action is revoked
+
+#### Scenario: Peer snapshot transitions arrive out of order at the bridge
+
+- **WHEN** the rail observes more than one trusted/presence state for the same
+  selected peer while previous bridge writes are still pending
+- **THEN** the bridge writes are applied in observation order
+- **AND** a prior state cannot overwrite the latest state used to enable import
+
+#### Scenario: Visible preview belongs to the current eligible peer
+
+- **WHEN** a remote preview card is visible
+- **THEN** the selected peer remains trusted and present according to the rail
+- **AND** a later fetch failure is not attributed to a cached inactive peer

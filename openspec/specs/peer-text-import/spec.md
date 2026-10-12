@@ -268,3 +268,56 @@ SHALL NOT overwrite source metadata on an existing deduplicated local entry.
 - **THEN** the text import still succeeds when its text payload is valid
 - **AND** no remote path/reference or invalid icon bytes are persisted
 - **AND** the matching peer collection uses its generic import-icon fallback
+
+### Requirement: Explicit text import waits for synchronized peer state
+
+Before the renderer sends an explicit text import request, it SHALL confirm
+that the selected peer's current trusted and active snapshot has completed
+synchronization with the text import service and remains trusted and active.
+The core SHALL retain its existing eligibility gate as defense in depth.
+
+#### Scenario: User activates import while synchronization is pending
+
+- **WHEN** a text preview is visible but its peer snapshot has not completed
+  synchronization
+- **THEN** ClipVault does not invoke the text-import command
+- **AND** it does not render `peer_unavailable` for that local transient state
+
+#### Scenario: User activates import after synchronization
+
+- **WHEN** the current trusted active peer snapshot is synchronized and the
+  user activates Importar for a text row
+- **THEN** ClipVault invokes the existing authenticated text import flow
+- **AND** existing typed outcomes for actual peer or transport failures remain
+  unchanged
+
+#### Scenario: Deferred snapshot cannot revoke a visible peer import
+
+- **WHEN** the renderer received a remote preview after a trusted active
+  snapshot, but an earlier snapshot synchronization finishes later
+- **THEN** the import service retains the latest trusted active state
+- **AND** the explicit text import is allowed to reach its authenticated fetch
+  flow
+
+#### Scenario: Host does not implement text fetch
+
+- **WHEN** the authenticated remote host replies to the text-fetch request with
+  `not_available`
+- **THEN** the import outcome identifies an unavailable host capability
+- **AND** no local entry is created
+
+#### Scenario: Existing capture no longer has a transferable body
+
+- **WHEN** the authenticated remote host replies with `not_found` or
+  `not_transferable`
+- **THEN** the import outcome is `NotTransferable`
+- **AND** no local entry is created
+
+#### Scenario: Transferable text exceeds the pairing request budget
+
+- **WHEN** an authenticated host returns a transferable text body whose
+  serialized `FetchTextAck` exceeds the generic pairing request budget but is
+  within the documented text-import response limit
+- **THEN** ClipVault sends and accepts the import acknowledgement
+- **AND** the importer continues with its existing local validation and commit
+- **AND** it does not report the body as a generic transport unavailability

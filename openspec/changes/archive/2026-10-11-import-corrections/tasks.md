@@ -25,10 +25,11 @@
   de importación y exponerlo sin filtrar detalles del protocolo.
 - [x] 4.3 Mostrar feedback localizado para captura no transferible y host que
   requiere actualización, con regresiones de frontend y core.
-- [ ] 4.4 Verificar con dos listeners TLS reales que un `FetchTextAck` mayor
+- [x] 4.4 Verificar con dos listeners TLS reales que un `FetchTextAck` mayor
   que el presupuesto de una petición de pairing usa el límite de respuesta de
-  importación; ejecutar los tests Rust/frontend relevantes, validar OpenSpec y
-  revisar el diff final.
+  importación; el test Rust dirigido y la prueba manual entre equipos pasaron.
+- [ ] 4.5 Ejecutar los tests frontend y `openspec validate`; este entorno
+  impide iniciar `npm` y `openspec` (`operation not permitted`).
 
 ## 5. Orden de estado del peer
 
@@ -39,4 +40,5 @@
   instantánea actual termine.
 - [x] 5.3 Añadir una regresión frontend que cubra el snapshot tardío y la
   finalización invertida de las sincronizaciones.
-- [ ] 5.4 Ejecutar las verificaciones relevantes y revisar el diff final.
+- [x] 5.4 La prueba manual fue confirmada por el usuario; los checks Rust de
+  formato, la regresión TLS y la revisión del diff final pasaron.
