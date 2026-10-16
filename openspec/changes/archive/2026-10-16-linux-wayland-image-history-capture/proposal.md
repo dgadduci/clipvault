@@ -1,6 +1,6 @@
 # Propuesta: capturar imágenes sucesivas en Ubuntu Wayland
 
-## Por qué
+## Why
 
 Se observó que, en Linux Ubuntu con Wayland, la primera captura de imagen se
 agrega al historial, pero las capturas de imagen posteriores no aparecen. La
@@ -11,7 +11,7 @@ descarta la posterior antes de comparar su contenido. El comportamiento
 impide usar de forma continua la captura de imágenes mientras ClipVault
 permanece abierto.
 
-## Qué cambia
+## What Changes
 
 - Definir que ClipVault siga observando cambios del portapapeles después de
   guardar una imagen y capture imágenes compatibles posteriores en Ubuntu
