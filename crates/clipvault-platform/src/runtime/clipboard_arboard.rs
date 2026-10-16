@@ -52,11 +52,13 @@ use std::borrow::Cow;
 use std::env;
 
 use arboard::{Clipboard as Arboard, Error as ArboardError, ImageData};
+#[cfg(target_os = "linux")]
 use parking_lot::Mutex;
 
 use crate::clipboard::{
     checked_rgba_len, ClipboardBackend, ClipboardBackendError, ClipboardImage,
-    ClipboardObservation, ClipboardRevision, ImageValidationError, RichTextPayload,
+    ClipboardObservation, ClipboardPayload, ClipboardRevision, ImageValidationError,
+    RichTextPayload,
 };
 use crate::Capability;
 
@@ -153,20 +155,6 @@ impl ArboardBackend {
     }
 }
 
-/// Conservative payload-diff fallback used only when the current host cannot
-/// subscribe to the X11/XWayland ownership stream.
-///
-/// This fallback cannot detect a second copy of identical text. It is never
-/// presented as a real revision: `revision()` reports `UNKNOWN`, so a
-/// destructive baseline cannot accidentally invent a recapture. The watcher
-/// still gets the historical payload-deduplication behaviour for ordinary
-/// polling on hosts without XFixes.
-#[derive(Debug, Default)]
-struct FallbackRevisionState {
-    counter: u64,
-    last_text: Option<String>,
-}
-
 enum RevisionSource {
     /// X11 / XWayland ownership stream. Used both for native X11
     /// sessions and as the fallback transport for Wayland sessions
@@ -181,7 +169,7 @@ enum RevisionSource {
     /// without a native data-control backend, on hosts that cannot
     /// initialise XFixes and on every non-Linux build. The watcher
     /// relies on its existing payload-fingerprint deduplication.
-    Fallback(Mutex<FallbackRevisionState>),
+    Fallback,
 }
 
 impl RevisionSource {
@@ -201,20 +189,18 @@ impl RevisionSource {
         match session {
             LinuxSession::X11 => match X11ClipboardRevisionMonitor::new() {
                 Ok(monitor) => Self::X11(Box::new(Mutex::new(monitor))),
-                Err(_) => Self::Fallback(Mutex::new(FallbackRevisionState::default())),
+                Err(_) => Self::Fallback,
             },
             // Wayland / Unknown: the XFixes stream would be
             // misleading, so the adapter falls through to the
             // fingerprint-only fallback.
-            LinuxSession::Wayland | LinuxSession::Unknown => {
-                Self::Fallback(Mutex::new(FallbackRevisionState::default()))
-            }
+            LinuxSession::Wayland | LinuxSession::Unknown => Self::Fallback,
         }
     }
 
     #[cfg(not(all(target_os = "linux", feature = "linux-x11")))]
     fn for_session(_session: LinuxSession) -> Self {
-        Self::Fallback(Mutex::new(FallbackRevisionState::default()))
+        Self::Fallback
     }
 
     fn revision(&self) -> ClipboardRevision {
@@ -228,27 +214,15 @@ impl RevisionSource {
             // Without an ownership-event stream there is no payload-free
             // baseline to read. Returning UNKNOWN preserves the existing
             // dedupe state instead of manufacturing a false change signal.
-            Self::Fallback(_) => ClipboardRevision::UNKNOWN,
+            Self::Fallback => ClipboardRevision::UNKNOWN,
         }
     }
 
-    fn observe_payload(&self, text_leg: Option<String>) -> ClipboardRevision {
-        match self {
-            #[cfg(all(target_os = "linux", feature = "linux-x11"))]
-            Self::X11(monitor) => monitor
-                .lock()
-                .revision()
-                .map(ClipboardRevision::new)
-                .unwrap_or(ClipboardRevision::UNKNOWN),
-            Self::Fallback(state) => {
-                let mut state = state.lock();
-                if state.last_text != text_leg {
-                    state.counter = state.counter.saturating_add(1);
-                    state.last_text = text_leg;
-                }
-                ClipboardRevision::new(state.counter)
-            }
-        }
+    /// Pair a just-read payload with the revision source for that clipboard
+    /// observation. The fallback deliberately ignores payload content: only
+    /// a native ownership event can provide a trustworthy revision.
+    fn revision_for_observation(&self, _payload: Option<&ClipboardPayload>) -> ClipboardRevision {
+        self.revision()
     }
 }
 
@@ -607,14 +581,9 @@ impl ClipboardBackend for ArboardClipboard {
     /// bytes, hashes or absolute paths.
     fn read_observation(&self) -> Result<ClipboardObservation, ClipboardBackendError> {
         let payload = self.read_payload()?;
-        let text_leg = match &payload {
-            Some(crate::clipboard::ClipboardPayload::Text(text)) => Some(text.clone()),
-            Some(crate::clipboard::ClipboardPayload::RichText(rich)) => {
-                Some(rich.plain_text().to_string())
-            }
-            Some(crate::clipboard::ClipboardPayload::Image(_)) | None => None,
-        };
-        let revision = self.revision_source.observe_payload(text_leg);
+        let revision = self
+            .revision_source
+            .revision_for_observation(payload.as_ref());
         Ok(ClipboardObservation { payload, revision })
     }
 }
@@ -729,27 +698,25 @@ mod tests {
     }
 
     #[test]
-    fn payload_diff_fallback_never_claims_a_payload_free_revision() {
-        // A host without the XFixes/XWayland ownership stream can still
-        // collapse ordinary identical polls, but it cannot safely baseline a
-        // destructive operation. The payload-free accessor must therefore
-        // report UNKNOWN instead of turning a content diff into a fake event.
-        let source = RevisionSource::Fallback(Mutex::new(FallbackRevisionState::default()));
+    fn fallback_keeps_distinct_image_observations_unversioned() {
+        // A text-derived counter cannot describe image clipboard changes:
+        // successive images both have no text leg and would receive the same
+        // known revision. Without a trustworthy ownership event, the watcher
+        // must compare the complete payload fingerprint instead.
+        let source = RevisionSource::Fallback;
+        let first =
+            ClipboardPayload::Image(ClipboardImage::new(vec![0x33; 4], 1, 1).expect("valid image"));
+        let second =
+            ClipboardPayload::Image(ClipboardImage::new(vec![0x44; 4], 1, 1).expect("valid image"));
 
-        assert_eq!(source.revision(), ClipboardRevision::UNKNOWN);
         assert_eq!(
-            source.observe_payload(Some("same text".into())),
-            ClipboardRevision::new(1)
+            source.revision_for_observation(Some(&first)),
+            ClipboardRevision::UNKNOWN
         );
         assert_eq!(
-            source.observe_payload(Some("same text".into())),
-            ClipboardRevision::new(1)
+            source.revision_for_observation(Some(&second)),
+            ClipboardRevision::UNKNOWN
         );
-        assert_eq!(
-            source.observe_payload(Some("other text".into())),
-            ClipboardRevision::new(2)
-        );
-        assert_eq!(source.revision(), ClipboardRevision::UNKNOWN);
     }
 
     // -----------------------------------------------------------------
@@ -841,7 +808,7 @@ mod tests {
         // fresh native capture that XWayland never observed.
         let source = RevisionSource::for_session(LinuxSession::Wayland);
         assert!(
-            matches!(source, RevisionSource::Fallback(_)),
+            matches!(source, RevisionSource::Fallback),
             "Wayland session must fall through to the fallback source"
         );
         assert_eq!(source.revision(), ClipboardRevision::UNKNOWN);
@@ -863,7 +830,7 @@ mod tests {
     fn x11_session_revision_source_can_observe_xfixes() {
         // X11 sessions keep the historical behaviour: the source
         // either selects the X11 monitor (when a server is reachable)
-        // or falls back to the payload-diff fallback. The
+        // or falls back to the watcher fingerprint path. The
         // payload-free `revision()` accessor must NOT be used to
         // recreate a destructive baseline.
         let source = RevisionSource::for_session(LinuxSession::X11);
@@ -874,7 +841,7 @@ mod tests {
                 // clipboard bytes.
                 let _ = source.revision();
             }
-            RevisionSource::Fallback(_) => {
+            RevisionSource::Fallback => {
                 // No X11 server reachable from the test environment
                 // (CI sandbox, headless runner): the fallback must
                 // still refuse to claim a payload-free revision.
