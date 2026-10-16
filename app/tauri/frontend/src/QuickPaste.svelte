@@ -3,12 +3,13 @@
   import type {
     CopyResponse,
     EntryRecord,
+    EntryTextEditorMode,
     PlatformGuidance,
     PeerImportedSourceAppPresentation,
     SearchHit,
     SearchResponse,
   } from "./types";
-  import { isEditableTextEntry } from "./types";
+  import { isEditableTextEntry, isRichTextEntry } from "./types";
   import { visualTokenCss } from "./lib/visualTokens";
   import {
     copyEntryCommand,
@@ -114,6 +115,7 @@
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
   import ClipboardPreview from "./ClipboardPreview.svelte";
   import EntryTextEditorModal from "./EntryTextEditorModal.svelte";
+  import RichTextConversionWarningModal from "./RichTextConversionWarningModal.svelte";
   import Modal from "./Modal.svelte";
 
   /**
@@ -278,6 +280,11 @@
    * `null` means no editor is open.
    */
   let quickPasteEditorEntry: EntryRecord | null = null;
+  let quickPasteEditorMode: EntryTextEditorMode = "plain";
+  let quickPasteRichConversionWarning: {
+    entry: EntryRecord;
+    displayTitle: string;
+  } | null = null;
   /**
    * Stable id of the row the `Captura no editable` dialog should
    * return focus to when the user dismisses it. The id is captured
@@ -1715,8 +1722,8 @@
    *
    *   - resolve the entry by id from the live `recent` / `hits`
    *     feeds, never from a stale closure;
-   *   - reject the activation when the resolved entry is not eligible
-   *     for the persistent editor (image, rich text, missing row);
+   *   - route rich entries to the conversion warning and reject
+   *     images or malformed rows;
    *   - close the menu popover so the dialog renders on top of an
    *     empty list rather than stacking on top of the open menu;
    *   - store the snapshot of the entry the editor will persist so
@@ -1726,7 +1733,7 @@
    *     is responsible for the actual editing surface, draft,
    *     persistence and accessibility.
    *
-   * The handler never invokes the `updateTextEntryCommand` directly;
+   * The handler never invokes a persistence command directly;
    * that contract belongs to the modal so the double-submit lock,
    * the error surface and the close dispatcher stay in one place.
    */
@@ -1747,16 +1754,42 @@
       // row.
       return;
     }
+    if (isRichTextEntry(entry)) {
+      openMenuEntryId = null;
+      quickPasteRichConversionWarning = {
+        entry,
+        displayTitle: renderTitle(mode, recent, hits, entry.id, $t),
+      };
+      return;
+    }
     if (!isEditableTextEntry(entry)) {
-      // `quickPasteMenuActions` already gates the entry shape, but
-      // the predicate is re-evaluated here so a stale menu that
-      // somehow mounted against a rich / image row can never reach
-      // the editor.
+      // Recheck eligibility after resolving the live row so a stale
+      // menu can never open the editor for an image or malformed row.
       return;
     }
     openMenuEntryId = null;
     quickPasteEditorEntry = entry;
+    quickPasteEditorMode = "plain";
     quickPasteEditorOpen = true;
+  }
+
+  function confirmQuickPasteRichConversion(): void {
+    const pending = quickPasteRichConversionWarning;
+    if (!pending) return;
+    const currentEntry = findEntry(mode, recent, hits, pending.entry.id);
+    quickPasteRichConversionWarning = null;
+    if (!currentEntry || !isRichTextEntry(currentEntry)) return;
+    quickPasteEditorEntry = currentEntry;
+    quickPasteEditorMode = "rich-conversion";
+    quickPasteEditorOpen = true;
+  }
+
+  function closeQuickPasteRichConversionWarning(): void {
+    suppressNextWindowEscape = true;
+    quickPasteRichConversionWarning = null;
+    requestAnimationFrame(() => {
+      suppressNextWindowEscape = false;
+    });
   }
 
   /**
@@ -1800,6 +1833,7 @@
     suppressNextWindowEscape = true;
     quickPasteEditorOpen = false;
     quickPasteEditorEntry = null;
+    quickPasteEditorMode = "plain";
     requestAnimationFrame(() => {
       suppressNextWindowEscape = false;
     });
@@ -1891,20 +1925,24 @@
     entryId: number,
   ): HTMLElement | null {
     const anchor = menuAnchorEls[entryId];
-    if (anchor) return anchor;
+    if (anchor && document.contains(anchor)) return anchor;
     const row = rowRefs.get(entryId);
-    if (row) return row;
+    if (row && document.contains(row)) return row;
     return null;
   }
 
+  function resolveQuickPasteRichWarningFocusTarget(): HTMLElement | null {
+    const pending = quickPasteRichConversionWarning;
+    return pending
+      ? resolveQuickPasteEditorFocusTarget(pending.entry.id)
+      : null;
+  }
+
   /**
-   * Open the informative `Captura no editable` dialog for the entry
-   * the user activated `Cmd/Ctrl+E` against. The dialog is the
-   * single switch the keyboard listener consults when the matcher
-   * resolves to an image / rich-text row so the user gets a clear
-   * explanation without the editor silently mounting against an
-   * ineligible entry (or against a stale row the menu or shortcut
-   * might have left from a previous edit cycle).
+   * Open the informative `Captura no editable` dialog for an image
+   * entry the user activated `Cmd/Ctrl+E` against. Rich-text rows
+   * use the separate conversion warning; this helper never mounts
+   * the editor against an image or stale row.
    *
    * The dialog reuses the shared `Modal.svelte` shell so the focus
    * trap, the Escape / backdrop contract and the accessible
@@ -2150,7 +2188,7 @@
       // fallback (`quickPasteEditorEntry` / `quickPasteEditorEntryId`)
       // was deliberately removed: it caused the second `Cmd/Ctrl+E`
       // activation to silently reopen an older entry when the
-      // currently selected entry was image / rich text or empty.
+      // currently selected entry was an image, invalid row or empty.
       const selectedId =
         selectedEntryId !== null &&
         resultIds.indexOf(selectedEntryId) >= 0
@@ -2161,10 +2199,19 @@
       if (!entry) {
         return;
       }
+      if (isRichTextEntry(entry)) {
+        event.preventDefault();
+        openMenuEntryId = null;
+        quickPasteRichConversionWarning = {
+          entry,
+          displayTitle: renderTitle(mode, recent, hits, entry.id, $t),
+        };
+        return;
+      }
       if (!isEditableTextEntry(entry)) {
         // Surface the informative dialog instead of opening the
-        // editor so the user gets a clear explanation for image /
-        // rich-text rows. The dialog never invokes the
+        // editor so the user gets a clear explanation for image
+        // rows. The dialog never invokes the
         // `updateTextEntryCommand` bridge and never mutates the
         // entry, but reuses the shared `Modal.svelte` shell so the
         // focus trap, the Escape / backdrop contract and the
@@ -2177,6 +2224,7 @@
       event.preventDefault();
       openMenuEntryId = null;
       quickPasteEditorEntry = entry;
+      quickPasteEditorMode = "plain";
       quickPasteEditorOpen = true;
       return;
     }
@@ -3279,6 +3327,22 @@
 {/if}
 
 <!--
+  Rich-to-plain warning shared with the desktop card flow. The
+  warning only authorizes opening the editor; persistence is owned
+  by EntryTextEditorModal and its explicit conversion mode.
+-->
+{#if quickPasteRichConversionWarning}
+  <RichTextConversionWarningModal
+    open={true}
+    entryId={quickPasteRichConversionWarning.entry.id}
+    displayTitle={quickPasteRichConversionWarning.displayTitle}
+    returnFocusTo={resolveQuickPasteRichWarningFocusTarget()}
+    on:close={closeQuickPasteRichConversionWarning}
+    on:confirm={confirmQuickPasteRichConversion}
+  />
+{/if}
+
+<!--
   Persistent text editor modal. The window owns the lifecycle
   (`quickPasteEditorOpen` / `quickPasteEditorEntry`) and forwards
   a stable focus return target so the menu trigger or, when the
@@ -3304,6 +3368,7 @@
   <EntryTextEditorModal
     open={quickPasteEditorOpen}
     entry={quickPasteEditorEntry}
+    mode={quickPasteEditorMode}
     displayTitle={editorTitle}
     returnFocusTo={editorFocusTarget}
     on:close={handleQuickPasteEditorClose}
@@ -3312,10 +3377,10 @@
 
 <!--
   Informative `Captura no editable` dialog. The window mounts this
-  modal ONLY when the `Cmd/Ctrl+E` shortcut resolves to an image or
-  rich-text entry; the menu matrix already gates `Editar captura`
-  out for those entry shapes, so the dialog is a defence-in-depth
-  surface for the keyboard path. The dialog reuses the shared
+  modal ONLY when the `Cmd/Ctrl+E` shortcut resolves to an image;
+  rich-text entries use the conversion warning above. The menu
+  matrix also keeps `Editar captura` hidden for images. The dialog
+  reuses the shared
   `Modal.svelte` shell so the focus trap, Escape handling and
   backdrop dismissal stay in lockstep with the rest of the Quick
   Paste surfaces; the helper never invokes

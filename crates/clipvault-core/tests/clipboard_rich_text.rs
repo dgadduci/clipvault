@@ -254,6 +254,116 @@ fn html_plus_plain_persists_rich_metadata() {
 }
 
 #[test]
+fn rich_conversion_keeps_assets_referenced_by_another_entry() {
+    let h = harness(vec![]);
+    let payload = rich_text(
+        Some("<p>shared representation</p>"),
+        Some(b"{\\rtf1 shared}"),
+    );
+    let id = match h.context.history().record_clipboard_payload(
+        &h.context,
+        ClipboardPayload::RichText(payload),
+        Some("com.example.Editor"),
+    ) {
+        HistoryOutcome::Stored { id } => id,
+        other => panic!("expected Stored, got {other:?}"),
+    };
+    let original = record(&h, id);
+    let alias_id = {
+        let mut db = h.context.database().lock();
+        let mut repo = EntryRepository::new(db.connection_mut());
+        repo.insert_or_touch(clipvault_db::NewEntry {
+            content: "shared alias".to_string(),
+            content_type: ContentType::Text,
+            content_size: "shared alias".len() as i64,
+            content_hash: "test-shared-rich-assets-alias".to_string(),
+            source_app: None,
+            created_at: datetime!(2026-01-02 03:04:05 UTC),
+            last_seen_at: datetime!(2026-01-02 03:04:05 UTC),
+            asset_ref: None,
+            mime_type: None,
+            payload_width: None,
+            payload_height: None,
+            rich_text_hash: original.rich_text_hash.clone(),
+            rich_html_ref: original.rich_html_ref.clone(),
+            rich_rtf_ref: original.rich_rtf_ref.clone(),
+            rich_preview_ref: original.rich_preview_ref.clone(),
+            rich_html_size: original.rich_html_size,
+            rich_rtf_size: original.rich_rtf_size,
+            code_language: None,
+        })
+        .expect("insert second row sharing rich assets")
+        .record()
+        .id
+    };
+
+    let outcome = h
+        .context
+        .history()
+        .convert_rich_text_to_plain(&h.context, id, "converted text".to_string())
+        .expect("convert rich text");
+    assert!(matches!(
+        outcome,
+        clipvault_core::UpdateTextHistoryOutcome::Updated { .. }
+    ));
+
+    let alias = record(&h, alias_id);
+    assert!(alias.has_rich_text());
+    for reference in [
+        original.rich_html_ref,
+        original.rich_rtf_ref,
+        original.rich_preview_ref,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(
+            h.rich_store.read_bytes(&reference).is_ok(),
+            "a rich asset still referenced by another entry must remain available"
+        );
+    }
+}
+
+#[test]
+fn rich_conversion_collects_its_assets_after_successful_commit() {
+    let h = harness(vec![]);
+    let payload = rich_text(
+        Some("<p>discard rich format</p>"),
+        Some(b"{\\rtf1 discard rich format}"),
+    );
+    let id = match h.context.history().record_clipboard_payload(
+        &h.context,
+        ClipboardPayload::RichText(payload),
+        Some("com.example.Editor"),
+    ) {
+        HistoryOutcome::Stored { id } => id,
+        other => panic!("expected Stored, got {other:?}"),
+    };
+    let original = record(&h, id);
+    let rich_refs = [
+        original.rich_html_ref,
+        original.rich_rtf_ref,
+        original.rich_preview_ref,
+    ];
+
+    let outcome = h
+        .context
+        .history()
+        .convert_rich_text_to_plain(&h.context, id, "plain after conversion".to_string())
+        .expect("convert rich text");
+    assert!(matches!(
+        outcome,
+        clipvault_core::UpdateTextHistoryOutcome::Updated { .. }
+    ));
+    for reference in rich_refs.into_iter().flatten() {
+        assert!(
+            h.rich_store.read_bytes(&reference).is_err(),
+            "unreferenced rich assets should be collected after the row commits"
+        );
+    }
+}
+
+#[test]
 fn plain_only_payload_does_not_create_rich_metadata() {
     let h = harness(vec![]);
     let outcome = h.context.history().record_clipboard_payload(

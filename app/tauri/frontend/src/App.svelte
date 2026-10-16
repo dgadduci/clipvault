@@ -115,7 +115,7 @@
     resolveEditTextShortcutEntryId as resolveEditTextShortcutTargetId,
     type EditTextShortcutPlatform,
   } from "./lib/editTextShortcut";
-  import { isEditableTextEntry } from "./types";
+  import { isEditableTextEntry, isRichTextEntry } from "./types";
   import { visualTokenCss } from "./lib/visualTokens";
   import { setLocale, t, tPlural } from "./lib/localization.ts";
   import { waitForStartupStatus } from "./lib/startup.ts";
@@ -1829,7 +1829,10 @@
       if (!targetEntry) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (!isEditableTextEntry(targetEntry)) {
+      if (
+        !isEditableTextEntry(targetEntry) &&
+        !isRichTextEntry(targetEntry)
+      ) {
         nonEditableTextNoticeReturnFocus = findHistoryCardElement(targetEntryId);
         nonEditableTextNotice = {
           contentType: targetEntry.content_type,
@@ -3461,6 +3464,32 @@
   .collection-content-stage {
     position: relative;
     min-width: 0;
+  }
+
+  .collection-content-rail {
+    width: 100%;
+    min-width: 0;
+    height: var(
+      --cv-card-rail-height,
+      calc(var(--cv-card-size, 240px) + 2.75rem)
+    );
+  }
+
+  :global(.collection-content-rail .rail) {
+    display: flex;
+    flex-flow: row nowrap;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  :global(.collection-content-rail .rail .card) {
+    flex: 0 0 var(--cv-card-size, 240px);
+    width: var(--cv-card-size, 240px);
+    height: var(--cv-card-size, 240px);
   }
 
   .collection-content-rail.clearing-old-content {

@@ -255,12 +255,10 @@ test("App-level matcher gates interactive targets and dialogs", () => {
 });
 
 test("App-level matcher validates the eligibility predicate before opening the editor", () => {
-  // An image or rich-text row must never reach the modal even when
-  // the user happens to have it focused. The shell listener routes
-  // the eligibility check through the existing
-  // `isEditableTextEntry` predicate the menu / modal already
-  // consult so the front of house stays the single source of
-  // truth.
+  // An image row must never reach the modal even when the user has
+  // it focused. Rich rows are allowed through to the card's
+  // conversion warning; both frontend predicates mirror the backend
+  // eligibility guards.
   const handler = appSource.match(
     /function\s+onSearchShortcutKeydown[\s\S]*?\n  \}\n/,
   );
@@ -273,6 +271,11 @@ test("App-level matcher validates the eligibility predicate before opening the e
     branchBody,
     /isEditableTextEntry\s*\(/,
     "the edit-text branch must consult the eligibility predicate",
+  );
+  assert.match(
+    branchBody,
+    /isRichTextEntry\s*\(/,
+    "the edit-text branch must allow rich entries to reach their conversion warning",
   );
   assert.match(
     branchBody,
@@ -297,7 +300,7 @@ test("ineligible shortcut targets are consumed and show a notice instead of reop
   // local fallback could reopen the last text editor. The ineligible
   // branch must consume the event before showing a notice.
   const guard = appSource.match(
-    /event\.preventDefault\(\);\s*event\.stopImmediatePropagation\(\);\s*if\s*\(\s*!isEditableTextEntry\(targetEntry\)\s*\)\s*\{[\s\S]*?\n      \}/,
+    /event\.preventDefault\(\);\s*event\.stopImmediatePropagation\(\);\s*if\s*\(\s*!isEditableTextEntry\(targetEntry\)\s*&&\s*!isRichTextEntry\(targetEntry\)\s*\)\s*\{[\s\S]*?\n      \}/,
   );
   assert.notEqual(
     guard,
@@ -676,7 +679,7 @@ test("card resets textEditorOpen when the rail broadcasts a close for a differen
   const body = handler?.[0] ?? "";
   assert.match(
     body,
-    /if\s*\(\s*!textEditorOpen\s*\)\s*return/,
+    /if\s*\(\s*!textEditorOpen\s*&&\s*!richConversionWarningOpen\s*\)\s*return/,
     "the close handler must early-return when the card never opened its modal",
   );
   assert.match(

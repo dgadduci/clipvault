@@ -986,6 +986,20 @@ export const updateTextEntryCommand: ClipvaultCommandArg<
     content: args.content,
   });
 
+/**
+ * Explicitly convert a rich-text history entry to plain text. The
+ * separate command ensures the backend validates that the live row is
+ * still rich before clearing its rich metadata and asset references.
+ */
+export const convertRichTextToPlainCommand: ClipvaultCommandArg<
+  UpdateTextEntryResponse,
+  { id: number; content: string }
+> = (args) =>
+  invoke<UpdateTextEntryResponse>("clipvault_convert_rich_text_to_plain", {
+    entryId: args.id,
+    content: args.content,
+  });
+
 export const createManualTextCommand: ClipvaultCommandArg<
   CreateManualTextResponse,
   { collectionId: number; content: string }

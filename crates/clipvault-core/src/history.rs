@@ -115,8 +115,8 @@ pub enum UpdateTextHistoryOutcome {
     Noop { record: clipvault_db::EntryRecord },
     /// The target entry does not exist.
     NotFound,
-    /// The target entry is an image or carries rich-text metadata
-    /// the editor must not touch.
+    /// The target entry is an image, or a rich-text row reached the
+    /// plain-text edit operation instead of the explicit conversion.
     NotEditable,
     /// The trimmed input is empty.
     EmptyContent,
@@ -900,6 +900,65 @@ impl TextHistoryService {
         })
     }
 
+    /// Convert a rich-text history entry to plain text in place.
+    /// Eligibility is rechecked by the repository inside the same
+    /// transaction that clears the rich references and writes the
+    /// edited content. Rich assets are collected only after a
+    /// successful commit and only from a trustworthy live-reference
+    /// query; collection failures do not roll back the saved edit.
+    pub fn convert_rich_text_to_plain(
+        &self,
+        context: &AppContext,
+        id: i64,
+        text: String,
+    ) -> Result<UpdateTextHistoryOutcome, HistoryServiceError> {
+        if text.is_empty() {
+            return Ok(UpdateTextHistoryOutcome::EmptyContent);
+        }
+        let hash = hash_content(&text);
+        let content_type = detect_content_type(&text);
+        let size = text.len() as i64;
+        let now = self.clock.now();
+
+        let mut rich_refs_to_keep = None;
+        let outcome = {
+            let mut db = context.database().lock();
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let outcome =
+                repo.convert_rich_text_to_plain(id, &text, &hash, content_type, size, now)?;
+            if matches!(&outcome, UpdateTextOutcome::Updated { .. }) {
+                match repo.referenced_rich_asset_refs() {
+                    Ok(refs) => rich_refs_to_keep = Some(refs),
+                    Err(_) => warn!(
+                        error_kind = "rich_asset_reference_query_failed",
+                        "rich asset collection skipped after text conversion; assets preserved"
+                    ),
+                }
+            }
+            outcome
+        };
+
+        if let (Some(store), Some(references)) =
+            (self.rich_asset_store.as_ref(), rich_refs_to_keep.as_ref())
+        {
+            if let Err(error) = store.collect_unreferenced(references) {
+                warn!(
+                    reason = error.kind_str(),
+                    "rich asset collection failed after text conversion; orphans remain"
+                );
+            }
+        }
+
+        Ok(match outcome {
+            UpdateTextOutcome::Updated { record } => UpdateTextHistoryOutcome::Updated { record },
+            UpdateTextOutcome::Noop { record } => UpdateTextHistoryOutcome::Noop { record },
+            UpdateTextOutcome::NotFound => UpdateTextHistoryOutcome::NotFound,
+            UpdateTextOutcome::NotEditable => UpdateTextHistoryOutcome::NotEditable,
+            UpdateTextOutcome::EmptyContent => UpdateTextHistoryOutcome::EmptyContent,
+            UpdateTextOutcome::DuplicateContent => UpdateTextHistoryOutcome::DuplicateContent,
+        })
+    }
+
     /// Persist a user-authored multiline text entry using the same content
     /// classification and deduplication rules as clipboard captures. The
     /// repository atomically attaches it to Historial and to the selected
@@ -1295,6 +1354,28 @@ mod tests {
             .id
     }
 
+    fn insert_rich_text(context: &AppContext, content: &str) -> i64 {
+        let now = time::OffsetDateTime::UNIX_EPOCH;
+        let mut entry = clipvault_db::NewEntry::text(
+            content.to_string(),
+            clipvault_db::ContentType::Text,
+            content.len() as i64,
+            hash_content(content),
+            None,
+            now,
+            now,
+        );
+        entry.rich_text_hash = Some("test-rich-hash".to_string());
+        entry.rich_html_ref = Some("rich-text/test-rich-hash.html".to_string());
+        entry.rich_preview_ref = Some("rich-text/test-rich-hash.preview.html".to_string());
+        let mut db = context.database().lock();
+        let mut repo = clipvault_db::EntryRepository::new(db.connection_mut());
+        repo.insert_or_touch(entry)
+            .expect("insert rich text")
+            .record()
+            .id
+    }
+
     #[test]
     fn create_manual_text_preserves_multiline_and_attaches_history_and_collection() {
         let (context, service) = isolated_service();
@@ -1429,6 +1510,42 @@ mod tests {
             }
             other => panic!("expected Updated, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn convert_rich_text_to_plain_recomputes_text_metadata_and_clears_rich_fields() {
+        let (context, service) = isolated_service();
+        let id = insert_rich_text(&context, "styled note");
+        let edited = "https://example.com/edited";
+
+        let outcome = service
+            .convert_rich_text_to_plain(&context, id, edited.to_string())
+            .expect("convert rich text");
+        let UpdateTextHistoryOutcome::Updated { record } = outcome else {
+            panic!("expected Updated, got {outcome:?}");
+        };
+
+        assert_eq!(record.id, id);
+        assert_eq!(record.content, edited);
+        assert_eq!(record.content_hash, hash_content(edited));
+        assert_eq!(record.content_size, edited.len() as i64);
+        assert_eq!(record.content_type, ContentType::Url);
+        assert!(record.rich_text_hash.is_none());
+        assert!(record.rich_html_ref.is_none());
+        assert!(record.rich_rtf_ref.is_none());
+        assert!(record.rich_preview_ref.is_none());
+        assert!(record.rich_html_size.is_none());
+        assert!(record.rich_rtf_size.is_none());
+
+        let stored = {
+            let mut db = context.database().lock();
+            let repo = clipvault_db::EntryRepository::new(db.connection_mut());
+            repo.find_by_id(id)
+                .expect("read entry")
+                .expect("entry exists")
+        };
+        assert_eq!(stored.content, edited);
+        assert!(!stored.has_rich_text());
     }
 
     #[test]

@@ -802,6 +802,7 @@ import { t } from "./lib/localization.ts";
      *     shrinks below its content inside a future flex row. */
     display: flex;
     flex-direction: column;
+    color: var(--cv-fg, #f0f4f8);
     gap: 0.45rem;
     width: 100%;
     height: 100%;
@@ -830,7 +831,7 @@ import { t } from "./lib/localization.ts";
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
-    flex: 1 1 auto;
+    flex: 1 1 0;
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
@@ -903,7 +904,7 @@ import { t } from "./lib/localization.ts";
   .collection-button {
     background: transparent;
     border: 0;
-    color: inherit;
+    color: var(--cv-fg, #f0f4f8);
     text-align: left;
     padding: 0.3rem 0.4rem;
     border-radius: 6px;

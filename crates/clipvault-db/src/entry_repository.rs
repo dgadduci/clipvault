@@ -216,8 +216,8 @@ pub struct SetSourceAppMetadataOutcome {
 ///   persisted content; no mutation happened and no event will be
 ///   emitted upstream.
 /// - `NotFound`: the target id does not exist.
-/// - `NotEditable`: the row is an image or carries rich-text
-///   metadata that the editor must never touch.
+/// - `NotEditable`: the plain-text operation targeted an image or a
+///   rich row without the explicit conversion intent.
 /// - `EmptyContent`: the trimmed input is empty.
 /// - `DuplicateContent`: another live row already owns the
 ///   canonical hash the new text would produce; the operation
@@ -230,6 +230,12 @@ pub enum UpdateTextOutcome {
     NotEditable,
     EmptyContent,
     DuplicateContent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextEditMode {
+    PlainText,
+    ConvertRichToPlain,
 }
 
 /// Single distinct source-application entry the combobox query
@@ -1476,6 +1482,52 @@ impl<'a> EntryRepository<'a> {
         new_content_size: i64,
         now: OffsetDateTime,
     ) -> Result<UpdateTextOutcome, EntryRepositoryError> {
+        self.update_text_inner(
+            id,
+            new_content,
+            new_content_hash,
+            new_content_type,
+            new_content_size,
+            now,
+            TextEditMode::PlainText,
+        )
+    }
+
+    /// Convert an existing rich-text row to plain text in place. The
+    /// conversion uses the same validation and duplicate checks as
+    /// [`Self::update_text`], but only accepts rows that still have a
+    /// complete rich representation and clears all rich metadata in
+    /// the same transaction as the text update.
+    pub fn convert_rich_text_to_plain(
+        &mut self,
+        id: i64,
+        new_content: &str,
+        new_content_hash: &str,
+        new_content_type: ContentType,
+        new_content_size: i64,
+        now: OffsetDateTime,
+    ) -> Result<UpdateTextOutcome, EntryRepositoryError> {
+        self.update_text_inner(
+            id,
+            new_content,
+            new_content_hash,
+            new_content_type,
+            new_content_size,
+            now,
+            TextEditMode::ConvertRichToPlain,
+        )
+    }
+
+    fn update_text_inner(
+        &mut self,
+        id: i64,
+        new_content: &str,
+        new_content_hash: &str,
+        new_content_type: ContentType,
+        new_content_size: i64,
+        now: OffsetDateTime,
+        mode: TextEditMode,
+    ) -> Result<UpdateTextOutcome, EntryRepositoryError> {
         let tx = self.conn.transaction()?;
 
         let existing = match fetch_by_id(&tx, id)? {
@@ -1491,16 +1543,23 @@ impl<'a> EntryRepository<'a> {
             }
         };
 
-        if !existing.content_type.is_textual()
-            || existing.asset_ref.is_some()
+        let has_image_metadata = existing.asset_ref.is_some()
             || existing.mime_type.is_some()
             || existing.payload_width.is_some()
-            || existing.payload_height.is_some()
-            || existing.rich_text_hash.is_some()
+            || existing.payload_height.is_some();
+        let has_any_rich_metadata = existing.rich_text_hash.is_some()
             || existing.rich_html_ref.is_some()
             || existing.rich_rtf_ref.is_some()
             || existing.rich_preview_ref.is_some()
-        {
+            || existing.rich_html_size.is_some()
+            || existing.rich_rtf_size.is_some();
+        let eligible = existing.content_type.is_textual()
+            && !has_image_metadata
+            && match mode {
+                TextEditMode::PlainText => !has_any_rich_metadata,
+                TextEditMode::ConvertRichToPlain => existing.has_rich_text(),
+            };
+        if !eligible {
             tx.rollback()?;
             return Ok(UpdateTextOutcome::NotEditable);
         }
@@ -1510,7 +1569,11 @@ impl<'a> EntryRepository<'a> {
             return Ok(UpdateTextOutcome::EmptyContent);
         }
 
-        if existing.content_hash == new_content_hash {
+        let unchanged = match mode {
+            TextEditMode::PlainText => existing.content_hash == new_content_hash,
+            TextEditMode::ConvertRichToPlain => existing.content == new_content,
+        };
+        if unchanged {
             // The new text is byte-for-byte identical to the
             // persisted one. Drop the transaction and surface a
             // no-op so the shell does not emit a content mutation
@@ -1545,23 +1608,52 @@ impl<'a> EntryRepository<'a> {
         }
 
         let now_str = format_timestamp(now);
-        tx.execute(
-            "UPDATE clipboard_entries
-                SET content = ?1,
-                    content_type = ?2,
-                    content_size = ?3,
-                    content_hash = ?4,
-                    updated_at = ?5
-              WHERE id = ?6",
-            params![
-                new_content,
-                new_content_type.as_str(),
-                new_content_size,
-                new_content_hash,
-                now_str,
-                id,
-            ],
-        )?;
+        match mode {
+            TextEditMode::PlainText => {
+                tx.execute(
+                    "UPDATE clipboard_entries
+                        SET content = ?1,
+                            content_type = ?2,
+                            content_size = ?3,
+                            content_hash = ?4,
+                            updated_at = ?5
+                      WHERE id = ?6",
+                    params![
+                        new_content,
+                        new_content_type.as_str(),
+                        new_content_size,
+                        new_content_hash,
+                        now_str,
+                        id,
+                    ],
+                )?;
+            }
+            TextEditMode::ConvertRichToPlain => {
+                tx.execute(
+                    "UPDATE clipboard_entries
+                        SET content = ?1,
+                            content_type = ?2,
+                            content_size = ?3,
+                            content_hash = ?4,
+                            updated_at = ?5,
+                            rich_text_hash = NULL,
+                            rich_html_ref = NULL,
+                            rich_rtf_ref = NULL,
+                            rich_preview_ref = NULL,
+                            rich_html_size = NULL,
+                            rich_rtf_size = NULL
+                      WHERE id = ?6",
+                    params![
+                        new_content,
+                        new_content_type.as_str(),
+                        new_content_size,
+                        new_content_hash,
+                        now_str,
+                        id,
+                    ],
+                )?;
+            }
+        }
         let record = fetch_by_id(&tx, id)?.expect("row updated above must still exist");
         tx.commit()?;
         Ok(UpdateTextOutcome::Updated { record })
@@ -4987,6 +5079,272 @@ mod tests {
         };
         assert_eq!(stored.content, "styled text");
         assert!(stored.has_rich_text());
+    }
+
+    #[test]
+    fn convert_rich_text_to_plain_clears_rich_metadata_and_preserves_entry_metadata() {
+        let (_dir, mut db) = open_temp_db();
+        let captured_at = datetime!(2026-01-02 03:04:05 UTC);
+        let edited_at = datetime!(2026-01-02 03:10:00 UTC);
+        let entry_id = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let id = repo
+                .insert_or_touch(new_rich_entry(
+                    "styled text",
+                    "rich-hash-conversion",
+                    Some("<b>styled text</b>"),
+                    Some(b"{\\rtf1 styled text}"),
+                    captured_at,
+                ))
+                .expect("insert rich entry")
+                .record()
+                .id;
+            repo.set_title(id, Some("Rich title"), captured_at)
+                .expect("title");
+            repo.set_favorite(id, true, captured_at).expect("favorite");
+            repo.set_source_app_metadata(
+                id,
+                Some("Editor"),
+                Some("application-icons/editor.png"),
+                captured_at,
+            )
+            .expect("source app");
+            id
+        };
+        let (collection_id, tag_id) = {
+            let mut repo = crate::OrganizationRepository::new(db.connection_mut());
+            let collection = repo
+                .create_user_collection("Rich captures", "#1565c0", captured_at)
+                .expect("collection")
+                .id;
+            let tag = repo.upsert_tag("rich", captured_at).expect("tag").id;
+            repo.replace_entry_collections(entry_id, &[collection], captured_at)
+                .expect("attach collection");
+            repo.replace_entry_tags(entry_id, &[tag], captured_at)
+                .expect("attach tag");
+            (collection, tag)
+        };
+
+        let new_content = "https://example.com/edited";
+        let (new_hash, new_size) = compute_text_metadata(new_content);
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.convert_rich_text_to_plain(
+                entry_id,
+                new_content,
+                &new_hash,
+                ContentType::Url,
+                new_size,
+                edited_at,
+            )
+            .expect("convert rich text")
+        };
+        let UpdateTextOutcome::Updated { record } = outcome else {
+            panic!("expected Updated, got {outcome:?}");
+        };
+        assert_eq!(record.id, entry_id);
+        assert_eq!(record.content, new_content);
+        assert_eq!(record.content_hash, new_hash);
+        assert_eq!(record.content_size, new_size);
+        assert_eq!(record.content_type, ContentType::Url);
+        assert_eq!(record.updated_at, format_timestamp(edited_at));
+        assert_eq!(record.created_at, format_timestamp(captured_at));
+        assert_eq!(record.last_seen_at, format_timestamp(captured_at));
+        assert_eq!(record.title.as_deref(), Some("Rich title"));
+        assert!(record.is_pinned);
+        assert_eq!(record.source_app_name.as_deref(), Some("Editor"));
+        assert_eq!(
+            record.source_app_icon_ref.as_deref(),
+            Some("application-icons/editor.png")
+        );
+        assert!(record.asset_ref.is_none());
+        assert!(record.mime_type.is_none());
+        assert!(record.payload_width.is_none());
+        assert!(record.payload_height.is_none());
+        assert!(record.rich_text_hash.is_none());
+        assert!(record.rich_html_ref.is_none());
+        assert!(record.rich_rtf_ref.is_none());
+        assert!(record.rich_preview_ref.is_none());
+        assert!(record.rich_html_size.is_none());
+        assert!(record.rich_rtf_size.is_none());
+        let mut repo = EntryRepository::new(db.connection_mut());
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(
+                entry_id,
+                "second edit",
+                "second-edit-hash",
+                ContentType::Text,
+                11,
+                edited_at + time::Duration::minutes(1),
+            )
+            .expect("already converted entry"),
+            UpdateTextOutcome::NotEditable
+        ));
+
+        let org_repo = crate::OrganizationRepository::new(db.connection_mut());
+        assert!(org_repo
+            .entry_collection_ids(entry_id)
+            .expect("entry collections")
+            .contains(&collection_id));
+        assert!(org_repo
+            .entry_tag_ids(entry_id)
+            .expect("entry tags")
+            .contains(&tag_id));
+    }
+
+    #[test]
+    fn convert_rich_text_to_plain_rejects_noop_empty_non_rich_and_duplicate_inputs() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (plain_id, rich_id, image_id) = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let plain_id = repo
+                .insert_or_touch(new_entry("duplicate target", when))
+                .expect("plain")
+                .record()
+                .id;
+            let rich_id = repo
+                .insert_or_touch(new_rich_entry(
+                    "styled source",
+                    "rich-hash-guard",
+                    Some("<b>styled source</b>"),
+                    None,
+                    when,
+                ))
+                .expect("rich")
+                .record()
+                .id;
+            let image_id = repo
+                .insert_or_touch(new_image_entry(&"ee".repeat(32), 4, 4, when))
+                .expect("image")
+                .record()
+                .id;
+            (plain_id, rich_id, image_id)
+        };
+        let original = {
+            let repo = EntryRepository::new(db.connection_mut());
+            repo.find_by_id(rich_id).unwrap().unwrap()
+        };
+        let mut repo = EntryRepository::new(db.connection_mut());
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(
+                9999,
+                "missing target",
+                "missing-hash",
+                ContentType::Text,
+                14,
+                when,
+            )
+            .expect("missing entry"),
+            UpdateTextOutcome::NotFound
+        ));
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(rich_id, "", "empty-hash", ContentType::Text, 0, when,)
+                .expect("empty input"),
+            UpdateTextOutcome::EmptyContent
+        ));
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(
+                rich_id,
+                &original.content,
+                &original.content_hash,
+                original.content_type,
+                original.content_size,
+                when + time::Duration::minutes(1),
+            )
+            .expect("unchanged input"),
+            UpdateTextOutcome::Noop { .. }
+        ));
+        let duplicate = repo.find_by_id(plain_id).unwrap().unwrap();
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(
+                rich_id,
+                &duplicate.content,
+                &duplicate.content_hash,
+                duplicate.content_type,
+                duplicate.content_size,
+                when + time::Duration::minutes(1),
+            )
+            .expect("duplicate input"),
+            UpdateTextOutcome::DuplicateContent
+        ));
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(
+                plain_id,
+                "replacement",
+                "replacement-hash",
+                ContentType::Text,
+                11,
+                when + time::Duration::minutes(1),
+            )
+            .expect("plain entry"),
+            UpdateTextOutcome::NotEditable
+        ));
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(
+                image_id,
+                "replacement",
+                "image-replacement-hash",
+                ContentType::Text,
+                11,
+                when + time::Duration::minutes(1),
+            )
+            .expect("image entry"),
+            UpdateTextOutcome::NotEditable
+        ));
+
+        let unchanged = repo.find_by_id(rich_id).unwrap().unwrap();
+        assert_eq!(unchanged.content, original.content);
+        assert_eq!(unchanged.updated_at, original.updated_at);
+        assert!(unchanged.has_rich_text());
+    }
+
+    #[test]
+    fn convert_rich_text_to_plain_survives_database_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("clipvault.db");
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let later = datetime!(2026-01-02 03:10:00 UTC);
+        let id;
+        {
+            let mut db = crate::Database::open(&db_path).expect("open");
+            db.run_migrations(&crate::builtin_migrations())
+                .expect("migrate");
+            let mut repo = EntryRepository::new(db.connection_mut());
+            id = repo
+                .insert_or_touch(new_rich_entry(
+                    "styled before restart",
+                    "rich-hash-restart",
+                    Some("<b>styled before restart</b>"),
+                    None,
+                    when,
+                ))
+                .expect("insert rich")
+                .record()
+                .id;
+            let (hash, size) = compute_text_metadata("plain after restart");
+            assert!(matches!(
+                repo.convert_rich_text_to_plain(
+                    id,
+                    "plain after restart",
+                    &hash,
+                    ContentType::Text,
+                    size,
+                    later,
+                )
+                .expect("convert"),
+                UpdateTextOutcome::Updated { .. }
+            ));
+        }
+
+        let mut db = reopen_db(&db_path);
+        let repo = EntryRepository::new(db.connection_mut());
+        let stored = repo.find_by_id(id).unwrap().unwrap();
+        assert_eq!(stored.content, "plain after restart");
+        assert_eq!(stored.updated_at, format_timestamp(later));
+        assert!(!stored.has_rich_text());
+        assert!(stored.rich_html_ref.is_none());
+        assert!(stored.rich_preview_ref.is_none());
     }
 
     #[test]

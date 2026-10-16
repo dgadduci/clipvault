@@ -228,6 +228,7 @@ fn main() {
             commands::clipvault_ignored_app_linux_add,
             commands::clipvault_set_entry_title,
             commands::clipvault_update_text_entry,
+            commands::clipvault_convert_rich_text_to_plain,
             commands::clipvault_create_manual_text,
             commands::clipvault_entry_note,
             commands::clipvault_entry_note_ids,

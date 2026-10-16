@@ -596,6 +596,7 @@
     box-sizing: border-box;
     display: flex;
     flex-direction: row;
+    flex-wrap: nowrap;
     gap: 0.75rem;
     width: 100%;
     min-width: 0;

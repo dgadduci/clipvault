@@ -365,6 +365,24 @@ export function isEditableTextEntry(entry: EntryRecord): boolean {
   return true;
 }
 
+/**
+ * Whether a history entry carries a complete, text-backed rich capture
+ * that can be explicitly converted to plain text. The predicate mirrors
+ * `EntryRecord::has_rich_text` in the database crate and excludes rows
+ * with image payload metadata.
+ */
+export function isRichTextEntry(entry: EntryRecord): boolean {
+  if (entry.content_type === "image") return false;
+  if (entry.asset_ref != null || entry.mime_type != null) return false;
+  if (entry.payload_width != null || entry.payload_height != null) return false;
+  return (
+    entry.rich_text_hash != null &&
+    (entry.rich_html_ref != null || entry.rich_rtf_ref != null)
+  );
+}
+
+export type EntryTextEditorMode = "plain" | "rich-conversion";
+
 export type SetFavoriteResponse =
   | { kind: "updated"; entry: EntrySummary }
   | { kind: "not_found" };

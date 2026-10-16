@@ -241,17 +241,18 @@ test("quickPasteMenuActions: image entry yields exactly one Copiar action plus P
   );
 });
 
-test("quickPasteMenuActions: rich entry yields rich + plain actions plus Previsualizar", () => {
+test("quickPasteMenuActions: rich entry yields rich + plain + edit + preview actions", () => {
   const actions = quickPasteMenuActions(richEntry(), "Captured rich", {
     copyBusy: false,
   });
-  assert.equal(actions.length, 3);
+  assert.equal(actions.length, 4);
   assert.equal(actions[0].kind, "copy-rich");
   assert.equal(actions[0].disabled, false);
   assert.equal(actions[0].mode, "rich");
   assert.equal(actions[1].kind, "copy-plain");
   assert.equal(actions[1].disabled, false);
-  assert.equal(actions[2].kind, "preview");
+  assert.equal(actions[2].kind, "edit");
+  assert.equal(actions[3].kind, "preview");
 });
 
 test("quickPasteMenuActions: editable plain entry yields Copiar, Editar captura and Previsualizar", () => {
@@ -378,11 +379,10 @@ test("quickPasteMenuActions: preview action has no mode and a stable test id", (
 
 // ---------------------------------------------------------------------------
 // Edit-capture matrix. The Quick Paste palette must append the
-// `Editar captura` action only for entries the persistent text editor
-// can persist. The helper is the single switch the renderer and the
-// `Cmd/Ctrl+E` shortcut consult, so a regression that drops the
-// action for plain entries or accidentally surfaces it for image /
-// rich rows is caught here before it can ship. The list-ordering
+// `Editar captura` action for eligible plain and rich entries. Rich
+// entries are gated by their renderable rich representation and the
+// UI requires conversion confirmation before opening the editor. The
+// list-ordering
 // contract — `Copiar` → `Editar captura` → `Previsualizar` — is
 // pinned alongside the predicate so a future refactor that reorders
 // the menu items surfaces as a test failure instead of a silent UX
@@ -421,20 +421,28 @@ test("quickPasteMenuActions: image entry never exposes Editar captura", () => {
   assert.equal(actions.length, 2);
 });
 
-test("quickPasteMenuActions: rich entry never exposes Editar captura", () => {
-  // Rich rows carry `rich_text_hash` / `rich_html_ref` / ...; the
-  // editor would destroy the rich metadata, so the menu must not
-  // advertise the action even when the row also exposes a plain
-  // representation. `isEditableTextEntry` rejects rich rows and the
-  // helper mirrors the predicate so the Quick Paste palette and the
-  // desktop rail cannot drift apart.
+test("quickPasteMenuActions: rich entry exposes Editar captura before warning", () => {
+  // The menu exposes the shared edit entry point for rich captures;
+  // QuickPaste.svelte routes it through the conversion warning.
   const actions = quickPasteMenuActions(richEntry(), "Captured rich", {
     copyBusy: false,
   });
   assert.equal(
     actions.some((action) => action.kind === "edit"),
-    false,
-    "rich entries must not surface an Editar captura action",
+    true,
+    "rich entries must surface the conversion-aware Editar captura action",
+  );
+});
+
+test("quickPasteMenuActions: rich capture remains editable if its preview asset is unavailable", () => {
+  const entry = richEntry({ rich_preview_ref: null });
+  const actions = quickPasteMenuActions(entry, "Captured rich", {
+    copyBusy: false,
+  });
+  assert.equal(
+    actions.some((action) => action.kind === "edit"),
+    true,
+    "backend-eligible rich captures must keep the edit action even without a preview asset",
   );
 });
 
@@ -451,8 +459,8 @@ test("quickPasteMenuActions: copyBusy disables every action including Editar cap
   }
 });
 
-test("quickPasteMenuActions: edit action sits between Copiar and Previsualizar", () => {
-  // The documented order is `Copiar` → `Editar captura` →
+test("quickPasteMenuActions: edit action sits before Previsualizar", () => {
+  // The documented plain-entry order is `Copiar` → `Editar captura` →
   // `Previsualizar`. Pinning the relative position here keeps the
   // matrix stable across future helper refactors; the renderer reads
   // the action list in order, so an Editar captura that hops over

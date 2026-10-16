@@ -118,8 +118,10 @@
   import CollectionSelectorModal from "./CollectionSelectorModal.svelte";
   import CollectionMembershipModal from "./CollectionMembershipModal.svelte";
   import EntryTextEditorModal from "./EntryTextEditorModal.svelte";
+  import RichTextConversionWarningModal from "./RichTextConversionWarningModal.svelte";
   import TextNoteModal from "./TextNoteModal.svelte";
-  import { isEditableTextEntry } from "./types";
+  import type { EntryTextEditorMode } from "./types";
+  import { isEditableTextEntry, isRichTextEntry } from "./types";
   import { localeStore, t } from "./lib/localization.ts";
   import { ariaShortcut, keyboardShortcuts, shortcutLabel } from "./lib/keyboardShortcuts.ts";
 
@@ -281,11 +283,12 @@
    * never at a specific target id.
    */
   function handleCardEditTextShortcutClose(): void {
-    if (!textEditorOpen) return;
+    if (!textEditorOpen && !richConversionWarningOpen) return;
     // This is a rail-forced close while another card becomes the target;
     // do not restore focus to this obsolete card.
     textEditorReturnFocusTarget = null;
     textEditorOpen = false;
+    richConversionWarningOpen = false;
   }
   function handleCardEntryNoteShortcutClose(): void {
     if (!noteModalOpen) return;
@@ -650,12 +653,11 @@
   $: isRich = hasRenderableRichText(entry);
   /**
    * Whether the card exposes the `Editar captura` action. The
-   * predicate mirrors the backend guard so a stale frontend
-   * cannot surface the action for an image or rich-text entry —
-   * the storage layer will refuse the call anyway, but keeping
-   * the menu honest avoids a misleading affordance.
+   * predicate mirrors the backend guards so a stale frontend
+   * cannot surface the action for an image or malformed entry;
+   * rich-text entries use the explicit conversion warning first.
    */
-  $: canEditText = isEditableTextEntry(entry);
+  $: canEditCapture = isEditableTextEntry(entry) || isRichTextEntry(entry);
 
   // ---------------------------------------------------------------
   // Paste menu actions.
@@ -971,6 +973,8 @@
    * editor state.
    */
   let textEditorOpen = false;
+  let textEditorMode: EntryTextEditorMode = "plain";
+  let richConversionWarningOpen = false;
   /**
    * Focus destination for the currently open text editor. Normal
    * user-initiated closes return to this card; a rail-forced close while
@@ -1235,17 +1239,35 @@
     closeMenuAfterAction();
   }
 
-  /**
-   * Open the text editor modal. The guard rejects ineligible
-   * entries so a stale foreground cannot open the editor for an
-   * image or a rich-text row even if the menu somehow exposes the
-   * action; the storage layer is the second line of defence.
-   */
+  /** Route plain entries directly to the editor and rich entries through
+   * the explicit conversion warning before opening that same editor. */
   function openTextEditor(): void {
-    if (!canEditText) return;
+    if (isEditableTextEntry(entry)) {
+      textEditorMode = "plain";
+      textEditorReturnFocusTarget = cardArticleEl;
+      textEditorOpen = true;
+      closeMenuAfterAction();
+      return;
+    }
+    if (isRichTextEntry(entry)) {
+      richConversionWarningOpen = true;
+      closeMenuAfterAction();
+    }
+  }
+
+  function confirmRichTextConversion(): void {
+    if (!isRichTextEntry(entry)) {
+      richConversionWarningOpen = false;
+      return;
+    }
+    richConversionWarningOpen = false;
+    textEditorMode = "rich-conversion";
     textEditorReturnFocusTarget = cardArticleEl;
     textEditorOpen = true;
-    closeMenuAfterAction();
+  }
+
+  function closeRichTextConversionWarning(): void {
+    richConversionWarningOpen = false;
   }
 
   /**
@@ -1258,6 +1280,7 @@
   function closeTextEditor(): void {
     textEditorReturnFocusTarget = cardArticleEl;
     textEditorOpen = false;
+    textEditorMode = "plain";
     dispatchSelect(entry.id);
     queueMicrotask(() => {
       if (cardArticleEl && document.contains(cardArticleEl)) {
@@ -1306,8 +1329,8 @@
    *
    * The shortcut MUST:
    *
-   *   - be a no-op when the card is not eligible (`canEditText`)
-   *     so an image or rich-text row never opens the editor;
+   *   - be a no-op when the card is neither plain-text editable nor
+   *     a rich-text row eligible for explicit conversion;
    *   - be a no-op when the keyboard event target is itself an
    *     interactive surface (input, textarea, select, button,
    *     contenteditable, the ellipsis menu, the editor modal or the
@@ -1679,7 +1702,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       // typing `e` outside the card keeps its native behaviour and
       // the shortcut never races the existing `Escape` /
       // `Cmd/Ctrl+Enter` flows.
-      if (!canEditText) return;
+      if (!canEditCapture) return;
       if (isInsideModalTarget(event.target)) return;
       event.preventDefault();
       openTextEditor();
@@ -2435,7 +2458,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       >
         {$t("history.card.restore_title")}
       </button>
-      {#if canEditText}
+      {#if canEditCapture}
         <button
           type="button"
           role="menuitem"
@@ -2598,9 +2621,19 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   on:close={() => { membershipModalOpen = false; }}
 />
 
+<RichTextConversionWarningModal
+  open={richConversionWarningOpen}
+  entryId={entry.id}
+  displayTitle={displayTitle}
+  returnFocusTo={menuTriggerEl}
+  on:close={closeRichTextConversionWarning}
+  on:confirm={confirmRichTextConversion}
+/>
+
 <EntryTextEditorModal
   open={textEditorOpen}
   {entry}
+  mode={textEditorMode}
   {displayTitle}
   returnFocusTo={textEditorReturnFocusTarget}
   on:close={closeTextEditor}

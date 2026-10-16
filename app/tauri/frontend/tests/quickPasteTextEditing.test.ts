@@ -15,8 +15,8 @@
  *   - the modal is fed `displayTitle` derived from the entry's
  *     resolved title (the exact same `displayTitle` the rail uses);
  *   - the menu exposes `Editar captura` between `Copiar` and
- *     `Previsualizar` for plain text entries and never for image /
- *     rich entries (the matrix helpers `quickPasteMenuActions` and
+ *     `Previsualizar` for plain and rich text entries and never for
+ *     images (the matrix helpers `quickPasteMenuActions` and
  *     the matching `QUICK_PASTE_EDIT_*` constants are exercised
  *     here too so a rename surfaces as a test failure);
  *   - the visible shortcut hint and the `aria-keyshortcuts`
@@ -261,7 +261,7 @@ function readQuickPasteActionsSource(): string {
   return readFileSync(path, "utf8");
 }
 
-test("source: Quick Paste imports the shared EntryTextEditorModal and updateTextEntryCommand is only mentioned in comments", () => {
+test("source: Quick Paste imports the shared EntryTextEditorModal and delegates persistence to it", () => {
   const source = readQuickPasteSource();
   assert.match(
     source,
@@ -284,6 +284,47 @@ test("source: Quick Paste mounts the editor with displayTitle and a stable focus
     source,
     /<EntryTextEditorModal[\s\S]*?displayTitle=\{editorTitle\}[\s\S]*?returnFocusTo=\{editorFocusTarget\}[\s\S]*?on:close=\{handleQuickPasteEditorClose\}\s*\/>/,
     "the Quick Paste window must mount the modal with displayTitle and a stable focus target",
+  );
+  assert.match(
+    source,
+    /<EntryTextEditorModal[\s\S]*?mode=\{quickPasteEditorMode\}/,
+    "Quick Paste must pass the selected plain or rich-conversion mode to the shared editor",
+  );
+});
+
+test("source: rich-text menu and shortcut share the explicit conversion warning", () => {
+  const source = readQuickPasteSource();
+  assert.match(
+    source,
+    /import\s+RichTextConversionWarningModal\s+from\s+"\.\/RichTextConversionWarningModal\.svelte"/,
+  );
+  assert.match(
+    source,
+    /if\s*\(\s*isRichTextEntry\(entry\)\s*\)\s*\{[\s\S]*?quickPasteRichConversionWarning\s*=\s*\{/,
+    "rich menu and shortcut activations must capture a live rich row for confirmation",
+  );
+  assert.match(
+    source,
+    /<RichTextConversionWarningModal[\s\S]*?on:confirm=\{confirmQuickPasteRichConversion\}/,
+    "confirming the warning must open the shared editor flow",
+  );
+  assert.match(
+    source,
+    /quickPasteEditorMode\s*=\s*"rich-conversion"/,
+    "the editor must use its explicit rich-conversion persistence mode",
+  );
+});
+
+test("source: conversion save requires non-empty text changed from the baseline", () => {
+  const modal = readEntryTextEditorModalSource();
+  assert.match(
+    modal,
+    /mode\s*===\s*"rich-conversion"\s*\?\s*convertRichTextToPlainCommand\s*:\s*updateTextEntryCommand/,
+  );
+  assert.match(
+    modal,
+    /draft\.length\s*>\s*0[\s\S]*?draft\s*!==\s*\(baselineEntry\.content\s*\?\?\s*""\)/,
+    "the save control must reject empty and unchanged conversion drafts",
   );
 });
 
@@ -395,9 +436,8 @@ test("source: edit shortcut uses the entry id from the live selection, not a sta
     /findEntry\(mode,\s*recent,\s*hits,\s*id\)/,
     "the keyboard handler must resolve the entry by id from the live feeds",
   );
-  // The eligibility predicate MUST be re-evaluated even when the
-  // menu already gated the entry so a stale rich / image row can
-  // never reach the editor.
+  // Plain edit eligibility MUST be re-evaluated for stale rows;
+  // rich rows take the separate warning path and images are refused.
   assert.match(
     source,
     /isEditableTextEntry\(entry\)/,
@@ -511,13 +551,13 @@ test("source: matrix constants surface as exported symbols with stable test ids"
     /export\s+const\s+QUICK_PASTE_EDIT_TEST_ID\s*=\s*"quick-paste-menu-edit"/,
     "quickPasteActions.ts must export the QUICK_PASTE_EDIT_TEST_ID constant",
   );
-  // The matrix helper MUST reject rich and image entries through
-  // the `isEditableTextEntry` predicate so a future tweak cannot
-  // accidentally surface the editor on a non-eligible row.
+  // The matrix helper admits renderable rich rows for the conversion
+  // warning and eligible plain rows, while the image gate keeps image
+  // entries out.
   assert.match(
     actions,
-    /isEditableTextEntry\(entry\s+as\s+EntryRecord\)/,
-    "quickPasteActions.ts must gate the edit action through isEditableTextEntry",
+    /isRichTextEntry\(entry\s+as\s+EntryRecord\)\s*\|\|\s*isEditableTextEntry\(entry\s+as\s+EntryRecord\)/,
+    "quickPasteActions.ts must expose editing for rich captures and eligible plain text",
   );
 });
 
@@ -532,9 +572,8 @@ test("source: matrix constants surface as exported symbols with stable test ids"
 //   - the search input is the only HTMLInputElement that allows the
 //     shortcut (every other input / textarea / select / contenteditable
 //     must keep the keystroke);
-//   - image and rich-text rows trigger an informative dialog (not the
-//     editor) and the dialog never mounts EntryTextEditorModal nor
-//     invokes the updateTextEntryCommand bridge;
+//   - image rows trigger an informative dialog, while rich-text rows
+//     trigger a conversion warning before the shared editor;
 //   - Escape inside the editor must not close Quick Paste (the global
 //     Escape handler must detect the [role="dialog"] wrapper).
 // ---------------------------------------------------------------------------
@@ -546,7 +585,7 @@ test("fix: shortcut resolves the live selection id and never falls back to the l
   // MUST NOT consult `quickPasteEditorEntryId` (removed) nor a stale
   // `quickPasteEditorEntry` snapshot — those references would
   // silently reopen a previously edited row when the current
-  // selection is image / rich text.
+  // selection is an image or invalid text row.
   const source = readQuickPasteSource();
   assert.match(
     source,
@@ -621,42 +660,17 @@ test("fix: shortcut resolves to the informative dialog for image entries", () =>
   );
 });
 
-test("fix: shortcut resolves to the informative dialog for rich-text entries", () => {
+test("fix: shortcut opens the conversion warning for rich-text entries", () => {
   const source = readQuickPasteSource();
-  // `isEditableTextEntry` is the single predicate that gates both
-  // image and rich-text rows; the helper is shared with the desktop
-  // rail so a regression that opens the editor on a rich row is
-  // caught here even when the matrix helper never surfaces the
-  // menu item.
   assert.match(
     source,
-    /if\s*\(\s*!\s*isEditableTextEntry\(entry\)\s*\)/,
-    "the negative eligibility branch must surface the informative dialog",
+    /if\s*\(\s*isRichTextEntry\(entry\)\s*\)\s*\{[\s\S]*?quickPasteRichConversionWarning\s*=\s*\{/,
+    "rich rows must open the conversion warning before the editor",
   );
-  // The dialog branch must short-circuit (`return`) BEFORE the
-  // editor mount can run, so the two surfaces stay mutually
-  // exclusive: an image row opens the dialog, a text row opens
-  // the editor, never both.
   assert.match(
     source,
-    /openQuickPasteNotEditableDialogFor\(entry\)[\s\S]*?return\s*;/,
-    "the dialog branch must short-circuit before the editor mount",
-  );
-  // The editor mount line that lives in the keyboard handler MUST
-  // appear after the dialog helper inside the same handler. The
-  // helper is only used by the keyboard path; the menu path also
-  // assigns `quickPasteEditorEntry = entry` but in a different
-  // function, so the assertion searches forward from the dialog
-  // helper to find the next editor mount line.
-  const dialogIndex = source.indexOf("openQuickPasteNotEditableDialogFor(entry)");
-  assert.ok(dialogIndex > 0, "the dialog helper must be present");
-  const editorIndexAfterDialog = source.indexOf(
-    "quickPasteEditorEntry = entry;",
-    dialogIndex,
-  );
-  assert.ok(
-    editorIndexAfterDialog > dialogIndex,
-    "the editor mount line that lives after the dialog helper must be present so the dialog branch short-circuits it",
+    /function\s+confirmQuickPasteRichConversion\(\):\s*void\s*\{[\s\S]*?if\s*\(!currentEntry\s*\|\|\s*!isRichTextEntry\(currentEntry\)\)\s*return[\s\S]*?quickPasteEditorMode\s*=\s*"rich-conversion"[\s\S]*?quickPasteEditorOpen\s*=\s*true/,
+    "confirmation must re-resolve and revalidate the selected entry before opening the editor",
   );
 });
 

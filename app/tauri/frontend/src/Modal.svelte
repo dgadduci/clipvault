@@ -30,6 +30,7 @@
   export let open: boolean = false;
   export let titleId: string;
   export let title: string;
+  export let descriptionId: string | null = null;
   export let busy: boolean = false;
   /** Element returned focus when the dialog closes. */
   export let returnFocusTo: HTMLElement | null = null;
@@ -147,6 +148,7 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
+      aria-describedby={descriptionId ?? undefined}
       bind:this={dialogEl}
       tabindex="-1"
       data-busy={busy}

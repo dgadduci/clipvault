@@ -4,10 +4,11 @@
 
 Every visible result SHALL expose an accessible `...` menu. The menu SHALL
 show only valid copy actions for that entry, `Previsualizar`, and
-`Editar captura` when the entry is eligible for plain-text editing. Copy
+`Editar captura` for eligible plain-text entries and rich-text entries. Copy
 actions SHALL preserve the existing copy-only semantics. `Previsualizar` SHALL
 remain read-only. `Editar captura` SHALL open the existing persistent text
-editor and SHALL NOT be shown for image or rich-text entries.
+editor for plain-text entries and SHALL require the rich-to-plain conversion
+warning for rich-text entries. It SHALL NOT be shown for image entries.
 
 The menu SHALL remain inside the fixed window and SHALL not change row
 geometry. Each action that has a keyboard shortcut SHALL show its
@@ -26,8 +27,9 @@ value.
 
 - **WHEN** the user opens the menu for an entry with rich and plain
   representations
-- **THEN** it offers the existing rich/plain copy actions and `Previsualizar`
-- **AND** it does not offer `Editar captura`
+- **THEN** it offers the existing rich/plain copy actions, `Editar captura`
+  and `Previsualizar`
+- **AND** selecting `Editar captura` opens the explicit conversion warning
 
 #### Scenario: Menu opens with visible actions
 
@@ -62,15 +64,15 @@ value.
 
 ### Requirement: Edit an eligible text entry from Quick Paste
 
-Quick Paste SHALL allow a user to edit an eligible textual history entry from
-the entry menu and SHALL persist the replacement through the existing
+Quick Paste SHALL allow a user to edit an eligible plain-text history entry
+from the entry menu and SHALL persist the replacement through the existing
 `updateTextEntryCommand` and Rust text-history service. The operation SHALL
 reuse the same eligibility, validation, hash, type detection, duplicate
 detection and transactional semantics as the desktop editor.
 
 #### Scenario: Open the editor from Quick Paste
 
-- **WHEN** the user activates `Editar captura` for an eligible text result
+- **WHEN** the user activates `Editar captura` for an eligible plain-text result
 - **THEN** the existing text editor modal opens inside the Quick Paste window
 - **AND** it loads the current canonical content into its native textarea
 - **AND** the modal heading uses the resolved capture title
@@ -163,7 +165,7 @@ written). When no entry is selected, the shortcut is a no-op.
 
 #### Scenario: Shortcut surfaces an informative dialog for non-editable rows
 
-- **WHEN** the selected entry is an image or a rich-text entry and the user
+- **WHEN** the selected entry is an image and the user
   presses `Cmd+E` on macOS or `Ctrl+E` on Linux
 - **THEN** Quick Paste mounts an informative `Captura no editable` dialog
   built on the shared `Modal.svelte` shell
@@ -176,8 +178,18 @@ written). When no entry is selected, the shortcut is a no-op.
   keep Quick Paste visible
 - **AND** the focus returns to the row whose `data-entry-id` the dialog
   was opened against
-- **AND** the menu item `Editar captura` remains hidden for image / rich-text
-  rows so the dialog is the keyboard-only affordance
+- **AND** the menu item `Editar captura` remains hidden for image rows
+
+#### Scenario: Rich-text shortcut opens conversion warning
+
+- **WHEN** the selected entry is a rich-text entry and the user presses
+  `Cmd+E` on macOS or `Ctrl+E` on Linux
+- **THEN** Quick Paste opens the rich-to-plain conversion warning instead of
+  the informative non-editable dialog
+- **AND** confirming the warning opens the existing editor with canonical
+  plain text and cancellation leaves the entry unchanged
+- **AND** the selected entry is resolved from the live selection, never from
+  a stale editor ID
 
 #### Scenario: Escape inside the editor does not hide Quick Paste
 

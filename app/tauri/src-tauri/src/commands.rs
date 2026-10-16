@@ -1871,6 +1871,47 @@ pub fn clipvault_update_text_entry_for_test(
     Ok(outcome.into())
 }
 
+/// Convert a rich-text history entry to plain text in place. This
+/// separate command makes the user's explicit conversion intent
+/// visible to the backend, which validates the live row before
+/// clearing its rich references. Only a successful commit emits the
+/// existing metadata-only history update event.
+#[tauri::command]
+pub fn clipvault_convert_rich_text_to_plain(
+    state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
+    entry_id: i64,
+    content: String,
+) -> Result<UpdateTextEntryResponse, CommandError> {
+    let outcome = state
+        .context()
+        .history()
+        .convert_rich_text_to_plain(state.context(), entry_id, content)
+        .map_err(|err| CommandError::new("history_error", err.to_string()))?;
+    if matches!(outcome, UpdateTextHistoryOutcome::Updated { .. }) {
+        if let Err(error) = handle.emit(crate::bootstrap::HISTORY_UPDATED_EVENT, ()) {
+            warn!(error = %error, "failed to emit history-updated event");
+        }
+    }
+    Ok(outcome.into())
+}
+
+/// Test-friendly handle for the rich-to-plain conversion command.
+/// It exercises the same service validation without a Tauri runtime
+/// and intentionally does not emit the shell refresh event.
+#[allow(dead_code)]
+pub fn clipvault_convert_rich_text_to_plain_for_test(
+    context: &clipvault_core::AppContext,
+    entry_id: i64,
+    content: String,
+) -> Result<UpdateTextEntryResponse, CommandError> {
+    let outcome = context
+        .history()
+        .convert_rich_text_to_plain(context, entry_id, content)
+        .map_err(|err| CommandError::new("history_error", err.to_string()))?;
+    Ok(outcome.into())
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CreateManualTextResponse {

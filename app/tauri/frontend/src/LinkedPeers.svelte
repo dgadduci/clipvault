@@ -223,7 +223,7 @@
   .linked-peers-button {
     width: 100%;
     background: transparent;
-    color: inherit;
+    color: var(--cv-fg, #f0f4f8);
     border: 1px solid transparent;
     border-radius: 6px;
     padding: 0.3rem 0.45rem;
