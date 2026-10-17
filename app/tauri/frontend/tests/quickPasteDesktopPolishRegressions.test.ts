@@ -622,12 +622,12 @@ test("Quick Paste prunes the tag cache when an entry leaves the visible scope", 
 });
 
 // ---------------------------------------------------------------------------
-// 9.4 TagFilter width matches SourceAppFilter width.
+// 9.4 SourceAppFilter retains its established width while TagFilter is compact.
 // ---------------------------------------------------------------------------
 
-test("filterTokens exports a single canonical width for both comboboxes", () => {
-  // The token module MUST own the documented 220px / 11rem
-  // baseline so the source-app and tag comboboxes cannot drift.
+test("filterTokens preserves the source-app width and exports compact tag-filter sizing", () => {
+  // The source-app filter keeps its documented 220px / 11rem
+  // baseline; the tag filter owns an independent compact token.
   assert.equal(FILTER_WIDTH_PX, 220);
   assert.equal(FILTER_MIN_WIDTH_REM, "11rem");
   assert.ok(
@@ -638,26 +638,27 @@ test("filterTokens exports a single canonical width for both comboboxes", () => 
     /220px/.test(filterTokensSource),
     "the token module must document the 220px width",
   );
+  assert.match(filterTokensSource, /COMPACT_FILTER_WIDTH_PX = 110/);
+  assert.match(filterTokensSource, /COMPACT_FILTER_MIN_WIDTH_REM = "5\.5rem"/);
 });
 
-test("TagFilter uses the shared filterComboboxStyles and width declarations", () => {
+test("TagFilter uses the shared compact filter styles and width declarations", () => {
   // The combobox MUST consume the shared width token (NOT an
   // intrinsic flex value) and apply it via the inline `style`
   // attribute so a CSS refactor cannot regress the width.
   assert.ok(
-    /filterComboboxStyles/.test(tagFilterSource),
-    "TagFilter must import filterComboboxStyles",
+    /compactFilterComboboxStyles/.test(tagFilterSource),
+    "TagFilter must import compactFilterComboboxStyles",
   );
   assert.ok(
-    /style=\{filterComboboxStyles\}/.test(tagFilterSource),
+    /style=\{compactFilterComboboxStyles\}/.test(tagFilterSource),
     "TagFilter must apply the shared styles inline on the root div",
   );
   assert.ok(
-    /data-filter-width="220"/.test(tagFilterSource),
+    /data-filter-width="110"/.test(tagFilterSource),
     "TagFilter must expose data-filter-width for the regression suite",
   );
-  // The CSS rule must pin the same width the token module owns so
-  // the inline style and the stylesheet cannot drift.
+  // The compact rule must stay at half the source-app width.
   const cssBlock = tagFilterSource.slice(
     tagFilterSource.indexOf("<style>"),
     tagFilterSource.length,
@@ -665,16 +666,16 @@ test("TagFilter uses the shared filterComboboxStyles and width declarations", ()
   const rule = cssBlock.match(/\.tag-filter\s*\{[^}]*\}/);
   assert.ok(rule, "the .tag-filter rule must exist");
   assert.ok(
-    /width:\s*220px/.test(rule![0]),
-    "the .tag-filter rule must pin width: 220px",
+    /width:\s*110px/.test(rule![0]),
+    "the .tag-filter rule must pin width: 110px",
   );
   assert.ok(
-    /max-width:\s*220px/.test(rule![0]),
-    "the .tag-filter rule must pin max-width: 220px",
+    /max-width:\s*110px/.test(rule![0]),
+    "the .tag-filter rule must pin max-width: 110px",
   );
   assert.ok(
-    /min-width:\s*11rem/.test(rule![0]),
-    "the .tag-filter rule must pin min-width: 11rem",
+    /min-width:\s*5\.5rem/.test(rule![0]),
+    "the .tag-filter rule must pin min-width: 5.5rem",
   );
 });
 

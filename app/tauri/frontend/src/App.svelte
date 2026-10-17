@@ -28,6 +28,7 @@
     SourceApplicationOption,
     SourceApplicationsSnapshot,
     Tag,
+    CollectionFilter,
     TagFilter,
     TagFilterOption,
   } from "./types";
@@ -316,6 +317,8 @@
    * rail byte-for-byte so the new facet is purely additive.
    */
   let tagFilter: TagFilter = { kind: "all" };
+  /** Additional collection facet shown only while the sidebar is on History. */
+  let collectionFilter: CollectionFilter = { kind: "all" };
   /**
    * Tag combobox options. The desktop derives them from the active
    * scope (`Historial` or the active collection) using the
@@ -335,10 +338,47 @@
         }
       }
     }
+    const selectedTagId = tagFilter.kind === "tag" ? tagFilter.tagId : null;
+    if (selectedTagId !== null && !lookup.has(selectedTagId)) {
+      const selectedTag = organization?.tags.find((tag) => tag.id === selectedTagId);
+      if (selectedTag) {
+        lookup.set(selectedTag.id, {
+          id: selectedTag.id,
+          display_name: selectedTag.display_name,
+        });
+      }
+    }
     return Array.from(lookup.values()).sort((a, b) =>
       a.display_name.toLowerCase().localeCompare(b.display_name.toLowerCase()),
     );
   })();
+  $: collectionFilterOptions = (organization?.collections ?? [])
+    .filter((collection) => collection.kind === "user")
+    .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  $: {
+    const selectedCollectionFilterId = collectionFilter.kind === "collection"
+      ? collectionFilter.collectionId
+      : null;
+    if (
+      organization &&
+      selectedCollectionFilterId !== null &&
+      !collectionFilterOptions.some((collection) => collection.id === selectedCollectionFilterId)
+    ) {
+      collectionFilter = { kind: "all" };
+      void refreshEntries();
+    }
+  }
+  $: {
+    const selectedTagFilterId = tagFilter.kind === "tag" ? tagFilter.tagId : null;
+    if (
+      organization &&
+      selectedTagFilterId !== null &&
+      !organization.tags.some((tag) => tag.id === selectedTagFilterId)
+    ) {
+      tagFilter = { kind: "all" };
+      void refreshEntries();
+    }
+  }
   /**
    * Compute the tag ids the recents/search request must forward
    * to the backend. The helper is read at the call site of every
@@ -437,6 +477,17 @@
       (candidate) => candidate.id === collectionId,
     );
     return collection?.kind === "system" ? null : collectionId;
+  }
+
+  function entriesCollectionId(collectionId: number | null): number | null {
+    const scope = collectionId === null
+      ? null
+      : organization?.collections.find((candidate) => candidate.id === collectionId);
+    const historyScope = collectionId === null || scope?.kind === "system";
+    if (historyScope && collectionFilter.kind === "collection") {
+      return collectionFilter.collectionId;
+    }
+    return activeCollectionScopeId(collectionId);
   }
 
   $: canCreateManualText = activePeerId === null && (
@@ -605,7 +656,10 @@
       diagnostics = await diagnosticsCommand();
       capabilities = await platformCapabilitiesCommand();
       activeApp = await activeApplicationCommand();
-      organization = await organizationSnapshotCommand();
+      await refreshOrganization();
+      if (!organization) {
+        throw new Error("Organization snapshot is unavailable");
+      }
       if (historyCollectionId === null) {
         historyCollectionId =
           organization.collections.find((c) => c.kind === "system")?.id ?? null;
@@ -655,7 +709,7 @@
   async function loadEntries(): Promise<EntryRecord[]> {
     return recentEntriesFilteredCommand({
       limit: RAIL_LIMIT,
-      collectionId: activeCollectionScopeId(selectedCollectionId),
+      collectionId: entriesCollectionId(selectedCollectionId),
       tagIds: currentTagFilterIds(),
       sourceApp: sourceAppFilter,
     });
@@ -666,7 +720,7 @@
   ): Promise<void> {
     const token = ++peerImportedSourceAppsToken;
     const selectedCollectionIdAtRequest = selectedCollectionId;
-    const collectionId = activeCollectionScopeId(selectedCollectionId);
+    const collectionId = entriesCollectionId(selectedCollectionId);
     const entryIds = Array.from(new Set(records.map((entry) => entry.id)))
       .filter((id) => Number.isInteger(id) && id > 0)
       .slice(0, 100);
@@ -856,6 +910,7 @@
         entryId: pending.entryId,
         collectionId: pending.collectionId,
       });
+      await refreshOrganization();
       await refreshEntries();
       await refreshEntryOrganization(pending.entryId);
       await refreshUnorganizedClearableCount();
@@ -913,6 +968,7 @@
     }
     try {
       await refreshEntries();
+      await refreshOrganization();
     } catch (err) {
       organizationError = "app.error.generic";
     }
@@ -935,6 +991,7 @@
     }
     try {
       await refreshEntries();
+      await refreshOrganization();
       await refreshUnorganizedClearableCount();
     } catch (err) {
       organizationError = "app.error.generic";
@@ -999,7 +1056,7 @@
     createTextEntryOpen = false;
     await Promise.all([
       refreshEntries(),
-      organizationSnapshotCommand().then((snapshot) => { organization = snapshot; }),
+      refreshOrganization(),
     ]);
   }
 
@@ -1055,6 +1112,19 @@
     await refreshEntries();
   }
 
+  async function handleCollectionFilterChange(
+    next: CollectionFilter,
+  ): Promise<void> {
+    if (!activeCollectionIsHistory) return;
+    const sameSelection = next.kind === collectionFilter.kind &&
+      (next.kind === "all" ||
+        (collectionFilter.kind === "collection" &&
+          next.collectionId === collectionFilter.collectionId));
+    if (sameSelection) return;
+    collectionFilter = next;
+    await refreshEntries();
+  }
+
   async function refreshUnorganizedClearableCount(): Promise<void> {
     if (unorganizedClearableCountLoading) {
       return;
@@ -1073,11 +1143,18 @@
     }
   }
 
+  let organizationSnapshotToken = 0;
   async function refreshOrganization(): Promise<void> {
+    const token = ++organizationSnapshotToken;
     try {
-      organization = await organizationSnapshotCommand();
+      const snapshot = await organizationSnapshotCommand();
+      if (token === organizationSnapshotToken) {
+        organization = snapshot;
+      }
     } catch (err) {
-      organizationError = "app.error.generic";
+      if (token === organizationSnapshotToken) {
+        organizationError = "app.error.generic";
+      }
     }
   }
 
@@ -1160,6 +1237,7 @@
     targetCollectionId: number | null,
   ): Promise<void> {
     selectedCollectionId = targetCollectionId;
+    collectionFilter = { kind: "all" };
     clearingOldCollectionContent = true;
     collectionContentLoading = true;
     entriesLoadToken += 1;
@@ -1609,6 +1687,7 @@
       entryId: entry.id,
       collectionId,
     });
+    await refreshOrganization();
     await refreshEntries();
     await refreshEntryOrganization(entry.id);
     await refreshUnorganizedClearableCount();
@@ -2058,7 +2137,7 @@
         const response: SearchResponse = await searchEntriesCommand({
           query: q,
           limit: RAIL_LIMIT,
-          collectionId: activeCollectionScopeId(selectedCollectionId),
+          collectionId: entriesCollectionId(selectedCollectionId),
           tagIds: currentTagFilterIds(),
           sourceApp: sourceAppFilter,
         });
@@ -2451,6 +2530,7 @@
 
   async function handleHistoryUpdated(): Promise<void> {
     try {
+      await refreshOrganization();
       await refreshSourceAppOptions();
       await refreshEntries();
       await refreshUnorganizedClearableCount();
@@ -2775,6 +2855,9 @@
             sourceAppOptions={sourceAppOptions}
             tagFilter={tagFilter}
             tagFilterOptions={tagFilterOptions}
+            showCollectionFilter={activeCollectionIsHistory}
+            collectionFilter={collectionFilter}
+            collectionFilterOptions={collectionFilterOptions}
             onSearchInput={handleSearchInput}
             onOpenGeneralSettings={onOpenGeneralSettings}
             onOpenPrivacy={onOpenPrivacy}
@@ -2787,6 +2870,7 @@
             onCreateManualText={openCreateTextEntry}
             onSourceAppFilterChange={(next) => handleSourceAppFilterChange(next)}
             onTagFilterChange={(next) => handleTagFilterChange(next)}
+            onCollectionFilterChange={(next) => handleCollectionFilterChange(next)}
           />
           <p
             class="search-status muted"
@@ -3489,6 +3573,8 @@
   :global(.collection-content-rail .rail .card) {
     flex: 0 0 var(--cv-card-size, 240px);
     width: var(--cv-card-size, 240px);
+    min-width: var(--cv-card-size, 240px);
+    max-width: var(--cv-card-size, 240px);
     height: var(--cv-card-size, 240px);
   }
 

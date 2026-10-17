@@ -431,10 +431,13 @@ test("DesktopToolbar keeps all controls in a single horizontal scroll row", () =
   assert.match(source, /\.toolbar-row\s*\{[^}]*flex-wrap:\s*nowrap/);
   assert.match(source, /\.toolbar-row\s*\{[^}]*overflow-x:\s*auto/);
   assert.match(source, /\.toolbar-row\s*\{[^}]*height:\s*fit-content/);
-  assert.match(source, /\.search-shell\s*\{[^}]*flex:\s*1 0 240px/);
+  assert.match(source, /\.search-shell\s*\{[^}]*flex:\s*0 0 180px/);
   assert.match(source, /\.actions\s*\{[^}]*flex-wrap:\s*nowrap/);
   const filterTokens = loadSource("src/lib/filterTokens.ts");
   assert.match(filterTokens, /flex:\s*0 0 \$\{FILTER_WIDTH_PX\}px/);
+  assert.match(filterTokens, /COMPACT_FILTER_WIDTH_PX = 110/);
+  assert.match(filterTokens, /COMPACT_FILTER_MIN_WIDTH_REM = "5\.5rem"/);
+  assert.match(source, /data-testid="create-text-capture-shortcut"/);
 
   // The menu and filters escape the scroll viewport and follow their
   // triggers, so their option surfaces remain visible and interactive.
@@ -734,13 +737,13 @@ test("OrganizationSidebar keeps the bounded internal scroller for the collection
   const source = stripComments(loadSource("src/OrganizationSidebar.svelte"));
   // The collection list MUST size itself from the available panel
   // height, NOT from the number of rows the user has. The pinned
-  // flex triple (`flex: 1 1 auto` + `min-height: 0`) plus the
+  // flex triple (`flex: 1 1 0` + `min-height: 0`) plus the
   // vertical auto overflow is what guarantees that adding
   // collections can never grow the desktop body.
   assert.match(
     source,
-    /\.collection-list\s*\{[^}]*flex:\s*1 1 auto/,
-    ".collection-list must consume the remaining vertical space through flex: 1 1 auto",
+    /\.collection-list\s*\{[^}]*flex:\s*1 1 0/,
+    ".collection-list must consume the remaining vertical space through a zero-basis flex track",
   );
   assert.match(
     source,

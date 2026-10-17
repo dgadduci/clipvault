@@ -95,7 +95,7 @@ test("imported source metadata loads in history and stays a tooltip tag beside t
   const refresh = SOURCE.app.match(
     /async function refreshPeerImportedSourceApps\([\s\S]*?\n  \}/,
   )?.[0] ?? "";
-  assert.match(refresh, /collectionId = activeCollectionScopeId\(selectedCollectionId\)/);
+  assert.match(refresh, /collectionId = entriesCollectionId\(selectedCollectionId\)/);
   assert.doesNotMatch(refresh, /is_peer_bound/);
   assert.match(refresh, /collection_id: collectionId/);
   assert.match(refresh, /selectedCollectionId !== selectedCollectionIdAtRequest/);

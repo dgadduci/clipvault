@@ -113,6 +113,10 @@ pub struct Collection {
     pub stable_key: Option<String>,
     pub name: String,
     pub kind: CollectionKind,
+    /// Number of distinct history entries currently associated with
+    /// this collection. It is projected by collection queries from
+    /// `entry_collections`; it is not persisted as a separate counter.
+    pub capture_count: i64,
     /// Normalised `#rrggbb` colour the sidebar square and the card
     /// labels render. The repository refuses any other value at write
     /// time so every consumer can trust the format.
@@ -255,11 +259,17 @@ impl<'a> OrganizationRepository<'a> {
                     c.created_at, c.updated_at,
                     CASE WHEN pcb.peer_id IS NULL THEN 0 ELSE 1 END AS is_peer_bound,
                     NULLIF(TRIM(kp.display_name), '') AS peer_display_name,
-                    CASE WHEN cn.collection_id IS NULL THEN 0 ELSE 1 END AS has_note
+                    CASE WHEN cn.collection_id IS NULL THEN 0 ELSE 1 END AS has_note,
+                    COALESCE(entry_counts.capture_count, 0) AS capture_count
              FROM collections c
              LEFT JOIN peer_collection_bindings pcb ON pcb.collection_id = c.id
              LEFT JOIN known_peers kp ON kp.peer_id = pcb.peer_id
              LEFT JOIN collection_notes cn ON cn.collection_id = c.id
+             LEFT JOIN (
+                 SELECT collection_id, COUNT(DISTINCT entry_id) AS capture_count
+                 FROM entry_collections
+                 GROUP BY collection_id
+             ) entry_counts ON entry_counts.collection_id = c.id
              ORDER BY CASE WHEN c.kind = 'system' THEN 0 ELSE 1 END,
                       c.name COLLATE NOCASE ASC",
         )?;
@@ -286,11 +296,17 @@ impl<'a> OrganizationRepository<'a> {
                         c.created_at, c.updated_at,
                         CASE WHEN pcb.peer_id IS NULL THEN 0 ELSE 1 END AS is_peer_bound,
                         NULLIF(TRIM(kp.display_name), '') AS peer_display_name,
-                        CASE WHEN cn.collection_id IS NULL THEN 0 ELSE 1 END AS has_note
+                        CASE WHEN cn.collection_id IS NULL THEN 0 ELSE 1 END AS has_note,
+                        COALESCE(entry_counts.capture_count, 0) AS capture_count
                  FROM collections c
                  LEFT JOIN peer_collection_bindings pcb ON pcb.collection_id = c.id
                  LEFT JOIN known_peers kp ON kp.peer_id = pcb.peer_id
                  LEFT JOIN collection_notes cn ON cn.collection_id = c.id
+                 LEFT JOIN (
+                     SELECT collection_id, COUNT(DISTINCT entry_id) AS capture_count
+                     FROM entry_collections
+                     GROUP BY collection_id
+                 ) entry_counts ON entry_counts.collection_id = c.id
                  WHERE c.id = ?1",
                 params![id],
                 row_to_collection,
@@ -327,6 +343,7 @@ impl<'a> OrganizationRepository<'a> {
             stable_key: None,
             name: trimmed,
             kind: CollectionKind::User,
+            capture_count: 0,
             color_hex: normalised,
             created_at: ts.clone(),
             updated_at: ts,
@@ -1037,6 +1054,7 @@ fn row_to_collection(row: &rusqlite::Row<'_>) -> rusqlite::Result<Collection> {
         stable_key: row.get(1)?,
         name: row.get(2)?,
         kind,
+        capture_count: row.get(10)?,
         color_hex: row.get(4)?,
         created_at: row.get(5)?,
         updated_at: row.get(6)?,

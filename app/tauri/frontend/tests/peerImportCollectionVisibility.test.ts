@@ -156,7 +156,7 @@ test("OrganizationSidebar never embeds the raw peer_id in the template", () => {
   // the source. A regression that forwards the binding key surfaces
   // here.
   const block = sidebarSource.match(
-    /\{\s*#if isHistory\(collection\)\s*\}[\s\S]*?\{\/if\}\s*<\/button>/,
+    /class="collection-row"[\s\S]*?<\/li>/,
   );
   assert.ok(block, "the collection-row template block must exist");
   assert.equal(

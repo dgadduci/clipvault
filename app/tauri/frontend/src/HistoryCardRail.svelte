@@ -622,6 +622,8 @@
   .rail :global(.card) {
     flex: 0 0 var(--cv-card-size);
     width: var(--cv-card-size);
+    min-width: var(--cv-card-size);
+    max-width: var(--cv-card-size);
     scroll-snap-align: start;
   }
 

@@ -28,7 +28,7 @@
 import CollectionColorModal from "./CollectionColorModal.svelte";
 import TextNoteModal from "./TextNoteModal.svelte";
 import LinkedPeers from "./LinkedPeers.svelte";
-import { t } from "./lib/localization.ts";
+import { t, tPlural } from "./lib/localization.ts";
 
   export let collections: Collection[] = [];
   export let activeCollectionId: number | null = null;
@@ -633,8 +633,8 @@ import { t } from "./lib/localization.ts";
             aria-pressed={isActive(collection.id)}
             aria-keyshortcuts={isHistory(collection) ? historyShortcutAccessible || undefined : undefined}
             aria-label={isHistory(collection)
-              ? $t("collections.select_system")
-              : $t("collections.rename_hint", { name: collection.name })}
+              ? `${$t("collections.select_system")}, ${$tPlural("collections.capture_count", collection.capture_count ?? 0)}`
+              : `${$t("collections.rename_hint", { name: collection.name })}, ${$tPlural("collections.capture_count", collection.capture_count ?? 0)}`}
             title={isHistory(collection)
               ? $t("collections.history")
               : $t("collections.rename_hint", { name: collection.name })}
@@ -660,6 +660,14 @@ import { t } from "./lib/localization.ts";
                 {$t("collections.imported_badge")}
               </span>
             {/if}
+            <span
+              class="badge capture-count"
+              aria-hidden="true"
+              data-testid="sidebar-collection-count"
+              data-count={collection.capture_count ?? 0}
+            >
+              {collection.capture_count ?? 0}
+            </span>
           </button>
           <button
             type="button"
@@ -839,12 +847,16 @@ import { t } from "./lib/localization.ts";
     -webkit-overflow-scrolling: touch;
   }
   .collection-row {
+    box-sizing: border-box;
     display: flex;
     flex-direction: row;
     align-items: center;
     gap: 0.3rem;
     border-radius: 6px;
-    padding: 0.15rem 0.4rem;
+    height: 2rem;
+    min-height: 2rem;
+    max-height: 2rem;
+    padding: 0 0.4rem;
   }
   .collection-row.active {
     background: rgba(37, 99, 235, 0.15);
@@ -902,11 +914,13 @@ import { t } from "./lib/localization.ts";
     box-shadow: none;
   }
   .collection-button {
+    box-sizing: border-box;
     background: transparent;
     border: 0;
     color: var(--cv-fg, #f0f4f8);
     text-align: left;
-    padding: 0.3rem 0.4rem;
+    height: 100%;
+    padding: 0.1rem 0.4rem;
     border-radius: 6px;
     cursor: pointer;
     display: flex;
@@ -914,6 +928,7 @@ import { t } from "./lib/localization.ts";
     justify-content: space-between;
     gap: 0.5rem;
     font: inherit;
+    line-height: 1.2;
     flex: 1 1 auto;
     min-width: 0;
   }
@@ -941,6 +956,21 @@ import { t } from "./lib/localization.ts";
     padding: 0.05rem 0.45rem;
     border: 1px solid #30363d;
     text-transform: lowercase;
+  }
+  .badge.capture-count {
+    flex: 0 0 auto;
+    margin-left: auto;
+    background: var(--cv-bg-elevated, #161b22);
+    color: var(--cv-muted, #8b949e);
+    border-radius: 999px;
+    font-size: 0.65rem;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    min-width: 1.1rem;
+    padding: 0.05rem 0.35rem;
+    text-align: center;
+    border: 1px solid var(--cv-border, #30363d);
+    pointer-events: none;
   }
   /*
    * Remote-origin marker rendered next to a user collection

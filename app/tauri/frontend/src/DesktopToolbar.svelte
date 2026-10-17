@@ -24,12 +24,15 @@
   import { anchorPopupToViewport } from "./lib/anchorPopupToViewport.ts";
   import SourceAppFilter from "./SourceAppFilter.svelte";
   import TagFilter from "./TagFilter.svelte";
+  import CollectionFilter from "./CollectionFilter.svelte";
   import type { SourceApplicationOption } from "./types.ts";
   import { t } from "./lib/localization.ts";
 
   type SourceAppFilterValue = import("./types.ts").SourceAppFilter;
   type TagFilterValue = import("./types.ts").TagFilter;
   type TagFilterOptionValue = import("./types.ts").TagFilterOption;
+  type CollectionFilterValue = import("./types.ts").CollectionFilter;
+  type CollectionOptionValue = import("./types.ts").Collection;
 
   export let searchQuery: string = "";
   export let searching: boolean = false;
@@ -96,6 +99,14 @@
    * forwards the list to the combobox.
    */
   export let tagFilterOptions: TagFilterOptionValue[] = [];
+  /**
+   * Additional collection filter for the Historial view. The parent
+   * owns its state and option refresh; this toolbar only renders and
+   * forwards the selected collection id.
+   */
+  export let showCollectionFilter: boolean = false;
+  export let collectionFilter: CollectionFilterValue = { kind: "all" };
+  export let collectionFilterOptions: CollectionOptionValue[] = [];
   export let onSearchInput: (value: string) => void = () => {};
   export let onOpenGeneralSettings: (event: MouseEvent) => void = () => {};
   export let onOpenPrivacy: (event: MouseEvent) => void = () => {};
@@ -119,6 +130,7 @@
   ) => void = () => {};
   export let onSourceAppFilterChange: (next: SourceAppFilterValue) => void = () => {};
   export let onTagFilterChange: (next: TagFilterValue) => void = () => {};
+  export let onCollectionFilterChange: (next: CollectionFilterValue) => void = () => {};
 
   /**
    * Ellipsis-menu state. The toolbar owns a single menu instance;
@@ -285,6 +297,14 @@
       ariaLabel={$t("filter.tag")}
       onChange={onTagFilterChange}
     />
+    {#if showCollectionFilter}
+      <CollectionFilter
+        selected={collectionFilter}
+        options={collectionFilterOptions}
+        ariaLabel={$t("filter.collection")}
+        onChange={onCollectionFilterChange}
+      />
+    {/if}
     {#if canCreateManualText}
       <button
         type="button"
@@ -490,9 +510,13 @@
     gap: 0.5rem;
     flex-wrap: nowrap;
     width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
     height: fit-content;
     overflow-x: auto;
     overflow-y: hidden;
+    overscroll-behavior-x: contain;
     scrollbar-width: thin;
     scrollbar-color: var(--cv-border, #30363d) transparent;
   }
@@ -504,8 +528,11 @@
 
   .search-shell {
     position: relative;
-    flex: 1 0 240px;
-    min-width: 12rem;
+    flex: 0 0 180px;
+    width: 180px;
+    min-width: 9rem;
+    max-width: 180px;
+    box-sizing: border-box;
     display: flex;
     align-items: center;
   }
@@ -604,8 +631,18 @@
   }
 
   .text-entry-shortcut {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 1.2rem;
+    padding: 0.08rem 0.35rem;
+    border: 1px solid var(--cv-border, #30363d);
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.55);
     color: var(--cv-fg-muted, #94a3b8);
     font-size: 0.7rem;
+    line-height: 1;
+    white-space: nowrap;
   }
 
   .menu-trigger:hover {

@@ -28,7 +28,7 @@
   import { onDestroy, tick } from "svelte";
   import { anchorPopupToViewport } from "./lib/anchorPopupToViewport.ts";
   import type { TagFilter, TagFilterOption } from "./types.ts";
-  import { filterComboboxStyles } from "./lib/filterTokens.ts";
+  import { compactFilterComboboxStyles } from "./lib/filterTokens.ts";
   import { t } from "./lib/localization.ts";
 
   export let selected: TagFilter;
@@ -272,9 +272,9 @@
 <div
     class="tag-filter"
     data-testid={testId}
-    data-filter-width="220"
-    data-filter-min-width="11rem"
-    style={filterComboboxStyles}
+    data-filter-width="110"
+    data-filter-min-width="5.5rem"
+    style={compactFilterComboboxStyles}
   >
   <button
     type="button"
@@ -311,7 +311,7 @@
         <circle cx="9" cy="9" r="1.2" fill="currentColor" />
       </svg>
     </span>
-    <span class="trigger-label">{triggerLabel}</span>
+    <span class="trigger-label" title={triggerLabel}>{triggerLabel}</span>
     <svg
       aria-hidden="true"
       focusable="false"
@@ -349,6 +349,7 @@
           class:selected={isSelected}
           data-testid={`${testId}-option-${key}`}
           data-tag-filter-key={key}
+          title={option.kind === "all" ? $t("filter.all") : option.option.display_name}
           on:click={() => selectKey(key)}
           on:mouseenter={() => (activeIndex = index)}
         >
@@ -363,19 +364,15 @@
 
 <style>
   .tag-filter {
-    /* The combobox MUST keep the same width the `SourceAppFilter`
-     * sibling reserves. The width token lives in `lib/filterTokens.ts`
-     * so the two comboboxes cannot drift; the inline `style`
-     * attribute on the root div sets the same value so a future
-     * CSS refactor cannot accidentally re-introduce the
-     * intrinsic-width regression the manual QA pass detected. */
+    /* Keep the tag control compact while its listbox matches this
+     * trigger width. The width token is shared with CollectionFilter. */
     position: relative;
     display: inline-flex;
     align-items: center;
-    flex: 0 1 220px;
-    min-width: 11rem;
-    max-width: 220px;
-    width: 220px;
+    flex: 0 0 110px;
+    min-width: 5.5rem;
+    max-width: 110px;
+    width: 110px;
   }
 
   .trigger {

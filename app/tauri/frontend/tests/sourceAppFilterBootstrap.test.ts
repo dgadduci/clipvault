@@ -114,8 +114,8 @@ test("loadEntries resolves the collection scope from the selected id", () => {
   const body = block[0];
   assert.match(
     body,
-    /collectionId:\s*activeCollectionScopeId\(selectedCollectionId\)/,
-    "loadEntries must derive the request scope from the selected collection id",
+    /collectionId:\s*entriesCollectionId\(selectedCollectionId\)/,
+    "loadEntries must combine the sidebar scope with the History collection filter",
   );
   assert.match(
     body,
@@ -175,8 +175,8 @@ test("searchEntriesCommand receives the resolved collection scope and sourceApp 
   const body = searchBlock[0];
   assert.match(
     body,
-    /collectionId:\s*activeCollectionScopeId\(selectedCollectionId\)/,
-    "search must derive its scope from the selected collection id",
+    /collectionId:\s*entriesCollectionId\(selectedCollectionId\)/,
+    "search must combine the sidebar scope with the History collection filter",
   );
   assert.match(
     body,

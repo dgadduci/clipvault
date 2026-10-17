@@ -1376,6 +1376,9 @@ export interface Collection {
   stable_key: string | null;
   name: string;
   kind: CollectionKind;
+  /** Current number of stored captures in this collection, when supplied by
+   * the organization snapshot. */
+  capture_count?: number;
   /**
    * Normalised opaque RGB colour the sidebar square and the
    * per-card collection labels render. The backend rejects any
@@ -1485,6 +1488,11 @@ export interface SourceApplicationOption {
 export type TagFilter =
   | { kind: "all" }
   | { kind: "tag"; tagId: number };
+
+/** Single collection selected as an additional History filter. */
+export type CollectionFilter =
+  | { kind: "all" }
+  | { kind: "collection"; collectionId: number };
 
 /**
  * Single metadata-only entry the tag combobox renders. The frontend
