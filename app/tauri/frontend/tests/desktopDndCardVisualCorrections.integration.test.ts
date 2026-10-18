@@ -73,8 +73,8 @@ interface RecordedEvent {
  *   - one `<li>` row per collection, carrying
  *     `data-drop-target="collection"` and `data-collection-id`;
  *   - a child `<button>` ("collection-button") and a child
- *     `<button>` ("sidebar-collection-delete") per user row, the
- *     same children the production sidebar renders;
+ *     `<button>` ("sidebar-collection-menu-trigger") per row, the
+ *     same row controls the production sidebar renders;
  *   - the reactive highlight state the sidebar owns.
  *
  * The harness ALWAYS uses the production `createCollectionDropZoneHandlers`
@@ -192,16 +192,12 @@ class SidebarHarness {
     name.textContent = collection.name;
     button.appendChild(name);
     row.appendChild(button);
-    if (collection.kind === "user") {
-      const del = this.document.createElement("button");
-      del.setAttribute("type", "button");
-      del.setAttribute("class", "icon-only danger delete-icon");
-      del.setAttribute("data-testid", "sidebar-collection-delete");
-      del.setAttribute("data-collection-id", String(collection.id));
-      const delSvg = this.document.createElement("svg");
-      del.appendChild(delSvg);
-      row.appendChild(del);
-    }
+    const menuTrigger = this.document.createElement("button");
+    menuTrigger.setAttribute("type", "button");
+    menuTrigger.setAttribute("class", "icon-only actions-menu-trigger");
+    menuTrigger.setAttribute("data-testid", "sidebar-collection-menu-trigger");
+    menuTrigger.setAttribute("data-collection-id", String(collection.id));
+    row.appendChild(menuTrigger);
     viewport.appendChild(row);
     this.rows.set(collection.id, row);
   }
@@ -458,25 +454,25 @@ function findChildByClass(
   return null;
 }
 
-test("drop on the delete button child still routes to the row", () => {
+test("drop on the actions-menu trigger still routes to its collection row", () => {
   const { restore, harness } = setupHarness();
   try {
     __resetDragSessionForTests();
     const targetRow = harness.rows.get(9);
     assert.ok(targetRow);
-    const delBtn = findChildByTestId(
+    const menuTrigger = findChildByTestId(
       targetRow,
-      "sidebar-collection-delete",
+      "sidebar-collection-menu-trigger",
     );
-    assert.ok(delBtn, "delete button must be present");
+    assert.ok(menuTrigger, "actions-menu trigger must be present");
 
     const entryId = 11;
     const transfer = buildDualTransfer(entryId);
     beginDragSession(entryId);
 
-    dispatchDrag(delBtn, "dragenter", transfer);
-    dispatchDrag(delBtn, "dragover", transfer);
-    dispatchDrag(delBtn, "drop", transfer);
+    dispatchDrag(menuTrigger, "dragenter", transfer);
+    dispatchDrag(menuTrigger, "dragover", transfer);
+    dispatchDrag(menuTrigger, "drop", transfer);
 
     assert.equal(harness.events.length, 1, "the row must still receive the drop");
     assert.equal(harness.events[0].entryId, entryId);

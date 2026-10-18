@@ -32,6 +32,26 @@ export function collectionColor(value: unknown): string {
 }
 
 /**
+ * Return a CSS rgba() tint for a collection color. The sidebar uses
+ * this for its row background so malformed legacy values stay safe
+ * and the assigned color can remain translucent over the desktop
+ * surface.
+ */
+export function collectionColorTint(
+  value: unknown,
+  opacity: number = 0.18,
+): string {
+  const hex = collectionColor(value).slice(1);
+  const red = Number.parseInt(hex.slice(0, 2), 16);
+  const green = Number.parseInt(hex.slice(2, 4), 16);
+  const blue = Number.parseInt(hex.slice(4, 6), 16);
+  const safeOpacity = Number.isFinite(opacity)
+    ? Math.min(1, Math.max(0, opacity))
+    : 0.18;
+  return `rgba(${red}, ${green}, ${blue}, ${safeOpacity})`;
+}
+
+/**
  * Stable fallback the card and the modal surface when a value cannot
  * be trusted. Exposed so tests can pin the exact constant instead of
  * duplicating the literal.

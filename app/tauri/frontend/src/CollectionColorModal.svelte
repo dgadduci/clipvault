@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
    * Colour editor for a single collection. Triggered from the
-   * sidebar's colour square (double click, Enter or Space).
+   * collection's actions menu.
    *
    * The modal reuses the existing `Modal` shell — focus trap,
    * Escape handling, backdrop dismissal and return-focus — and
@@ -31,6 +31,7 @@
 
   export let open: boolean;
   export let collection: Collection | null;
+  export let returnFocusTo: HTMLElement | null = null;
 
   type DispatchEvents = {
     save: { colorHex: string };
@@ -132,8 +133,13 @@
 <Modal
   {open}
   titleId="collection-color-modal-title"
-  title={$t("collections.color.title", { name: collection?.name ?? $t("collections.name") })}
+  title={$t("collections.color.title", {
+    name: collection?.kind === "system"
+      ? $t("collections.history")
+      : collection?.name ?? $t("collections.name"),
+  })}
   busy={false}
+  {returnFocusTo}
   onClose={onCancel}
 >
   <div

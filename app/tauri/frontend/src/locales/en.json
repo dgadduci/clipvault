@@ -277,6 +277,7 @@
   "collections.imported_from": "Imported from {peer}",
   "collections.imported_remote": "Imported from remote device",
   "collections.imported_badge": "imported",
+  "collections.actions_menu": "Actions for {name}",
   "collections.drop_peer_rejected": "Captures cannot be dropped into collections imported from another device.",
   "collections.change_color": "Change color for {name}",
   "collections.change_color_hint": "Change color for {name} (double-click or Enter)",

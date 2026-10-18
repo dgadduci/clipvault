@@ -1241,7 +1241,7 @@ test("OrganizationSidebar renders the collection delete icon at 18x18 (≈130% o
     source,
     /aria-label=\{\$t\("collections\.delete", \{ name: collection\.name \}\)\}/,
   );
-  assert.match(source, /\.icon-only\.danger\.delete-icon\s*\{[^}]*color:/s);
+  assert.match(source, /\.collection-action-menu-item\.danger\.delete-icon\s*\{[^}]*color:/s);
 });
 
 // ---------------------------------------------------------------------------

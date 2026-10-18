@@ -17,18 +17,20 @@
    * The parent owns collection deletion and its scoped confirmation
    * so the operation stays next to the history-management bridge.
    */
-  import { createEventDispatcher, onDestroy, onMount } from "svelte";
+  import { createEventDispatcher, onDestroy, onMount, tick } from "svelte";
   import type { Collection, PeerSnapshot } from "./types";
+  import { anchorPopupToViewport } from "./lib/anchorPopupToViewport";
+  import { collectionColor, collectionColorTint } from "./lib/collectionColor";
   import {
     COLLECTION_DROP_TARGET_VALUE,
     createCollectionDropZoneHandlers,
   } from "./lib/collectionDropZone";
   import { endDragSession, isDropTarget } from "./lib/dragAndDrop";
   import { POINTER_DRAG_END_EVENT } from "./lib/pointerDragAndDrop";
-import CollectionColorModal from "./CollectionColorModal.svelte";
-import TextNoteModal from "./TextNoteModal.svelte";
-import LinkedPeers from "./LinkedPeers.svelte";
-import { t, tPlural } from "./lib/localization.ts";
+  import CollectionColorModal from "./CollectionColorModal.svelte";
+  import TextNoteModal from "./TextNoteModal.svelte";
+  import LinkedPeers from "./LinkedPeers.svelte";
+  import { t, tPlural } from "./lib/localization.ts";
 
   export let collections: Collection[] = [];
   export let activeCollectionId: number | null = null;
@@ -71,15 +73,15 @@ import { t, tPlural } from "./lib/localization.ts";
   let newCollectionName = "";
   let renamingId: number | null = null;
   let renameDraft = "";
-  /**
-   * Modal state for the colour editor. The sidebar owns the
-   * triggering row (the colour square) so the modal can re-focus
-   * the square on close and the picker never drifts out of sync.
-   */
+  /** Modal state for collection actions and their return-focus targets. */
   let pendingColorCollection: Collection | null = null;
+  let pendingColorReturnFocusTarget: HTMLElement | null = null;
   let pendingNoteCollection: Collection | null = null;
   let noteReturnFocusTarget: HTMLElement | null = null;
   let lastColorError: string | null = null;
+  let actionsMenuCollectionId: number | null = null;
+  let actionsMenuTriggerEl: HTMLButtonElement | null = null;
+  let actionsMenuEl: HTMLDivElement | null = null;
   /**
    * Id of the collection row currently receiving a drag. The visual
    * feedback is purely decorative: the helper clears the highlight
@@ -90,6 +92,7 @@ import { t, tPlural } from "./lib/localization.ts";
   let dragOverCollectionId: number | null = null;
 
   function selectCollection(id: number | null): void {
+    closeActionsMenu();
     if (renamingId !== null) {
       cancelRename();
     }
@@ -103,6 +106,7 @@ import { t, tPlural } from "./lib/localization.ts";
   }
 
   function startCreate(): void {
+    closeActionsMenu();
     if (renamingId !== null) {
       cancelRename();
     }
@@ -132,6 +136,7 @@ import { t, tPlural } from "./lib/localization.ts";
     if (collection.kind !== "user") {
       return;
     }
+    closeActionsMenu();
     if (creating) {
       cancelCreate();
     }
@@ -170,37 +175,33 @@ import { t, tPlural } from "./lib/localization.ts";
     if (collection.kind !== "user") {
       return;
     }
+    closeActionsMenu();
     if (renamingId !== null) {
       cancelRename();
     }
     dispatch("delete", { collectionId: collection.id });
   }
 
-  /**
-   * Open the colour-editor modal against the supplied collection.
-   * The square's parent button is captured so the modal can restore
-   * focus when the user closes the picker without saving.
-   *
-   * The square is the only interactive surface the row offers for
-   * this flow; a single click on a collection row must NOT
-   * accidentally open the picker (the row's own click selects the
-   * collection), so the helper is wired to the dedicated `dblclick`
-   * and `keydown` paths the square installs below.
-   */
-  function askEditColor(
-    collection: Collection,
-    event: MouseEvent | KeyboardEvent,
-  ): void {
+  function askEditColor(collection: Collection): void {
     if (renamingId !== null) {
       cancelRename();
     }
     pendingColorCollection = collection;
+    pendingColorReturnFocusTarget = actionsMenuTriggerEl;
     lastColorError = null;
-    void event;
   }
 
   function cancelColorEdit(): void {
     pendingColorCollection = null;
+    const returnFocusTarget = pendingColorReturnFocusTarget;
+    void tick().then(() => {
+      if (
+        pendingColorCollection === null &&
+        pendingColorReturnFocusTarget === returnFocusTarget
+      ) {
+        pendingColorReturnFocusTarget = null;
+      }
+    });
     lastColorError = null;
   }
 
@@ -209,19 +210,153 @@ import { t, tPlural } from "./lib/localization.ts";
     const collectionId = pendingColorCollection.id;
     dispatch("set-color", { collectionId, colorHex });
     pendingColorCollection = null;
+    const returnFocusTarget = pendingColorReturnFocusTarget;
+    void tick().then(() => {
+      if (
+        pendingColorCollection === null &&
+        pendingColorReturnFocusTarget === returnFocusTarget
+      ) {
+        pendingColorReturnFocusTarget = null;
+      }
+    });
     lastColorError = null;
   }
 
   function openCollectionNote(collection: Collection, event: MouseEvent): void {
-    event.stopPropagation();
     pendingNoteCollection = collection;
-    noteReturnFocusTarget = event.currentTarget instanceof HTMLElement
-      ? event.currentTarget
-      : null;
+    noteReturnFocusTarget = event.currentTarget as HTMLButtonElement;
   }
 
   function closeCollectionNote(): void {
     pendingNoteCollection = null;
+  }
+
+  function closeActionsMenu(restoreFocus: boolean = false): void {
+    if (actionsMenuCollectionId === null) return;
+    const trigger = actionsMenuTriggerEl;
+    actionsMenuCollectionId = null;
+    actionsMenuEl = null;
+    if (restoreFocus) {
+      void tick().then(() => trigger?.focus());
+    }
+  }
+
+  function showActionsMenu(
+    collection: Collection,
+    trigger: HTMLButtonElement,
+    focusLast: boolean = false,
+  ): void {
+    if (actionsMenuCollectionId !== null) {
+      closeActionsMenu();
+    }
+    actionsMenuTriggerEl = trigger;
+    actionsMenuCollectionId = collection.id;
+    void tick().then(() => {
+      const items = Array.from(
+        actionsMenuEl?.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitem"]:not(:disabled)',
+        ) ?? [],
+      );
+      const target = focusLast ? items[items.length - 1] : items[0];
+      target?.focus();
+    });
+  }
+
+  function toggleActionsMenu(
+    collection: Collection,
+    event: MouseEvent,
+  ): void {
+    event.stopPropagation();
+    const trigger = event.currentTarget as HTMLButtonElement;
+    if (actionsMenuCollectionId === collection.id) {
+      closeActionsMenu(true);
+      return;
+    }
+    showActionsMenu(collection, trigger);
+  }
+
+  function onActionsMenuTriggerKeydown(
+    collection: Collection,
+    event: KeyboardEvent,
+  ): void {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    showActionsMenu(
+      collection,
+      event.currentTarget as HTMLButtonElement,
+      event.key === "ArrowUp",
+    );
+  }
+
+  function onActionsMenuKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeActionsMenu(true);
+      return;
+    }
+    if (
+      event.key !== "ArrowDown" &&
+      event.key !== "ArrowUp" &&
+      event.key !== "Home" &&
+      event.key !== "End"
+    ) {
+      return;
+    }
+    event.preventDefault();
+    const items = Array.from(
+      actionsMenuEl?.querySelectorAll<HTMLButtonElement>(
+        '[role="menuitem"]:not(:disabled)',
+      ) ?? [],
+    );
+    if (items.length === 0) return;
+    if (event.key === "Home") {
+      items[0].focus();
+      return;
+    }
+    if (event.key === "End") {
+      items[items.length - 1].focus();
+      return;
+    }
+    const currentIndex = items.indexOf(
+      document.activeElement as HTMLButtonElement,
+    );
+    const direction = event.key === "ArrowDown" ? 1 : -1;
+    const nextIndex = (currentIndex + direction + items.length) % items.length;
+    items[nextIndex].focus();
+  }
+
+  function onWindowPointerDown(event: PointerEvent): void {
+    if (actionsMenuCollectionId === null) return;
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    if (actionsMenuTriggerEl?.contains(target) || actionsMenuEl?.contains(target)) {
+      return;
+    }
+    closeActionsMenu();
+  }
+
+  function onWindowFocusIn(event: FocusEvent): void {
+    if (actionsMenuCollectionId === null) return;
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    if (actionsMenuTriggerEl?.contains(target) || actionsMenuEl?.contains(target)) {
+      return;
+    }
+    closeActionsMenu();
+  }
+
+  function onWindowKeydown(event: KeyboardEvent): void {
+    if (actionsMenuCollectionId === null || event.key !== "Escape") return;
+    event.preventDefault();
+    closeActionsMenu(true);
+  }
+
+  function selectActionsMenuItem(
+    action: (collection: Collection) => void,
+    collection: Collection,
+  ): void {
+    closeActionsMenu();
+    action(collection);
   }
 
   function isActive(id: number | null): boolean {
@@ -280,28 +415,6 @@ import { t, tPlural } from "./lib/localization.ts";
     }
     if (event.key === "F2") {
       event.preventDefault();
-    }
-  }
-
-  /**
-   * Square keyboard handling. Enter and Space open the picker;
-   * single click must NOT change the active collection, so the
-   * pointer has its own branch. Escape lets the user back out
-   * without opening the modal.
-   */
-  function onColorSquareKeydown(
-    event: KeyboardEvent,
-    collection: Collection,
-  ): void {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      event.stopPropagation();
-      askEditColor(collection, event);
-      return;
-    }
-    if (event.key === "Escape" && pendingColorCollection !== null) {
-      event.preventDefault();
-      cancelColorEdit();
     }
   }
 
@@ -419,11 +532,18 @@ import { t, tPlural } from "./lib/localization.ts";
     // sidebar never leaks handlers across remounts.
     document.addEventListener("dragend", onWindowDragEnd);
     document.addEventListener(POINTER_DRAG_END_EVENT, resetDragOver);
+    document.addEventListener("pointerdown", onWindowPointerDown);
+    document.addEventListener("focusin", onWindowFocusIn);
+    document.addEventListener("keydown", onWindowKeydown);
   });
 
   onDestroy(() => {
     document.removeEventListener("dragend", onWindowDragEnd);
     document.removeEventListener(POINTER_DRAG_END_EVENT, resetDragOver);
+    document.removeEventListener("pointerdown", onWindowPointerDown);
+    document.removeEventListener("focusin", onWindowFocusIn);
+    document.removeEventListener("keydown", onWindowKeydown);
+    closeActionsMenu();
     resetDragOver();
   });
 </script>
@@ -540,6 +660,9 @@ import { t, tPlural } from "./lib/localization.ts";
     {#each orderedCollections as collection (collection.id)}
       <li
         class="collection-row"
+        style={`--collection-row-tint: ${collectionColorTint(
+          collection.color_hex,
+        )};`}
         class:active={isActive(collection.id)}
         class:drop-target={isDropTarget(collection)}
         class:system-collection={collection.kind === "system"}
@@ -624,6 +747,9 @@ import { t, tPlural } from "./lib/localization.ts";
             </button>
           </form>
         {:else}
+          {@const collectionDisplayName = isHistory(collection)
+            ? $t("collections.history")
+            : collection.name}
           <button
             type="button"
             class="collection-button"
@@ -641,7 +767,7 @@ import { t, tPlural } from "./lib/localization.ts";
             data-testid="sidebar-collection-button"
             data-collection-id={collection.id}
           >
-            <span class="collection-name">{isHistory(collection) ? $t("collections.history") : collection.name}</span>
+            <span class="collection-name">{collectionDisplayName}</span>
             {#if isHistory(collection)}
               <span
                 class="badge system"
@@ -671,27 +797,15 @@ import { t, tPlural } from "./lib/localization.ts";
           </button>
           <button
             type="button"
-            class="color-square"
-            aria-label={$t("collections.change_color", { name: collection.name })}
-            title={$t("collections.change_color_hint", { name: collection.name })}
-            data-testid="sidebar-collection-color"
-            data-collection-id={collection.id}
-            data-color={collection.color_hex}
-            style="background-color: {collection.color_hex};"
-            on:dblclick|stopPropagation={(event) =>
-              askEditColor(collection, event)}
-            on:keydown={(event) => onColorSquareKeydown(event, collection)}
-          ></button>
-          <button
-            type="button"
             class="icon-only note-icon"
-            aria-label={collection.has_note
-              ? $t("collections.edit_note_for", { name: collection.name })
-              : $t("collections.add_note_for", { name: collection.name })}
             aria-haspopup="dialog"
             aria-expanded={pendingNoteCollection?.id === collection.id}
+            aria-label={collection.has_note
+              ? $t("collections.edit_note_for", { name: collectionDisplayName })
+              : $t("collections.add_note_for", { name: collectionDisplayName })}
             title={collection.has_note ? $t("collections.edit_note") : $t("collections.add_note")}
             data-testid="sidebar-collection-note"
+            data-collection-id={collection.id}
             data-has-note={collection.has_note ? "true" : "false"}
             on:click={(event) => openCollectionNote(collection, event)}
           >
@@ -705,36 +819,107 @@ import { t, tPlural } from "./lib/localization.ts";
               {/if}
             </svg>
           </button>
-          {#if collection.kind === "user"}
-            <button
-              type="button"
-              class="icon-only danger delete-icon"
-              on:click={(event) => askDelete(collection, event)}
-              aria-label={$t("collections.delete", { name: collection.name })}
-              title={$t("collections.delete", { name: collection.name })}
-              data-testid="sidebar-collection-delete"
-              data-collection-id={collection.id}
-              data-cv-danger="collection-delete"
+          <button
+            type="button"
+            class="icon-only actions-menu-trigger"
+            aria-haspopup="menu"
+            aria-expanded={actionsMenuCollectionId === collection.id}
+            aria-controls={`collection-actions-menu-${collection.id}`}
+            aria-label={$t("collections.actions_menu", {
+              name: collectionDisplayName,
+            })}
+            title={$t("collections.actions_menu", {
+              name: collectionDisplayName,
+            })}
+            data-testid="sidebar-collection-menu-trigger"
+            data-collection-id={collection.id}
+            on:click={(event) => toggleActionsMenu(collection, event)}
+            on:keydown={(event) => onActionsMenuTriggerKeydown(collection, event)}
+          >
+            <svg
+              aria-hidden="true"
+              focusable="false"
+              width="18"
+              height="18"
+              viewBox="0 0 18 18"
+              fill="currentColor"
             >
-              <svg
-                aria-hidden="true"
-                focusable="false"
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
+              <circle cx="4" cy="9" r="1.6" />
+              <circle cx="9" cy="9" r="1.6" />
+              <circle cx="14" cy="9" r="1.6" />
+            </svg>
+          </button>
+          {#if actionsMenuCollectionId === collection.id}
+            <div
+              id={`collection-actions-menu-${collection.id}`}
+              class="collection-actions-menu"
+              role="menu"
+              tabindex="-1"
+              aria-label={$t("collections.actions_menu", {
+                name: collectionDisplayName,
+              })}
+              data-testid="sidebar-collection-actions-menu"
+              data-collection-id={collection.id}
+              bind:this={actionsMenuEl}
+              use:anchorPopupToViewport={{
+                anchor: () => actionsMenuTriggerEl,
+                align: "end",
+              }}
+              on:keydown={onActionsMenuKeydown}
+            >
+              <button
+                type="button"
+                role="menuitem"
+                class="collection-action-menu-item"
+                aria-haspopup="dialog"
+                aria-label={$t("collections.change_color", { name: collectionDisplayName })}
+                title={$t("collections.change_color", { name: collectionDisplayName })}
+                data-testid="sidebar-collection-color"
+                data-collection-id={collection.id}
+                data-color={collection.color_hex}
+                on:click={() => selectActionsMenuItem(askEditColor, collection)}
               >
-                <path d="M5 8h14" />
-                <path d="M10 8V6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2" />
-                <path d="M7 8l.6 11.2a2 2 0 0 0 2 1.8h4.8a2 2 0 0 0 2-1.8L17 8" />
-                <path d="M10 11.5v5" />
-                <path d="M14 11.5v5" />
-              </svg>
-            </button>
+                <span
+                  class="collection-action-color-swatch"
+                  style={`background-color: ${collectionColor(collection.color_hex)};`}
+                  aria-hidden="true"
+                ></span>
+                <span>{$t("collections.change_color", { name: collectionDisplayName })}</span>
+              </button>
+              {#if collection.kind === "user"}
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="collection-action-menu-item danger delete-icon"
+                  on:click={(event) => askDelete(collection, event)}
+                  aria-label={$t("collections.delete", { name: collection.name })}
+                  title={$t("collections.delete", { name: collection.name })}
+                  data-testid="sidebar-collection-delete"
+                  data-collection-id={collection.id}
+                  data-cv-danger="collection-delete"
+                >
+                  <svg
+                    aria-hidden="true"
+                    focusable="false"
+                    width="18"
+                    height="18"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M5 8h14" />
+                    <path d="M10 8V6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2" />
+                    <path d="M7 8l.6 11.2a2 2 0 0 0 2 1.8h4.8a2 2 0 0 0 2-1.8L17 8" />
+                    <path d="M10 11.5v5" />
+                    <path d="M14 11.5v5" />
+                  </svg>
+                  <span>{$t("collections.delete", { name: collection.name })}</span>
+                </button>
+              {/if}
+            </div>
           {/if}
         {/if}
       </li>
@@ -760,6 +945,7 @@ import { t, tPlural } from "./lib/localization.ts";
 <CollectionColorModal
   open={pendingColorCollection !== null}
   collection={pendingColorCollection}
+  returnFocusTo={pendingColorReturnFocusTarget}
   on:save={(event) => commitColorEdit(event.detail.colorHex)}
   on:cancel={cancelColorEdit}
 />
@@ -769,7 +955,9 @@ import { t, tPlural } from "./lib/localization.ts";
     open={true}
     targetKind="collection"
     targetId={pendingNoteCollection.id}
-    targetLabel={pendingNoteCollection.name}
+    targetLabel={pendingNoteCollection.kind === "system"
+      ? $t("collections.history")
+      : pendingNoteCollection.name}
     returnFocusTo={noteReturnFocusTarget}
     on:close={closeCollectionNote}
   />
@@ -857,9 +1045,10 @@ import { t, tPlural } from "./lib/localization.ts";
     min-height: 2rem;
     max-height: 2rem;
     padding: 0 0.4rem;
+    background-color: var(--collection-row-tint, transparent);
   }
   .collection-row.active {
-    background: rgba(37, 99, 235, 0.15);
+    box-shadow: inset 0 0 0 1px var(--cv-accent, #2563eb);
   }
   /*
    * Drag-over feedback. The CSS rules are scoped to user-kind rows
@@ -888,27 +1077,29 @@ import { t, tPlural } from "./lib/localization.ts";
   }
   .collection-row.drop-target.drag-over {
     /* The drag-over highlight intentionally differs from the
-     * `.active` selection (which uses a softer `rgba(37, 99, 235,
-     * 0.15)` background). The drop target carries a slightly more
-     * saturated background, a hard 1px border in the accent colour
+     * `.active` selection (which keeps the assigned collection tint
+     * and adds an inset accent border). The drop target overlays a
+     * translucent accent, a hard 1px border in the accent colour
      * and a soft glow so the row reads as a separate, actionable
      * surface. The transition properties on `.drop-target` animate
      * every one of those properties so the user sees a soft
      * 150–250 ms colour change rather than a sudden snap. */
-    background: rgba(37, 99, 235, 0.28);
+    background-color: var(--collection-row-tint, transparent);
     border-color: var(--cv-accent, #2563eb);
     outline: 1px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.6));
     outline-offset: 1px;
     /* The shadow keeps the contrast-safe accent without the row
      * losing its square shape; it fades with the same easing as
      * the background so the transition feels cohesive. */
-    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.28);
+    box-shadow:
+      inset 0 0 0 999px rgba(37, 99, 235, 0.16),
+      0 0 0 2px rgba(37, 99, 235, 0.28);
   }
   .collection-row.drop-target.system-collection.drag-over {
     /* `Historial` (system kind) is never a valid drop target; if a
      * drop-target row happens to also be flagged `system` we
      * suppress the highlight so the visual feedback never lies. */
-    background: transparent;
+    background-color: var(--collection-row-tint, transparent);
     border-color: transparent;
     outline: 0;
     box-shadow: none;
@@ -990,27 +1181,6 @@ import { t, tPlural } from "./lib/localization.ts";
     border: 1px solid #115e3a;
     text-transform: lowercase;
   }
-  .color-square {
-    flex: 0 0 auto;
-    width: 1.1rem;
-    height: 1.1rem;
-    border-radius: 4px;
-    border: 1px solid var(--cv-border, #30363d);
-    cursor: pointer;
-    padding: 0;
-    background-clip: padding-box;
-    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
-    transition:
-      outline-color 0.15s ease-out,
-      transform 0.15s ease-out;
-  }
-  .color-square:hover {
-    transform: scale(1.08);
-  }
-  .color-square:focus-visible {
-    outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.85));
-    outline-offset: 1px;
-  }
   .icon-only {
     flex: 0 0 auto;
     background: transparent;
@@ -1041,11 +1211,21 @@ import { t, tPlural } from "./lib/localization.ts";
   }
   .note-icon {
     color: #93c5fd;
-    flex: 0 0 1.65rem;
   }
   .note-icon[data-has-note="true"] {
     color: #bfdbfe;
-    background: rgba(96, 165, 250, 0.12);
+    background: rgba(59, 130, 246, 0.12);
+  }
+  .actions-menu-trigger {
+    color: var(--cv-muted, #94a3b8);
+  }
+  .actions-menu-trigger[aria-expanded="true"] {
+    color: var(--cv-fg, #f0f4f8);
+    background: var(--cv-bg-hover, rgba(255, 255, 255, 0.06));
+  }
+  .actions-menu-trigger:focus-visible {
+    outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.45));
+    outline-offset: 1px;
   }
   .confirm-icon {
     color: #4ade80;
@@ -1053,22 +1233,61 @@ import { t, tPlural } from "./lib/localization.ts";
   .cancel-icon {
     color: #94a3b8;
   }
-  /*
-   * Collection delete icon: rendered in the documented danger colour
-   * at rest, matching the trash button and the per-card delete
-   * affordance. The accessible name and the `title` tooltip are the
-   * textual cues the user gets; the destructive confirmation flow
-   * stays in the parent component and runs only after the user
-   * accepts the modal the sidebar renders.
-   */
-  .icon-only.danger.delete-icon {
+  .collection-actions-menu {
+    position: fixed;
+    z-index: 40;
+    min-width: 14rem;
+    padding: 0.35rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    color: var(--cv-fg, #f0f4f8);
+    background: var(--cv-bg-elevated, #161b22);
+    border: 1px solid var(--cv-border, #30363d);
+    border-radius: var(--cv-radius-md, 10px);
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.34);
+  }
+  .collection-action-menu-item {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 2rem;
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.4rem 0.65rem;
+    color: var(--cv-fg, #f0f4f8);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--cv-radius-sm, 6px);
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    font-size: var(--cv-control, 0.85rem);
+  }
+  .collection-action-menu-item:hover,
+  .collection-action-menu-item:focus-visible {
+    background: var(--cv-bg-hover, rgba(255, 255, 255, 0.06));
+    outline: none;
+  }
+  .collection-action-color-swatch {
+    flex: 0 0 0.9rem;
+    width: 0.9rem;
+    height: 0.9rem;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 3px;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2);
+  }
+  .collection-action-menu-item.danger.delete-icon {
+    margin-top: 0.15rem;
+    padding-top: 0.5rem;
+    border-top-color: var(--cv-border, #30363d);
     color: var(--cv-danger, #b91c1c);
   }
-  .icon-only.danger.delete-icon:hover {
+  .collection-action-menu-item.danger.delete-icon:hover {
     color: var(--cv-danger-hover, #991b1b);
     background: rgba(185, 28, 28, 0.12);
   }
-  .icon-only.danger.delete-icon:focus-visible {
+  .collection-action-menu-item.danger.delete-icon:focus-visible {
     outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.45));
     outline-offset: 1px;
   }

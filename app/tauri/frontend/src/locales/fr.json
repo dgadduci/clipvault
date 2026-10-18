@@ -277,6 +277,7 @@
   "collections.imported_from": "Importée depuis {peer}",
   "collections.imported_remote": "Importée depuis un appareil distant",
   "collections.imported_badge": "importées",
+  "collections.actions_menu": "Actions pour {name}",
   "collections.drop_peer_rejected": "Impossible de déposer des captures dans les collections importées depuis un autre appareil.",
   "collections.change_color": "Modifier la couleur de {name}",
   "collections.change_color_hint": "Modifier la couleur de {name} (double-clic ou Entrée)",
