@@ -217,6 +217,26 @@ fn create_collection_rejects_empty_and_overlong_names() {
 }
 
 #[test]
+fn create_subcollection_persists_its_parent_through_the_service() {
+    let (_dir, context) = bootstrap_with_clock(datetime!(2026-01-02 03:04:05 UTC));
+    let service = context.organization();
+    let parent = service
+        .create_collection(&context, "Trabajo")
+        .expect("create parent");
+    let child = service
+        .create_subcollection(&context, parent.id, "Clientes")
+        .expect("create child");
+
+    assert_eq!(child.parent_id, Some(parent.id));
+    let listed = service
+        .list_collections(&context)
+        .expect("list collections");
+    assert!(listed.iter().any(|collection| {
+        collection.id == child.id && collection.parent_id == Some(parent.id)
+    }));
+}
+
+#[test]
 fn delete_user_collection_removes_only_its_memberships() {
     let (_dir, context) = bootstrap_with_clock(datetime!(2026-01-02 03:04:05 UTC));
     let when = datetime!(2026-01-02 03:04:05 UTC);

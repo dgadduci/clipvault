@@ -2177,6 +2177,9 @@ fn organization_command_error(error: OrganizationServiceError) -> CommandError {
             clipvault_db::OrganizationError::TagNameTooLong(_) => "tag_name_too_long",
             clipvault_db::OrganizationError::TagNameTaken(_) => "tag_name_taken",
             clipvault_db::OrganizationError::CollectionNotFound(_) => "collection_not_found",
+            clipvault_db::OrganizationError::InvalidCollectionParent(_) => {
+                "invalid_collection_parent"
+            }
             clipvault_db::OrganizationError::TagNotFound(_) => "tag_not_found",
             clipvault_db::OrganizationError::EntryNotFound(_) => "entry_not_found",
             clipvault_db::OrganizationError::SystemCollectionProtected(_) => {
@@ -2217,6 +2220,22 @@ pub fn clipvault_collections_create(
         .context()
         .organization()
         .create_collection(state.context(), &name)
+        .map_err(organization_command_error)?;
+    emit_organization_updated(&handle);
+    Ok(collection)
+}
+
+#[tauri::command]
+pub fn clipvault_collections_create_subcollection(
+    state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
+    parent_id: i64,
+    name: String,
+) -> Result<Collection, CommandError> {
+    let collection = state
+        .context()
+        .organization()
+        .create_subcollection(state.context(), parent_id, &name)
         .map_err(organization_command_error)?;
     emit_organization_updated(&handle);
     Ok(collection)
@@ -2330,7 +2349,7 @@ pub fn clipvault_collections_clear_preview(
     state
         .context()
         .management()
-        .preview_collection_deletion(state.context(), collection_id)
+        .preview_collection_clear(state.context(), collection_id)
         .map_err(management_command_error)
 }
 

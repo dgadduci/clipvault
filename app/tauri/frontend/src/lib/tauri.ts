@@ -1059,6 +1059,15 @@ export const collectionsCreateCommand: ClipvaultCommandArg<
 > = (args) =>
   invoke<Collection>("clipvault_collections_create", { name: args.name });
 
+export const collectionsCreateSubcollectionCommand: ClipvaultCommandArg<
+  Collection,
+  { parentId: number; name: string }
+> = (args) =>
+  invoke<Collection>("clipvault_collections_create_subcollection", {
+    parentId: args.parentId,
+    name: args.name,
+  });
+
 export const collectionsRenameCommand: ClipvaultCommandArg<
   Collection,
   { collectionId: number; name: string }

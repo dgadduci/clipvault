@@ -38,6 +38,7 @@
     contextualDesktopSetupDismissCommand,
     contextualDesktopSetupDismissalsGetCommand,
     collectionsCreateCommand,
+    collectionsCreateSubcollectionCommand,
     collectionsDeleteCommand,
     collectionsDeletePreviewCommand,
     collectionsClearCommand,
@@ -226,7 +227,12 @@
     | { kind: "delete"; id: number; label: string }
     | { kind: "clear"; count: number }
     | null = null;
-  let pendingCollectionDeletion: { collectionId: number; name: string } | null = null;
+  let pendingCollectionDeletion: {
+    collectionId: number;
+    name: string;
+    parentId: number | null;
+    parentName: string | null;
+  } | null = null;
   let collectionDeletionPreview: CollectionDeletionPreview | null = null;
   let collectionDeletionBusy = false;
   let collectionDeletionError: string | null = null;
@@ -1300,6 +1306,20 @@
     }
   }
 
+  async function handleCreateSubcollection(
+    event: CustomEvent<{ parentId: number; name: string }>,
+  ): Promise<void> {
+    try {
+      await collectionsCreateSubcollectionCommand({
+        parentId: event.detail.parentId,
+        name: event.detail.name,
+      });
+      await refreshOrganization();
+    } catch (err) {
+      organizationError = "app.error.generic";
+    }
+  }
+
   async function handleRenameCollection(
     event: CustomEvent<{ collectionId: number; name: string }>,
   ): Promise<void> {
@@ -1324,6 +1344,12 @@
     pendingCollectionDeletion = {
       collectionId: collection.id,
       name: collection.name,
+      parentId: collection.parent_id ?? null,
+      parentName: collection.parent_id == null
+        ? null
+        : organization?.collections.find(
+            (candidate) => candidate.id === collection.parent_id,
+          )?.name ?? null,
     };
     collectionDeletionPreview = null;
     collectionDeletionPreviewChanged = false;
@@ -1394,12 +1420,23 @@
         collectionDeletionPreviewChanged = true;
         return;
       }
-      if (selectedCollectionId === pending.collectionId) {
-        selectedCollectionId = null;
+      const selectedCollection = organization?.collections.find(
+        (candidate) => candidate.id === selectedCollectionId,
+      );
+      let nextSelection: number | null | undefined;
+      if (
+        selectedCollectionId === pending.collectionId ||
+        selectedCollection?.parent_id === pending.collectionId
+      ) {
+        nextSelection = pending.parentId;
       }
       cancelCollectionDeletion();
       await refreshOrganization();
-      await refreshEntries();
+      if (nextSelection !== undefined) {
+        await selectCollectionById(nextSelection);
+      } else {
+        await refreshEntries();
+      }
       await refreshUnorganizedClearableCount();
     } catch (err) {
       collectionDeletionError = "app.error.generic";
@@ -2801,6 +2838,7 @@
         activePeerId={activePeerId}
         on:select={(e) => selectCollectionFromSidebar(e)}
         on:create={(e) => handleCreateCollection(e)}
+        on:create-subcollection={(e) => handleCreateSubcollection(e)}
         on:rename={(e) => handleRenameCollection(e)}
         on:delete={(e) => handleDeleteCollection(e)}
         on:card-drop={(e) => handleCardDrop(e)}
@@ -2967,7 +3005,9 @@
 <Modal
   open={pendingCollectionDeletion !== null}
   titleId="collection-delete-modal-title"
-  title={$t("app.collection.delete.title")}
+  title={$t(pendingCollectionDeletion?.parentId != null
+    ? "app.collection.delete.subcollection_title"
+    : "app.collection.delete.title")}
   busy={collectionDeletionBusy}
   returnFocusTo={collectionDeletionTrigger}
   onClose={cancelCollectionDeletion}
@@ -2975,7 +3015,12 @@
   {#if pendingCollectionDeletion}
     <div data-testid="collection-delete-modal">
       <p data-testid="collection-delete-summary">
-        {$t("app.collection.delete.question", { name: pendingCollectionDeletion.name })}
+        {$t(pendingCollectionDeletion.parentId != null
+          ? "app.collection.delete.subcollection_question"
+          : "app.collection.delete.question", {
+            name: pendingCollectionDeletion.name,
+            parent: pendingCollectionDeletion.parentName ?? "",
+          })}
         {#if collectionDeletionPreview}
           {$tPlural("app.collection.delete.captures", collectionDeletionPreview.entries)}
           {$tPlural("app.collection.delete.favorites", collectionDeletionPreview.favorites)}
@@ -3010,7 +3055,11 @@
             disabled={collectionDeletionBusy}
             data-testid="collection-delete-preserve"
           >
-            {$t("app.collection.delete.keep")}
+            {$t(pendingCollectionDeletion.parentId != null
+              ? "app.collection.delete.subcollection_keep"
+              : "app.collection.delete.keep", {
+                parent: pendingCollectionDeletion.parentName ?? "",
+              })}
           </button>
           <button
             type="button"
@@ -3020,7 +3069,9 @@
             data-testid="collection-delete-entries"
             data-cv-danger="collection-delete-confirm"
           >
-            {$t("app.collection.delete.with_captures")}
+            {$t(pendingCollectionDeletion.parentId != null
+              ? "app.collection.delete.subcollection_everywhere"
+              : "app.collection.delete.with_captures")}
           </button>
         {/if}
         <button

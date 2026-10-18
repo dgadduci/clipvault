@@ -830,6 +830,7 @@ impl PeerImportPersistence for InMemoryImportPersistence {
             id,
             Collection {
                 id,
+                parent_id: None,
                 stable_key: None,
                 name: name.to_string(),
                 kind: CollectionKind::User,

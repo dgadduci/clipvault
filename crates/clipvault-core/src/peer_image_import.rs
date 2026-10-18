@@ -956,6 +956,7 @@ impl PeerImageImportPersistence for InMemoryImageImportPersistence {
             id,
             Collection {
                 id,
+                parent_id: None,
                 stable_key: None,
                 name: name.to_string(),
                 kind: CollectionKind::User,
@@ -1297,6 +1298,7 @@ impl PeerImageImportPersistence for InMemoryImageImportPersistence {
                     id,
                     Collection {
                         id,
+                        parent_id: None,
                         stable_key: None,
                         name: candidate,
                         kind: CollectionKind::User,

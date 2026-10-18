@@ -1107,6 +1107,84 @@ const MIGRATION_0021_LOCAL_NOTES: Migration = Migration {
     DROP TABLE IF EXISTS entry_notes;",
 };
 
+/// Add one-level collection hierarchy without rewriting existing
+/// collection or capture rows. A nullable parent keeps every existing
+/// collection at the root; the triggers enforce that only unbound user root
+/// collections can become parents, even for callers outside the UI.
+const MIGRATION_0022_COLLECTION_SUBCOLLECTIONS: Migration = Migration {
+    version: 22,
+    description: "tags-and-collections: add one-level subcollections",
+    up_sql: "ALTER TABLE collections
+        ADD COLUMN parent_id INTEGER REFERENCES collections(id) ON DELETE CASCADE;
+    CREATE INDEX idx_collections_parent_id ON collections (parent_id);
+    CREATE TRIGGER collections_parent_insert_guard
+    BEFORE INSERT ON collections
+    WHEN NEW.parent_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM collections parent
+         WHERE parent.id = NEW.parent_id
+           AND parent.kind = 'user'
+           AND parent.parent_id IS NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM peer_collection_bindings pcb
+                WHERE pcb.collection_id = parent.id
+           )
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'invalid collection parent');
+    END;
+    CREATE TRIGGER collections_parent_update_guard
+    BEFORE UPDATE OF parent_id ON collections
+    WHEN NEW.parent_id IS NOT NULL AND (
+        NOT EXISTS (
+            SELECT 1 FROM collections parent
+             WHERE parent.id = NEW.parent_id
+               AND parent.kind = 'user'
+               AND parent.parent_id IS NULL
+               AND parent.id <> NEW.id
+               AND NOT EXISTS (
+                   SELECT 1 FROM peer_collection_bindings pcb
+                    WHERE pcb.collection_id = parent.id
+               )
+        ) OR EXISTS (
+            SELECT 1 FROM collections child WHERE child.parent_id = NEW.id
+        ) OR EXISTS (
+            SELECT 1 FROM peer_collection_bindings pcb
+             WHERE pcb.collection_id = NEW.id
+        )
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'invalid collection parent');
+    END;
+    CREATE TRIGGER peer_collection_binding_children_guard_insert
+    BEFORE INSERT ON peer_collection_bindings
+    WHEN EXISTS (
+        SELECT 1 FROM collections target
+         WHERE target.id = NEW.collection_id AND target.parent_id IS NOT NULL
+    ) OR EXISTS (
+        SELECT 1 FROM collections child WHERE child.parent_id = NEW.collection_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'collection with subcollections cannot be peer-bound');
+    END;
+    CREATE TRIGGER peer_collection_binding_children_guard_update
+    BEFORE UPDATE OF collection_id ON peer_collection_bindings
+    WHEN EXISTS (
+        SELECT 1 FROM collections target
+         WHERE target.id = NEW.collection_id AND target.parent_id IS NOT NULL
+    ) OR EXISTS (
+        SELECT 1 FROM collections child WHERE child.parent_id = NEW.collection_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'collection with subcollections cannot be peer-bound');
+    END;",
+    down_sql: "DROP TRIGGER IF EXISTS peer_collection_binding_children_guard_update;
+    DROP TRIGGER IF EXISTS peer_collection_binding_children_guard_insert;
+    DROP TRIGGER IF EXISTS collections_parent_update_guard;
+    DROP TRIGGER IF EXISTS collections_parent_insert_guard;
+    DROP INDEX IF EXISTS idx_collections_parent_id;
+    ALTER TABLE collections DROP COLUMN parent_id;",
+};
+
 /// Returns the migrations shipped with ClipVault. Each new migration is
 /// appended to this slice to keep ordering deterministic.
 pub fn builtin_migrations() -> Vec<Migration> {
@@ -1132,6 +1210,7 @@ pub fn builtin_migrations() -> Vec<Migration> {
         MIGRATION_0019_PEER_SOURCE_APP_PRESENTATION,
         MIGRATION_0020_PEER_IMPORT_HISTORY_MEMBERSHIP,
         MIGRATION_0021_LOCAL_NOTES,
+        MIGRATION_0022_COLLECTION_SUBCOLLECTIONS,
     ]
 }
 

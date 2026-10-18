@@ -622,6 +622,18 @@ impl HistoryManagementService {
         Ok(repo.preview_collection_deletion(collection_id)?)
     }
 
+    /// Preview only direct memberships for the existing clear flow. A
+    /// parent clear does not implicitly include child collections.
+    pub fn preview_collection_clear(
+        &self,
+        context: &AppContext,
+        collection_id: i64,
+    ) -> Result<CollectionDeletionPreview, ManagementServiceError> {
+        let mut db = context.database().lock();
+        let repo = OrganizationRepository::new(db.connection_mut());
+        Ok(repo.preview_collection_clear(collection_id)?)
+    }
+
     /// Confirm deletion of a collection, either preserving its rows or
     /// deleting them from local history. The repository checks the
     /// preview counts inside its transaction and returns fresh counts

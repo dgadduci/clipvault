@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
-   * Sidebar that exposes `Historial` first and the user-defined
-   * collections below.
+   * Sidebar that exposes `Historial` first and user collections as
+   * one-level parent/child rows below.
    *
    * The component shares the height token with the card rail so the
    * panel and the rail stay visually aligned. Only the list of
@@ -21,6 +21,7 @@
   import type { Collection, PeerSnapshot } from "./types";
   import { anchorPopupToViewport } from "./lib/anchorPopupToViewport";
   import { collectionColor, collectionColorTint } from "./lib/collectionColor";
+  import { collectionChildren, visibleCollectionRows } from "./lib/collectionTree";
   import {
     COLLECTION_DROP_TARGET_VALUE,
     createCollectionDropZoneHandlers,
@@ -54,6 +55,7 @@
   type DispatchEvents = {
     select: { collectionId: number | null };
     create: { name: string };
+    "create-subcollection": { parentId: number; name: string };
     rename: { collectionId: number; name: string };
     delete: { collectionId: number };
     "card-drop": { entryId: number; collectionId: number };
@@ -70,6 +72,8 @@
   }
 
   let creating = false;
+  let creatingParentId: number | null = null;
+  let expandedCollectionIds = new Set<number>();
   let newCollectionName = "";
   let renamingId: number | null = null;
   let renameDraft = "";
@@ -114,11 +118,28 @@
       cancelColorEdit();
     }
     creating = true;
+    creatingParentId = null;
+    newCollectionName = "";
+  }
+
+  function startCreateSubcollection(collection: Collection): void {
+    if (
+      collection.kind !== "user" ||
+      collection.parent_id != null ||
+      collection.is_peer_bound
+    ) return;
+    closeActionsMenu();
+    if (renamingId !== null) cancelRename();
+    if (pendingColorCollection !== null) cancelColorEdit();
+    expandedCollectionIds = new Set(expandedCollectionIds).add(collection.id);
+    creating = true;
+    creatingParentId = collection.id;
     newCollectionName = "";
   }
 
   function cancelCreate(): void {
     creating = false;
+    creatingParentId = null;
     newCollectionName = "";
   }
 
@@ -128,8 +149,34 @@
       cancelCreate();
       return;
     }
-    dispatch("create", { name: trimmed });
+    if (creatingParentId === null) {
+      dispatch("create", { name: trimmed });
+    } else {
+      dispatch("create-subcollection", {
+        parentId: creatingParentId,
+        name: trimmed,
+      });
+    }
     cancelCreate();
+  }
+
+  function toggleExpanded(collectionId: number): void {
+    const next = new Set(expandedCollectionIds);
+    if (next.has(collectionId)) {
+      next.delete(collectionId);
+      const active = collections.find(
+        (collection) => collection.id === activeCollectionId,
+      );
+      if (active?.parent_id === collectionId) {
+        // Keep the active collection visible after its parent collapses.
+        selectCollection(collectionId);
+      } else if (creatingParentId === collectionId) {
+        cancelCreate();
+      }
+    } else {
+      next.add(collectionId);
+    }
+    expandedCollectionIds = next;
   }
 
   function startRename(collection: Collection): void {
@@ -493,7 +540,7 @@
   }
 
   $: dropZoneHandlers = createCollectionDropZoneHandlers({
-    collections: orderedCollections,
+    collections,
     getViewport: () => viewportEl,
     getDragOverCollectionId: () => dragOverCollectionId,
     setDragOverCollectionId: (id) => {
@@ -515,13 +562,7 @@
     endDragSession();
   }
 
-  $: orderedCollections = (() => {
-    const system = collections.filter((c) => c.kind === "system");
-    const users = [...collections.filter((c) => c.kind === "user")].sort(
-      (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
-    );
-    return [...system, ...users];
-  })();
+  $: visibleRows = visibleCollectionRows(collections, expandedCollectionIds);
 
   onMount(() => {
     // The browser fires `dragend` on the source (the card) when the
@@ -590,9 +631,17 @@
         type="text"
         bind:value={newCollectionName}
         on:keydown={onCreateKeydown}
-        placeholder={$t("collections.name")}
+        placeholder={creatingParentId === null
+          ? $t("collections.name")
+          : $t("collections.create_subcollection_for", {
+              name: collections.find((item) => item.id === creatingParentId)?.name ?? "",
+            })}
         maxlength="80"
-        aria-label={$t("collections.name")}
+        aria-label={creatingParentId === null
+          ? $t("collections.name")
+          : $t("collections.create_subcollection_for", {
+              name: collections.find((item) => item.id === creatingParentId)?.name ?? "",
+            })}
         data-testid="sidebar-create-input"
       />
       <button
@@ -657,9 +706,11 @@
     on:drop={(event) => dropZoneHandlers.onDrop(event)}
     use:pointerDropZone
   >
-    {#each orderedCollections as collection (collection.id)}
+    {#each visibleRows as row (row.collection.id)}
+      {@const collection = row.collection}
       <li
         class="collection-row"
+        class:subcollection-row={collection.parent_id != null}
         style={`--collection-row-tint: ${collectionColorTint(
           collection.color_hex,
         )};`}
@@ -670,13 +721,15 @@
         data-testid="sidebar-collection-row"
         data-collection-id={collection.id}
         data-collection-kind={collection.kind}
+        data-collection-parent-id={collection.parent_id ?? null}
+        data-tree-level={row.level}
+        aria-level={row.level}
         data-droppable={isDropTarget(collection) ? "true" : "false"}
         data-drop-target={isDropTarget(collection)
           ? COLLECTION_DROP_TARGET_VALUE
           : null}
         data-collection-drop-row={collection.kind === "user" ? "true" : null}
         on:keydown={(event) => onCollectionRowKeydown(event, collection)}
-        role="presentation"
       >
         {#if renamingId === collection.id}
           <form
@@ -750,6 +803,33 @@
           {@const collectionDisplayName = isHistory(collection)
             ? $t("collections.history")
             : collection.name}
+          {#if collection.parent_id == null && collection.kind === "user" && collectionChildren(collections, collection.id).length > 0}
+            <button
+              type="button"
+              class="icon-only collection-disclosure"
+              aria-expanded={expandedCollectionIds.has(collection.id)}
+              aria-label={$t(expandedCollectionIds.has(collection.id)
+                ? "collections.collapse"
+                : "collections.expand", { name: collectionDisplayName })}
+              title={$t(expandedCollectionIds.has(collection.id)
+                ? "collections.collapse"
+                : "collections.expand", { name: collectionDisplayName })}
+              data-testid="sidebar-collection-disclosure"
+              data-collection-id={collection.id}
+              on:click={(event) => {
+                event.stopPropagation();
+                toggleExpanded(collection.id);
+              }}
+            >
+              <svg aria-hidden="true" focusable="false" width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+                {#if expandedCollectionIds.has(collection.id)}
+                  <path d="M3.5 6l4.5 4.5L12.5 6z" />
+                {:else}
+                  <path d="M6 3.5 10.5 8 6 12.5z" />
+                {/if}
+              </svg>
+            </button>
+          {/if}
           <button
             type="button"
             class="collection-button"
@@ -867,6 +947,23 @@
               }}
               on:keydown={onActionsMenuKeydown}
             >
+              {#if collection.parent_id == null && collection.kind === "user" && !hasRemoteOrigin(collection)}
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="collection-action-menu-item"
+                  aria-label={$t("collections.create_subcollection_for", { name: collectionDisplayName })}
+                  title={$t("collections.create_subcollection_for", { name: collectionDisplayName })}
+                  data-testid="sidebar-collection-create-subcollection"
+                  data-collection-id={collection.id}
+                  on:click={() => selectActionsMenuItem(startCreateSubcollection, collection)}
+                >
+                  <svg aria-hidden="true" focusable="false" width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M7.25 2.5a.75.75 0 0 1 1.5 0v4.75h4.75a.75.75 0 0 1 0 1.5H8.75v4.75a.75.75 0 0 1-1.5 0V8.75H2.5a.75.75 0 0 1 0-1.5h4.75z" />
+                  </svg>
+                  <span>{$t("collections.create_subcollection")}</span>
+                </button>
+              {/if}
               <button
                 type="button"
                 role="menuitem"
@@ -1046,6 +1143,22 @@
     max-height: 2rem;
     padding: 0 0.4rem;
     background-color: var(--collection-row-tint, transparent);
+  }
+  .collection-row.subcollection-row {
+    width: calc(100% - 1.35rem);
+    margin-inline-start: 1.35rem;
+  }
+  .collection-disclosure {
+    flex: 0 0 1rem;
+    width: 1rem;
+    height: 1.5rem;
+    padding: 0;
+    border-radius: 4px;
+    color: var(--cv-muted, #8b949e);
+  }
+  .collection-disclosure:hover,
+  .collection-disclosure:focus-visible {
+    color: var(--cv-fg, #f0f4f8);
   }
   .collection-row.active {
     box-shadow: inset 0 0 0 1px var(--cv-accent, #2563eb);

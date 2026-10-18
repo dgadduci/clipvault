@@ -1372,6 +1372,8 @@ export type CollectionKind = "system" | "user";
 
 export interface Collection {
   id: number;
+  /** Parent id for a one-level subcollection; null for root collections. */
+  parent_id?: number | null;
   /** Stable key reserved for system collections (`history` for `Historial`). */
   stable_key: string | null;
   name: string;

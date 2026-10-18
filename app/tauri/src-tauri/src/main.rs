@@ -240,6 +240,7 @@ fn main() {
             commands::clipvault_rich_text_preview,
             commands::clipvault_organization_snapshot,
             commands::clipvault_collections_create,
+            commands::clipvault_collections_create_subcollection,
             commands::clipvault_collections_rename,
             commands::clipvault_collections_delete,
             commands::clipvault_collections_delete_preview,

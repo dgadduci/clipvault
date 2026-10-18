@@ -44,22 +44,30 @@ function makeCollection(): Collection {
   };
 }
 
-test("pointer drag uses hit-testing for a scrolled collection row and persists the drop callback", { concurrency: false }, () => {
+test("pointer drag drops onto a subcollection row using its own collection id", { concurrency: false }, () => {
   const { document, restore } = installDomPolyfill();
   try {
     __resetDragSessionForTests();
     __resetPointerDragForTests();
+    const parent = makeCollection();
+    const child: Collection = {
+      ...makeCollection(),
+      id: 10,
+      name: "Subcolección",
+      parent_id: parent.id,
+    };
     const viewport = document.createElement("ul");
     const row = document.createElement("li");
     row.setAttribute("data-drop-target", COLLECTION_DROP_TARGET_VALUE);
-    row.setAttribute("data-collection-id", "9");
+    row.setAttribute("data-collection-drop-row", "true");
+    row.setAttribute("data-collection-id", String(child.id));
     viewport.appendChild(row);
     document.body.appendChild(viewport);
 
     let highlighted: number | null = null;
     let dropped: { entryId: number; collectionId: number } | null = null;
     const handlers = createCollectionDropZoneHandlers({
-      collections: [makeCollection()],
+      collections: [parent, child],
       getViewport: () => viewport,
       getDragOverCollectionId: () => highlighted,
       setDragOverCollectionId: (id) => {
@@ -106,7 +114,7 @@ test("pointer drag uses hit-testing for a scrolled collection row and persists t
 
     assert.equal(isPointerDragActive(), true);
     assert.equal(hasActiveDragSession(), true);
-    assert.equal(highlighted, 9);
+    assert.equal(highlighted, child.id);
     assert.equal(document.body.classList.contains("cv-pointer-dragging"), true);
     const ghost = document.body.querySelector(".cv-pointer-drag-ghost");
     assert.ok(ghost);
@@ -134,7 +142,7 @@ test("pointer drag uses hit-testing for a scrolled collection row and persists t
       }),
     );
 
-    assert.deepEqual(dropped, { entryId: 42, collectionId: 9 });
+    assert.deepEqual(dropped, { entryId: 42, collectionId: child.id });
     assert.equal(isPointerDragActive(), false);
     assert.equal(hasActiveDragSession(), false);
     assert.equal(document.body.classList.contains("cv-pointer-dragging"), false);

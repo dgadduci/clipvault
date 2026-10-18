@@ -1,7 +1,7 @@
 //! Local organization service.
 //!
 //! [`OrganizationService`] is the only place the rest of ClipVault
-//! uses to manage flat collections, free tags and the many-to-many
+//! uses to manage one-level collections, free tags and the many-to-many
 //! associations the sidebar and the card selectors depend on. It
 //! sits between the Tauri commands and the [`OrganizationRepository`]
 //! and enforces the rules the change contract documents:
@@ -52,6 +52,7 @@ impl OrganizationServiceError {
                 OrganizationError::TagNameTooLong(_) => "tag_name_too_long",
                 OrganizationError::TagNameTaken(_) => "tag_name_taken",
                 OrganizationError::CollectionNotFound(_) => "collection_not_found",
+                OrganizationError::InvalidCollectionParent(_) => "invalid_collection_parent",
                 OrganizationError::TagNotFound(_) => "tag_not_found",
                 OrganizationError::EntryNotFound(_) => "entry_not_found",
                 OrganizationError::SystemCollectionProtected(_) => "system_collection_protected",
@@ -178,6 +179,22 @@ impl OrganizationService {
             .next_palette_index(DEFAULT_COLLECTION_PALETTE.len());
         let color_hex = DEFAULT_COLLECTION_PALETTE[seed];
         Ok(repo.create_user_collection(name, color_hex, now)?)
+    }
+
+    pub fn create_subcollection(
+        &self,
+        context: &AppContext,
+        parent_id: i64,
+        name: &str,
+    ) -> Result<Collection, OrganizationServiceError> {
+        let now = self.clock.now();
+        let mut db = context.database().lock();
+        let mut repo = OrganizationRepository::new(db.connection_mut());
+        let seed = self
+            .rng
+            .next_palette_index(DEFAULT_COLLECTION_PALETTE.len());
+        let color_hex = DEFAULT_COLLECTION_PALETTE[seed];
+        Ok(repo.create_subcollection(parent_id, name, color_hex, now)?)
     }
 
     pub fn rename_collection(
