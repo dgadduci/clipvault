@@ -286,6 +286,8 @@
   "collections.imported_remote": "Importadas de equipo remoto",
   "collections.imported_badge": "importadas",
   "collections.actions_menu": "Acciones de {name}",
+  "collections.hide_subcollection_captures_for": "Ocultar capturas que también están en subcolecciones de {name}",
+  "collections.show_subcollection_captures_for": "Mostrar capturas que también están en subcolecciones de {name}",
   "collections.drop_peer_rejected": "No se pueden soltar capturas en colecciones importadas desde otro equipo.",
   "collections.change_color": "Cambiar color de {name}",
   "collections.change_color_hint": "Cambiar color de {name} (doble clic o Enter)",

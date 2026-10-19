@@ -139,7 +139,7 @@ test("App.svelte grid still pins two columns through grid-template-columns", () 
   // surface here as a failed pattern match.
   assert.match(
     appSource,
-    /\.layout\s*\{[^}]*grid-template-columns:\s*minmax\(180px,\s*220px\)\s*minmax\(0,\s*1fr\)/,
+    /\.layout\s*\{[^}]*grid-template-columns:\s*minmax\(198px,\s*242px\)\s*minmax\(0,\s*1fr\)/,
     ".layout must pin the grid to exactly two columns",
   );
 });

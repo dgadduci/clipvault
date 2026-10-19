@@ -35,6 +35,8 @@
 
   export let collections: Collection[] = [];
   export let activeCollectionId: number | null = null;
+  /** Principal collection ids whose shared child captures are hidden. */
+  export let hiddenSubcollectionCaptureCollectionIds: Set<number> = new Set();
   export let historyShortcutAccessible: string = "";
   /**
    * Snapshot the parent polls on every refresh / pairing close so
@@ -60,6 +62,10 @@
     delete: { collectionId: number };
     "card-drop": { entryId: number; collectionId: number };
     "peer-bound-drop": Record<string, never>;
+    "toggle-subcollection-captures": {
+      collectionId: number;
+      show: boolean;
+    };
     "set-color": { collectionId: number; colorHex: string };
     "select-peer": { peerId: string };
   };
@@ -274,6 +280,17 @@
     noteReturnFocusTarget = event.currentTarget as HTMLButtonElement;
   }
 
+  function toggleSubcollectionCaptures(
+    collection: Collection,
+    event: MouseEvent,
+  ): void {
+    event.stopPropagation();
+    dispatch("toggle-subcollection-captures", {
+      collectionId: collection.id,
+      show: hiddenSubcollectionCaptureCollectionIds.has(collection.id),
+    });
+  }
+
   function closeCollectionNote(): void {
     pendingNoteCollection = null;
   }
@@ -473,6 +490,21 @@
       event.preventDefault();
       startRename(collection);
     }
+  }
+
+  function onCollectionRowClick(
+    event: MouseEvent,
+    collection: Collection,
+  ): void {
+    const target = event.target;
+    if (
+      !(target instanceof Element) ||
+      target.closest("button, [role='menu']") ||
+      !target.closest(".badge")
+    ) {
+      return;
+    }
+    selectCollection(collection.id);
   }
 
   // ---------------------------------------------------------------
@@ -730,6 +762,7 @@
           : null}
         data-collection-drop-row={collection.kind === "user" ? "true" : null}
         on:keydown={(event) => onCollectionRowKeydown(event, collection)}
+        on:click={(event) => onCollectionRowClick(event, collection)}
       >
         {#if renamingId === collection.id}
           <form
@@ -848,33 +881,63 @@
             data-collection-id={collection.id}
           >
             <span class="collection-name">{collectionDisplayName}</span>
-            {#if isHistory(collection)}
-              <span
-                class="badge system"
-                aria-label={$t("collections.system_protected")}
-              >
-                {$t("collections.system_badge")}
-              </span>
-            {:else if hasRemoteOrigin(collection)}
-              <span
-                class="badge remote"
-                data-testid="sidebar-collection-remote-origin"
-                data-peer-bound="true"
-                aria-label={remoteOriginLabel(collection, $t)}
-                title={remoteOriginLabel(collection, $t)}
-              >
-                {$t("collections.imported_badge")}
-              </span>
-            {/if}
-            <span
-              class="badge capture-count"
-              aria-hidden="true"
-              data-testid="sidebar-collection-count"
-              data-count={collection.capture_count ?? 0}
-            >
-              {collection.capture_count ?? 0}
-            </span>
           </button>
+          {#if collection.parent_id == null && collection.kind === "user" && collectionChildren(collections, collection.id).length > 0}
+            {@const showSubcollectionCaptures = !hiddenSubcollectionCaptureCollectionIds.has(collection.id)}
+            <button
+              type="button"
+              class="icon-only subcollection-visibility-icon"
+              aria-pressed={showSubcollectionCaptures}
+              aria-label={$t(showSubcollectionCaptures
+                ? "collections.hide_subcollection_captures_for"
+                : "collections.show_subcollection_captures_for", {
+                  name: collectionDisplayName,
+                })}
+              title={$t(showSubcollectionCaptures
+                ? "collections.hide_subcollection_captures_for"
+                : "collections.show_subcollection_captures_for", {
+                  name: collectionDisplayName,
+                })}
+              data-testid="sidebar-collection-subcollection-visibility"
+              data-collection-id={collection.id}
+              data-show-subcollection-captures={showSubcollectionCaptures ? "true" : "false"}
+              on:click={(event) => toggleSubcollectionCaptures(collection, event)}
+            >
+              <svg aria-hidden="true" focusable="false" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M2.5 12s3.4-6.25 9.5-6.25S21.5 12 21.5 12 18.1 18.25 12 18.25 2.5 12 2.5 12Z" />
+                <circle cx="12" cy="12" r="2.75" />
+                {#if !showSubcollectionCaptures}
+                  <path d="m4 4 16 16" />
+                {/if}
+              </svg>
+            </button>
+          {/if}
+          {#if isHistory(collection)}
+            <span
+              class="badge system"
+              aria-label={$t("collections.system_protected")}
+            >
+              {$t("collections.system_badge")}
+            </span>
+          {:else if hasRemoteOrigin(collection)}
+            <span
+              class="badge remote"
+              data-testid="sidebar-collection-remote-origin"
+              data-peer-bound="true"
+              aria-label={remoteOriginLabel(collection, $t)}
+              title={remoteOriginLabel(collection, $t)}
+            >
+              {$t("collections.imported_badge")}
+            </span>
+          {/if}
+          <span
+            class="badge capture-count"
+            aria-hidden="true"
+            data-testid="sidebar-collection-count"
+            data-count={collection.capture_count ?? 0}
+          >
+            {collection.capture_count ?? 0}
+          </span>
           <button
             type="button"
             class="icon-only note-icon"
@@ -1274,7 +1337,6 @@
     padding: 0.05rem 0.35rem;
     text-align: center;
     border: 1px solid var(--cv-border, #30363d);
-    pointer-events: none;
   }
   /*
    * Remote-origin marker rendered next to a user collection
@@ -1328,6 +1390,12 @@
   .note-icon[data-has-note="true"] {
     color: #bfdbfe;
     background: rgba(59, 130, 246, 0.12);
+  }
+  .subcollection-visibility-icon {
+    color: #93c5fd;
+  }
+  .subcollection-visibility-icon[aria-pressed="false"] {
+    color: var(--cv-muted, #94a3b8);
   }
   .actions-menu-trigger {
     color: var(--cv-muted, #94a3b8);

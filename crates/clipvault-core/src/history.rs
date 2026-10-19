@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use thiserror::Error;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use clipvault_db::{
     ContentType, EntryOutcome, EntryRepository, EntryRepositoryError, NewEntry, SourceAppFilter,
@@ -277,6 +277,21 @@ impl TextHistoryService {
         };
 
         self.record_payload(context, text, source_app)
+    }
+
+    /// Read and persist a direct text capture, then add its active local
+    /// collection membership when the capture produced or reused an entry.
+    /// A stale or ineligible destination does not change the successful
+    /// Historial outcome.
+    pub fn record_text_with_collection(
+        &self,
+        context: &AppContext,
+        source_app: Option<&str>,
+        collection_id: Option<i64>,
+    ) -> HistoryOutcome {
+        let outcome = self.record_text(context, source_app);
+        self.add_outcome_to_local_collection(context, &outcome, collection_id);
+        outcome
     }
 
     /// Persist a textual payload that has already been read from the
@@ -811,6 +826,42 @@ impl TextHistoryService {
         let mut db = context.database().lock();
         let repo = EntryRepository::new(db.connection_mut());
         Ok(repo.count()?)
+    }
+
+    /// Add an existing captured entry to a local collection without
+    /// replacing its other memberships. The repository validates the
+    /// collection again at write time so a stale or peer-bound selection
+    /// cannot redirect local captures.
+    pub fn add_entry_to_local_collection(
+        &self,
+        context: &AppContext,
+        entry_id: i64,
+        collection_id: i64,
+    ) -> Result<(), HistoryServiceError> {
+        let mut db = context.database().lock();
+        let mut repo = EntryRepository::new(db.connection_mut());
+        repo.add_entry_to_local_collection(entry_id, collection_id, self.clock.now())?;
+        Ok(())
+    }
+
+    /// Add the supplied collection to a successful capture outcome. Other
+    /// memberships remain intact, and assignment failures remain non-fatal
+    /// because the capture is already committed to Historial.
+    pub fn add_outcome_to_local_collection(
+        &self,
+        context: &AppContext,
+        outcome: &HistoryOutcome,
+        collection_id: Option<i64>,
+    ) {
+        let (Some(entry_id), Some(collection_id)) = (outcome.id(), collection_id) else {
+            return;
+        };
+        if self
+            .add_entry_to_local_collection(context, entry_id, collection_id)
+            .is_err()
+        {
+            debug!("capture was kept in Historial; active collection assignment was skipped");
+        }
     }
 
     /// Validate the user-supplied title before the GUI persists it.
@@ -1439,6 +1490,46 @@ mod tests {
                 .expect("memberships")
         };
         assert!(memberships.contains(&collection_id));
+    }
+
+    #[test]
+    fn direct_text_capture_adds_selected_collection_for_new_and_duplicate_rows() {
+        let (context, _) = isolated_service();
+        let clipboard = Arc::new(crate::FakeClipboard::with_text("direct capture"));
+        let clock: Arc<dyn Clock> =
+            Arc::new(crate::FixedClock::new(time::OffsetDateTime::UNIX_EPOCH));
+        let service = TextHistoryService::new(
+            clipboard.clone() as Arc<dyn Clipboard>,
+            clock,
+            Arc::new(crate::FakeApplicationMetadataProvider::default())
+                as Arc<dyn clipvault_platform::ApplicationMetadataProvider>,
+        );
+        let first_collection_id = create_user_collection(&context, "First collection");
+        let second_collection_id = create_user_collection(&context, "Second collection");
+
+        let stored = service.record_text_with_collection(&context, None, Some(first_collection_id));
+        let HistoryOutcome::Stored { id } = stored else {
+            panic!("expected stored capture, got {stored:?}");
+        };
+
+        clipboard.set_text("direct capture");
+        assert_eq!(
+            service.record_text_with_collection(&context, None, Some(second_collection_id)),
+            HistoryOutcome::Duplicate { id }
+        );
+
+        let memberships = context
+            .organization()
+            .entry_collection_ids(&context, id)
+            .expect("capture memberships");
+        let history_id = context
+            .organization()
+            .history_collection_id(&context)
+            .expect("history collection");
+        assert!(memberships.contains(&history_id));
+        assert!(memberships.contains(&first_collection_id));
+        assert!(memberships.contains(&second_collection_id));
+        assert_eq!(memberships.len(), 3);
     }
 
     #[test]

@@ -79,6 +79,19 @@ impl SharedState {
         self.inner.watcher.is_capture_enabled()
     }
 
+    /// Return the runtime local collection selection used by automatic
+    /// capture assignment.
+    pub fn active_capture_collection_id(&self) -> Option<i64> {
+        self.inner.watcher.active_collection_id()
+    }
+
+    /// Update the runtime local collection selection shared by every watcher
+    /// clone. The persistence layer validates eligibility when an entry is
+    /// assigned.
+    pub fn set_active_capture_collection_id(&self, collection_id: Option<i64>) {
+        self.inner.watcher.set_active_collection_id(collection_id);
+    }
+
     /// Persist and atomically apply a requested state, or toggle it when
     /// `requested` is `None`. The watcher gate serializes this transition
     /// with every in-flight local capture.

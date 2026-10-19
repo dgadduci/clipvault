@@ -473,15 +473,25 @@ pub fn clipvault_capture_text(
 ) -> Result<CaptureResponse, CommandError> {
     let _ = source_app;
     let Some(outcome) = state.with_capture_enabled(|| {
+        let active_collection_id = state.active_capture_collection_id();
         let identifier = crate::bootstrap::resolved_source_identifier(state.context());
-        state
-            .context()
-            .history()
-            .record_text(state.context(), identifier.as_deref())
+        let history = state.context().history();
+        history.record_text_with_collection(
+            state.context(),
+            identifier.as_deref(),
+            active_collection_id,
+        )
     }) else {
         return Ok(CaptureResponse::paused());
     };
     Ok(CaptureResponse::from_outcome(outcome))
+}
+
+/// Set or clear the process-local collection destination used by clipboard
+/// captures. The core validates the collection again when assigning an entry.
+#[tauri::command]
+pub fn clipvault_capture_collection_set(state: State<'_, SharedState>, collection_id: Option<i64>) {
+    state.set_active_capture_collection_id(collection_id);
 }
 
 #[tauri::command]

@@ -357,7 +357,7 @@ test("App.svelte keeps the two-column grid with stretch alignment and min-width:
   // stays bounded while the right column owns the rest of the row.
   assert.match(
     source,
-    /grid-template-columns:\s*minmax\(180px,\s*220px\)\s*minmax\(0,\s*1fr\)/,
+    /grid-template-columns:\s*minmax\(198px,\s*242px\)\s*minmax\(0,\s*1fr\)/,
   );
   // `align-items: stretch` is the new contract that lets the
   // sidebar grow with the right column instead of pinning to a

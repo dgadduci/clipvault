@@ -175,6 +175,20 @@ test("Desktop layout stretches both columns to the rail height", () => {
   );
 });
 
+test("Desktop layout gives the collections and linked teams panel 10% more width", () => {
+  const source = loadSource("src/App.svelte");
+  assert.match(
+    source,
+    /\.layout\s*\{[^}]*grid-template-columns:\s*minmax\(198px,\s*242px\)\s+minmax\(0,\s*1fr\)/,
+    "the sidebar grid column must grow from 180–220px to 198–242px",
+  );
+  assert.match(
+    source,
+    /@media\s*\(max-width:\s*720px\)[\s\S]*?\.layout\s*\{\s*grid-template-columns:\s*1fr/,
+    "the mobile single-column layout must remain unchanged",
+  );
+});
+
 test("HistoryCardRail pins the rail height to the same token", () => {
   const source = loadSource("src/HistoryCardRail.svelte");
   // The rail height must come from the same `--cv-card-rail-height`

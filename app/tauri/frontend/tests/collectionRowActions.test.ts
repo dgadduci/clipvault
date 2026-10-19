@@ -24,22 +24,43 @@ test("collection rows use their assigned color as a translucent background", () 
   );
 });
 
-test("the collection selection row contains only its name and applicable badges", () => {
+test("the collection selection button contains only its name", () => {
   const selectionButton = sidebar.match(
     /<button\s+type="button"\s+class="collection-button"[\s\S]*?<\/button>/,
   );
   assert.ok(selectionButton, "collection selection button must exist");
   assert.match(selectionButton[0], /class="collection-name"/);
-  assert.match(selectionButton[0], /class="badge system"/);
-  assert.match(selectionButton[0], /class="badge remote"/);
-  assert.match(selectionButton[0], /class="badge capture-count"/);
-  assert.doesNotMatch(selectionButton[0], /<svg|sidebar-collection-color|sidebar-collection-note|sidebar-collection-delete/);
-  const rowActions = sidebar.match(
-    /class="collection-button"[\s\S]*?<\/button>\s*([\s\S]*?)<button[\s\S]*?class="icon-only actions-menu-trigger"/,
+  assert.doesNotMatch(
+    selectionButton[0],
+    /<svg|class="badge|sidebar-collection-(?:color|note|subcollection-visibility|count|remote-origin|delete)/,
   );
-  assert.ok(rowActions, "collection row controls must follow the selection button");
-  assert.match(rowActions[1], /class="icon-only note-icon"[\s\S]*?data-testid="sidebar-collection-note"/);
-  assert.doesNotMatch(rowActions[1], /sidebar-collection-color|sidebar-collection-delete/);
+  const rowActions = sidebar.match(
+    /data-testid="sidebar-collection-button"[\s\S]*?data-testid="sidebar-collection-menu-trigger"/,
+  );
+  assert.ok(rowActions, "collection row controls must include name, visibility, badges, note, and menu actions");
+  const rowActionOrder = [
+    'class="collection-name"',
+    'data-testid="sidebar-collection-subcollection-visibility"',
+    'class="badge system"',
+    'class="badge remote"',
+    'data-testid="sidebar-collection-count"',
+    'data-testid="sidebar-collection-note"',
+    'data-testid="sidebar-collection-menu-trigger"',
+  ].map((marker) => rowActions[0].indexOf(marker));
+  assert.ok(
+    rowActionOrder.every((index, position) => index >= 0 && (position === 0 || index > rowActionOrder[position - 1])),
+    "row actions must follow name, eye, badges, note, and menu order",
+  );
+  assert.match(
+    sidebar,
+    /\{#if collection\.parent_id == null && collection\.kind === "user" && collectionChildren\(collections, collection\.id\)\.length > 0\}[\s\S]*?data-testid="sidebar-collection-subcollection-visibility"/,
+  );
+  assert.match(rowActions[0], /aria-pressed=\{showSubcollectionCaptures\}/);
+  assert.doesNotMatch(rowActions[0], /sidebar-collection-color|sidebar-collection-delete/);
+  assert.match(
+    sidebar,
+    /function onCollectionRowClick\([\s\S]*?target\.closest\("button, \[role='menu'\]"\)[\s\S]*?!target\.closest\("\.badge"\)[\s\S]*?selectCollection\(collection\.id\)/,
+  );
   assert.match(sidebar, /noteReturnFocusTarget = event\.currentTarget as HTMLButtonElement/);
 });
 

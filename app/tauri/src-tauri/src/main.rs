@@ -186,6 +186,7 @@ fn main() {
             commands::clipvault_database_path,
             commands::clipvault_migrations_applied,
             commands::clipvault_capture_text,
+            commands::clipvault_capture_collection_set,
             commands::clipvault_recent_entries,
             commands::clipvault_recent_entries_filtered,
             commands::clipvault_history_count,

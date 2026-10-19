@@ -119,9 +119,10 @@ pub struct Collection {
     pub stable_key: Option<String>,
     pub name: String,
     pub kind: CollectionKind,
-    /// Number of distinct history entries currently associated with
-    /// this collection. It is projected by collection queries from
-    /// `entry_collections`; it is not persisted as a separate counter.
+    /// Number of capture-count contributions represented by this collection.
+    /// Root user collections add parent-only memberships to each direct
+    /// subcollection's count; subcollections and system collections use their
+    /// own memberships. Projected from `entry_collections`, never persisted.
     pub capture_count: i64,
     /// Normalised `#rrggbb` colour the sidebar square and the card
     /// labels render. The repository refuses any other value at write
@@ -273,8 +274,31 @@ impl<'a> OrganizationRepository<'a> {
              LEFT JOIN known_peers kp ON kp.peer_id = pcb.peer_id
              LEFT JOIN collection_notes cn ON cn.collection_id = c.id
              LEFT JOIN (
-                 SELECT collection_id, COUNT(DISTINCT entry_id) AS capture_count
-                 FROM entry_collections
+                 SELECT collection_id, COUNT(*) AS capture_count
+                 FROM (
+                     SELECT ec.collection_id, ec.entry_id
+                     FROM entry_collections ec
+                     JOIN collections owner ON owner.id = ec.collection_id
+                     WHERE owner.parent_id IS NOT NULL
+                        OR NOT EXISTS (
+                            SELECT 1
+                            FROM collections child
+                            JOIN entry_collections child_entries
+                              ON child_entries.collection_id = child.id
+                            WHERE child.parent_id = owner.id
+                              AND child_entries.entry_id = ec.entry_id
+                        )
+                     UNION ALL
+                     SELECT parent.id AS collection_id, child_entries.entry_id
+                     FROM collections parent
+                     JOIN collections child
+                       ON child.parent_id = parent.id
+                      AND child.kind = 'user'
+                     JOIN entry_collections child_entries
+                       ON child_entries.collection_id = child.id
+                     WHERE parent.parent_id IS NULL
+                       AND parent.kind = 'user'
+                 ) collection_count_contributions
                  GROUP BY collection_id
              ) entry_counts ON entry_counts.collection_id = c.id
              ORDER BY CASE WHEN c.kind = 'system' THEN 0 ELSE 1 END,
@@ -313,8 +337,31 @@ impl<'a> OrganizationRepository<'a> {
                  LEFT JOIN known_peers kp ON kp.peer_id = pcb.peer_id
                  LEFT JOIN collection_notes cn ON cn.collection_id = c.id
                  LEFT JOIN (
-                     SELECT collection_id, COUNT(DISTINCT entry_id) AS capture_count
-                     FROM entry_collections
+                     SELECT collection_id, COUNT(*) AS capture_count
+                     FROM (
+                         SELECT ec.collection_id, ec.entry_id
+                         FROM entry_collections ec
+                         JOIN collections owner ON owner.id = ec.collection_id
+                         WHERE owner.parent_id IS NOT NULL
+                            OR NOT EXISTS (
+                                SELECT 1
+                                FROM collections child
+                                JOIN entry_collections child_entries
+                                  ON child_entries.collection_id = child.id
+                                WHERE child.parent_id = owner.id
+                                  AND child_entries.entry_id = ec.entry_id
+                            )
+                         UNION ALL
+                         SELECT parent.id AS collection_id, child_entries.entry_id
+                         FROM collections parent
+                         JOIN collections child
+                           ON child.parent_id = parent.id
+                          AND child.kind = 'user'
+                         JOIN entry_collections child_entries
+                           ON child_entries.collection_id = child.id
+                         WHERE parent.parent_id IS NULL
+                           AND parent.kind = 'user'
+                     ) collection_count_contributions
                      GROUP BY collection_id
                  ) entry_counts ON entry_counts.collection_id = c.id
                  WHERE c.id = ?1",
@@ -1675,6 +1722,189 @@ mod tests {
             .expect("parent lookup")
             .is_some());
         assert!(org.find_collection(other).expect("other lookup").is_some());
+    }
+
+    #[test]
+    fn parent_badge_sums_subcollection_counts_and_refreshes_after_removal() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (parent, child_one, child_two, other) = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            let parent = org
+                .create_user_collection("Principal", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("parent");
+            let child_one = org
+                .create_subcollection(parent.id, "Hija uno", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("first child");
+            let child_two = org
+                .create_subcollection(parent.id, "Hija dos", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("second child");
+            let other = org
+                .create_user_collection("Otra", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("other");
+            (parent.id, child_one.id, child_two.id, other.id)
+        };
+
+        let parent_only = insert_text_entry(db.connection_mut(), "parent only", when);
+        let child_one_only = insert_text_entry(db.connection_mut(), "child one only", when);
+        let child_two_only = insert_text_entry(db.connection_mut(), "child two only", when);
+        let shared = insert_text_entry(db.connection_mut(), "shared children", when);
+        let other_only = insert_text_entry(db.connection_mut(), "other only", when);
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.replace_entry_collections(parent_only, &[parent], when)
+                .expect("parent membership");
+            org.replace_entry_collections(child_one_only, &[child_one], when)
+                .expect("first child membership");
+            org.replace_entry_collections(child_two_only, &[child_two], when)
+                .expect("second child membership");
+            org.replace_entry_collections(shared, &[parent, child_one, child_two], when)
+                .expect("shared memberships");
+            org.replace_entry_collections(other_only, &[other], when)
+                .expect("other membership");
+        }
+
+        {
+            let org = OrganizationRepository::new(db.connection_mut());
+            let rows = org.list_collections().expect("list counts");
+            let count = |id| {
+                rows.iter()
+                    .find(|collection| collection.id == id)
+                    .expect("collection row")
+                    .capture_count
+            };
+            assert_eq!(
+                count(parent),
+                5,
+                "parent adds child counts and excludes overlapping direct memberships"
+            );
+            assert_eq!(count(child_one), 2, "first child counts direct memberships");
+            assert_eq!(
+                count(child_two),
+                2,
+                "second child counts direct memberships"
+            );
+            assert_eq!(count(other), 1, "unrelated collection remains independent");
+            assert_eq!(
+                org.find_collection(parent)
+                    .expect("find parent")
+                    .expect("parent row")
+                    .capture_count,
+                5,
+                "individual lookup uses the same subtree count"
+            );
+        }
+
+        let clear_preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_clear(parent)
+                .expect("parent direct-membership preview")
+        };
+        assert_eq!(clear_preview.entries, 2);
+        let cleared = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.clear_collection_with_scope(parent, false, clear_preview)
+                .expect("clear direct parent memberships")
+        };
+        assert_eq!(
+            cleared,
+            CollectionClearOutcome::Cleared { removed_entries: 0 }
+        );
+        {
+            let org = OrganizationRepository::new(db.connection_mut());
+            let rows = org.list_collections().expect("list after clear");
+            let parent_row = rows
+                .iter()
+                .find(|collection| collection.id == parent)
+                .expect("parent remains");
+            assert_eq!(
+                parent_row.capture_count, 4,
+                "clearing direct memberships leaves child entries in the parent total"
+            );
+        }
+
+        let deletion_preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_deletion(child_one)
+                .expect("child deletion preview")
+        };
+        assert_eq!(deletion_preview.entries, 2);
+        let deleted = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.delete_collection_with_scope(child_one, true, deletion_preview)
+                .expect("delete child and its captures everywhere")
+        };
+        assert_eq!(
+            deleted,
+            CollectionDeletionOutcome::Deleted { removed_entries: 2 }
+        );
+
+        let org = OrganizationRepository::new(db.connection_mut());
+        let rows = org.list_collections().expect("list after child deletion");
+        let count = |id| {
+            rows.iter()
+                .find(|collection| collection.id == id)
+                .expect("remaining collection row")
+                .capture_count
+        };
+        assert_eq!(
+            count(parent),
+            1,
+            "deleted child entries leave the parent total"
+        );
+        assert_eq!(
+            count(child_two),
+            1,
+            "shared deleted entry leaves the sibling"
+        );
+        assert_eq!(count(other), 1, "unrelated collection is unchanged");
+        assert!(org
+            .find_collection(child_one)
+            .expect("find deleted child")
+            .is_none());
+
+        let deletion_preview = org
+            .preview_collection_deletion(parent)
+            .expect("parent deletion preview");
+        assert_eq!(deletion_preview.entries, 1);
+        let deleted_parent = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.delete_collection_with_scope(parent, true, deletion_preview)
+                .expect("delete parent, children and their remaining captures")
+        };
+        assert_eq!(
+            deleted_parent,
+            CollectionDeletionOutcome::Deleted { removed_entries: 1 }
+        );
+
+        let org = OrganizationRepository::new(db.connection_mut());
+        assert!(org
+            .find_collection(parent)
+            .expect("find deleted parent")
+            .is_none());
+        assert!(org
+            .find_collection(child_two)
+            .expect("find deleted sibling")
+            .is_none());
+        assert_eq!(
+            org.find_collection(
+                org.system_collection_id(HISTORY_STABLE_KEY)
+                    .expect("history id")
+                    .expect("history")
+            )
+            .expect("find History")
+            .expect("History row")
+            .capture_count,
+            2,
+            "deleting the parent tree removes its remaining capture from History"
+        );
+        assert_eq!(
+            org.find_collection(other)
+                .expect("find unrelated collection")
+                .expect("unrelated row")
+                .capture_count,
+            1
+        );
     }
 
     #[test]

@@ -286,6 +286,8 @@
   "collections.imported_remote": "Von einem anderen Gerät importiert",
   "collections.imported_badge": "Importiert",
   "collections.actions_menu": "Aktionen für {name}",
+  "collections.hide_subcollection_captures_for": "Einträge aus Unterkollektionen von {name} ausblenden",
+  "collections.show_subcollection_captures_for": "Einträge aus Unterkollektionen von {name} anzeigen",
   "collections.drop_peer_rejected": "Einträge können nicht in Sammlungen von anderen Geräten gezogen werden.",
   "collections.change_color": "Farbe von {name} ändern",
   "collections.change_color_hint": "Farbe von {name} ändern (Doppelklick oder Enter)",

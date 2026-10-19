@@ -286,6 +286,8 @@
   "collections.imported_remote": "Imported from remote device",
   "collections.imported_badge": "imported",
   "collections.actions_menu": "Actions for {name}",
+  "collections.hide_subcollection_captures_for": "Hide captures also in subcollections of {name}",
+  "collections.show_subcollection_captures_for": "Show captures also in subcollections of {name}",
   "collections.drop_peer_rejected": "Captures cannot be dropped into collections imported from another device.",
   "collections.change_color": "Change color for {name}",
   "collections.change_color_hint": "Change color for {name} (double-click or Enter)",

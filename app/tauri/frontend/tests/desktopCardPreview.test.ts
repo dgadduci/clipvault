@@ -105,8 +105,8 @@ test("App.svelte closes the preview when the visible scope changes", () => {
     appSource.length,
   );
   assert.ok(
-    body.includes("visibleEntries.some"),
-    "bumpPreviewScope must consult visibleEntries so a stale entry closes the preview",
+    body.includes("displayVisibleEntries.some"),
+    "bumpPreviewScope must consult filtered rail entries so a hidden entry closes the preview",
   );
 });
 

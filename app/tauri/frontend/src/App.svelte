@@ -34,6 +34,7 @@
   } from "./types";
   import {
     activeApplicationCommand,
+    captureCollectionSetCommand,
     clearUnorganizedHistoryCommand,
     contextualDesktopSetupDismissCommand,
     contextualDesktopSetupDismissalsGetCommand,
@@ -71,6 +72,10 @@
     unorganizedClearableCountCommand,
   } from "./lib/tauri";
   import { retryGuidance } from "./lib/guidance";
+  import {
+    createActiveCaptureCollectionSync,
+    resolveActiveCaptureCollectionId,
+  } from "./lib/activeCaptureCollectionSync";
   import { contextualDesktopSetupCandidates } from "./lib/contextualDesktopSetupGuidance";
   import { startAutomaticUpdateCheck } from "./lib/applicationUpdates";
   import { runSearch } from "./lib/search";
@@ -99,6 +104,7 @@
   import {
     applyCodeLanguageToDesktopProjections,
   } from "./lib/codeLanguageProjections";
+  import { projectSubcollectionVisibility } from "./lib/subcollectionVisibility";
   import {
     matchesSearchShortcut,
     searchShortcutAccessibleLabel,
@@ -293,6 +299,18 @@
 
   let organization: OrganizationSnapshot | null = null;
   let selectedCollectionId: number | null = null;
+  const syncActiveCaptureCollection = createActiveCaptureCollectionSync(
+    (collectionId) => captureCollectionSetCommand({ collectionId }),
+  );
+  function updateActiveCaptureCollection(collectionId: number | null): void {
+    void syncActiveCaptureCollection(collectionId).catch((error) => {
+      console.warn(
+        "active capture collection update failed:",
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+  }
+  let hiddenSubcollectionCaptureCollectionIds: Set<number> = new Set();
   let historyCollectionId: number | null = null;
   /**
    * Source-application filter the desktop toolbar's combobox owns.
@@ -456,6 +474,24 @@
   $: activeCollection = organization?.collections.find(
     (c) => c.id === selectedCollectionId,
   ) ?? null;
+  $: showActiveSubcollectionCaptures = activeCollection === null ||
+    !hiddenSubcollectionCaptureCollectionIds.has(activeCollection.id);
+  $: displayVisibleEntries = projectSubcollectionVisibility(
+    visibleEntries,
+    activeCollection?.id ?? null,
+    organization?.collections ?? [],
+    entryOrganization,
+    entryOrganizationHydration,
+    showActiveSubcollectionCaptures,
+  );
+  $: displayScopeEntries = projectSubcollectionVisibility(
+    entries,
+    activeCollection?.id ?? null,
+    organization?.collections ?? [],
+    entryOrganization,
+    entryOrganizationHydration,
+    showActiveSubcollectionCaptures,
+  );
   /**
    * The `Historial` view is the absence of a selected collection id
    * (the rail renders the recent-entries feed) OR the active
@@ -494,6 +530,14 @@
       return collectionFilter.collectionId;
     }
     return activeCollectionScopeId(collectionId);
+  }
+
+  function hidesSharedSubcollectionCaptures(collectionId: number | null): boolean {
+    return collectionId !== null &&
+      hiddenSubcollectionCaptureCollectionIds.has(collectionId) &&
+      (organization?.collections ?? []).some(
+        (collection) => collection.parent_id === collectionId,
+      );
   }
 
   $: canCreateManualText = activePeerId === null && (
@@ -557,15 +601,15 @@
     previewScopeToken += 1;
     if (previewEntry === null) return;
     const stillVisible =
-      visibleEntries.some((candidate) => candidate.id === previewEntry!.id) ||
-      entries.some((candidate) => candidate.id === previewEntry!.id);
+      displayVisibleEntries.some((candidate) => candidate.id === previewEntry!.id) ||
+      displayScopeEntries.some((candidate) => candidate.id === previewEntry!.id);
     if (!stillVisible) {
       previewEntry = null;
       previewTrigger = null;
     }
   }
 
-  $: visibleEntries, entries, bumpPreviewScope();
+  $: displayVisibleEntries, displayScopeEntries, entries, bumpPreviewScope();
 
   /**
    * Select a peer from the `Equipos vinculados` list. The helper
@@ -578,6 +622,13 @@
   function selectPeer(peerId: string): void {
     if (peerId === activePeerId) return;
     activePeerId = peerId;
+    updateActiveCaptureCollection(
+      resolveActiveCaptureCollectionId(
+        selectedCollectionId,
+        activePeerId,
+        organization?.collections ?? [],
+      ),
+    );
   }
 
   /**
@@ -589,6 +640,13 @@
     const previous = activePeerId;
     activePeerId = null;
     if (previous !== null) {
+      updateActiveCaptureCollection(
+        resolveActiveCaptureCollectionId(
+          selectedCollectionId,
+          activePeerId,
+          organization?.collections ?? [],
+        ),
+      );
       void peerHistoryForgetCommand({ peer_id: previous });
       void peerImageThumbnailForgetCommand({ peer_id: previous });
     }
@@ -756,7 +814,7 @@
 
   async function hydrateEntryOrganization(
     entries: EntryRecord[],
-    options: { force?: boolean } = {},
+    options: { force?: boolean; additionalEntries?: EntryRecord[] } = {},
   ): Promise<void> {
     // The hydration round is anchored on a monotonic token so a
     // stale response can never overwrite a fresher commit (e.g. a
@@ -774,9 +832,20 @@
     entryOrganization = reconciled.nextOrganization;
     entryOrganizationHydration = reconciled.nextHydration;
 
-    const pendingEntries = selectPendingEntries(entries, entryOrganizationHydration, {
+    const pendingVisibleEntries = selectPendingEntries(entries, entryOrganizationHydration, {
       force: options.force,
     });
+    const pendingAdditionalEntries = options.additionalEntries === undefined
+      ? []
+      : selectPendingEntries(
+          options.additionalEntries,
+          entryOrganizationHydration,
+          { force: options.force },
+        );
+    const pendingEntries = Array.from(new Map(
+      [...pendingVisibleEntries, ...pendingAdditionalEntries]
+        .map((entry) => [entry.id, entry] as const),
+    ).values());
     if (pendingEntries.length === 0) {
       return;
     }
@@ -1239,11 +1308,43 @@
     await selectCollectionById(event.detail.collectionId);
   }
 
+  async function handleSubcollectionCaptureVisibility(
+    event: CustomEvent<{ collectionId: number; show: boolean }>,
+  ): Promise<void> {
+    const { collectionId, show } = event.detail;
+    const nextHiddenIds = new Set(hiddenSubcollectionCaptureCollectionIds);
+    if (show) {
+      nextHiddenIds.delete(collectionId);
+    } else {
+      nextHiddenIds.add(collectionId);
+    }
+    hiddenSubcollectionCaptureCollectionIds = nextHiddenIds;
+
+    if (
+      !show &&
+      selectedCollectionId === collectionId &&
+      isFiltering &&
+      visibleEntries.length > 0
+    ) {
+      await hydrateEntryOrganization(entries, { additionalEntries: visibleEntries });
+    }
+  }
+
   async function selectCollectionById(
     targetCollectionId: number | null,
   ): Promise<void> {
     selectedCollectionId = targetCollectionId;
+    if (activePeerId === null) {
+      updateActiveCaptureCollection(
+        resolveActiveCaptureCollectionId(
+          selectedCollectionId,
+          activePeerId,
+          organization?.collections ?? [],
+        ),
+      );
+    }
     collectionFilter = { kind: "all" };
+    resetSearchForCollectionSwitch();
     clearingOldCollectionContent = true;
     collectionContentLoading = true;
     entriesLoadToken += 1;
@@ -1879,9 +1980,9 @@
         // expects the shortcut to be inert until they pick a row.
         return;
       }
-      const targetEntry = visibleEntries.find(
+      const targetEntry = displayVisibleEntries.find(
         (entry) => entry.id === railSelectedEntryId,
-      ) ?? entries.find((entry) => entry.id === railSelectedEntryId);
+      ) ?? displayScopeEntries.find((entry) => entry.id === railSelectedEntryId);
       if (!targetEntry) return;
       event.preventDefault();
       event.stopPropagation();
@@ -1939,9 +2040,9 @@
       }
       const targetEntryId = resolveEditTextShortcutEntryId(target);
       if (targetEntryId === null) return;
-      const targetEntry = visibleEntries.find(
+      const targetEntry = displayVisibleEntries.find(
         (entry) => entry.id === targetEntryId,
-      ) ?? entries.find((entry) => entry.id === targetEntryId);
+      ) ?? displayScopeEntries.find((entry) => entry.id === targetEntryId);
       if (!targetEntry) return;
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -1995,9 +2096,9 @@
       ) {
         return;
       }
-      const selectedEntry = visibleEntries.find(
+      const selectedEntry = displayVisibleEntries.find(
         (entry) => entry.id === railSelectedEntryId,
-      ) ?? entries.find((entry) => entry.id === railSelectedEntryId);
+      ) ?? displayScopeEntries.find((entry) => entry.id === railSelectedEntryId);
       if (!selectedEntry) return;
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -2143,6 +2244,16 @@
   }
 
   let searchToken = 0;
+  function resetSearchForCollectionSwitch(): void {
+    searchQuery = "";
+    searchToken += 1;
+    searchController?.cancel();
+    searchController = null;
+    searchError = null;
+    searching = false;
+    searchStatus = "idle";
+  }
+
   async function performSearch(
     query: string,
     options: { silent?: boolean } = {},
@@ -2193,6 +2304,12 @@
       const records = response.hits
         .map((hit) => hit.record)
         .filter((record) => record !== undefined);
+      if (hidesSharedSubcollectionCaptures(selectedCollectionId)) {
+        // Search hits can fall outside the recent-entry cache. Load only
+        // their metadata-only memberships before applying the child filter.
+        await hydrateEntryOrganization(entries, { additionalEntries: records });
+        if (token !== searchToken) return;
+      }
       visibleEntries = records;
       void refreshPeerImportedSourceApps(records);
       searchStatus = records.length === 0 ? "no_matches" : "ok";
@@ -2688,6 +2805,9 @@
   }
 
   onMount(() => {
+    // The backend watcher can outlive a webview reload. Re-establish the
+    // default Historial scope before the user selects a local collection.
+    updateActiveCaptureCollection(null);
     listen<void>("clipvault://splash-ready", () => {
       startupSplashConnected = true;
       notifyStartupSplash();
@@ -2833,10 +2953,12 @@
       <OrganizationSidebar
         collections={organization?.collections ?? []}
         activeCollectionId={selectedCollectionId}
+        {hiddenSubcollectionCaptureCollectionIds}
         historyShortcutAccessible={historyShortcutAccessibleText}
         linkedPeers={peerSnapshot}
         activePeerId={activePeerId}
         on:select={(e) => selectCollectionFromSidebar(e)}
+        on:toggle-subcollection-captures={(e) => handleSubcollectionCaptureVisibility(e)}
         on:create={(e) => handleCreateCollection(e)}
         on:create-subcollection={(e) => handleCreateSubcollection(e)}
         on:rename={(e) => handleRenameCollection(e)}
@@ -2922,13 +3044,13 @@
               </span>
             {:else if isFiltering && searching}
               <span data-testid="search-status-loading">{$t("app.search.loading")}</span>
-            {:else if isFiltering && searchStatus === "no_matches"}
+            {:else if isFiltering && (searchStatus === "no_matches" || displayVisibleEntries.length === 0)}
               <span data-testid="search-status-no-matches">
                 {$t("app.search.no_matches", { query: searchQuery })}
               </span>
             {:else if isFiltering}
               <span data-testid="search-status-results">
-                {$tPlural("app.search.results", visibleEntries.length, { query: searchQuery })}
+                {$tPlural("app.search.results", displayVisibleEntries.length, { query: searchQuery })}
               </span>
             {/if}
           </p>
@@ -2949,7 +3071,7 @@
               inert={clearingOldCollectionContent}
             >
               <HistoryCardRail
-                entries={visibleEntries}
+                entries={displayVisibleEntries}
                 peerImportedSourceApps={peerImportedSourceApps}
                 {entryNoteIds}
                 allTags={organization?.tags ?? []}
@@ -3566,7 +3688,7 @@
    */
   .layout {
     display: grid;
-    grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+    grid-template-columns: minmax(198px, 242px) minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
     gap: 1rem;
     align-items: stretch;

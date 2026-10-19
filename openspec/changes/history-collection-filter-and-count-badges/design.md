@@ -50,9 +50,12 @@ backend devuelve únicamente metadata necesaria para el selector y los badges.
   sobre las membresías. Se cuentan entradas persistidas distintas, de todos
   los tipos de contenido y tanto favoritas como no favoritas; no se limita el
   total a la búsqueda o al máximo de cards visibles.
-- `Historial` representa todas las capturas persistidas. Cada colección de
-  usuario cuenta sus propias membresías; una captura asociada a varias
-  colecciones aparece en el conteo de cada una.
+- `Historial` representa todas las capturas persistidas. Una subcolección
+  cuenta sus membresías directas. La colección principal suma sus capturas
+  directas que no están en ninguna hija más el conteo de cada hija; una
+  captura compartida por varias hijas contribuye una vez por hija. Si también
+  está asociada directamente a la principal, esa membresía directa no se suma
+  otra vez.
 - El badge muestra el número, también cuando es cero, en el extremo derecho de
   la línea de la colección. Su nombre accesible usa una etiqueta pluralizada y
   localizada. Cada fila conserva una altura compacta fija de `2rem`; el badge
@@ -85,8 +88,9 @@ backend devuelve únicamente metadata necesaria para el selector y los badges.
 - Probar selección, limpieza, composición con búsqueda/aplicación/tag y
   sincronización del selector tras crear, renombrar y borrar una colección.
 - Probar conteos de `Historial`, colecciones vacías y colecciones con capturas
-  de tipos distintos; comprobar refresco tras cambiar membresías y eliminar o
-  agregar capturas.
+  de tipos distintos; comprobar la suma del principal con capturas exclusivas,
+  compartidas entre hijas y también asociadas a la principal; comprobar
+  refresco tras cambiar membresías y eliminar o agregar capturas.
 - Mantener las regresiones de drag and drop de cards y colecciones, la paridad
   de traducciones, los checks frontend/backend afectados y la validación
   estricta de OpenSpec.

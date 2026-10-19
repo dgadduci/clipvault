@@ -108,6 +108,14 @@ export const captureTextCommand: ClipvaultCommandArg<
     source_app: args.sourceApp ?? null,
   });
 
+export const captureCollectionSetCommand: ClipvaultCommandArg<
+  void,
+  { collectionId: number | null }
+> = (args) =>
+  invoke<void>("clipvault_capture_collection_set", {
+    collectionId: args.collectionId,
+  });
+
 export const captureTickCommand: ClipvaultCommandArg<
   WatchTickResponse,
   { sourceApp?: string | null }

@@ -145,7 +145,7 @@ test("layout grid uses minmax(0, 1fr) on the rail column so cards never expand t
   const source = loadFixture(path.join(FRONTEND_ROOT, "src/App.svelte"));
   assert.match(
     source,
-    /grid-template-columns:\s*minmax\(180px,\s*220px\)\s*minmax\(0,\s*1fr\)/,
+    /grid-template-columns:\s*minmax\(198px,\s*242px\)\s*minmax\(0,\s*1fr\)/,
   );
 });
 

@@ -305,6 +305,27 @@ impl<'a> EntryRepository<'a> {
         self.insert_or_touch_inner(new, Some(collection_id))
     }
 
+    /// Add an existing entry to an eligible local user collection without
+    /// changing any of its other memberships. This is used after ordinary
+    /// clipboard capture so a selected collection can receive new and
+    /// deduplicated entries alike.
+    pub fn add_entry_to_local_collection(
+        &mut self,
+        entry_id: i64,
+        collection_id: i64,
+        created_at: OffsetDateTime,
+    ) -> Result<(), EntryRepositoryError> {
+        let tx = self.conn.transaction()?;
+        validate_local_collection_target(&tx, collection_id)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO entry_collections (entry_id, collection_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![entry_id, collection_id, format_timestamp(created_at)],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn insert_or_touch_inner(
         &mut self,
         new: NewEntry,
@@ -312,7 +333,7 @@ impl<'a> EntryRepository<'a> {
     ) -> Result<EntryOutcome, EntryRepositoryError> {
         let tx = self.conn.transaction()?;
         if let Some(collection_id) = collection_id {
-            validate_manual_collection_target(&tx, collection_id)?;
+            validate_local_collection_target(&tx, collection_id)?;
         }
         let plain_hash = new.content_hash.clone();
         let rich_hash = new.rich_text_hash.clone();
@@ -1921,7 +1942,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord> {
     })
 }
 
-fn validate_manual_collection_target(
+fn validate_local_collection_target(
     tx: &Transaction<'_>,
     collection_id: i64,
 ) -> Result<(), EntryRepositoryError> {
@@ -2237,6 +2258,63 @@ mod tests {
             EntryRepository::new(db.connection_mut()).count().unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn add_entry_to_local_collection_is_additive_idempotent_and_validated() {
+        let (_dir, mut db) = open_temp_db();
+        let captured_at = datetime!(2026-01-02 03:04:05 UTC);
+        let entry_id = {
+            let mut entries = EntryRepository::new(db.connection_mut());
+            entries
+                .insert_or_touch(new_entry("active capture", captured_at))
+                .expect("capture")
+                .record()
+                .id
+        };
+        let (parent_id, child_id) = {
+            let mut organization = crate::OrganizationRepository::new(db.connection_mut());
+            let parent_id = organization
+                .create_user_collection("Parent", "#1565c0", captured_at)
+                .expect("parent collection")
+                .id;
+            let child_id = organization
+                .create_subcollection(parent_id, "Child", "#1565c0", captured_at)
+                .expect("child collection")
+                .id;
+            organization
+                .replace_entry_collections(entry_id, &[parent_id], captured_at)
+                .expect("initial parent membership");
+            (parent_id, child_id)
+        };
+
+        {
+            let mut entries = EntryRepository::new(db.connection_mut());
+            entries
+                .add_entry_to_local_collection(entry_id, child_id, captured_at)
+                .expect("add child membership");
+            entries
+                .add_entry_to_local_collection(entry_id, child_id, captured_at)
+                .expect("duplicate add is idempotent");
+            assert!(matches!(
+                entries.add_entry_to_local_collection(entry_id, i64::MAX, captured_at),
+                Err(EntryRepositoryError::Organization(
+                    crate::organization::OrganizationError::CollectionNotFound(i64::MAX)
+                ))
+            ));
+        }
+
+        let memberships = crate::OrganizationRepository::new(db.connection_mut())
+            .entry_collection_ids(entry_id)
+            .expect("memberships");
+        let history_id = crate::OrganizationRepository::new(db.connection_mut())
+            .system_collection_id(crate::organization::HISTORY_STABLE_KEY)
+            .expect("history lookup")
+            .expect("history collection");
+        assert!(memberships.contains(&history_id));
+        assert!(memberships.contains(&parent_id));
+        assert!(memberships.contains(&child_id));
+        assert_eq!(memberships.len(), 3);
     }
 
     #[test]

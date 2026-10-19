@@ -3,12 +3,17 @@
 ### Requirement: Show capture counts at the end of collection rows
 
 The collection list SHALL show a numeric badge at the trailing end of every
-collection row. The badge SHALL display the current total number of distinct
-stored captures associated with that collection, including zero. `Historial`
-SHALL count every capture in local history. A user collection SHALL count its
-own memberships. Counts SHALL include all capture types and favorites and
-SHALL NOT be limited by the active query or the number of rendered cards. The
-badge SHALL expose a localized, pluralized accessible name.
+collection row. The badge SHALL display the current capture total for that
+collection's count scope, including zero. `Historial` SHALL count every
+capture in local history. A top-level user collection SHALL count its direct
+captures that are not associated with any direct subcollection, plus the sum
+of each direct subcollection's count. A subcollection SHALL count only its own
+distinct direct memberships. A capture associated with multiple
+subcollections SHALL contribute once to each such subcollection and therefore
+once per subcollection to the parent total. Counts SHALL include all capture
+types and favorites and SHALL NOT be limited by the active query or the number
+of rendered cards. The badge SHALL expose a localized, pluralized accessible
+name.
 
 #### Scenario: Show the total for Historial
 
@@ -16,14 +21,23 @@ badge SHALL expose a localized, pluralized accessible name.
 - **THEN** its badge shows the total number of persisted history captures,
   including text, rich-text and image captures
 
-#### Scenario: Show a user collection's membership count
+#### Scenario: Show a top-level collection's total
 
-- **WHEN** the collection list shows a user collection with associated
-  captures
-- **THEN** its badge shows the number of distinct captures associated with
-  that collection, including favorites
-- **AND** a capture shared with several collections contributes once to each
-  collection's count
+- **GIVEN** captures are associated directly with a top-level collection or
+  with one or more of its direct subcollections
+- **WHEN** the collection list shows that parent
+- **THEN** its badge adds parent captures that are not in any child to each
+  child's count
+- **AND** a capture associated with multiple children contributes once for
+  each child it belongs to
+- **AND** a capture in both the parent and a child is counted through the
+  child, not again as a parent-only capture
+
+#### Scenario: Show a subcollection's direct membership count
+
+- **WHEN** the collection list shows a subcollection
+- **THEN** its badge shows the number of distinct captures associated
+  directly with that subcollection, including favorites
 
 #### Scenario: Show zero for an empty collection
 
@@ -50,8 +64,8 @@ badge SHALL expose a localized, pluralized accessible name.
 
 - **GIVEN** a collection has captures outside the current query or card limit
 - **WHEN** the collection list displays its badge
-- **THEN** the badge still reports all persisted memberships in that
-  collection
+- **THEN** the badge still reports all persisted captures in that
+  collection's count scope
 
 #### Scenario: Collection row interactions remain intact
 
