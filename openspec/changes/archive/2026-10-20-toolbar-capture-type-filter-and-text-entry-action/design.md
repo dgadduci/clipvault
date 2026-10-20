@@ -2,24 +2,35 @@
 
 ## Filtro de tipo
 
-Se conserva el control de tipo de captura que ya existe en la interfaz; este
-cambio no agrega un segundo select. Hay que reparar la fuente de sus opciones
-para que el selector existente muestre los tipos presentes en el alcance
-activo y conserve los iconos que comparte con las cards mediante
-`contentTypeIcons.ts`. `Todas` sigue siendo la opción sin restricción.
+El código actual no monta un control de tipo en `DesktopToolbar`, aunque el
+backend ya admite el filtro. Se agrega un solo `ContentTypeFilter.svelte`; no
+se conserva ni se duplica un selector inexistente. El control presenta
+«Todas» y los tipos presentes en el alcance activo, con los mismos iconos y
+claves de traducción que las cards.
 
-`App.svelte` es dueño de la selección. El control existente notifica cambios a
+Las opciones salen de una consulta metadata-only `clipvault_content_types`,
+que delega en `TextHistoryService` y `EntryRepository` para leer tipos
+distintos de la colección. No se derivan de las capturas cargadas en el rail:
+su límite de paginación podría omitir tipos que sí existen más atrás en una
+colección grande. `collection_id = null` representa Historial. El frontend
+ordena las opciones usando el orden canónico de `ContentTypeValue` y siempre
+antepone «Todas».
+
+`App.svelte` es dueño de la selección. El nuevo control notifica cambios a
 `App.svelte`, y cada solicitud de recents y búsqueda envía el tipo como
-metadato opcional. El comando Tauri lo decodifica como
+metadato opcional. El comando Tauri ya lo decodifica como
 `ContentType`, y el core lo combina con colección, etiquetas y aplicación en
 la consulta parametrizada de SQLite. La ausencia del filtro conserva la
 consulta actual. Al cambiar de colección, la selección vuelve a «Todas», como
-los filtros de aplicación y etiqueta.
+los filtros de aplicación y etiqueta. También se reinicia al cambiar el filtro
+de colección adicional de Historial, y si una actualización deja de ofrecer el
+tipo seleccionado.
 
 El filtro se aplica antes del límite del rail y antes del ranking de búsqueda,
 de modo que una página llena de otros tipos no oculte resultados que sí
 coinciden. Los bytes y el contenido de las capturas no participan en el
-filtro.
+filtro. La solicitud de opciones usa un token monotónico para descartar una
+respuesta atrasada después de cambiar el alcance.
 
 ## Acción de captura de texto
 

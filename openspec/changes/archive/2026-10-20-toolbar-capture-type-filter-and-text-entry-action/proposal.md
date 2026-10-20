@@ -2,19 +2,21 @@
 
 ## Por qué
 
-El filtro de tipo de captura existente no presenta opciones distintas de
-«Todas» en las colecciones. La corrección debe conservar su iconografía actual
-y reparar sus opciones, sin agregar un segundo selector. Además, crear una
-captura de texto requiere abrir el menú de acciones secundarias, aunque es una
-acción frecuente que corresponde a la barra junto a los filtros.
+El backend ya admite filtrar capturas por tipo, pero `DesktopToolbar` no monta
+un control conectado a esa capacidad. La barra necesita un único filtro de
+tipo para Historial y las colecciones locales, con opciones que correspondan
+al alcance seleccionado. Además, crear una captura de texto requiere abrir el
+menú de acciones secundarias, aunque es una acción frecuente que corresponde
+a la barra junto a los filtros.
 
 ## Qué cambia
 
-- Reparar el filtro de tipo de captura existente para que muestre los tipos
-  admitidos en cada colección y conserve los iconos usados por las cards.
+- Incorporar un único filtro de tipo de captura para que muestre los tipos
+  presentes en el alcance activo y conserve los iconos y etiquetas usados por
+  las cards.
 - Aplicar el tipo seleccionado junto con la colección activa, los filtros de
   aplicación y etiqueta, tanto al rail como a la búsqueda, usando el control
-  existente sin duplicarlo.
+  sin renderizar selectores duplicados.
 - Mover «Nueva captura de texto» fuera del menú de tres puntos y ubicar un
   botón compacto con icono de documento y etiqueta «Texto» entre el filtro de
   tipo y el menú.

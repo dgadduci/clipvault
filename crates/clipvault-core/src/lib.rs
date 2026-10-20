@@ -23,6 +23,7 @@ pub mod history;
 pub mod ignored_apps;
 pub mod ignored_apps_service;
 pub mod image_capture_diagnostic;
+pub mod image_file_import;
 pub mod kde_kwin_integration;
 pub mod keyboard_shortcuts;
 #[cfg(target_os = "linux")]
@@ -32,6 +33,7 @@ pub mod notes;
 pub mod organization;
 pub mod paste;
 pub mod paste_suppression;
+pub mod pdf_export;
 pub mod peer_discovery;
 pub mod peer_identity;
 pub mod peer_image_history;
@@ -126,8 +128,9 @@ pub use gnome_integration::{
     GnomeTechnicalState, GNOME_CONSENT_STORAGE_KEY, GNOME_STATE_STORAGE_KEY,
 };
 pub use history::{
-    hash_content, HistoryOutcome, HistoryServiceError, ManualTextCreationOutcome, SetTitleOutcome,
-    TextHistoryService, TitleValidationError, UpdateTextHistoryOutcome, MAX_TITLE_LENGTH,
+    hash_content, HistoryOutcome, HistoryServiceError, ImageRotationDirection,
+    ManualTextCreationOutcome, RotateImageOutcome, SetTitleOutcome, TextHistoryService,
+    TitleValidationError, UpdateTextHistoryOutcome, MAX_TITLE_LENGTH,
 };
 pub use ignored_apps::{normalize_identifier, IgnoredAppEntry, IgnoredAppError, PickAndAddOutcome};
 pub use ignored_apps_service::{IgnoredAppsService, IgnoredAppsServiceError};
@@ -156,6 +159,7 @@ pub use paste::{
     SYNTHETIC_PASTE_CAPABILITY,
 };
 pub use paste_suppression::{PasteSuppression, SuppressionFingerprint, DEFAULT_SUPPRESSION_TTL};
+pub use pdf_export::{PdfExportError, PdfExportService};
 pub use peer_discovery::{
     AdapterError, DiscoveryEvent, LocalPeerIdentitySnapshot, ObservationOutcome,
     PeerDiscoveryAdapter, PeerDiscoveryRuntime, PeerObservationRecord, PeerPresence,

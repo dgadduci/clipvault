@@ -2,8 +2,9 @@
   /**
    * Shared preview overlay for the Desktop and Quick Paste surfaces.
    *
-   * The component renders a strictly read-only modal that mirrors the
-   * Quick Paste preview the `quick-paste-preview-ui` change pinned.
+   * The component renders a shared preview modal for Desktop and Quick
+   * Paste. Text and rich text remain read-only; image previews also expose
+   * explicit persistent quarter-turn controls.
    * The Desktop rail consumes it directly through the
    * `desktop-card-preview` change; Quick Paste consumes the same
    * component so neither surface can drift.
@@ -26,8 +27,8 @@
    *   - closes on `Escape` and on a click outside the inner card,
    *     and returns focus to the trigger element when the parent
    *     provides one;
-   *   - never copies, pastes, edits, pins, tags, deletes or otherwise
-   *     mutates the entry. The component only reads.
+   *   - never copies, pastes, pins, tags or deletes an entry. Only the two
+   *     explicit image rotation controls update an image capture.
    *
    * The contract documented in the `desktop-card-preview` design
    * pins:
@@ -45,6 +46,7 @@
    *     user lands back on the affordance they used.
    */
   import { onDestroy, onMount, tick } from "svelte";
+  import CircularLoadingIndicator from "./CircularLoadingIndicator.svelte";
   import type { EntryRecord } from "./types.ts";
   import {
     CONTENT_TYPE_ICON_SPRITE,
@@ -61,6 +63,8 @@
     hasRenderableImage,
     isImageEntry,
   } from "./lib/clipboardAsset.ts";
+  import { rotateImageCaptureCommand } from "./lib/tauri.ts";
+  import type { ImageRotationDirection } from "./types.ts";
   import {
     canonicalLabel as canonicalCodeLanguageLabel,
     renderHighlightedCode,
@@ -98,6 +102,37 @@
   let imageUrl: string | null = null;
   let imageAssetRef: string | null = null;
   let imageToken = 0;
+  let visibleEntry: EntryRecord | null = null;
+  let previewToken = 0;
+  let imageRotationBusy = false;
+  let imageRotationRefreshing = false;
+  let imageRotationError = false;
+
+  function syncEntry(): void {
+    if (entry === null) {
+      if (visibleEntry !== null) {
+        imageToken += 1;
+        if (imageAssetRef) assetResolver.releaseFor(imageAssetRef);
+        visibleEntry = null;
+        previewToken += 1;
+        imageRotationBusy = false;
+        imageRotationRefreshing = false;
+        imageRotationError = false;
+        seedImageState();
+      }
+      return;
+    }
+    if (visibleEntry?.id !== entry.id) {
+      imageToken += 1;
+      if (imageAssetRef) assetResolver.releaseFor(imageAssetRef);
+      visibleEntry = entry;
+      previewToken += 1;
+      imageRotationBusy = false;
+      imageRotationRefreshing = false;
+      imageRotationError = false;
+      seedImageState();
+    }
+  }
 
   /**
    * Reset image state to the entry's first coherent metadata shape.
@@ -109,29 +144,32 @@
    * `error`.
    */
   function seedImageState(): void {
-    if (!entry) {
+    if (!visibleEntry) {
       imageState = "idle";
       imageUrl = null;
       imageAssetRef = null;
       return;
     }
-    if (!isImageEntry(entry) || !hasRenderableImage(entry)) {
-      imageState = isImageEntry(entry) ? "error" : "idle";
+    if (!isImageEntry(visibleEntry) || !hasRenderableImage(visibleEntry)) {
+      imageState = isImageEntry(visibleEntry) ? "error" : "idle";
       imageUrl = null;
       imageAssetRef = null;
       return;
     }
     imageState = "loading";
-    imageAssetRef = entry.asset_ref ?? null;
+    imageAssetRef = visibleEntry.asset_ref ?? null;
   }
 
-  $: entry, seedImageState();
+  $: entry, syncEntry();
 
   async function refreshImage(assetRef: string | null): Promise<void> {
     const token = ++imageToken;
     if (!assetRef) {
       imageUrl = null;
-      if (token === imageToken) imageState = "error";
+      if (token === imageToken) {
+        imageState = "error";
+        imageRotationRefreshing = false;
+      }
       return;
     }
     if (token === imageToken) imageState = "loading";
@@ -149,9 +187,10 @@
       imageUrl = null;
       imageState = "error";
     }
+    imageRotationRefreshing = false;
   }
 
-  $: if (entry && imageState === "loading" && imageAssetRef) {
+  $: if (visibleEntry && imageState === "loading" && imageAssetRef) {
     void refreshImage(imageAssetRef);
   }
 
@@ -164,6 +203,42 @@
     assetResolver.releaseFor(imageAssetRef);
     imageUrl = null;
     imageState = "error";
+  }
+
+  async function rotateImage(direction: ImageRotationDirection): Promise<void> {
+    if (!visibleEntry || imageRotationBusy || imageState !== "loaded") return;
+    const entryId = visibleEntry.id;
+    const token = previewToken;
+    const previousAssetRef = imageAssetRef;
+    imageRotationBusy = true;
+    imageRotationError = false;
+
+    try {
+      const result = await rotateImageCaptureCommand({ entryId, direction });
+      if (token !== previewToken || visibleEntry?.id !== entryId) return;
+      if (result.kind !== "updated") {
+        imageRotationError = true;
+        return;
+      }
+
+      imageToken += 1;
+      if (previousAssetRef) assetResolver.releaseFor(previousAssetRef);
+      imageUrl = null;
+      visibleEntry = result.entry;
+      imageAssetRef = result.entry.asset_ref ?? null;
+      imageRotationRefreshing = Boolean(
+        imageAssetRef && hasRenderableImage(result.entry),
+      );
+      imageState = imageRotationRefreshing ? "loading" : "error";
+    } catch {
+      if (token === previewToken && visibleEntry?.id === entryId) {
+        imageRotationError = true;
+      }
+    } finally {
+      if (token === previewToken && visibleEntry?.id === entryId) {
+        imageRotationBusy = false;
+      }
+    }
   }
 
   function close(): void {
@@ -201,8 +276,8 @@
   let closeButtonEl: HTMLButtonElement | null = null;
 
   onMount(() => {
-    // Move focus into the overlay so the next Tab steps through the
-    // close button only; the overlay is otherwise strictly inert.
+    // Move focus into the overlay so keyboard users can reach its
+    // close and image rotation controls.
     void tick().then(() => {
       closeButtonEl?.focus();
     });
@@ -239,7 +314,7 @@
     close();
   }
 
-  $: fullText = entry == null ? "" : entryFullPreviewText(entry);
+  $: fullText = visibleEntry == null ? "" : entryFullPreviewText(visibleEntry);
   /**
    * Raw textual content of the entry, with no whitespace collapse and
    * no trim. The highlighted preview feeds THIS string into
@@ -251,38 +326,39 @@
    * captured block byte-for-byte, the same way the highlighted
    * branch does — both surfaces consult the same canonical helper.
    */
-  $: rawText = entry == null ? "" : entryRawContent(entry);
+  $: rawText = visibleEntry == null ? "" : entryRawContent(visibleEntry);
   $: highlightedHtml = (() => {
-    if (entry == null || !shouldRenderHighlightedPreview(entry) || rawText.length === 0) {
+    if (visibleEntry == null || !shouldRenderHighlightedPreview(visibleEntry) || rawText.length === 0) {
       return null;
     }
-    return renderHighlightedCode(rawText, entry.code_language).html;
+    return renderHighlightedCode(rawText, visibleEntry.code_language).html;
   })();
   $: titleLabel =
-    entry == null
+    visibleEntry == null
       ? ""
-      : (entry.title ?? "").trim().length > 0
-        ? (entry.title ?? "").trim()
-        : $t(contentTypeTranslationKey(entry.content_type));
+      : (visibleEntry.title ?? "").trim().length > 0
+        ? (visibleEntry.title ?? "").trim()
+        : $t(contentTypeTranslationKey(visibleEntry.content_type));
   $: derivedAccessibleLabel =
-    accessibleLabel ?? (entry == null ? "" : $t("preview.accessible", { title: titleLabel }));
+    accessibleLabel ?? (visibleEntry == null ? "" : $t("preview.accessible", { title: titleLabel }));
   $: sourceLabel =
-    entry == null ? "" : sourceAppAccessibleLabel(entry, $t);
+    visibleEntry == null ? "" : sourceAppAccessibleLabel(visibleEntry, $t);
   $: typeLabel =
-    entry == null ? "" : $t(contentTypeTranslationKey(entry.content_type));
+    visibleEntry == null ? "" : $t(contentTypeTranslationKey(visibleEntry.content_type));
   $: codeLanguageLabel =
-    entry == null || !shouldShowCodeLanguageBadge(entry)
+    visibleEntry == null || !shouldShowCodeLanguageBadge(visibleEntry)
       ? ""
-      : canonicalCodeLanguageLabel(entry.code_language);
+      : canonicalCodeLanguageLabel(visibleEntry.code_language);
 </script>
 
-{#if entry != null}
-  {@const record = entry}
+{#if visibleEntry != null}
+  {@const record = visibleEntry}
   <div
     class="cv-preview-overlay"
     role="dialog"
     aria-modal="true"
     aria-label={derivedAccessibleLabel}
+    tabindex="-1"
     data-testid="{testIdPrefix}-overlay"
     data-entry-id={record.id}
     data-content-type={record.content_type}
@@ -319,24 +395,79 @@
         >
           {titleLabel}
         </h2>
-        <button
-          type="button"
-          class="cv-preview-close"
-          data-testid="{testIdPrefix}-close"
-          aria-label={$t("preview.close")}
-          title={$t("preview.close_escape")}
-          bind:this={closeButtonEl}
-          on:click={handleClose}
-        >
-          ×
-        </button>
+        <div class="cv-preview-header-actions">
+          {#if isImageEntry(record)}
+            <button
+              type="button"
+              class="cv-preview-rotate"
+              data-testid="{testIdPrefix}-rotate-counterclockwise"
+              aria-label={$t("preview.rotate_counterclockwise")}
+              title={$t("preview.rotate_counterclockwise")}
+              disabled={imageRotationBusy || imageState !== "loaded"}
+              on:click={() => void rotateImage("counterclockwise")}
+            >
+              <svg aria-hidden="true" focusable="false" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 7v6h6" />
+                <path d="M21 17a9 9 0 0 0-15.5-6.5L3 13" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              class="cv-preview-rotate"
+              data-testid="{testIdPrefix}-rotate-clockwise"
+              aria-label={$t("preview.rotate_clockwise")}
+              title={$t("preview.rotate_clockwise")}
+              disabled={imageRotationBusy || imageState !== "loaded"}
+              on:click={() => void rotateImage("clockwise")}
+            >
+              <svg aria-hidden="true" focusable="false" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 7v6h-6" />
+                <path d="M3 17a9 9 0 0 1 15.5-6.5L21 13" />
+              </svg>
+            </button>
+          {/if}
+          <button
+            type="button"
+            class="cv-preview-close"
+            data-testid="{testIdPrefix}-close"
+            aria-label={$t("preview.close")}
+            title={$t("preview.close_escape")}
+            bind:this={closeButtonEl}
+            on:click={handleClose}
+          >
+            ×
+          </button>
+        </div>
       </header>
       <div
         class="cv-preview-body"
         data-testid="{testIdPrefix}-body"
         data-content-type={record.content_type}
+        aria-busy={imageRotationBusy || imageRotationRefreshing}
       >
         {#if isImageEntry(record)}
+          {#if imageRotationBusy || imageRotationRefreshing}
+            {#if imageUrl && imageState === "loaded"}
+              <CircularLoadingIndicator
+                label={$t("preview.loading_image")}
+                testId={`${testIdPrefix}-image-rotation-spinner`}
+                variant="overlay"
+              />
+            {:else}
+              <div class="cv-preview-image-refreshing">
+                <CircularLoadingIndicator
+                  label={$t("preview.loading_image")}
+                  testId={`${testIdPrefix}-image-rotation-spinner`}
+                  variant="overlay"
+                />
+              </div>
+            {/if}
+          {/if}
+          {#if imageRotationError}
+            <p class="cv-preview-image-rotation-error" role="alert" data-testid="{testIdPrefix}-rotation-error">
+              {$t("preview.image_rotation_error")}
+            </p>
+          {/if}
           {#if imageUrl && imageState === "loaded"}
             <img
               class="cv-preview-image"
@@ -346,13 +477,15 @@
               on:error={onImageError}
             />
           {:else if record.asset_ref && hasRenderableImage(record) && imageState === "loading"}
-            <p
-              class="cv-preview-image-unavailable"
-              data-testid="{testIdPrefix}-image-loading"
-            >
-              {$t("preview.loading_image")}
-            </p>
-          {:else}
+            {#if !imageRotationBusy && !imageRotationRefreshing}
+              <p
+                class="cv-preview-image-unavailable"
+                data-testid="{testIdPrefix}-image-loading"
+              >
+                {$t("preview.loading_image")}
+              </p>
+            {/if}
+          {:else if !imageRotationBusy && !imageRotationRefreshing}
             <p
               class="cv-preview-image-unavailable"
               data-testid="{testIdPrefix}-image-unavailable"
@@ -453,7 +586,7 @@
 
   .cv-preview-header {
     display: grid;
-    grid-template-columns: 18px 1fr auto;
+    grid-template-columns: 18px minmax(0, 1fr) auto;
     gap: 0.5rem;
     align-items: center;
     padding: 0.5rem 0.65rem;
@@ -508,12 +641,59 @@
     outline-offset: 1px;
   }
 
+  .cv-preview-header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+  }
+
+  .cv-preview-rotate {
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: #94a3b8;
+    cursor: pointer;
+  }
+
+  .cv-preview-rotate:hover:not(:disabled) {
+    background: rgba(148, 163, 184, 0.18);
+    color: #f0f4f8;
+  }
+
+  .cv-preview-rotate:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  .cv-preview-rotate:focus-visible {
+    outline: 1px solid #2563eb;
+    outline-offset: 1px;
+  }
+
   .cv-preview-body {
+    position: relative;
     padding: 0.6rem 0.7rem;
     overflow: auto;
     background: rgba(0, 0, 0, 0.18);
     color: #cbd5f5;
     min-height: 0;
+  }
+
+  .cv-preview-image-rotation-error {
+    margin: 0 0 0.5rem;
+    color: #fca5a5;
+    font-size: var(--cv-caption, 0.72rem);
+  }
+
+  .cv-preview-image-refreshing {
+    position: relative;
+    min-height: min(16rem, 50vh);
   }
 
   .cv-preview-text {

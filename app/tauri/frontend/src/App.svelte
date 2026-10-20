@@ -16,6 +16,8 @@
     Diagnostics,
     DesktopSetupIntegration,
     EntryRecord,
+    ImageImportFilePreview,
+    ImageImportResponse,
     OrganizationSnapshot,
     PeerImportedSourceAppPresentation,
     PasteResponse,
@@ -32,6 +34,8 @@
     TagFilter,
     TagFilterOption,
   } from "./types";
+  import type { ContentTypeValue } from "./lib/contentType.ts";
+  import { orderAvailableContentTypes } from "./lib/contentType.ts";
   import {
     activeApplicationCommand,
     captureCollectionSetCommand,
@@ -46,6 +50,11 @@
     collectionsClearPreviewCommand,
     collectionsRenameCommand,
     collectionsSetColorCommand,
+    contentTypesCommand,
+    exportEntriesPdfCommand,
+    cancelImageImportCommand,
+    completeImageImportCommand,
+    prepareImageImportCommand,
     deleteEntryCommand,
     diagnosticsCommand,
     gnomeIntegrationStatusCommand,
@@ -136,6 +145,7 @@
   import HistoryCardRail from "./HistoryCardRail.svelte";
   import OrganizationSidebar from "./OrganizationSidebar.svelte";
   import DesktopToolbar from "./DesktopToolbar.svelte";
+  import ImageImportOrderModal from "./ImageImportOrderModal.svelte";
   import Modal from "./Modal.svelte";
   import DevelopmentModal from "./DevelopmentModal.svelte";
   import DesktopIntegrationsModal from "./DesktopIntegrationsModal.svelte";
@@ -343,6 +353,21 @@
   let tagFilter: TagFilter = { kind: "all" };
   /** Additional collection facet shown only while the sidebar is on History. */
   let collectionFilter: CollectionFilter = { kind: "all" };
+  /** Capture type selected for the active local collection scope. */
+  let selectedContentType: ContentTypeValue | null = null;
+  let selectedDesktopEntryIds: number[] = [];
+  let pdfExportInFlight = false;
+  let pdfExportError = false;
+  let imageImportInFlight = false;
+  let imageImportError = false;
+  let imageImportSummary: Extract<ImageImportResponse, { kind: "completed" }> | null = null;
+  let pendingImageImportReview: {
+    sessionId: number;
+    files: ImageImportFilePreview[];
+    orderedFileIds: number[];
+  } | null = null;
+  /** Complete distinct types in the active scope, independent of rail paging. */
+  let contentTypeOptions: ContentTypeValue[] = [];
   /**
    * Tag combobox options. The desktop derives them from the active
    * scope (`Historial` or the active collection) using the
@@ -776,6 +801,7 @@
       collectionId: entriesCollectionId(selectedCollectionId),
       tagIds: currentTagFilterIds(),
       sourceApp: sourceAppFilter,
+      contentType: selectedContentType,
     });
   }
 
@@ -1075,13 +1101,29 @@
 
   async function refreshEntries(): Promise<void> {
     const requestToken = ++entriesLoadToken;
+    const requestCollectionId = entriesCollectionId(selectedCollectionId);
     collectionContentLoading = true;
     try {
-      const [loadedEntries, noteIds] = await Promise.all([
+      const [loadedEntries, noteIds, availableTypes] = await Promise.all([
         loadEntries(),
         entryNoteIdsCommand(),
+        contentTypesCommand({ collectionId: requestCollectionId }).catch(() => null),
       ]);
       if (requestToken !== entriesLoadToken) return;
+      contentTypeOptions = orderAvailableContentTypes(availableTypes ?? []);
+      if (availableTypes === null) {
+        organizationError = "app.error.generic";
+      }
+      if (
+        selectedContentType !== null &&
+        !contentTypeOptions.includes(selectedContentType)
+      ) {
+        // A collection/history update can remove the last capture of the
+        // selected type. Clear the facet and reload the unfiltered scope.
+        selectedContentType = null;
+        await refreshEntries();
+        return;
+      }
       entries = loadedEntries;
       entryNoteIds = new Set(noteIds);
       if (isFiltering) {
@@ -1197,7 +1239,121 @@
           next.collectionId === collectionFilter.collectionId));
     if (sameSelection) return;
     collectionFilter = next;
+    selectedContentType = null;
+    contentTypeOptions = [];
     await refreshEntries();
+  }
+
+  async function handleContentTypeFilterChange(
+    next: ContentTypeValue | null,
+  ): Promise<void> {
+    if (selectedContentType === next) return;
+    selectedContentType = next;
+    await refreshEntries();
+  }
+
+  function handleDesktopSelectionChange(entryIds: number[]): void {
+    selectedDesktopEntryIds = entryIds;
+    pdfExportError = false;
+  }
+
+  async function exportDesktopSelectionAsPdf(): Promise<void> {
+    if (pdfExportInFlight || selectedDesktopEntryIds.length === 0) return;
+    pdfExportInFlight = true;
+    pdfExportError = false;
+    try {
+      await exportEntriesPdfCommand({
+        entryIds: [...selectedDesktopEntryIds],
+        dialogTitle: $t("pdf_export.dialog.title"),
+        filterName: $t("pdf_export.dialog.filter"),
+        suggestedFileName: $t("pdf_export.dialog.filename"),
+      });
+    } catch {
+      pdfExportError = true;
+    } finally {
+      pdfExportInFlight = false;
+    }
+  }
+
+  async function importDesktopImages(): Promise<void> {
+    if (imageImportInFlight || pendingImageImportReview) return;
+    imageImportInFlight = true;
+    imageImportError = false;
+    imageImportSummary = null;
+    try {
+      const result = await prepareImageImportCommand({
+        dialogTitle: $t("image_import.dialog.title"),
+        filterName: $t("image_import.dialog.filter"),
+      });
+      if (result.kind === "cancelled") return;
+      if (result.kind === "prepared") {
+        pendingImageImportReview = {
+          sessionId: result.session_id,
+          files: result.files,
+          orderedFileIds: result.files.map((file) => file.id),
+        };
+        return;
+      }
+      await finishDesktopImageImport(result);
+    } catch {
+      imageImportError = true;
+    } finally {
+      imageImportInFlight = false;
+    }
+  }
+
+  async function finishDesktopImageImport(
+    result: Extract<ImageImportResponse, { kind: "completed" }>,
+  ): Promise<void> {
+    imageImportSummary = result;
+    if (result.imported + result.duplicates === 0) return;
+    try {
+      await Promise.all([
+        refreshEntries(),
+        refreshOrganization(),
+        refreshUnorganizedClearableCount(),
+      ]);
+    } catch {
+      organizationError = "app.error.generic";
+    }
+  }
+
+  function reorderDesktopImageImport(event: CustomEvent<{ orderedFileIds: number[] }>): void {
+    if (!pendingImageImportReview || imageImportInFlight) return;
+    pendingImageImportReview = {
+      ...pendingImageImportReview,
+      orderedFileIds: event.detail.orderedFileIds,
+    };
+  }
+
+  async function confirmDesktopImageImport(
+    event: CustomEvent<{ orderedFileIds: number[] }>,
+  ): Promise<void> {
+    const pending = pendingImageImportReview;
+    if (!pending || imageImportInFlight) return;
+    imageImportInFlight = true;
+    imageImportError = false;
+    try {
+      const result = await completeImageImportCommand({
+        sessionId: pending.sessionId,
+        orderedFileIds: event.detail.orderedFileIds,
+      });
+      pendingImageImportReview = null;
+      await finishDesktopImageImport(result);
+    } catch {
+      imageImportError = true;
+      pendingImageImportReview = null;
+      void cancelImageImportCommand({ sessionId: pending.sessionId }).catch(() => undefined);
+    } finally {
+      imageImportInFlight = false;
+    }
+  }
+
+  function cancelDesktopImageImport(): void {
+    const pending = pendingImageImportReview;
+    if (!pending || imageImportInFlight) return;
+    pendingImageImportReview = null;
+    void cancelImageImportCommand({ sessionId: pending.sessionId }).catch(() => undefined);
   }
 
   async function refreshUnorganizedClearableCount(): Promise<void> {
@@ -1344,6 +1500,8 @@
       );
     }
     collectionFilter = { kind: "all" };
+    selectedContentType = null;
+    contentTypeOptions = [];
     resetSearchForCollectionSwitch();
     clearingOldCollectionContent = true;
     collectionContentLoading = true;
@@ -1700,21 +1858,17 @@
    * `combineMemberships` helper implements).
    */
   async function handleCardDrop(
-    event: CustomEvent<{ entryId: number; collectionId: number }>,
+    event: CustomEvent<{
+      entryId: number;
+      entryIds?: number[];
+      collectionId: number;
+    }>,
   ): Promise<void> {
     const { entryId, collectionId } = event.detail;
-    // Step 1: validate entry id and collection id. The sidebar
-    // already refused non-user collections before dispatching
-    // `card-drop`, but the parent is the single source of truth for
-    // the drop pipeline so the checks stay here as well.
-    if (!Number.isFinite(entryId) || !Number.isInteger(entryId)) {
-      return;
-    }
-    if (
-      !Number.isFinite(collectionId) || !Number.isInteger(collectionId)
-    ) {
-      return;
-    }
+    const entryIds = [...new Set([entryId, ...(event.detail.entryIds ?? [])])]
+      .filter((id) => Number.isFinite(id) && Number.isInteger(id));
+    if (entryIds.length === 0) return;
+    if (!Number.isFinite(collectionId) || !Number.isInteger(collectionId)) return;
     const targetCollection = organization?.collections.find(
       (collection) => collection.id === collectionId,
     );
@@ -1729,87 +1883,63 @@
       // protection automatically.
       return;
     }
-    const entry = entries.find((candidate) => candidate.id === entryId);
-    if (!entry) {
-      // The card is not visible right now; the drop is a no-op.
-      return;
+    const visibleIds = new Set(entries.map((entry) => entry.id));
+    const targets = entryIds.filter((id) => visibleIds.has(id));
+    if (targets.length === 0) return;
+
+    const changedIds: number[] = [];
+    let failed = false;
+    for (const targetEntryId of targets) {
+      const result = await addEntryToDropCollection(targetEntryId, collectionId);
+      if (result === true) changedIds.push(targetEntryId);
+      else if (result === null) failed = true;
     }
-    // Step 11: avoid duplicate writes while the same drop is in
-    // flight. The first drop holds the (entryId, collectionId) pair
-    // until the backend round-trip resolves; a second drop on the
-    // same target that lands before the first finishes is dropped
-    // silently — the backend is idempotent so the result would be
-    // the same.
-    const dropKey = `${entryId}:${collectionId}`;
-    if (dropInFlight.has(dropKey)) {
-      return;
-    }
-    const nextDropInFlight = new Set(dropInFlight);
-    nextDropInFlight.add(dropKey);
-    dropInFlight = nextDropInFlight;
-    // Step 4: read the associations from the cache only when they
-    // are really loaded. Otherwise the entry may not be in the map
-    // yet (initial paint) or in `pending` / `error` state. The
-    // fallback goes through `entryCollectionsCommand`, the same
-    // metadata-only bridge the modal uses, and never returns
-    // content.
-    const hydrationState = entryOrganizationHydration.get(entryId);
-    let currentCollectionIds: number[] | null = null;
-    if (hydrationState === "loaded") {
-      currentCollectionIds =
-        entryOrganization.get(entryId)?.collections.map((c) => c.id) ?? null;
-    } else {
-      // The hydration round is still in flight, the cache is empty
-      // (first paint) or the previous hydration failed. Refuse to
-      // send a destructive `[]`: ask the backend for the current set
-      // and merge on top of it.
+    if (changedIds.length > 0) {
       try {
-        currentCollectionIds = await entryCollectionsCommand({
-          entryId,
-        });
-      } catch (error) {
-        organizationError = "app.error.generic";
-        const reduced = new Set(dropInFlight);
-        reduced.delete(dropKey);
-        dropInFlight = reduced;
-        return;
+        await refreshOrganization();
+        await Promise.all(changedIds.map((id) => refreshEntryOrganization(id)));
+        await refreshUnorganizedClearableCount();
+      } catch {
+        failed = true;
       }
     }
-    // Step 6 / Step 7: build the merged membership set. The helper
-    // refuses `[]` and partial lists when hydration is missing,
-    // refuses the system collection as a drop target, refuses
-    // already-member targets, and reattaches the system collection
-    // automatically so the card never leaves the protected
-    // membership.
-    const result = combineMemberships(
-      entryId,
-      collectionId,
-      currentCollectionIds,
-      historyCollectionId,
-    );
-    if (result.safeNoop || result.nextCollectionIds === undefined) {
-      const reduced = new Set(dropInFlight);
-      reduced.delete(dropKey);
-      dropInFlight = reduced;
-      return;
-    }
+    if (failed) organizationError = "app.error.generic";
+  }
+
+  /** Add the target to one entry's memberships without replacing its other
+   * collections. `null` reports a persistence/hydration failure; `false`
+   * reports an idempotent no-op such as an existing membership. */
+  async function addEntryToDropCollection(
+    entryId: number,
+    collectionId: number,
+  ): Promise<boolean | null> {
+    if (!entries.some((candidate) => candidate.id === entryId)) return false;
+    const dropKey = `${entryId}:${collectionId}`;
+    if (dropInFlight.has(dropKey)) return false;
+    dropInFlight = new Set(dropInFlight).add(dropKey);
     try {
-      // Step 8 / Step 9: reuse `entry_collections_set` and await
-      // its resolution. The command returns the persisted list so
-      // the cache below can mirror the backend truth.
+      const hydrationState = entryOrganizationHydration.get(entryId);
+      let currentCollectionIds: number[] | null = null;
+      if (hydrationState === "loaded") {
+        currentCollectionIds =
+          entryOrganization.get(entryId)?.collections.map((collection) => collection.id) ?? null;
+      } else {
+        currentCollectionIds = await entryCollectionsCommand({ entryId });
+      }
+      const result = combineMemberships(
+        entryId,
+        collectionId,
+        currentCollectionIds,
+        historyCollectionId,
+      );
+      if (result.safeNoop || result.nextCollectionIds === undefined) return false;
       await entryCollectionsSetCommand({
         entryId,
         collectionIds: result.nextCollectionIds,
       });
-      // Step 10: refresh organization, the entry hydration and the
-      // unorganized counter so the card is visible in the target
-      // collection and the rail reflects the new membership
-      // immediately.
-      await refreshOrganization();
-      await refreshEntryOrganization(entryId);
-      await refreshUnorganizedClearableCount();
-    } catch (error) {
-      organizationError = "app.error.generic";
+      return true;
+    } catch {
+      return null;
     } finally {
       const reduced = new Set(dropInFlight);
       reduced.delete(dropKey);
@@ -2288,6 +2418,7 @@
           collectionId: entriesCollectionId(selectedCollectionId),
           tagIds: currentTagFilterIds(),
           sourceApp: sourceAppFilter,
+          contentType: selectedContentType,
         });
         return response;
       },
@@ -2936,6 +3067,34 @@
       {$t(organizationError)}
     </p>
   {/if}
+  {#if pdfExportError}
+    <p class="status error" role="alert" data-testid="pdf-export-error">
+      {$t("pdf_export.error")}
+    </p>
+  {/if}
+  {#if imageImportError}
+    <p class="status error" role="alert" data-testid="image-import-error">
+      {$t("image_import.error")}
+    </p>
+  {/if}
+  {#if imageImportSummary}
+    <p class="status muted" role="status" data-testid="image-import-summary">
+      {$t("image_import.result", {
+        imported: imageImportSummary.imported,
+        duplicates: imageImportSummary.duplicates,
+        skipped: imageImportSummary.skipped,
+      })}
+    </p>
+  {/if}
+  <ImageImportOrderModal
+    open={pendingImageImportReview !== null}
+    files={pendingImageImportReview?.files ?? []}
+    orderedFileIds={pendingImageImportReview?.orderedFileIds ?? []}
+    busy={imageImportInFlight}
+    on:reorder={reorderDesktopImageImport}
+    on:confirm={(event) => void confirmDesktopImageImport(event)}
+    on:cancel={cancelDesktopImageImport}
+  />
 
   {#if loading}
     <CircularLoadingIndicator
@@ -3018,6 +3177,11 @@
             showCollectionFilter={activeCollectionIsHistory}
             collectionFilter={collectionFilter}
             collectionFilterOptions={collectionFilterOptions}
+            selectedContentType={selectedContentType}
+            contentTypeOptions={contentTypeOptions}
+            selectedEntryIds={selectedDesktopEntryIds}
+            pdfExporting={pdfExportInFlight}
+            imageImporting={imageImportInFlight || pendingImageImportReview !== null}
             onSearchInput={handleSearchInput}
             onOpenGeneralSettings={onOpenGeneralSettings}
             onOpenPrivacy={onOpenPrivacy}
@@ -3031,6 +3195,9 @@
             onSourceAppFilterChange={(next) => handleSourceAppFilterChange(next)}
             onTagFilterChange={(next) => handleTagFilterChange(next)}
             onCollectionFilterChange={(next) => handleCollectionFilterChange(next)}
+            onContentTypeFilterChange={(next) => handleContentTypeFilterChange(next)}
+            onExportPdf={exportDesktopSelectionAsPdf}
+            onImportImages={importDesktopImages}
           />
           <p
             class="search-status muted"
@@ -3081,6 +3248,7 @@
                 entryOrganizationHydration={entryOrganizationHydration}
                 isFiltering={isFiltering}
                 bind:selectedEntryId={railSelectedEntryId}
+                onSelectionChange={handleDesktopSelectionChange}
                 onTogglePin={(entry) => toggleFavorite(entry)}
                 onRequestDelete={requestDelete}
                 onAfterMutation={(entry) => handleAfterMutation(entry)}

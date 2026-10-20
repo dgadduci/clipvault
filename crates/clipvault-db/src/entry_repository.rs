@@ -463,6 +463,58 @@ impl<'a> EntryRepository<'a> {
         fetch_by_id(self.conn, id)
     }
 
+    /// Replace the persisted pixels and metadata for one image entry.
+    ///
+    /// `expected_asset_ref` makes the write conditional on the image still
+    /// being the version the caller read before transforming it. This keeps
+    /// a slower rotation from overwriting a newer image update. Other entry
+    /// columns and collection memberships are deliberately left untouched.
+    pub fn replace_image_asset(
+        &mut self,
+        id: i64,
+        expected_asset_ref: &str,
+        content_hash: &str,
+        asset_ref: &str,
+        content_size: i64,
+        payload_width: u32,
+        payload_height: u32,
+        now: OffsetDateTime,
+    ) -> Result<Option<EntryRecord>, EntryRepositoryError> {
+        let tx = self.conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE clipboard_entries
+             SET content_hash = ?1,
+                 content_size = ?2,
+                 asset_ref = ?3,
+                 mime_type = ?4,
+                 payload_width = ?5,
+                 payload_height = ?6,
+                 updated_at = ?7
+             WHERE id = ?8
+               AND content_type = ?9
+               AND asset_ref = ?10",
+            params![
+                content_hash,
+                content_size,
+                asset_ref,
+                crate::entry::IMAGE_MIME_PNG,
+                payload_width,
+                payload_height,
+                format_timestamp(now),
+                id,
+                ContentType::Image.as_str(),
+                expected_asset_ref,
+            ],
+        )?;
+        let record = if updated == 0 {
+            None
+        } else {
+            fetch_by_id(&tx, id)?
+        };
+        tx.commit()?;
+        Ok(record)
+    }
+
     /// Refresh only the `updated_at` / `last_seen_at` columns of
     /// the supplied entry id. The helper is metadata-only: it
     /// does not touch `title`, `is_pinned`, `asset_ref`, the
@@ -1154,6 +1206,41 @@ impl<'a> EntryRepository<'a> {
         source_app: &SourceAppFilter,
     ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
         self.entries_filtered_by_content_type(collection_id, tag_ids, source_app, None)
+    }
+
+    /// Return the distinct, supported content types represented in a
+    /// collection scope. `None` is Historial and therefore includes every
+    /// entry. This metadata query is deliberately independent of the recent
+    /// entries limit so a type on an older card remains selectable.
+    pub fn distinct_content_types(
+        &self,
+        collection_id: Option<i64>,
+    ) -> Result<Vec<ContentType>, EntryRepositoryError> {
+        let sql = if collection_id.is_some() {
+            "SELECT DISTINCT content_type FROM clipboard_entries
+             WHERE id IN (
+               SELECT entry_id FROM entry_collections WHERE collection_id = ?1
+             )
+             ORDER BY content_type"
+        } else {
+            "SELECT DISTINCT content_type FROM clipboard_entries
+             ORDER BY content_type"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let raw_types = if let Some(collection_id) = collection_id {
+            stmt.query_map(params![collection_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        let mut content_types = raw_types
+            .iter()
+            .filter_map(|raw| parse_content_type(raw))
+            .collect::<Vec<_>>();
+        content_types.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(content_types)
     }
 
     /// Variant of [`Self::entries_filtered`] that also restricts rows to one
@@ -3422,6 +3509,50 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, url_id);
         assert_ne!(filtered[0].id, text_id);
+    }
+
+    #[test]
+    fn distinct_content_types_are_complete_and_collection_scoped() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let collection_id = {
+            let mut organization = crate::OrganizationRepository::new(db.connection_mut());
+            organization
+                .create_user_collection("Tipos", "#1565c0", when)
+                .expect("create collection")
+                .id
+        };
+        {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_entry_with_type("history only", ContentType::Text, when))
+                .expect("text entry");
+            repo.insert_or_touch_in_local_collection(
+                new_entry_with_type("first url", ContentType::Url, when),
+                collection_id,
+            )
+            .expect("first url entry");
+            repo.insert_or_touch_in_local_collection(
+                new_entry_with_type("second url", ContentType::Url, when),
+                collection_id,
+            )
+            .expect("second url entry");
+            repo.insert_or_touch_in_local_collection(
+                new_entry_with_type("code", ContentType::Code, when),
+                collection_id,
+            )
+            .expect("code entry");
+        }
+
+        let repo = EntryRepository::new(db.connection_mut());
+        assert_eq!(
+            repo.distinct_content_types(None).expect("history types"),
+            vec![ContentType::Code, ContentType::Text, ContentType::Url],
+        );
+        assert_eq!(
+            repo.distinct_content_types(Some(collection_id))
+                .expect("collection types"),
+            vec![ContentType::Code, ContentType::Url],
+        );
     }
 
     #[test]

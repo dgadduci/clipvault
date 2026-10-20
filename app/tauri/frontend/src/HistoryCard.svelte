@@ -165,21 +165,11 @@
     entry: EntryRecord,
     collectionId: number,
   ) => Promise<void> = async () => {};
-  /**
-   * Whether this card is the rail's currently selected entry. The
-   * flag is local UI state: a `true` value exposes `aria-selected`,
-   * paints the selected styling and shows the platform-aware preview
-   * shortcut hint (the same matcher `ClipboardPreview` consumes).
-   * Selection is purely visual; the card never writes the value back
-   * to SQLite, the clipboard or a backend command.
-   */
+  /** Whether this card belongs to the rail's ephemeral multi-selection. */
   export let selected: boolean = false;
-  /**
-   * Forward the user gesture that flipped selection. The rail owns
-   * the canonical id so two cards racing a `mousedown`/`keydown`
-   * cannot end up with two selections; the helper receives the id
-   * the user just picked (or `null` to clear the selection).
-   */
+  /** Active card used by single-entry shortcuts and the preview hint. */
+  export let active: boolean = false;
+  /** Forward a single-card active-id update; the rail applies group semantics. */
   export let onSelect: (entryId: number | null) => void = () => {};
   /**
    * Whether this card's ellipsis menu is currently open. The flag
@@ -207,7 +197,11 @@
   const dispatch = createEventDispatcher<{
     "menu-toggle": { id: number; open: boolean };
     "preview-request": { id: number };
-    "select-request": { id: number | null };
+    "select-request": {
+      id: number | null;
+      toggle?: boolean;
+      range?: boolean;
+    };
   }>();
 
   /** Local override of the persisted title so edits feel instant. */
@@ -1716,7 +1710,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       // Escape when the user is editing the title, browsing the menu
       // or typing inside an input — `isInteractiveTarget` already
       // covers those branches.
-      if (selected) {
+      if (selected || active) {
         event.preventDefault();
         dispatchSelect(null);
       }
@@ -1727,7 +1721,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     // card. A card that is not selected ignores the shortcut so
     // `Cmd/Ctrl+Enter` cannot silently open a preview for an entry
     // the user did not pick.
-    if (!selected) return;
+    if (!active) return;
     event.preventDefault();
     requestPreview();
   }
@@ -1737,9 +1731,12 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
    * helper centralises the dispatch path so the click handler and
    * the `Escape` shortcut share one branch.
    */
-  function dispatchSelect(next: number | null): void {
+  function dispatchSelect(
+    next: number | null,
+    modifiers: { toggle?: boolean; range?: boolean } = {},
+  ): void {
     onSelect(next);
-    dispatch("select-request", { id: next });
+    dispatch("select-request", { id: next, ...modifiers });
   }
 
   /**
@@ -1749,15 +1746,17 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
    * collection / paste / delete control keeps its existing action
    * and never accidentally flips the selection.
    *
-   * Clicking the non-interactive surface of the currently selected
-   * card clears the selection; clicking any other card moves the
-   * selection to that card. The helper never writes the value to
-   * SQLite or any backend command — the rail is the single source of
-   * truth.
+   * A plain click asks the rail to keep one selected card (the rail
+   * preserves its legacy click-again-to-clear behavior). Ctrl/Cmd-click
+   * toggles a card and Shift-click selects an inclusive range. The
+   * helper never writes selection to SQLite or a backend command.
    */
   function onCardSurfaceClick(event: MouseEvent): void {
     if (isInteractiveTarget(event.target)) return;
-    dispatchSelect(selected ? null : entry.id);
+    dispatchSelect(entry.id, {
+      toggle: event.metaKey || event.ctrlKey,
+      range: event.shiftKey && !event.metaKey && !event.ctrlKey,
+    });
   }
 
   // Dragging is delegated to the singleton pointer controller installed by
@@ -1782,9 +1781,11 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   class="card"
   class:menu-open={menuOpen}
   class:card-selected={selected}
+  class:card-active={active}
   data-testid="history-card"
   data-entry-id={entry.id}
   data-selected={selected ? "true" : "false"}
+  data-active={active ? "true" : "false"}
   aria-label={displayTitle}
   aria-selected={selected}
   draggable="false"
@@ -2300,7 +2301,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   {/if}
 
   <footer class="card-actions" class:has-note={hasNote}>
-    {#if selected}
+    {#if active}
       <span
         class="preview-hint"
         data-testid="history-card-preview-hint"
@@ -2672,24 +2673,19 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       background 120ms ease;
   }
 
-  /*
-   * Visual selection state the rail drives through the `selected`
-   * prop. The contract is `entry.id === selectedEntryId` (strict);
-   * the same predicate powers `aria-selected`, the preview-shortcut
-   * hint and the `data-selected` attribute so the four indicators
-   * can never drift. The previous baseline painted the class on the
-   * DOM but never declared the rule so the user only ever saw the
-   * default card chrome and could not tell which row was active —
-   * the regression surfaced as "clicking card 3 still selects card 1".
-   * The accent border, the soft ring and the lighter background are
-   * the same palette the Quick Paste row uses so the two surfaces
-   * read as the same affordance.
-   */
+  /* Visual state for cards that belong to the ephemeral group selection. */
   .card.card-selected {
     border-color: rgba(96, 165, 250, 0.85);
     background: rgba(96, 165, 250, 0.08);
     box-shadow:
       0 0 0 1px rgba(96, 165, 250, 0.45),
+      0 6px 18px rgba(15, 23, 42, 0.55);
+  }
+
+  .card.card-active {
+    border-color: rgba(96, 165, 250, 0.95);
+    box-shadow:
+      0 0 0 1px rgba(96, 165, 250, 0.55),
       0 6px 18px rgba(15, 23, 42, 0.55);
   }
 
@@ -2710,7 +2706,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
    * ArrowRight moves `selectedEntryId`; scoping this rule prevents
    * that residual focus from painting a second selected card.
    */
-  .card.card-selected:focus-visible {
+  .card.card-active:focus-visible {
     border-color: rgba(96, 165, 250, 0.85);
     outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.85));
     outline-offset: 1px;
@@ -2738,7 +2734,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
    * Selection wins over the open-menu cue so a card that owns both
    * flags keeps the blue accent the keyboard shortcut requires.
    */
-  .card.card-selected.menu-open {
+  .card.card-selected.menu-open,
+  .card.card-active.menu-open {
     border-color: rgba(96, 165, 250, 0.85);
     box-shadow:
       0 0 0 1px rgba(96, 165, 250, 0.45),

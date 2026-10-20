@@ -33,6 +33,7 @@ import type {
   LocalPeerProfileResponse,
   MigrationsApplied,
   OrganizationSnapshot,
+  PdfExportSaveResult,
   PasteResponse,
   PeerSharingToggleResponse,
   PeerSnapshot,
@@ -61,8 +62,12 @@ import type {
   Tag,
   TextNoteRecord,
   UpdateTextEntryResponse,
+  RotateImageCaptureResponse,
+  ImageRotationDirection,
   WatchTickResponse,
   HotkeySpec,
+  ImageImportResponse,
+  ImageImportPreparationResponse,
 } from "../types.ts";
 import type { StartupStatus } from "./startup.ts";
 import type { ContentTypeValue } from "./contentType.ts";
@@ -148,6 +153,15 @@ export const recentEntriesFilteredCommand: ClipvaultCommandArg<
     tagIds: args.tagIds ?? [],
     sourceApp: args.sourceApp ?? null,
     contentType: args.contentType ?? null,
+  });
+
+/** Return all capture types present in Historial or one local collection. */
+export const contentTypesCommand: ClipvaultCommandArg<
+  ContentTypeValue[],
+  { collectionId?: number | null }
+> = (args) =>
+  invoke<ContentTypeValue[]>("clipvault_content_types", {
+    collectionId: args.collectionId ?? null,
   });
 
 export const searchEntriesCommand: ClipvaultCommandArg<
@@ -326,6 +340,48 @@ export const settingsSetCommand: ClipvaultCommandArg<
   SettingsUpdate
 > = (args) =>
   invoke<Settings>("clipvault_settings_set", { update: args });
+
+export const exportEntriesPdfCommand: ClipvaultCommandArg<
+  PdfExportSaveResult,
+  {
+    entryIds: number[];
+    dialogTitle: string;
+    filterName: string;
+    suggestedFileName: string;
+  }
+> = (args) =>
+  invoke<PdfExportSaveResult>("clipvault_export_pdf", {
+    entryIds: args.entryIds,
+    dialogTitle: args.dialogTitle,
+    filterName: args.filterName,
+    suggestedFileName: args.suggestedFileName,
+  });
+
+export const prepareImageImportCommand: ClipvaultCommandArg<
+  ImageImportPreparationResponse,
+  { dialogTitle: string; filterName: string }
+> = (args) =>
+  invoke<ImageImportPreparationResponse>("clipvault_prepare_image_import", {
+    dialogTitle: args.dialogTitle,
+    filterName: args.filterName,
+  });
+
+export const completeImageImportCommand: ClipvaultCommandArg<
+  ImageImportResponse,
+  { sessionId: number; orderedFileIds: number[] }
+> = (args) =>
+  invoke<ImageImportResponse>("clipvault_complete_image_import", {
+    sessionId: args.sessionId,
+    orderedFileIds: args.orderedFileIds,
+  });
+
+export const cancelImageImportCommand: ClipvaultCommandArg<
+  void,
+  { sessionId: number }
+> = (args) =>
+  invoke<void>("clipvault_cancel_image_import", {
+    sessionId: args.sessionId,
+  });
 
 export const keyboardShortcutsGetCommand:
   ClipvaultCommand<KeyboardShortcutsSnapshot> = () =>
@@ -992,6 +1048,15 @@ export const updateTextEntryCommand: ClipvaultCommandArg<
   invoke<UpdateTextEntryResponse>("clipvault_update_text_entry", {
     entryId: args.id,
     content: args.content,
+  });
+
+export const rotateImageCaptureCommand: ClipvaultCommandArg<
+  RotateImageCaptureResponse,
+  { entryId: number; direction: ImageRotationDirection }
+> = (args) =>
+  invoke<RotateImageCaptureResponse>("clipvault_rotate_image_capture", {
+    entryId: args.entryId,
+    direction: args.direction,
   });
 
 /**

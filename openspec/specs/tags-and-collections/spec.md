@@ -514,3 +514,257 @@ selector SHALL remain open with a localized error.
 - **WHEN** the delete command fails
 - **THEN** the modal displays a localized error and stays open
 - **AND** the tag definition, associations and current selection remain intact
+
+### Requirement: Filter shared captures in a principal collection view
+
+The desktop collection list SHALL provide an accessible visibility toggle on
+each user principal collection that has direct subcollections. The toggle
+SHALL control whether captures directly associated with the principal remain
+visible when they are also associated with one or more of its direct
+subcollections. It SHALL default to showing those captures and SHALL retain
+its state per principal collection for the current application session.
+Collection memberships SHALL remain independent: a capture assigned only to
+a subcollection SHALL NOT become a member of its principal collection.
+
+#### Scenario: Show captures also assigned to a subcollection
+
+- **GIVEN** a capture belongs directly to a principal collection and to one
+  of its subcollections
+- **WHEN** the principal collection's visibility toggle is active
+- **THEN** the capture remains visible in that principal collection
+- **AND** the principal's other directly associated captures remain visible
+
+#### Scenario: Hide captures also assigned to a subcollection
+
+- **GIVEN** a capture belongs directly to a principal collection and to one
+  of its subcollections
+- **WHEN** the principal collection's visibility toggle is inactive
+- **THEN** the capture is hidden from the principal collection view
+- **AND** a capture belonging directly to the principal but to no child
+  remains visible
+
+#### Scenario: Consider every direct subcollection
+
+- **GIVEN** a capture belongs directly to the principal and to any one of its
+  direct subcollections
+- **WHEN** the visibility toggle is inactive
+- **THEN** that capture is hidden even if it is not in the principal's other
+  subcollections
+- **AND** memberships in unrelated collections do not affect the result
+
+#### Scenario: Keep subcollection-only captures independent
+
+- **GIVEN** a capture belongs to a subcollection but not its principal
+- **WHEN** the user selects the principal, with either toggle state
+- **THEN** the capture is not added to the principal's view by this toggle
+- **AND** all persisted memberships remain unchanged
+
+#### Scenario: Apply visibility together with search and filters
+
+- **GIVEN** the user has disabled shared captures for the selected principal
+- **WHEN** recent entries or text-search results are displayed with tag or
+  source-application filters
+- **THEN** captures also assigned to any direct subcollection remain hidden
+- **AND** the existing search, tag, source-application and ordering behavior
+  is otherwise preserved
+
+#### Scenario: Expose the toggle accessibly
+
+- **WHEN** a principal collection with direct subcollections is rendered
+- **THEN** its eye control appears immediately after the collection name and
+  before the row's badges
+- **AND** the note control and actions-menu control appear after the badges
+- **AND** it has localized action text and an `aria-pressed` state
+- **AND** the state and action text describe whether shared captures are
+  currently shown or will be hidden
+- **AND** Historial, child collections and principals without children do
+  not show the control
+
+#### Scenario: Widen the collection and linked-team panel
+
+- **WHEN** the desktop organization panel is rendered
+- **THEN** the grid column containing collections and linked teams has a
+  minimum width of `198px` and a maximum width of `242px`
+- **AND** its mobile single-column layout remains unchanged
+
+#### Scenario: Keep the choice local to the session
+
+- **WHEN** the user switches away from a principal and selects it again
+- **THEN** its visibility choice remains in effect for that session
+- **WHEN** ClipVault starts a new session
+- **THEN** shared captures are visible by default
+
+### Requirement: Include subcollection captures in parent badge counts
+
+The collection list SHALL show a numeric badge at the trailing end of every
+collection row. The badge SHALL display the current capture total for that
+collection's defined count scope, including zero. `Historial` SHALL count
+every capture in local history. A top-level user collection SHALL count its
+direct captures that are not associated with any direct subcollection, plus
+the sum of each direct subcollection's count. A subcollection SHALL count only
+its own distinct direct memberships. A capture associated with multiple
+subcollections SHALL contribute once to each such subcollection and therefore
+once per subcollection to the parent total. Counts SHALL include all capture
+types and favorites and SHALL NOT be limited by the active query or the number
+of rendered cards. The badge SHALL expose a localized, pluralized accessible
+name.
+
+#### Scenario: Show the total for Historial
+
+- **WHEN** the collection list shows `Historial`
+- **THEN** its badge shows the total number of persisted history captures,
+  including text, rich-text and image captures
+
+#### Scenario: Show a parent collection's subtree total
+
+- **GIVEN** captures are associated directly with a top-level collection or
+  with one or more of its direct subcollections
+- **WHEN** the collection list shows that parent
+- **THEN** its badge adds the direct captures that are not in any child to the
+  count of each child
+- **AND** a capture associated with multiple children contributes once for
+  each child it belongs to
+- **AND** a capture in both the parent and a child is counted through the
+  child's count, not again as a parent-only capture
+
+#### Scenario: Show a subcollection's direct membership count
+
+- **WHEN** the collection list shows a subcollection
+- **THEN** its badge counts the distinct captures associated directly with
+  that subcollection, regardless of membership in its parent or siblings
+
+#### Scenario: Show zero for an empty collection
+
+- **WHEN** a collection has no captures represented by its count scope
+- **THEN** its row displays a badge with `0` and an accessible zero-count label
+
+#### Scenario: Refresh count after capture or membership changes
+
+- **WHEN** a capture is added or removed, or its collection memberships are
+  assigned or removed
+- **THEN** the affected collection badges refresh from persisted metadata
+  without restarting Desktop
+
+#### Scenario: Refresh counts after clearing or deleting collections
+
+- **WHEN** a parent or subcollection is cleared or deleted, or captures are
+  deleted through that operation
+- **THEN** the next organization snapshot reports counts from the remaining
+  collection rows and memberships
+- **AND** no deleted membership remains in a parent's total
+
+#### Scenario: Refresh rows after collection changes
+
+- **WHEN** a collection is created, modified or deleted
+- **THEN** the collection list refreshes its rows and counts from the current
+  organization snapshot
+- **AND** a new empty collection initially displays `0`
+- **AND** a renamed collection retains its count
+- **AND** a deleted collection's row disappears
+
+#### Scenario: Count does not depend on visible search results
+
+- **GIVEN** a collection has captures outside the current query or card limit
+- **WHEN** the collection list displays its badge
+- **THEN** the badge still reports all persisted memberships in its count scope
+
+#### Scenario: Collection row interactions remain intact
+
+- **WHEN** the user selects, renames, opens actions for, or drags a capture
+  over a collection row
+- **THEN** the badge does not intercept the row's existing keyboard, pointer,
+  menu or drop interactions
+
+#### Scenario: Count projection remains metadata-only
+
+- **WHEN** Desktop loads collection counts
+- **THEN** the backend returns aggregate counts without loading capture content
+  or issuing one count query per collection
+- **AND** the snapshot, events and logs contain no capture content, hashes,
+  snippets, paths or capture identifiers
+
+### Requirement: Assign automatic captures to the active local collection
+
+ClipVault SHALL associate each newly captured clipboard entry with `Historial`
+and, when a local user collection or subcollection is active at capture time,
+with that active collection as well. The rule SHALL apply to new entries and
+to existing entries returned by deduplication. Adding the active membership
+SHALL preserve all existing collection memberships.
+
+#### Scenario: Capture while a local collection is active
+
+- **GIVEN** a local user collection is selected
+- **WHEN** ClipVault stores a new clipboard capture
+- **THEN** the entry belongs to both `Historial` and the selected collection
+
+#### Scenario: Capture while a subcollection is active
+
+- **GIVEN** a local subcollection is selected
+- **WHEN** ClipVault stores a new clipboard capture
+- **THEN** the entry belongs to both `Historial` and that subcollection
+- **AND** ClipVault does not implicitly add the entry to the parent collection
+
+#### Scenario: Capture duplicates an existing entry
+
+- **GIVEN** a local user collection or subcollection is active
+- **AND** the clipboard capture resolves to an existing history entry
+- **WHEN** ClipVault completes the capture
+- **THEN** the existing entry belongs to the active collection as well as
+  `Historial`
+- **AND** its other collection memberships remain unchanged
+
+#### Scenario: Capture while Historial is active
+
+- **GIVEN** `Historial` is active or no local collection is selected
+- **WHEN** ClipVault stores a clipboard capture
+- **THEN** the entry belongs to `Historial`
+- **AND** ClipVault does not add it to a user collection
+
+#### Scenario: Capture while a linked team history is active
+
+- **GIVEN** the user is viewing a linked team's history
+- **WHEN** ClipVault stores a local clipboard capture
+- **THEN** the entry belongs to `Historial`
+- **AND** ClipVault does not add it to the previously selected local collection
+
+#### Scenario: Capture while a peer-bound collection is selected
+
+- **GIVEN** the selected collection is bound to a linked peer
+- **WHEN** ClipVault stores a local clipboard capture
+- **THEN** the entry belongs to `Historial`
+- **AND** ClipVault does not add it to the peer-bound collection
+
+#### Scenario: Active local collection was removed or is no longer eligible
+
+- **GIVEN** the active collection ID no longer identifies an eligible local
+  user collection
+- **WHEN** ClipVault stores a clipboard capture
+- **THEN** the entry remains stored in `Historial`
+- **AND** the invalid additional membership is ignored
+
+#### Scenario: Restart with no active collection
+
+- **WHEN** ClipVault starts a new session
+- **THEN** the active capture destination is empty until the user selects a
+  local collection
+- **AND** clipboard captures continue to belong to `Historial`
+
+### Requirement: Track the active capture collection with the visible scope
+
+ClipVault SHALL keep the active capture destination synchronized with the
+visible local collection scope. Selecting a local collection or subcollection
+SHALL set that destination; selecting `Historial` or opening a linked team's
+history SHALL clear it. Closing the linked team's history SHALL restore the
+previous local selection as the destination. This runtime selection SHALL NOT
+be persisted across application restarts.
+
+#### Scenario: Switch between local collection scopes
+
+- **WHEN** the user selects a different local collection or subcollection
+- **THEN** subsequent captures use that newly selected collection
+
+#### Scenario: Restore local scope after closing a linked history
+
+- **GIVEN** a local collection is selected
+- **WHEN** the user opens and then closes a linked team's history
+- **THEN** subsequent captures use the previously selected local collection

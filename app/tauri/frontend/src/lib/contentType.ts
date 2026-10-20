@@ -9,22 +9,34 @@
 // keeps rendering meaningful metadata even when the backend extends
 // the taxonomy in the future.
 
-export type ContentTypeValue =
-  | "text"
-  | "url"
-  | "email"
-  | "json"
-  | "jwt"
-  | "uuid"
-  | "ipv4"
-  | "ipv6"
-  | "hex_color"
-  | "html"
-  | "file_path"
-  | "shell_command"
-  | "sql"
-  | "code"
-  | "image";
+/** Canonical display order shared by cards and the desktop type filter. */
+export const CONTENT_TYPE_VALUES = [
+  "text",
+  "url",
+  "email",
+  "json",
+  "jwt",
+  "uuid",
+  "ipv4",
+  "ipv6",
+  "hex_color",
+  "html",
+  "file_path",
+  "shell_command",
+  "sql",
+  "code",
+  "image",
+] as const;
+
+export type ContentTypeValue = (typeof CONTENT_TYPE_VALUES)[number];
+
+/** Keep only supported, available values and return them in canonical order. */
+export function orderAvailableContentTypes(
+  available: readonly ContentTypeValue[],
+): ContentTypeValue[] {
+  const availableSet = new Set(available);
+  return CONTENT_TYPE_VALUES.filter((contentType) => availableSet.has(contentType));
+}
 
 const CONTENT_TYPE_LABELS: Record<ContentTypeValue, string> = {
   text: "Texto",

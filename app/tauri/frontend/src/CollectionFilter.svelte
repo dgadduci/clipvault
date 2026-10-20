@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { compactFilterComboboxStyles } from "./lib/filterTokens.ts";
+  import { ACTIVE_FILTER_SURFACES, compactFilterComboboxStyles } from "./lib/filterTokens.ts";
   import { t } from "./lib/localization.ts";
   import type { Collection, CollectionFilter as CollectionFilterValue } from "./types.ts";
 
@@ -32,9 +32,10 @@
 <div
   class="collection-filter"
   data-testid={testId}
+  data-filter-active={selected.kind === "collection"}
   data-filter-width="110"
   data-filter-min-width="5.5rem"
-  style={compactFilterComboboxStyles}
+  style={`${compactFilterComboboxStyles} --filter-active-background: ${ACTIVE_FILTER_SURFACES.collection};`}
 >
   <svg
     class="collection-icon"
@@ -58,6 +59,7 @@
     title={selectedTitle}
     data-testid={`${testId}-select`}
     data-collection-filter-selected={selected.kind}
+    data-filter-active={selected.kind === "collection"}
     on:change={handleChange}
   >
     <option value="all" title={$t("filter.all")}>{$t("filter.all")}</option>
@@ -108,6 +110,18 @@
 
   select:hover {
     background: var(--cv-bg-hover, rgba(255, 255, 255, 0.06));
+  }
+
+  .collection-filter[data-filter-active="true"] select,
+  .collection-filter[data-filter-active="true"] select:hover {
+    background: var(--filter-active-background);
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.34);
+  }
+
+  .collection-filter[data-filter-active="true"] .collection-icon,
+  .collection-filter[data-filter-active="true"] .chevron {
+    color: #fff;
   }
 
   select:focus-visible {

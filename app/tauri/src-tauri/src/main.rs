@@ -99,7 +99,9 @@ fn main() {
 
     init_tracing();
 
-    let builder = tauri::Builder::default().plugin(tauri_plugin_process::init());
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init());
 
     // The updater public key and endpoint live in tauri.conf.json. This keeps
     // locally packaged production builds able to verify signed releases too;
@@ -189,9 +191,14 @@ fn main() {
             commands::clipvault_capture_collection_set,
             commands::clipvault_recent_entries,
             commands::clipvault_recent_entries_filtered,
+            commands::clipvault_content_types,
             commands::clipvault_history_count,
             commands::clipvault_search_entries,
             commands::clipvault_capture_tick,
+            commands::clipvault_export_pdf,
+            commands::clipvault_prepare_image_import,
+            commands::clipvault_complete_image_import,
+            commands::clipvault_cancel_image_import,
             commands::clipvault_platform_capabilities,
             commands::clipvault_paste_entry,
             commands::clipvault_copy_entry,
@@ -238,6 +245,7 @@ fn main() {
             commands::clipvault_set_collection_note,
             commands::clipvault_source_app_icon,
             commands::clipvault_clipboard_asset,
+            commands::clipvault_rotate_image_capture,
             commands::clipvault_rich_text_preview,
             commands::clipvault_organization_snapshot,
             commands::clipvault_collections_create,

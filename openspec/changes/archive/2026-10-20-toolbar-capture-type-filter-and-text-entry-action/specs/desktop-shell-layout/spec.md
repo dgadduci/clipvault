@@ -4,13 +4,15 @@
 
 The desktop SHALL expose the existing manual text-capture flow as a compact
 icon-and-label action in the toolbar. The action SHALL appear after the
-existing filter controls and before the ellipsis menu, preserve the existing
-scope rules, and return focus to its trigger when the modal closes.
+filter controls, including the capture-type filter, and before the ellipsis
+menu, preserve the existing scope rules, and return focus to its trigger when
+the modal closes.
 
 #### Scenario: Text capture action sits after the type filter
 
 - **WHEN** the desktop toolbar is rendered in any local collection scope
-- **THEN** the existing filter controls appear before the «Texto» action
+- **THEN** the capture-type filter and other filter controls appear before
+  the «Texto» action
 - **AND** the «Texto» action appears before the ellipsis menu
 - **AND** the action has an accessible name «Nueva captura de texto»
 

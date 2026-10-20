@@ -38,6 +38,7 @@ use crate::image_capture_diagnostic::{
     log_image_capture_diagnostic, ColorProfileKind, ImageCaptureDiagnostic, ImageSource,
     RepresentationSource,
 };
+use crate::image_file_import::{decode_image_file, ImageFileImportError};
 use crate::privacy::{CaptureDecision, PrivacyGate};
 use crate::rich_text::{canonical_rich_text_hash, RichTextAssetStore};
 
@@ -79,8 +80,28 @@ impl HistoryOutcome {
 pub enum HistoryServiceError {
     #[error("entry repository error: {0}")]
     Repository(#[from] EntryRepositoryError),
+    #[error("clipboard image asset error: {0}")]
+    ImageAsset(#[from] crate::clipboard_assets::AssetError),
+    #[error("clipboard image asset store is unavailable")]
+    ImageAssetStoreUnavailable,
     #[error("invalid card title: {0}")]
     InvalidTitle(#[from] TitleValidationError),
+}
+
+/// Direction applied by [`TextHistoryService::rotate_image_capture`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageRotationDirection {
+    Clockwise,
+    Counterclockwise,
+}
+
+/// Outcome of [`TextHistoryService::rotate_image_capture`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RotateImageOutcome {
+    Updated { record: clipvault_db::EntryRecord },
+    NotFound,
+    NotImage,
 }
 
 /// Maximum length of a user-defined card title. The repository stores
@@ -241,6 +262,118 @@ impl TextHistoryService {
         self.asset_store.as_ref()
     }
 
+    /// Rotate one persisted image entry by 90° and save the transformed PNG
+    /// as the entry's new content-addressed asset. The entry ID and its
+    /// unrelated metadata stay stable. The old asset is collected only after
+    /// SQLite commits and confirms which references remain live.
+    pub fn rotate_image_capture(
+        &self,
+        context: &AppContext,
+        id: i64,
+        direction: ImageRotationDirection,
+    ) -> Result<RotateImageOutcome, HistoryServiceError> {
+        let Some(store) = self.asset_store.as_ref() else {
+            return Err(HistoryServiceError::ImageAssetStoreUnavailable);
+        };
+
+        let entry = {
+            let mut db = context.database().lock();
+            let repo = EntryRepository::new(db.connection_mut());
+            repo.find_by_id(id)?
+        };
+        let Some(entry) = entry else {
+            return Ok(RotateImageOutcome::NotFound);
+        };
+        if entry.content_type != ContentType::Image || !entry.is_renderable_image() {
+            return Ok(RotateImageOutcome::NotImage);
+        }
+        let Some(old_asset_ref) = entry.asset_ref.filter(|asset_ref| !asset_ref.is_empty()) else {
+            return Ok(RotateImageOutcome::NotImage);
+        };
+
+        let source_bytes = store.read_bytes(&old_asset_ref)?;
+        let source = crate::clipboard_assets::decode_png(&source_bytes)?;
+        let source_width = source.width();
+        let source_height = source.height();
+        let output_width = source_height;
+        let output_height = source_width;
+        let mut output_rgba = vec![0; source.rgba().len()];
+
+        // Pixel coordinates are mapped directly so the two directions are
+        // unambiguous and alpha/color bytes are preserved exactly.
+        for y in 0..source_height {
+            for x in 0..source_width {
+                let (output_x, output_y) = match direction {
+                    ImageRotationDirection::Clockwise => (source_height - 1 - y, x),
+                    ImageRotationDirection::Counterclockwise => (y, source_width - 1 - x),
+                };
+                let source_offset = ((y as usize * source_width as usize) + x as usize) * 4;
+                let output_offset =
+                    ((output_y as usize * output_width as usize) + output_x as usize) * 4;
+                output_rgba[output_offset..output_offset + 4]
+                    .copy_from_slice(&source.rgba()[source_offset..source_offset + 4]);
+            }
+        }
+        let rotated =
+            ClipboardImage::new(output_rgba, output_width, output_height).map_err(|_| {
+                crate::clipboard_assets::AssetError::InvalidDimensions {
+                    width: output_width,
+                    height: output_height,
+                }
+            })?;
+        let normalized = crate::clipboard_assets::normalize_image_preserving_visual_metadata(
+            &rotated,
+            &source_bytes,
+        )?;
+
+        // Keep the shared asset mutation lock through the write, conditional
+        // database update and old-asset collection. This matches the image
+        // capture pipeline's lock order and protects shared/deduplicated PNGs.
+        let asset_mutation_guard = store.lock_mutations();
+        let stored = store.store_image_with_guard(&normalized, &asset_mutation_guard)?;
+        let (updated_entry, old_asset_is_unreferenced) = {
+            let mut db = context.database().lock();
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let updated = repo.replace_image_asset(
+                id,
+                &old_asset_ref,
+                normalized.hash(),
+                stored.asset_ref(),
+                normalized.byte_len() as i64,
+                normalized.width(),
+                normalized.height(),
+                self.clock.now(),
+            )?;
+            let old_is_unreferenced = if updated.is_some() {
+                match repo.count_asset_references(&old_asset_ref) {
+                    Ok(count) => Some(count == 0),
+                    Err(_) => {
+                        tracing::warn!("could not count image asset references after rotation");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            (updated, old_is_unreferenced)
+        };
+
+        let Some(record) = updated_entry else {
+            return Ok(RotateImageOutcome::NotFound);
+        };
+        if old_asset_is_unreferenced == Some(true) {
+            if let Err(error) =
+                store.delete_if_present_with_guard(&old_asset_ref, &asset_mutation_guard)
+            {
+                tracing::warn!(
+                    reason = error.kind_str(),
+                    "image asset cleanup failed after rotation"
+                );
+            }
+        }
+        Ok(RotateImageOutcome::Updated { record })
+    }
+
     /// The configured rich-text asset store, if any.
     pub fn rich_asset_store(&self) -> Option<&RichTextAssetStore> {
         self.rich_asset_store.as_ref()
@@ -290,6 +423,78 @@ impl TextHistoryService {
         collection_id: Option<i64>,
     ) -> HistoryOutcome {
         let outcome = self.record_text(context, source_app);
+        self.add_outcome_to_local_collection(context, &outcome, collection_id);
+        outcome
+    }
+
+    /// Import a local raster image into History and add it to the selected
+    /// local collection when one is active. Decode failures are metadata-only
+    /// and never include the source path or image bytes.
+    pub fn import_image_file(
+        &self,
+        context: &AppContext,
+        path: &std::path::Path,
+        collection_id: Option<i64>,
+    ) -> HistoryOutcome {
+        self.import_image_file_with_created_at(context, path, collection_id, None)
+    }
+
+    /// Import an ordered batch of local images. Timestamps descend by one
+    /// nanosecond per input position so the newest-first History query renders
+    /// newly created captures in the same order as `paths`. Processing stays
+    /// forward, which also means the first occurrence of a duplicate within
+    /// the batch is the one that creates the shared capture.
+    pub fn import_image_files_in_order(
+        &self,
+        context: &AppContext,
+        paths: &[std::path::PathBuf],
+        collection_id: Option<i64>,
+    ) -> Vec<HistoryOutcome> {
+        let batch_time = self.clock.now();
+        // Keep one nonzero final nanosecond digit across the batch. The
+        // repository sorts RFC3339 strings, so equal fractional precision is
+        // needed for lexical order to match timestamp order.
+        let batch_time = batch_time
+            .replace_nanosecond((batch_time.nanosecond() / 10 * 10) + 5)
+            .unwrap_or(batch_time);
+        paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let offset = time::Duration::nanoseconds(index as i64 * 10);
+                self.import_image_file_with_created_at(
+                    context,
+                    path,
+                    collection_id,
+                    Some(batch_time - offset),
+                )
+            })
+            .collect()
+    }
+
+    fn import_image_file_with_created_at(
+        &self,
+        context: &AppContext,
+        path: &std::path::Path,
+        collection_id: Option<i64>,
+        created_at: Option<time::OffsetDateTime>,
+    ) -> HistoryOutcome {
+        let image = match decode_image_file(path) {
+            Ok(image) => image,
+            Err(error) => {
+                let reason = match error {
+                    ImageFileImportError::Open => "open_failed",
+                    ImageFileImportError::UnsupportedFormat => "unsupported_format",
+                    ImageFileImportError::Decode => "decode_failed",
+                    ImageFileImportError::TooLarge => "image_limit_exceeded",
+                };
+                warn!(reason, "local image import skipped");
+                return HistoryOutcome::Failed {
+                    message: "image_import_failed".to_string(),
+                };
+            }
+        };
+        let outcome = self.persist_image(context, &image, None, created_at);
         self.add_outcome_to_local_collection(context, &outcome, collection_id);
         outcome
     }
@@ -433,7 +638,7 @@ impl TextHistoryService {
                 outcome
             }
             ClipboardPayload::Image(image) => {
-                let outcome = self.persist_image(context, &image, source_app);
+                let outcome = self.persist_image(context, &image, source_app, None);
                 emit_persistence_event(context, correlation_id, &outcome, started.elapsed());
                 outcome
             }
@@ -573,6 +778,7 @@ impl TextHistoryService {
         context: &AppContext,
         image: &ClipboardImage,
         source_app: Option<String>,
+        created_at: Option<time::OffsetDateTime>,
     ) -> HistoryOutcome {
         let Some(store) = self.asset_store.as_ref() else {
             return HistoryOutcome::Failed {
@@ -654,7 +860,7 @@ impl TextHistoryService {
             // Dedupe key: the hash of the normalized PNG.
             content_hash: normalized.hash().to_string(),
             source_app: source_app.clone(),
-            created_at: now,
+            created_at: created_at.unwrap_or(now),
             last_seen_at: now,
             asset_ref: Some(outcome.asset_ref().to_string()),
             mime_type: Some(IMAGE_MIME_PNG.to_string()),
@@ -820,6 +1026,19 @@ impl TextHistoryService {
         // Truncate to the requested limit so the rail stays
         // predictable regardless of the filter cardinality.
         Ok(records.into_iter().take(limit).collect())
+    }
+
+    /// Return the supported content types present in the active collection
+    /// scope. The repository query is distinct and independent of the rail
+    /// page limit, so older entries can still contribute an option.
+    pub fn available_content_types(
+        &self,
+        context: &AppContext,
+        collection_id: Option<i64>,
+    ) -> Result<Vec<ContentType>, HistoryServiceError> {
+        let mut db = context.database().lock();
+        let repo = EntryRepository::new(db.connection_mut());
+        Ok(repo.distinct_content_types(collection_id)?)
     }
 
     pub fn history_count(&self, context: &AppContext) -> Result<i64, HistoryServiceError> {

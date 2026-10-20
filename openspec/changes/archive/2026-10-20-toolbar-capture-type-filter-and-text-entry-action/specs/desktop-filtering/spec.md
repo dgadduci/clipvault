@@ -2,18 +2,20 @@
 
 ### Requirement: Filter captures by their content type
 
-The desktop SHALL preserve its existing capture-type filter in Historial and
-every local collection. The filter SHALL offer «Todas» and the capture types
-available in the active scope, with the same type icons used by cards.
+The desktop SHALL render one capture-type filter in Historial and every local
+collection. The filter SHALL offer «Todas» and the capture types available in
+the active scope, with the same type icons and translated labels used by
+cards. It SHALL NOT render duplicate capture-type selectors.
 Selecting a type SHALL combine with the active collection, source-application
 filter, tag filter and search query for both the card rail and search results.
-Changing collection scope SHALL reset the selected type to «Todas». The
-toolbar SHALL NOT render a duplicate capture-type selector.
+Changing collection scope SHALL reset the selected type to «Todas». The filter
+options SHALL be derived from all entries in the active collection scope, not
+from the paginated card rail.
 
-#### Scenario: Existing filter offers the types available in each scope
+#### Scenario: Filter offers the types available in each scope
 
 - **WHEN** the user opens the capture-type filter in Historial or a collection
-- **THEN** the existing filter offers «Todas» and each capture type present
+- **THEN** the filter offers «Todas» and each capture type present
   in that scope
 - **AND** every type option uses the existing card type icon and label
 - **AND** no second capture-type select is rendered

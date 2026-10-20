@@ -498,11 +498,12 @@ changing the established card dimensions or source-app/icon/title layout.
 
 ### Requirement: Preview capture from Desktop cards
 
-Every Desktop history card SHALL expose a read-only `Previsualizar` action in
-its existing menu and SHALL support the same platform-aware shortcut used by
-Quick Paste: `Cmd+Enter` on macOS and `Ctrl+Enter` on Linux when the card is
-focused. Both entry points SHALL open the same shared preview implementation
-used by Quick Paste.
+Every Desktop history card SHALL expose a `Previsualizar` action in its
+existing menu and SHALL support the same platform-aware shortcut used by Quick
+Paste: `Cmd+Enter` on macOS and `Ctrl+Enter` on Linux when the card is focused.
+Both entry points SHALL open the same shared preview implementation used by
+Quick Paste. The preview SHALL keep text and rich-text content read-only and
+MAY persist an explicit image rotation requested through its image controls.
 
 #### Scenario: Preview text from the card menu
 
@@ -515,8 +516,10 @@ used by Quick Paste.
 
 - **WHEN** the user opens an image card menu and chooses `Previsualizar`
 - **THEN** the Desktop opens the shared image preview and displays the complete
-  persisted image inside the bounded preview area without changing the asset,
-  its metadata or the clipboard
+  persisted image inside the bounded preview area without changing the
+  clipboard
+- **AND** the user can explicitly rotate the displayed image in either
+  direction and persist that rotation for the same capture
 
 #### Scenario: Preview with the platform shortcut
 
@@ -534,10 +537,11 @@ used by Quick Paste.
 ### Requirement: Shared preview behavior and presentation
 
 Desktop and Quick Paste SHALL render text, rich text and image previews through
-one shared component/helper path. The shared preview SHALL preserve the
-existing Quick Paste behavior, including full safe text, existing rich-preview
-policy, validated image assets, loading/error states, bounded scrolling and
-consistent type/title/source metadata.
+one shared component/helper path. The shared preview SHALL preserve full safe
+text, the existing rich-preview policy, validated image assets, loading/error
+states, bounded scrolling and consistent type/title/source metadata. Text and
+rich-text previews remain read-only. Image previews SHALL expose persistent
+rotation controls for exactly 90° clockwise and counterclockwise turns.
 
 #### Scenario: Full text is not truncated
 
@@ -552,6 +556,52 @@ consistent type/title/source metadata.
   content
 - **THEN** the preview displays it as inert text according to the existing
   escaping policy and executes no script, handler or navigation
+
+#### Scenario: Image rotation controls are available
+
+- **WHEN** the shared preview displays an image capture in Desktop or Quick
+  Paste
+- **THEN** it shows separate accessible controls with icons for clockwise and
+  counterclockwise rotation
+- **AND** activating either control rotates the image by exactly 90° in the
+  indicated direction and updates the preview after persistence succeeds
+- **AND** text and rich-text previews do not show these controls
+
+#### Scenario: Rotation shows a spinner until the refreshed image is ready
+
+- **WHEN** the user rotates an image capture
+- **THEN** the shared preview shows an accessible spinning indicator while the
+  rotation is being saved and while the resulting PNG is being loaded
+- **AND** it does not show the initial “Loading image…” text during that
+  rotation and reload
+- **AND** the spinner stops when the refreshed image is displayed or an error
+  fallback is shown
+
+#### Scenario: Image rotation persists on the same capture
+
+- **WHEN** a user rotates an image from its preview
+- **THEN** ClipVault stores the rotated pixels as a PNG asset and updates that
+  entry's asset reference, content hash, byte size and dimensions
+- **AND** the entry ID, title, favorite, note, tags, collection memberships,
+  capture timestamps and source metadata remain unchanged
+- **AND** the rotation remains visible after closing and reopening the preview
+  or restarting ClipVault
+
+#### Scenario: Rotation updates dimensions and retains other assets
+
+- **WHEN** an image is rotated by 90° in either direction
+- **THEN** its persisted width and height are swapped while the full image and
+  its proportions are preserved
+- **AND** any previous asset still referenced by another entry remains
+  available and unchanged
+
+#### Scenario: Rotation failure leaves the entry unchanged
+
+- **WHEN** the image is missing, invalid, the entry was removed or persistence
+  fails while a rotation is requested, including a content-hash collision with
+  another capture
+- **THEN** the current capture stays unchanged and the preview shows a
+  localized error while remaining usable
 
 #### Scenario: Image preview preserves the asset
 
@@ -569,14 +619,15 @@ consistent type/title/source metadata.
 
 #### Scenario: Shared implementation is actually reused
 
-- **WHEN** tests inspect or exercise Desktop and Quick Paste preview flows
+- **WHEN** Desktop and Quick Paste open previews
 - **THEN** both surfaces call the same preview component/helpers and there is
-  no duplicate renderer, sanitizer, shortcut matcher or asset lifecycle
+  no duplicate renderer, sanitizer, rotation path or asset lifecycle
 
 ### Requirement: Accessible preview lifecycle
 
 The Desktop preview SHALL behave as a bounded accessible overlay without
-changing the fixed geometry of the application.
+changing the fixed geometry of the application. Rotation controls SHALL have
+localized accessible names and remain keyboard operable.
 
 #### Scenario: Escape closes the preview first
 
@@ -587,8 +638,8 @@ changing the fixed geometry of the application.
 #### Scenario: Outside click closes the preview
 
 - **WHEN** the user clicks outside the preview surface
-- **THEN** the preview closes without mutating the entry; a click inside the
-  preview does not close it accidentally
+- **THEN** the preview closes without performing an additional mutation; a
+  click inside the preview does not close it accidentally
 
 #### Scenario: Repeated open and close is leak-free
 
@@ -878,31 +929,49 @@ that opens a read-only modal containing every assigned collection, including
 
 ### Requirement: Open the text editor from an eligible card
 
-Each eligible textual history card SHALL expose an accessible `Editar captura`
-action through its existing card menu. Image and rich-text cards SHALL NOT
-expose this action. Opening the editor SHALL not select the card or start a
-drag operation.
+Each eligible plain-text history card SHALL expose an accessible `Editar
+captura` action through its existing card menu. A rich-text card SHALL expose
+the same action, but SHALL require explicit confirmation before opening the
+plain-text editor. Image cards SHALL NOT expose this action. Opening the menu,
+warning or editor SHALL not select the card or start a drag operation.
 
 #### Scenario: Open editor from the card menu
 
-- **WHEN** the user opens the menu of an eligible text card and chooses
+- **WHEN** the user opens the menu of an eligible plain-text card and chooses
   `Editar captura`
 - **THEN** a modal opens with the current content loaded into a native
   `textarea`
 - **AND** focus moves to the editor
 - **AND** the card keeps its fixed geometry and existing actions
 
+#### Scenario: Rich card requires confirmation before opening editor
+
+- **WHEN** the user chooses `Editar captura` from a rich-text card menu
+- **THEN** an accessible warning explains that saving modified text converts
+  the capture to plain text and removes its rich representations
+- **AND** confirming opens the existing text editor with the canonical plain
+  text and resolved capture title
+- **AND** the card keeps its fixed geometry and existing actions
+
+#### Scenario: Cancel rich-card confirmation
+
+- **WHEN** the user cancels or closes the rich-text warning
+- **THEN** the editor does not open and the history entry remains unchanged
+- **AND** focus returns to the card menu trigger
+
 #### Scenario: Edit modal is accessible and cancellable
 
 - **WHEN** the text editor modal is open
 - **THEN** it has an accessible title, labelled editor, Guardar and Cancelar
   controls, visible validation errors and a single submit path
+- **AND** for a rich conversion Guardar is disabled while the draft is empty
+  or byte-for-byte equal to the original canonical text
 - **AND** Escape, backdrop, close button or Cancelar closes it without saving
 - **AND** focus returns to the menu trigger
 
 #### Scenario: Successful card edit refreshes the card
 
-- **WHEN** the user saves valid text
+- **WHEN** the user saves valid changed text
 - **THEN** the card renders the updated preview and metadata returned by the
   backend
 - **AND** tags, collections, title, favorite state and source-app presentation
@@ -932,9 +1001,10 @@ drag operation.
 The text editor modal SHALL use the card's resolved capture title as its
 visible dialog title, including the existing fallback when the capture has no
 custom title. It SHALL NOT show the generic `Editar captura` as the dialog
-title or the existing explanatory summary below the editor. An eligible text
-card SHALL support `Ctrl+E` as a card-level shortcut and SHALL show `Ctrl+E`
-next to the `Editar captura` menu action.
+title or the existing explanatory summary below the editor. Plain-text cards
+and rich-text cards SHALL expose the platform edit shortcut beside
+`Editar captura`; rich-text shortcut activation SHALL pass through the
+conversion warning before the editor opens.
 
 #### Scenario: Editor title is the capture title
 
@@ -947,33 +1017,44 @@ next to the `Editar captura` menu action.
 
 #### Scenario: Ctrl+E opens editing for an eligible card
 
-- **WHEN** an eligible text card has keyboard focus and the user presses
-  `Ctrl+E`
-- **THEN** the editor opens with the current capture content
+- **WHEN** an eligible plain-text card has keyboard focus and the user presses
+  `Ctrl+E`, or a rich-text card has focus and the user presses its platform
+  edit shortcut
+- **THEN** the editor opens with the current capture content for plain text,
+  or the conversion warning opens for rich text
 - **AND** the card/menu interaction is not treated as a drag
-- **AND** the `Editar captura` menu action visibly presents `Ctrl+E` and
-  exposes `aria-keyshortcuts="Control+E"`
+- **AND** the `Editar captura` menu action visibly presents the matching
+  shortcut and exposes its matching `aria-keyshortcuts`
+
+#### Scenario: Shortcut warns before editing a rich-text card
+
+- **WHEN** a rich-text card has keyboard focus and the user presses the
+  platform edit shortcut
+- **THEN** the conversion warning opens before the editor
+- **AND** the `Editar captura` menu action visibly presents the same shortcut
+  and exposes its matching `aria-keyshortcuts`
 
 #### Scenario: Ctrl+E is ignored in ineligible or interactive contexts
 
-- **WHEN** the focused card is an image/rich-text card, or the event target is
-  an input, textarea, select, button, menu, contenteditable element or the
-  editor modal
-- **THEN** `Ctrl+E` does not open the text editor and does not interfere with
-  the focused control's normal behavior
+- **WHEN** the focused card is an image card or the event target is an input,
+  textarea, select, button, menu, contenteditable element or the editor modal
+- **THEN** the text editor does not open and the focused control's normal
+  behavior is preserved
 
 ### Requirement: Open text editing with the platform shortcut
 
-An eligible textual history card SHALL open the existing text editor through
-`Ctrl+E` on Linux, including Wayland and X11, and through `Cmd+E` on macOS.
-The shortcut SHALL work when the eligible card is focused and when the rail's
-current selection identifies the eligible card without requiring the card's
-`article` element to receive the event directly.
+An eligible plain-text history card SHALL open the existing text editor through
+`Ctrl+E` on Linux, including Wayland and X11, and through `Cmd+E` on macOS. A
+rich-text history card SHALL open the conversion warning through the same
+platform-aware shortcut and SHALL open the editor only after confirmation.
+The shortcut SHALL work when the target card is focused and when the rail's
+current selection identifies the target without requiring its `article`
+element to receive the event directly.
 
 #### Scenario: Linux opens editing with Ctrl+E
 
-- **WHEN** an eligible text capture is focused or selected in the desktop rail
-  on Linux
+- **WHEN** an eligible plain-text capture is focused or selected in the
+  desktop rail on Linux
 - **AND** the user presses `Ctrl+E`
 - **THEN** the existing `EntryTextEditorModal` opens for that capture
 - **AND** the current persisted content is loaded into the editor
@@ -981,16 +1062,26 @@ current selection identifies the eligible card without requiring the card's
 
 #### Scenario: macOS opens editing with Cmd+E
 
-- **WHEN** an eligible text capture is focused or selected in the desktop rail
-  on macOS
+- **WHEN** an eligible plain-text capture is focused or selected in the
+  desktop rail on macOS
 - **AND** the user presses `Cmd+E`
 - **THEN** the existing `EntryTextEditorModal` opens for that capture
 - **AND** the current persisted content is loaded into the editor
 - **AND** the shortcut is consumed exactly once
 
+#### Scenario: Platform shortcut requests rich conversion
+
+- **WHEN** a rich-text capture is focused or selected in the desktop rail on
+  Linux or macOS
+- **AND** the user presses `Ctrl+E` on Linux or `Cmd+E` on macOS
+- **THEN** the warning opens before any editor or backend mutation
+- **AND** confirming opens the editor with the canonical plain text
+- **AND** cancelling leaves the capture rich and unchanged
+
 #### Scenario: Menu hint matches the platform
 
-- **WHEN** the `Editar captura` action is rendered for an eligible capture
+- **WHEN** the `Editar captura` action is rendered for a plain-text or
+  rich-text capture
 - **THEN** Linux displays `Ctrl+E` and exposes `aria-keyshortcuts="Control+E"`
 - **AND** macOS displays `⌘E` and exposes `aria-keyshortcuts="Meta+E"`
 - **AND** both labels and the matcher use the same platform resolution
@@ -1000,14 +1091,14 @@ current selection identifies the eligible card without requiring the card's
 - **WHEN** the event target is an input, textarea, select, contenteditable,
   button, menu, menuitem, title editor, selector, chip, dialog or another
   protected interactive control
-- **THEN** the editor does not open
+- **THEN** the editor or conversion warning does not open
 - **AND** the event's normal behavior is preserved
 - **AND** no card selection or drag operation is started
 
 #### Scenario: Ineligible entries show an informational notice
 
-- **WHEN** the focused or selected entry is an image/rich-text capture
-- **AND** the user presses the valid platform edit shortcut
+- **WHEN** the focused or selected entry is an image and the user presses the
+  valid platform edit shortcut
 - **THEN** the text editor does not open
 - **AND** the shortcut is consumed so a stale card-level handler cannot open
   the last edited capture
@@ -1018,10 +1109,9 @@ current selection identifies the eligible card without requiring the card's
 
 #### Scenario: Invalid modifiers and missing targets are ignored
 
-- **WHEN** no eligible entry is selected, or the user presses the wrong
-  platform modifier, `Alt`, or `Shift`
-- **THEN** the text editor does not open
-- **AND** no backend command or state mutation is issued
+- **WHEN** no entry is selected, or the user presses the wrong platform
+  modifier, `Alt` or `Shift`
+- **THEN** no editor, conversion warning or backend mutation is issued
 
 #### Scenario: Existing card and drag baselines remain intact
 

@@ -42,11 +42,9 @@
 //     foreign drag from another app cannot impersonate a card.
 //   - `beginDragSession` / `endDragSession` own the in-memory
 //     session that bridges the WebKit/Tauri gap. The pointer/mouse controller calls
-//     `beginDragSession(entry.id)` after activation and the sidebar
-//     consults / clears it during `dragover`, `drop` and the
-//     document-level `dragend`. A session that is left dangling
-//     after a cancel is cleared by the global `dragend` listener so
-//     a stale entry id cannot leak across drags.
+//     `beginDragSession(entry.id, selectedIds)` after activation and the
+//     sidebar consults / clears it during `dragover`, `drop` and the
+//     document-level `dragend`. The session carries only opaque integer IDs.
 //   - `combineMemberships` adds the target collection to the
 //     persisted set without dropping the existing memberships. The
 //     system `Historial` collection is always retained; calling the
@@ -86,14 +84,15 @@ export const CLIPVAULT_ENTRY_TEXT_PREFIX = "clipvault-entry:v1:";
  * In-memory drag session the pointer/mouse controller opens after
  * activation and the
  * sidebar consults on `dragover` / `drop` when `DataTransfer.types`
- * is empty or only exposes an unexpected MIME. The session only
- * stores an opaque entry id; clipboard content, snippets, hashes,
- * paths and image bytes never enter this state. The session is
+ * is empty or only exposes an unexpected MIME. It stores the primary opaque
+ * entry ID and selected opaque IDs for a grouped local operation; clipboard
+ * content, snippets, hashes, paths and image bytes never enter this state. The session is
  * cleared on `dragend`, on every `drop`, on `dragend` and after a
  * manual reset so a stale id cannot leak across drags.
  */
 interface DragSession {
   entryId: number;
+  selectedEntryIds: number[];
   token: number;
 }
 
@@ -101,7 +100,8 @@ let activeDragSession: DragSession | null = null;
 let dragSessionTokenCounter = 0;
 
 /**
- * Open a fresh in-memory drag session for the supplied entry id.
+ * Open a fresh in-memory drag session for the supplied primary entry ID and
+ * selected IDs when the primary belongs to that selection.
  *
  * The helper returns an opaque `token` the caller can pass to
  * `endDragSession` so a stale listener that fires after a new drag
@@ -111,18 +111,25 @@ let dragSessionTokenCounter = 0;
  * reference is the simplest, race-free channel that survives the
  * WebKit/Tauri quirk that drops the DataTransfer on `dragover`.
  *
- * `null` is returned when the caller cannot prove the entry id is a
- * finite non-negative integer — the session must never carry an
- * arbitrary value because the sidebar trusts it as a fallback
- * `DataTransfer` payload.
+ * `null` is returned when the caller cannot prove the primary entry ID is a
+ * finite non-negative integer. Invalid additional IDs are discarded because
+ * the sidebar trusts the primary as a fallback `DataTransfer` payload.
  */
-export function beginDragSession(entryId: number): number | null {
+export function beginDragSession(
+  entryId: number,
+  selectedEntryIds: readonly number[] = [entryId],
+): number | null {
   if (!Number.isFinite(entryId) || !Number.isInteger(entryId) || entryId < 0) {
     return null;
   }
+  const validatedIds = [...new Set(selectedEntryIds)].filter(
+    (id) => Number.isFinite(id) && Number.isInteger(id) && id >= 0,
+  );
+  if (!validatedIds.includes(entryId)) validatedIds.unshift(entryId);
   dragSessionTokenCounter += 1;
   activeDragSession = {
     entryId,
+    selectedEntryIds: validatedIds,
     token: dragSessionTokenCounter,
   };
   return dragSessionTokenCounter;
@@ -159,12 +166,17 @@ export function hasActiveDragSession(): boolean {
 }
 
 /**
- * Read the entry id the active drag session carries. Returns
- * `null` when no session is active so the sidebar can fall through
- * to the next resolution strategy.
+ * Read the primary entry ID the active drag session carries. Returns `null`
+ * when no session is active so the sidebar can fall through to the next
+ * resolution strategy.
  */
 export function getActiveDragSessionEntryId(): number | null {
   return activeDragSession ? activeDragSession.entryId : null;
+}
+
+/** Read the opaque entry IDs retained by the current in-process drag session. */
+export function getActiveDragSessionEntryIds(): number[] {
+  return activeDragSession ? [...activeDragSession.selectedEntryIds] : [];
 }
 
 /**

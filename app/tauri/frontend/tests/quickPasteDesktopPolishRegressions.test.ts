@@ -622,21 +622,21 @@ test("Quick Paste prunes the tag cache when an entry leaves the visible scope", 
 });
 
 // ---------------------------------------------------------------------------
-// 9.4 SourceAppFilter retains its established width while TagFilter is compact.
+// 9.4 SourceAppFilter uses its reduced width while TagFilter stays compact.
 // ---------------------------------------------------------------------------
 
-test("filterTokens preserves the source-app width and exports compact tag-filter sizing", () => {
-  // The source-app filter keeps its documented 220px / 11rem
-  // baseline; the tag filter owns an independent compact token.
-  assert.equal(FILTER_WIDTH_PX, 220);
-  assert.equal(FILTER_MIN_WIDTH_REM, "11rem");
+test("filterTokens exposes the reduced source-app width and compact tag sizing", () => {
+  // The source-app width is reduced a further 10% from 187px / 9.35rem;
+  // the tag filter keeps its independent compact token.
+  assert.equal(FILTER_WIDTH_PX, 168.3);
+  assert.equal(FILTER_MIN_WIDTH_REM, "8.415rem");
   assert.ok(
     /filterComboboxStyles/.test(filterTokensSource),
     "the token module must export filterComboboxStyles for component composition",
   );
   assert.ok(
-    /220px/.test(filterTokensSource),
-    "the token module must document the 220px width",
+    /168\.3px/.test(filterTokensSource),
+    "the token module must document the reduced 168.3px width",
   );
   assert.match(filterTokensSource, /COMPACT_FILTER_WIDTH_PX = 110/);
   assert.match(filterTokensSource, /COMPACT_FILTER_MIN_WIDTH_REM = "5\.5rem"/);
@@ -651,8 +651,8 @@ test("TagFilter uses the shared compact filter styles and width declarations", (
     "TagFilter must import compactFilterComboboxStyles",
   );
   assert.ok(
-    /style=\{compactFilterComboboxStyles\}/.test(tagFilterSource),
-    "TagFilter must apply the shared styles inline on the root div",
+    /style=\{`\$\{compactFilterComboboxStyles\}[\s\S]*ACTIVE_FILTER_SURFACES\.tag/.test(tagFilterSource),
+    "TagFilter must apply the shared sizing and active surface inline on the root div",
   );
   assert.ok(
     /data-filter-width="110"/.test(tagFilterSource),
@@ -679,21 +679,22 @@ test("TagFilter uses the shared compact filter styles and width declarations", (
   );
 });
 
-test("SourceAppFilter uses the shared filterComboboxStyles and width declarations", () => {
-  // The combobox MUST consume the same shared token module so the
-  // two filters stay byte-for-byte identical in width.
+test("SourceAppFilter uses the shared reduced width and its filter palette token", () => {
+  // The source-app combobox consumes the shared width token and
+  // advertises the reduced dimensions for layout regressions.
   assert.ok(
     /filterComboboxStyles/.test(sourceAppFilterSource),
     "SourceAppFilter must import filterComboboxStyles",
   );
   assert.ok(
-    /style=\{filterComboboxStyles\}/.test(sourceAppFilterSource),
-    "SourceAppFilter must apply the shared styles inline on the root div",
+    /style=\{`\$\{filterComboboxStyles\}[\s\S]*ACTIVE_FILTER_SURFACES\.sourceApp/.test(sourceAppFilterSource),
+    "SourceAppFilter must apply the shared width and active surface on the root div",
   );
   assert.ok(
-    /data-filter-width="220"/.test(sourceAppFilterSource),
+    /data-filter-width="168\.3"/.test(sourceAppFilterSource),
     "SourceAppFilter must expose data-filter-width for the regression suite",
   );
+  assert.match(sourceAppFilterSource, /data-filter-min-width="8\.415rem"/);
   const cssBlock = sourceAppFilterSource.slice(
     sourceAppFilterSource.indexOf("<style>"),
     sourceAppFilterSource.length,
@@ -701,20 +702,19 @@ test("SourceAppFilter uses the shared filterComboboxStyles and width declaration
   const rule = cssBlock.match(/\.source-app-filter\s*\{[^}]*\}/);
   assert.ok(rule, "the .source-app-filter rule must exist");
   assert.ok(
-    /width:\s*220px/.test(rule![0]),
-    "the .source-app-filter rule must pin width: 220px",
+    /width:\s*168\.3px/.test(rule![0]),
+    "the .source-app-filter rule must pin width: 168.3px",
   );
   assert.ok(
-    /max-width:\s*220px/.test(rule![0]),
-    "the .source-app-filter rule must pin max-width: 220px",
+    /max-width:\s*168\.3px/.test(rule![0]),
+    "the .source-app-filter rule must pin max-width: 168.3px",
   );
 });
 
-test("Toolbar mounts SourceAppFilter, TagFilter and the overflow menu in the documented order", () => {
+test("Toolbar mounts source-app, tag and capture-type filters before overflow", () => {
   // The visible order MUST stay `search → source-app → tag →
-  // overflow` so the manual QA pass can navigate from the search
-  // input to the tag filter without crossing the source-app
-  // combobox. The test searches for the first occurrence AFTER
+  // collection → content-type → Text → overflow` so each facet
+  // follows the prior one in the desktop toolbar. The test searches for the first occurrence AFTER
   // the import block so the import line "SourceAppFilter" cannot
   // produce a false positive.
   const toolbarScriptEnd = desktopToolbarSource.indexOf("</script>");
@@ -724,15 +724,23 @@ test("Toolbar mounts SourceAppFilter, TagFilter and the overflow menu in the doc
   );
   const sourceAppIndex = toolbarMarkup.indexOf("<SourceAppFilter");
   const tagIndex = toolbarMarkup.indexOf("<TagFilter");
+  const collectionIndex = toolbarMarkup.indexOf("<CollectionFilter");
+  const contentTypeIndex = toolbarMarkup.indexOf("<ContentTypeFilter");
+  const textIndex = toolbarMarkup.indexOf('data-testid="create-manual-text-entry"');
   const overflowIndex = toolbarMarkup.indexOf("open-overflow-menu");
   const searchIndex = toolbarMarkup.indexOf("search-shell");
   assert.ok(sourceAppIndex > -1, "SourceAppFilter must remain mounted");
   assert.ok(tagIndex > -1, "TagFilter must be mounted");
+  assert.ok(collectionIndex > -1, "CollectionFilter must remain available in Historial");
+  assert.ok(contentTypeIndex > -1, "ContentTypeFilter must be mounted");
+  assert.ok(textIndex > -1, "Text action must remain mounted");
   assert.ok(overflowIndex > -1, "the overflow menu must remain mounted");
   assert.ok(searchIndex > -1, "the search shell must remain mounted");
   assert.ok(
-    searchIndex < sourceAppIndex && sourceAppIndex < tagIndex && tagIndex < overflowIndex,
-    "the toolbar order must be search → source-app → tag → overflow",
+    searchIndex < sourceAppIndex && sourceAppIndex < tagIndex &&
+      tagIndex < collectionIndex && collectionIndex < contentTypeIndex &&
+      contentTypeIndex < textIndex && textIndex < overflowIndex,
+    "the toolbar order must be search → source-app → tag → collection → type → Text → overflow",
   );
 });
 

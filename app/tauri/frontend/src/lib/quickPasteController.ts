@@ -174,6 +174,65 @@ export async function performPasteFlow(args: {
   return { kind: "pasted", windowStaysHidden: true };
 }
 
+export type PasteStackFlowOutcome =
+  | { kind: "pasted"; windowStaysHidden: true; pastedCount: number }
+  | {
+      kind: "failed";
+      windowStaysHidden: false;
+      response: PasteResponse | { error: string };
+      pastedCount: number;
+    };
+
+/**
+ * Hide Quick Paste once, then await each synthetic paste in order. A failure
+ * stops the stack so later entries cannot be pasted after an incomplete
+ * sequence. Successful earlier pastes cannot be rolled back, so the outcome
+ * reports their count and restores Quick Paste for the user.
+ */
+export async function performPasteStackFlow(args: {
+  bridge: QuickPasteTauriBridge;
+  pasteFns: readonly (() => Promise<PasteResponse>)[];
+  isCapabilityUnavailable?: (response: PasteResponse) => boolean;
+  isFailed?: (response: PasteResponse) => boolean;
+  onReShow?: () => void;
+}): Promise<PasteStackFlowOutcome> {
+  await args.bridge.hide();
+  let pastedCount = 0;
+  for (const pasteFn of args.pasteFns) {
+    let response: PasteResponse;
+    try {
+      response = await pasteFn();
+    } catch (error) {
+      await args.bridge.show();
+      args.onReShow?.();
+      return {
+        kind: "failed",
+        windowStaysHidden: false,
+        response: {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        pastedCount,
+      };
+    }
+    const failed = args.isFailed?.(response) ?? response.kind === "failed";
+    const unavailable =
+      args.isCapabilityUnavailable?.(response) ??
+      response.kind === "capability_unavailable";
+    if (failed || unavailable) {
+      await args.bridge.show();
+      args.onReShow?.();
+      return {
+        kind: "failed",
+        windowStaysHidden: false,
+        response,
+        pastedCount,
+      };
+    }
+    pastedCount += 1;
+  }
+  return { kind: "pasted", windowStaysHidden: true, pastedCount };
+}
+
 /** Outcome of a copy attempt expressed in the language the UI cares
  *  about. Centralised so the modal can react without duplicating the
  *  decision tree. The arms mirror [`PasteFlowOutcome`] minus the

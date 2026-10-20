@@ -468,14 +468,15 @@ available toolbar width, the toolbar viewport SHALL scroll horizontally and
 keep every control reachable without creating page-level horizontal overflow.
 
 The tag and collection filters SHALL each use a 110 px width and 5.5rem
-minimum, half of their current 220 px and 11rem widths. The source-application
-filter SHALL retain its existing width. The search field SHALL use a 180 px
-base width (75% of its current 240 px base) and a 9rem minimum. It SHALL not
-grow to absorb free space.
+minimum. The source-application filter SHALL use a 168.3 px width and 8.415rem
+minimum, a 10% reduction from its current 187 px and 9.35rem dimensions. The
+search field SHALL use a 180 px base width (75% of its current 240 px base) and
+a 9rem minimum. It SHALL not grow to absorb free space.
 
-The create-text shortcut SHALL appear as a compact badge inside its button.
-The search placeholder SHALL be the localized equivalent of “Search”, while
-its accessible name remains descriptive.
+The create-text action SHALL display only its document icon. Its accessible
+name, tooltip, keyboard shortcut metadata and activation behavior SHALL remain
+available. The search placeholder SHALL be the localized equivalent of
+“Search”, while its accessible name remains descriptive.
 
 #### Scenario: Toolbar scrolls when controls exceed available width
 
@@ -495,9 +496,10 @@ its accessible name remains descriptive.
 #### Scenario: Compact filter widths do not affect the application filter
 
 - **WHEN** the toolbar shows tag, collection and source-application filters
-- **THEN** the tag and collection controls use 110 px width and 5.5rem minimum
+- **THEN** tag and collection controls use 110 px width and 5.5rem minimum
+- **AND** the source-application control uses 168.3 px width and 8.415rem
+  minimum
 - **AND** the tag options popup matches the tag control width
-- **AND** the source-application control retains its existing width
 
 #### Scenario: Search uses the reduced width and concise placeholder
 
@@ -506,12 +508,13 @@ its accessible name remains descriptive.
 - **AND** its placeholder is a concise localized equivalent of “Search”
 - **AND** its accessible name continues to describe the search scope
 
-#### Scenario: Create-text shortcut appears as a badge
+#### Scenario: Create-text action displays only its icon
 
-- **WHEN** the create-text button has a configured shortcut
-- **THEN** the shortcut appears as a compact badge within the button
-- **AND** the button retains its existing accessible name, tooltip, keyboard
-  shortcut metadata and activation behavior
+- **WHEN** the create-text button is available in the toolbar
+- **THEN** its visible content is only the document icon, without a text label
+  or shortcut badge
+- **AND** its accessible name, tooltip, keyboard shortcut metadata and
+  activation behavior remain available
 
 #### Scenario: Menu remains visible from the scrollable toolbar
 
@@ -535,4 +538,106 @@ its accessible name remains descriptive.
 
 - **WHEN** the toolbar is resized or scrolled
 - **THEN** history cards retain their existing size, contents, actions,
-  horizontal rail, and drag-and-drop behavior
+  horizontal rail and drag-and-drop behavior
+
+### Requirement: Create text captures from the filter toolbar
+
+The desktop SHALL expose the existing manual text-capture flow as a compact
+icon-only action in the toolbar. The action SHALL appear after the filter
+controls, including the capture-type filter, and before the ellipsis menu,
+preserve the existing scope rules, and return focus to its trigger when the
+modal closes.
+
+#### Scenario: Text capture action sits after the type filter
+
+- **WHEN** the desktop toolbar is rendered in any local collection scope
+- **THEN** the capture-type filter and other filter controls appear before the
+  text-capture action
+- **AND** the text-capture action appears before the ellipsis menu
+- **AND** the action has an accessible name «Nueva captura de texto»
+- **AND** its visible content is only the document icon
+
+#### Scenario: Text capture action preserves existing scope rules
+
+- **WHEN** the action is available in the active scope and the user activates
+  it
+- **THEN** the existing text-capture modal opens for that scope
+- **AND** closing the modal returns focus to the action
+
+#### Scenario: Text action is unavailable in unsupported scopes
+
+- **WHEN** manual text creation is disallowed for the active scope
+- **THEN** the text-capture action is absent from the toolbar
+
+### Requirement: Preserve desktop history and organization list presentation
+
+The rich-text editing flow SHALL preserve the existing desktop presentation:
+capture cards stay in one horizontal rail with fixed card and rail dimensions
+that scrolls when its content exceeds the available width. The collection list
+keeps a bounded viewport whose height does not grow with its item count and
+scrolls vertically when needed. Collection and linked-team item labels use the
+light foreground visual token.
+
+#### Scenario: Capture rail overflows horizontally
+
+- **WHEN** the history contains more cards than fit in the visible rail
+- **THEN** cards remain in one horizontal row and the rail can scroll
+  horizontally without changing card dimensions
+
+#### Scenario: Organization labels retain light contrast
+
+- **WHEN** collection or linked-team items appear in the desktop sidebar
+- **THEN** their labels use the light foreground color against the dark
+  workspace background
+
+#### Scenario: Collection list remains bounded as it grows
+
+- **WHEN** the number of collections exceeds the allocated sidebar viewport
+- **THEN** the list scrolls vertically inside its fixed-height region
+- **AND** adding collections does not change the region's height or the
+  available height for linked teams
+
+### Requirement: Keep toolbar controls in one horizontally scrollable row
+
+The desktop toolbar SHALL keep its search, filters, text-capture action and
+menu actions in one row. The row SHALL NOT wrap controls onto a second line.
+When the controls exceed the available width, the row SHALL provide horizontal
+scrolling and its height SHALL be bounded by the tallest control in that row.
+Open filter and action menus SHALL remain visible and usable outside the
+scrolling viewport while staying anchored to their trigger.
+
+#### Scenario: Toolbar controls exceed the available width
+
+- **WHEN** the toolbar controls are wider than the available window space
+- **THEN** every control remains on the same row
+- **AND** the user can scroll horizontally to reach the controls
+- **AND** the row height remains bounded by its tallest control
+
+#### Scenario: A filter or action menu is open while the row scrolls
+
+- **WHEN** the user opens a filter list or the action menu
+- **AND** the toolbar row clips overflow horizontally
+- **THEN** the open menu remains visible and interactive outside the scroll
+  viewport
+- **AND** the menu stays positioned relative to its trigger as the viewport or
+  row scrolls
+
+#### Scenario: Toolbar row is navigated with a keyboard
+
+- **WHEN** a keyboard user focuses the toolbar scroll row
+- **THEN** the row exposes a descriptive accessible name
+- **AND** the user can scroll to controls outside the visible width
+
+### Requirement: Image import action placement
+
+The Desktop toolbar SHALL provide an accessible photo-icon button to import
+local image files. The button SHALL be positioned between the PDF export
+button and the delete button.
+
+#### Scenario: Open image import
+
+- **WHEN** the user activates the photo button
+- **THEN** ClipVault opens the native multi-file picker for supported local
+  image formats
+- **AND** the button is available independently of the current capture
+  selection

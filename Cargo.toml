@@ -40,6 +40,7 @@ arboard = "3"
 # handling), so surfacing it as a direct dependency of the core adds no
 # new third-party code to the build. See `design.md` §10.
 png = "0.17"
+image = { version = "=0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 # SHA-256 for the deterministic asset name / dedupe key. Already
 # present in the graph via `tauri`; RustCrypto's `sha2` is the
 # reference implementation and has no transitive surface beyond

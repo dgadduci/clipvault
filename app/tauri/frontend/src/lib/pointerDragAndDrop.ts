@@ -8,14 +8,16 @@
 // WebViews that expose a mouse gesture but do not deliver a complete
 // Pointer Events sequence.
 //
-// Only an integer entry id is kept in memory. No clipboard content, asset
-// reference, snippet, hash, path or image bytes are involved.
+// Only opaque integer entry IDs are kept in the local session. No clipboard
+// content, asset reference, snippet, hash, path or image bytes are involved.
 
 import {
   beginDragSession,
   endDragSession,
+  getActiveDragSessionEntryIds,
   getActiveDragSessionEntryId,
 } from "./dragAndDrop.ts";
+import { dragSelectionIds } from "./multiSelection.ts";
 import { translate } from "./localization.ts";
 
 export const POINTER_DRAG_OVER_EVENT = "clipvault-pointer-drag-over";
@@ -41,12 +43,15 @@ const DRAG_SELECTION_BLOCK_CLASS = "cv-pointer-dragging";
 
 export interface PointerDragDetail {
   entryId: number;
+  /** Opaque IDs carried only by this local custom event/session. */
+  entryIds?: number[];
   clientX: number;
   clientY: number;
 }
 
 interface PendingPointerDrag {
   entryId: number;
+  selectedEntryIds: number[];
   pointerId: number;
   startX: number;
   startY: number;
@@ -95,6 +100,7 @@ function dispatchAtPoint(
   eventName: string,
   event: DragCoordinates,
   entryId: number,
+  entryIds: readonly number[],
 ): Element | null {
   const target = doc.elementFromPoint(event.clientX, event.clientY);
   if (!target) return null;
@@ -102,6 +108,7 @@ function dispatchAtPoint(
     entryId,
     clientX: event.clientX,
     clientY: event.clientY,
+    ...(entryIds.length > 1 ? { entryIds: [...entryIds] } : {}),
   };
   target.dispatchEvent(
     new CustomEvent<PointerDragDetail>(eventName, {
@@ -267,11 +274,30 @@ function startPendingDrag(
   const entryId = rawId === null ? Number.NaN : Number(rawId);
   if (!isValidEntryId(entryId)) return null;
 
+  // Read the rail's ephemeral selection at gesture start. The DataTransfer
+  // still receives only `entryId`; the selected set remains in this local
+  // controller session for the collection drop adapter.
+  const rail = closestElement(card, '[data-testid="history-rail"]');
+  const selectedCards = rail?.querySelectorAll<HTMLElement>(
+    '[data-testid="history-card"][data-selected="true"]',
+  ) ?? [];
+  const visibleIds: number[] = [];
+  const selectedIds = new Set<number>();
+  for (const selectedCard of selectedCards) {
+    const id = Number(selectedCard.getAttribute("data-entry-id"));
+    if (!isValidEntryId(id)) continue;
+    visibleIds.push(id);
+    selectedIds.add(id);
+  }
+  if (!visibleIds.includes(entryId)) visibleIds.push(entryId);
+  const selectedEntryIds = dragSelectionIds(visibleIds, selectedIds, entryId);
+
   // A new pointerdown supersedes a stale pending pointer without touching a
   // different active session unless it belonged to this controller.
   finishPendingDrag();
   pendingDrag = {
     entryId,
+    selectedEntryIds,
     pointerId,
     startX: event.clientX,
     startY: event.clientY,
@@ -321,7 +347,7 @@ function updatePendingDrag(event: DragCoordinates): void {
     const dx = event.clientX - current.startX;
     const dy = event.clientY - current.startY;
     if (Math.hypot(dx, dy) < ACTIVATION_DISTANCE) return;
-    const token = beginDragSession(current.entryId);
+    const token = beginDragSession(current.entryId, current.selectedEntryIds);
     if (token === null) {
       pendingDrag = null;
       return;
@@ -357,6 +383,7 @@ function updatePendingDrag(event: DragCoordinates): void {
       POINTER_DRAG_OVER_EVENT,
       event,
       current.entryId,
+      current.selectedEntryIds,
     );
   }
 }
@@ -404,7 +431,13 @@ function onPointerUp(event: PointerEvent): void {
 
   event.preventDefault();
   if (installedDocument) {
-    dispatchAtPoint(installedDocument, POINTER_DROP_EVENT, event, current.entryId);
+    dispatchAtPoint(
+      installedDocument,
+      POINTER_DROP_EVENT,
+      event,
+      current.entryId,
+      current.selectedEntryIds,
+    );
   }
   finishPendingDrag();
 }
@@ -418,7 +451,13 @@ function onMouseUp(event: MouseEvent): void {
   }
   event.preventDefault();
   if (installedDocument) {
-    dispatchAtPoint(installedDocument, POINTER_DROP_EVENT, event, current.entryId);
+    dispatchAtPoint(
+      installedDocument,
+      POINTER_DROP_EVENT,
+      event,
+      current.entryId,
+      current.selectedEntryIds,
+    );
   }
   finishPendingDrag();
 }
@@ -495,6 +534,11 @@ export function isPointerDragActive(): boolean {
 export function activePointerDragEntryId(): number | null {
   if (!pendingDrag?.active) return null;
   return getActiveDragSessionEntryId();
+}
+
+export function activePointerDragEntryIds(): number[] {
+  if (!pendingDrag?.active) return [];
+  return getActiveDragSessionEntryIds();
 }
 
 /** Test-only state reset; production cleanup uses the controller cleanup. */

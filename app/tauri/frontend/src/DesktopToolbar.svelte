@@ -25,6 +25,9 @@
   import SourceAppFilter from "./SourceAppFilter.svelte";
   import TagFilter from "./TagFilter.svelte";
   import CollectionFilter from "./CollectionFilter.svelte";
+  import ContentTypeFilter from "./ContentTypeFilter.svelte";
+  import { COLLECTION_ROW_TINT_OPACITY } from "./lib/collectionColor.ts";
+  import type { ContentTypeValue } from "./lib/contentType.ts";
   import type { SourceApplicationOption } from "./types.ts";
   import { t } from "./lib/localization.ts";
 
@@ -107,6 +110,11 @@
   export let showCollectionFilter: boolean = false;
   export let collectionFilter: CollectionFilterValue = { kind: "all" };
   export let collectionFilterOptions: CollectionOptionValue[] = [];
+  export let selectedContentType: ContentTypeValue | null = null;
+  export let contentTypeOptions: ContentTypeValue[] = [];
+  export let selectedEntryIds: number[] = [];
+  export let pdfExporting: boolean = false;
+  export let imageImporting: boolean = false;
   export let onSearchInput: (value: string) => void = () => {};
   export let onOpenGeneralSettings: (event: MouseEvent) => void = () => {};
   export let onOpenPrivacy: (event: MouseEvent) => void = () => {};
@@ -131,6 +139,9 @@
   export let onSourceAppFilterChange: (next: SourceAppFilterValue) => void = () => {};
   export let onTagFilterChange: (next: TagFilterValue) => void = () => {};
   export let onCollectionFilterChange: (next: CollectionFilterValue) => void = () => {};
+  export let onContentTypeFilterChange: (next: ContentTypeValue | null) => void = () => {};
+  export let onExportPdf: () => void = () => {};
+  export let onImportImages: () => void = () => {};
 
   /**
    * Ellipsis-menu state. The toolbar owns a single menu instance;
@@ -305,6 +316,12 @@
         onChange={onCollectionFilterChange}
       />
     {/if}
+    <ContentTypeFilter
+      selected={selectedContentType}
+      options={contentTypeOptions}
+      ariaLabel={$t("filter.content_type")}
+      onChange={onContentTypeFilterChange}
+    />
     {#if canCreateManualText}
       <button
         type="button"
@@ -333,12 +350,6 @@
           <path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-9z" />
           <path d="M13 3v7h7M12 14v5m-2.5-2.5h5" />
         </svg>
-        <span>{$t("toolbar.text_capture.label")}</span>
-        {#if createTextShortcut}
-          <kbd class="text-entry-shortcut" data-testid="create-text-capture-shortcut" aria-hidden="true">
-            {createTextShortcut}
-          </kbd>
-        {/if}
       </button>
     {/if}
     <div class="actions" role="toolbar" aria-label={$t("toolbar.config.aria")}>
@@ -446,6 +457,47 @@
           </div>
         {/if}
       </div>
+      <button
+        type="button"
+        class="pdf-export-button"
+        style={`--pdf-row-tint-opacity: ${COLLECTION_ROW_TINT_OPACITY}`}
+        aria-label={$t("pdf_export.button")}
+        title={$t("pdf_export.button")}
+        aria-busy={pdfExporting}
+        disabled={selectedEntryIds.length === 0 || pdfExporting}
+        data-testid="export-pdf-button"
+        data-selected-count={selectedEntryIds.length}
+        on:click={onExportPdf}
+      >
+        {$t("pdf_export.short_label")}
+      </button>
+      <button
+        type="button"
+        class="image-import-button"
+        aria-label={$t("image_import.button")}
+        title={$t("image_import.button")}
+        aria-busy={imageImporting}
+        disabled={imageImporting}
+        data-testid="import-images-button"
+        on:click={onImportImages}
+      >
+        <svg
+          aria-hidden="true"
+          focusable="false"
+          width="17"
+          height="17"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+          <circle cx="8.5" cy="9" r="1.4" />
+          <path d="m5 17 4.2-4.3 3.1 3.1 2.4-2.3L19 18" />
+        </svg>
+      </button>
       {#if showClearHistory || showClearCollection}
         <button
           type="button"
@@ -608,7 +660,6 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 0.35rem;
     flex: 0 0 auto;
     min-height: 2rem;
     padding: 0.35rem 0.55rem;
@@ -628,21 +679,6 @@
   .text-entry:focus-visible {
     outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.45));
     outline-offset: 2px;
-  }
-
-  .text-entry-shortcut {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 1.2rem;
-    padding: 0.08rem 0.35rem;
-    border: 1px solid var(--cv-border, #30363d);
-    border-radius: 999px;
-    background: rgba(15, 23, 42, 0.55);
-    color: var(--cv-fg-muted, #94a3b8);
-    font-size: 0.7rem;
-    line-height: 1;
-    white-space: nowrap;
   }
 
   .menu-trigger:hover {
@@ -725,6 +761,72 @@
     justify-content: center;
     cursor: pointer;
     padding: 0;
+  }
+
+  .pdf-export-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 36px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid rgba(248, 81, 73, 0.5);
+    border-radius: 9px;
+    background: rgba(248, 81, 73, var(--pdf-row-tint-opacity, 0.18));
+    color: #f85149;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+
+  .pdf-export-button:hover:not(:disabled) {
+    border-color: rgba(248, 81, 73, 0.8);
+    background: rgba(248, 81, 73, 0.3);
+  }
+
+  .pdf-export-button:focus-visible {
+    outline: 2px solid #fca5a5;
+    outline-offset: 2px;
+  }
+
+  .pdf-export-button:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  .image-import-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 36px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid var(--cv-border, #30363d);
+    border-radius: 9px;
+    background: var(--cv-bg-elevated, #161b22);
+    color: var(--cv-fg, #f0f4f8);
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+
+  .image-import-button:hover:not(:disabled) {
+    border-color: var(--cv-border-hover, #64748b);
+    background: var(--cv-bg-hover, rgba(255, 255, 255, 0.08));
+  }
+
+  .image-import-button:focus-visible {
+    outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.45));
+    outline-offset: 2px;
+  }
+
+  .image-import-button:disabled,
+  .image-import-button[aria-busy="true"] {
+    opacity: 0.55;
+    cursor: progress;
   }
 
   .trash:hover {

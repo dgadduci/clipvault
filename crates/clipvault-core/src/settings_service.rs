@@ -27,10 +27,12 @@ use crate::privacy::PrivacyGate;
 use crate::settings::{
     capture_notes_sharing_enabled_value, local_clipboard_capture_enabled_value,
     local_peer_sharing_enabled_value, parse_capture_notes_sharing_enabled, parse_language,
-    parse_local_clipboard_capture_enabled, parse_local_peer_sharing_enabled, HotkeySpec, Settings,
-    SettingsUpdate, ValidationError, CAPTURE_NOTES_SHARING_ENABLED_KEY, HOTKEY_SETTING_STORAGE_KEY,
-    LANGUAGE_SETTING_KEY, LOCAL_CLIPBOARD_CAPTURE_ENABLED_KEY, LOCAL_PEER_DISPLAY_NAME_KEY,
-    LOCAL_PEER_SHARING_ENABLED_KEY,
+    parse_local_clipboard_capture_enabled, parse_local_peer_sharing_enabled,
+    parse_pdf_page_break_between_captures, pdf_page_break_between_captures_value, HotkeySpec,
+    Settings, SettingsUpdate, ValidationError, CAPTURE_NOTES_SHARING_ENABLED_KEY,
+    HOTKEY_SETTING_STORAGE_KEY, LANGUAGE_SETTING_KEY, LOCAL_CLIPBOARD_CAPTURE_ENABLED_KEY,
+    LOCAL_PEER_DISPLAY_NAME_KEY, LOCAL_PEER_SHARING_ENABLED_KEY,
+    PDF_PAGE_BREAK_BETWEEN_CAPTURES_KEY,
 };
 
 #[derive(Debug, Error)]
@@ -348,6 +350,16 @@ impl SettingsService {
         settings.capture_notes_sharing_enabled =
             parse_capture_notes_sharing_enabled(capture_notes_sharing_raw.as_deref());
 
+        let pdf_page_break_raw = {
+            let repo = AppSettingsRepository::new(db.connection_mut());
+            repo.get(PDF_PAGE_BREAK_BETWEEN_CAPTURES_KEY)
+                .ok()
+                .flatten()
+                .map(|setting| setting.value)
+        };
+        settings.pdf_page_break_between_captures =
+            parse_pdf_page_break_between_captures(pdf_page_break_raw.as_deref());
+
         let ignored = {
             let repo = IgnoredAppRepository::new(db.connection_mut());
             repo.list()
@@ -447,6 +459,15 @@ impl SettingsService {
             AppSettingsRepository::new(conn).set(
                 CAPTURE_NOTES_SHARING_ENABLED_KEY,
                 capture_notes_sharing_enabled_value(next.capture_notes_sharing_enabled),
+                now,
+            )?;
+        }
+
+        if next.pdf_page_break_between_captures != current.pdf_page_break_between_captures {
+            let conn = db.connection_mut();
+            AppSettingsRepository::new(conn).set(
+                PDF_PAGE_BREAK_BETWEEN_CAPTURES_KEY,
+                pdf_page_break_between_captures_value(next.pdf_page_break_between_captures),
                 now,
             )?;
         }
@@ -992,6 +1013,38 @@ mod tests {
             )
             .expect("unrelated partial setting");
         assert!(service.load(&context).capture_notes_sharing_enabled);
+    }
+
+    #[test]
+    fn pdf_page_break_preference_defaults_on_and_persists_as_a_partial_setting() {
+        use crate::test_support::isolated_harness;
+
+        let (_dir, context) = isolated_harness();
+        let service = minimal_service();
+        assert!(service.load(&context).pdf_page_break_between_captures);
+
+        let stored = service
+            .apply(
+                &context,
+                &SettingsUpdate {
+                    pdf_page_break_between_captures: Some(false),
+                    ..SettingsUpdate::default()
+                },
+            )
+            .expect("save page-break preference");
+        assert!(!stored.pdf_page_break_between_captures);
+        assert!(!service.load(&context).pdf_page_break_between_captures);
+
+        service
+            .apply(
+                &context,
+                &SettingsUpdate {
+                    retention: Some(RetentionPolicy::Days7),
+                    ..SettingsUpdate::default()
+                },
+            )
+            .expect("save unrelated setting");
+        assert!(!service.load(&context).pdf_page_break_between_captures);
     }
 
     #[test]

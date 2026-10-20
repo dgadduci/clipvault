@@ -416,6 +416,13 @@ export type UpdateTextEntryResponse =
   | { kind: "empty_content" }
   | { kind: "duplicate_content" };
 
+export type ImageRotationDirection = "clockwise" | "counterclockwise";
+
+export type RotateImageCaptureResponse =
+  | { kind: "updated"; entry: EntryRecord }
+  | { kind: "not_found" }
+  | { kind: "not_image" };
+
 export type DeleteResponse =
   | { kind: "removed"; removed: number }
   | { kind: "not_found" }
@@ -485,6 +492,7 @@ export interface Settings {
    */
   local_peer_display_name: string | null;
   capture_notes_sharing_enabled: boolean;
+  pdf_page_break_between_captures: boolean;
 }
 
 export interface SettingsUpdate {
@@ -495,7 +503,33 @@ export interface SettingsUpdate {
   quick_paste_hotkey?: HotkeySpec | null;
   local_peer_display_name?: string | null;
   capture_notes_sharing_enabled?: boolean;
+  pdf_page_break_between_captures?: boolean;
 }
+
+export type PdfExportSaveResult = "saved" | "cancelled";
+
+export type ImageImportResponse =
+  | {
+      kind: "completed";
+      imported: number;
+      duplicates: number;
+      skipped: number;
+    };
+
+export interface ImageImportFilePreview {
+  id: number;
+  display_name: string | null;
+}
+
+export type ImageImportPreparationResponse =
+  | { kind: "cancelled" }
+  | { kind: "prepared"; session_id: number; files: ImageImportFilePreview[] }
+  | {
+      kind: "completed";
+      imported: number;
+      duplicates: number;
+      skipped: number;
+    };
 
 /**
  * Metadata-only projection the frontend reads through

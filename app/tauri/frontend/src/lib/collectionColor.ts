@@ -14,6 +14,7 @@
 
 const FALLBACK_HEX = "#94a3b8";
 const HEX_RE = /^#[0-9a-f]{6}$/;
+export const COLLECTION_ROW_TINT_OPACITY = 0.18;
 
 /**
  * Validate and normalise a `Collection.color_hex` value. Returns the
@@ -39,7 +40,7 @@ export function collectionColor(value: unknown): string {
  */
 export function collectionColorTint(
   value: unknown,
-  opacity: number = 0.18,
+  opacity: number = COLLECTION_ROW_TINT_OPACITY,
 ): string {
   const hex = collectionColor(value).slice(1);
   const red = Number.parseInt(hex.slice(0, 2), 16);
@@ -47,7 +48,7 @@ export function collectionColorTint(
   const blue = Number.parseInt(hex.slice(4, 6), 16);
   const safeOpacity = Number.isFinite(opacity)
     ? Math.min(1, Math.max(0, opacity))
-    : 0.18;
+    : COLLECTION_ROW_TINT_OPACITY;
   return `rgba(${red}, ${green}, ${blue}, ${safeOpacity})`;
 }
 

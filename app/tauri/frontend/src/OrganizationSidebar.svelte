@@ -60,7 +60,11 @@
     "create-subcollection": { parentId: number; name: string };
     rename: { collectionId: number; name: string };
     delete: { collectionId: number };
-    "card-drop": { entryId: number; collectionId: number };
+    "card-drop": {
+      entryId: number;
+      collectionId: number;
+      entryIds?: number[];
+    };
     "peer-bound-drop": Record<string, never>;
     "toggle-subcollection-captures": {
       collectionId: number;
@@ -541,8 +545,20 @@
     dragOverCollectionId = null;
   }
 
-  function onCardDropDispatch(entryId: number, collectionId: number): void {
-    dispatch("card-drop", { entryId, collectionId });
+  function onCardDropDispatch(
+    entryId: number,
+    collectionId: number,
+    entryIds?: number[],
+  ): void {
+    if (!entryIds || entryIds.length <= 1) {
+      dispatch("card-drop", { entryId, collectionId });
+      return;
+    }
+    dispatch("card-drop", {
+      entryId,
+      collectionId,
+      entryIds,
+    });
   }
 
   function onPeerBoundDropDispatch(): void {

@@ -149,19 +149,20 @@ test("DesktopToolbar renders a single ellipsis trigger with accessible semantics
 
 test("text-entry action follows the existing filter controls and precedes the overflow menu", () => {
   const source = stripComments(loadSource("src/DesktopToolbar.svelte"));
-  const tagFilter = source.indexOf("<TagFilter");
+  const contentTypeFilter = source.indexOf("<ContentTypeFilter");
   const textAction = source.indexOf('data-testid="create-manual-text-entry"');
   const overflow = source.indexOf('data-testid="open-overflow-menu"');
-  assert.ok(tagFilter >= 0, "toolbar keeps its existing filter controls");
-  assert.ok(textAction > tagFilter, "text action follows the existing filters");
+  assert.ok(contentTypeFilter >= 0, "toolbar mounts the capture type filter");
+  assert.ok(textAction > contentTypeFilter, "text action follows the type filter");
   assert.ok(overflow > textAction, "overflow menu follows the text action");
   assert.equal(
-    source.includes("<CaptureTypeFilter"),
-    false,
-    "toolbar must not render the duplicate type-filter select",
+    source.split("<ContentTypeFilter").length - 1,
+    1,
+    "toolbar renders exactly one capture type filter",
   );
   assert.match(source, /aria-label=\{\$t\("toolbar\.text_capture\.aria"\)\}/);
-  assert.match(source, /<span>\{\$t\("toolbar\.text_capture\.label"\)\}<\/span>/);
+  assert.doesNotMatch(source, /toolbar\.text_capture\.label/);
+  assert.doesNotMatch(source, /create-text-capture-shortcut/);
   const menuStart = source.indexOf('data-testid="overflow-menu"');
   const menuEnd = source.indexOf("{/if}", menuStart);
   assert.equal(
@@ -445,6 +446,7 @@ test("DesktopToolbar keeps all controls in a single horizontal scroll row", () =
   for (const filterSource of [
     loadSource("src/SourceAppFilter.svelte"),
     loadSource("src/TagFilter.svelte"),
+    loadSource("src/ContentTypeFilter.svelte"),
   ]) {
     assert.match(filterSource, /use:anchorPopupToViewport=/);
     assert.match(filterSource, /\.listbox\s*\{[^}]*position:\s*fixed/);

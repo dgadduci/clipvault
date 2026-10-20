@@ -28,7 +28,7 @@
   import { onDestroy, tick } from "svelte";
   import { anchorPopupToViewport } from "./lib/anchorPopupToViewport.ts";
   import type { TagFilter, TagFilterOption } from "./types.ts";
-  import { compactFilterComboboxStyles } from "./lib/filterTokens.ts";
+  import { ACTIVE_FILTER_SURFACES, compactFilterComboboxStyles } from "./lib/filterTokens.ts";
   import { t } from "./lib/localization.ts";
 
   export let selected: TagFilter;
@@ -274,7 +274,7 @@
     data-testid={testId}
     data-filter-width="110"
     data-filter-min-width="5.5rem"
-    style={compactFilterComboboxStyles}
+    style={`${compactFilterComboboxStyles} --filter-active-background: ${ACTIVE_FILTER_SURFACES.tag};`}
   >
   <button
     type="button"
@@ -289,6 +289,7 @@
     on:keydown={onTriggerKeydown}
     data-testid={`${testId}-trigger`}
     data-tag-filter-selected={selected.kind}
+    data-filter-active={selected.kind === "tag"}
   >
     <span
       class="trigger-icon"
@@ -393,6 +394,17 @@
 
   .trigger:hover {
     background: var(--cv-bg-hover, rgba(255, 255, 255, 0.06));
+  }
+
+  .trigger[data-filter-active="true"],
+  .trigger[data-filter-active="true"]:hover {
+    background: var(--filter-active-background);
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.34);
+  }
+
+  .trigger[data-filter-active="true"] .trigger-icon {
+    color: #fff;
   }
 
   .trigger:focus-visible {

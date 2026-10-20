@@ -14,19 +14,21 @@ use clipvault_core::{
 use clipvault_core::{
     ActiveAppDiagnostics, Capabilities, ClearOutcome, ClipboardAssetStore,
     CodeLanguageServiceError, ContextualDesktopSetupDismissals, CopyOutcome, DeleteOutcome,
-    DesktopSetupIntegration, HotkeySpec, IgnoredAppEntry, IgnoredAppError, LocalSettingsReader,
-    ManualTextCreationOutcome, PasteMode, PasteOutcome, PickAndAddOutcome, PlatformGuidance,
-    PlatformGuidanceId, PlatformSettingsTarget, RetentionOutcome, RetentionPolicy,
-    RetentionPreview, RichTextAssetStore, SetFavoriteResult, SetTitleOutcome, Settings,
-    SettingsNavigator, SettingsOpenOutcome, SettingsServiceError, SettingsUpdate,
-    TitleValidationError, UpdateTextHistoryOutcome, ValidationCode, ValidationError,
-    WatchTickOutcome,
+    DesktopSetupIntegration, HistoryOutcome, HotkeySpec, IgnoredAppEntry, IgnoredAppError,
+    LocalSettingsReader, ManualTextCreationOutcome, PasteMode, PasteOutcome, PdfExportService,
+    PickAndAddOutcome, PlatformGuidance, PlatformGuidanceId, PlatformSettingsTarget,
+    RetentionOutcome, RetentionPolicy, RetentionPreview, RichTextAssetStore, SetFavoriteResult,
+    SetTitleOutcome, Settings, SettingsNavigator, SettingsOpenOutcome, SettingsServiceError,
+    SettingsUpdate, TitleValidationError, UpdateTextHistoryOutcome, ValidationCode,
+    ValidationError, WatchTickOutcome,
 };
 use clipvault_platform::{
     read_icon_bytes, read_source_app_icon_bytes, ActiveAppError, IconReadError,
 };
 use serde::Serialize;
+use tauri::WebviewWindow;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use tauri_plugin_dialog::DialogExt;
 use tracing::warn;
 
 use crate::state::SharedState;
@@ -155,6 +157,192 @@ impl CommandError {
             message: message.into(),
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfExportSaveResult {
+    Saved,
+    Cancelled,
+}
+
+/// Generate one PDF from the ordered local selection and save it through the
+/// native file dialog. The command only adapts the core service to Tauri's
+/// dialog and filesystem APIs; capture content never crosses the webview.
+#[tauri::command]
+pub async fn clipvault_export_pdf(
+    window: WebviewWindow,
+    state: State<'_, SharedState>,
+    entry_ids: Vec<i64>,
+    dialog_title: String,
+    filter_name: String,
+    suggested_file_name: String,
+) -> Result<PdfExportSaveResult, CommandError> {
+    let context = state.context();
+    let settings = context.settings().load(context);
+    let pdf = PdfExportService::generate(
+        context,
+        &entry_ids,
+        settings.pdf_page_break_between_captures,
+    )
+    .map_err(|_| CommandError::new("pdf_export_error", "PDF export failed"))?;
+
+    let Some(file_path) = window
+        .dialog()
+        .file()
+        .add_filter(filter_name, &["pdf"])
+        .set_title(dialog_title)
+        .set_file_name(suggested_file_name)
+        .blocking_save_file()
+    else {
+        return Ok(PdfExportSaveResult::Cancelled);
+    };
+    let mut path = file_path
+        .into_path()
+        .map_err(|_| CommandError::new("pdf_export_error", "PDF export failed"))?;
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+    {
+        path.set_extension("pdf");
+    }
+    std::fs::write(path, pdf)
+        .map_err(|_| CommandError::new("pdf_export_error", "PDF export failed"))?;
+
+    Ok(PdfExportSaveResult::Saved)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImageImportPreparation {
+    Cancelled,
+    Prepared {
+        session_id: u64,
+        files: Vec<crate::state::PendingImageImportFilePreview>,
+    },
+    Completed {
+        imported: usize,
+        duplicates: usize,
+        skipped: usize,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImageImportResult {
+    Completed {
+        imported: usize,
+        duplicates: usize,
+        skipped: usize,
+    },
+}
+
+/// Open the native multi-file picker and retain selected source paths in
+/// process-local state while the user reviews the final order. Only opaque IDs
+/// and basename labels cross the WebView boundary.
+#[tauri::command]
+pub async fn clipvault_prepare_image_import(
+    window: WebviewWindow,
+    state: State<'_, SharedState>,
+    dialog_title: String,
+    filter_name: String,
+) -> Result<ImageImportPreparation, CommandError> {
+    let Some(file_paths) = window
+        .dialog()
+        .file()
+        .add_filter(
+            filter_name,
+            &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"],
+        )
+        .set_title(dialog_title)
+        .blocking_pick_files()
+    else {
+        return Ok(ImageImportPreparation::Cancelled);
+    };
+
+    let mut skipped = 0;
+    let mut paths = Vec::with_capacity(file_paths.len());
+
+    for file_path in file_paths {
+        match file_path.into_path() {
+            Ok(path) => paths.push(path),
+            Err(_) => skipped += 1,
+        }
+    }
+
+    if paths.is_empty() {
+        return Ok(ImageImportPreparation::Completed {
+            imported: 0,
+            duplicates: 0,
+            skipped,
+        });
+    }
+    let preview = state.begin_image_import(paths, skipped);
+    Ok(ImageImportPreparation::Prepared {
+        session_id: preview.session_id,
+        files: preview.files,
+    })
+}
+
+/// Complete an image import in the order confirmed by the user. The core keeps
+/// processing forward and assigns timestamps that preserve that order in the
+/// History rail's newest-first ordering.
+#[tauri::command]
+pub async fn clipvault_complete_image_import(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    session_id: u64,
+    ordered_file_ids: Vec<u32>,
+) -> Result<ImageImportResult, CommandError> {
+    let (paths, mut skipped) = state
+        .take_ordered_image_import(session_id, &ordered_file_ids)
+        .map_err(|error| match error {
+            crate::state::PendingImageImportError::MissingOrExpired => CommandError::new(
+                "image_import_session_expired",
+                "Image import selection expired",
+            ),
+            crate::state::PendingImageImportError::InvalidOrder => CommandError::new(
+                "image_import_invalid_order",
+                "Image import order is invalid",
+            ),
+        })?;
+
+    let context = state.context();
+    let collection_id = state.active_capture_collection_id();
+    let mut imported = 0;
+    let mut duplicates = 0;
+
+    for outcome in context
+        .history()
+        .import_image_files_in_order(context, &paths, collection_id)
+    {
+        match outcome {
+            HistoryOutcome::Stored { .. } => imported += 1,
+            HistoryOutcome::Duplicate { .. } => duplicates += 1,
+            HistoryOutcome::Ignored | HistoryOutcome::Failed { .. } => skipped += 1,
+        }
+    }
+
+    if imported + duplicates > 0 {
+        emit_history_updated(&app);
+        emit_organization_updated(&app);
+    }
+
+    Ok(ImageImportResult::Completed {
+        imported,
+        duplicates,
+        skipped,
+    })
+}
+
+/// Release the pending source paths when the user cancels order review.
+#[tauri::command]
+pub async fn clipvault_cancel_image_import(
+    state: State<'_, SharedState>,
+    session_id: u64,
+) -> Result<(), CommandError> {
+    state.cancel_image_import(session_id);
+    Ok(())
 }
 
 impl From<clipvault_core::BootstrapError> for CommandError {
@@ -541,6 +729,21 @@ pub fn clipvault_recent_entries_filtered(
         )
         .map_err(|err| CommandError::new("history_error", err.to_string()))?;
     Ok(records)
+}
+
+/// List the supported capture types present in Historial or one local
+/// collection. This metadata-only query is not limited to the current rail
+/// page, so the toolbar can offer every type available in the active scope.
+#[tauri::command]
+pub fn clipvault_content_types(
+    state: State<'_, SharedState>,
+    collection_id: Option<i64>,
+) -> Result<Vec<clipvault_db::ContentType>, CommandError> {
+    state
+        .context()
+        .history()
+        .available_content_types(state.context(), collection_id)
+        .map_err(|err| CommandError::new("history_error", err.to_string()))
 }
 
 /// Response of [`clipvault_search_entries`]. Mirrors the service
@@ -2104,6 +2307,40 @@ pub fn clipvault_clipboard_asset(
 ) -> Result<Vec<u8>, CommandError> {
     let data_dir = state.context().platform().data_dir.clone();
     read_clipboard_asset(&data_dir, &asset_ref)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RotateImageCaptureResponse {
+    Updated { entry: clipvault_db::EntryRecord },
+    NotFound,
+    NotImage,
+}
+
+/// Persist a quarter-turn rotation for one local image capture. The core owns
+/// image decoding, transformation, asset storage and the conditional SQLite
+/// update; this command only forwards the typed result and refresh event.
+#[tauri::command]
+pub fn clipvault_rotate_image_capture(
+    state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
+    entry_id: i64,
+    direction: clipvault_core::ImageRotationDirection,
+) -> Result<RotateImageCaptureResponse, CommandError> {
+    let context = state.context();
+    let outcome = context
+        .history()
+        .rotate_image_capture(context, entry_id, direction)
+        .map_err(|_| CommandError::new("image_rotation_error", "image rotation failed"))?;
+    let response = match outcome {
+        clipvault_core::RotateImageOutcome::Updated { record } => {
+            emit_history_updated(&handle);
+            RotateImageCaptureResponse::Updated { entry: record }
+        }
+        clipvault_core::RotateImageOutcome::NotFound => RotateImageCaptureResponse::NotFound,
+        clipvault_core::RotateImageOutcome::NotImage => RotateImageCaptureResponse::NotImage,
+    };
+    Ok(response)
 }
 
 /// Test-friendly handle for [`clipvault_clipboard_asset`]. Lets the
