@@ -63,17 +63,17 @@ function extractBlockAfter(source: string, anchor: string): string {
   return source.slice(start);
 }
 
-test("ClipboardPreview declares a dialog role for the overlay", () => {
+test("ClipboardPreview uses modal semantics only for its in-window overlay", () => {
   // The overlay must announce itself as a modal so screen readers
   // do not leak focus into the underlying rail. The `role="dialog"`
   // is the documented contract for the Quick Paste overlay and
   // Desktop preview alike.
   assert.ok(
-    previewSource.includes('role="dialog"'),
+    previewSource.includes('role={standaloneImage ? "main" : "dialog"}'),
     "the overlay must declare role=\"dialog\"",
   );
   assert.ok(
-    previewSource.includes('aria-modal="true"'),
+    previewSource.includes('aria-modal={standaloneImage ? undefined : "true"}'),
     "the overlay must declare aria-modal=\"true\"",
   );
 });
@@ -89,22 +89,25 @@ test("preview stays open on outside interaction and closes only by button or Esc
   assert.match(escapeHandler, /close\(\)/);
 });
 
-test("image preview exposes an accessible pointer and keyboard resize control", () => {
-  assert.ok(
-    previewSource.includes('data-testid="{testIdPrefix}-resize-image-preview"'),
+test("image preview fits automatically and has no internal zoom handle", () => {
+  assert.equal(previewSource.includes("cv-preview-resize-handle"), false);
+  assert.equal(previewSource.includes("onPreviewResizePointer"), false);
+  assert.ok(previewSource.includes("export let standaloneImage: boolean = false"));
+  assert.ok(previewSource.includes("class:cv-preview-standalone={standaloneImage}"));
+  assert.ok(previewSource.includes("class:cv-preview-card-standalone={standaloneImage}"));
+  assert.ok(previewSource.includes('window.addEventListener("resize", handlePreviewResize)'));
+  assert.ok(previewSource.includes("      standaloneImage ? null : 1,\n    );"));
+  assert.match(
+    previewSource,
+    /\{#if !standaloneImage\}[\s\S]*?data-testid="\{testIdPrefix\}-close"[\s\S]*?\{\/if\}/,
+    "the in-window close button is available only for the modal overlay",
   );
-  assert.ok(previewSource.includes('$t("preview.resize_image")'));
-  assert.ok(previewSource.includes("on:pointerdown={onPreviewResizePointerDown}"));
-  assert.ok(previewSource.includes("on:pointermove={onPreviewResizePointerMove}"));
-  assert.ok(previewSource.includes("on:keydown={onPreviewResizeKeydown}"));
-  assert.ok(previewSource.includes("setPointerCapture(event.pointerId)"));
-  assert.ok(previewSource.includes("RESIZED_PREVIEW_IMAGE_SCALE"));
 });
 
-test("manual image preview size resets when the preview entry changes", () => {
-  const syncEntry = extractFunctionBody(previewSource, "syncEntry");
-  assert.ok(syncEntry.includes("manualPreviewCardSize = null"));
-  assert.ok(syncEntry.includes("previewCardHeight = null"));
+test("standalone image view renders in the native window without modal semantics", () => {
+  assert.ok(previewSource.includes('role={standaloneImage ? "main" : "dialog"}'));
+  assert.ok(previewSource.includes('aria-modal={standaloneImage ? undefined : "true"}'));
+  assert.ok(previewSource.includes("class:cv-preview-body-image-standalone={standaloneImage}"));
 });
 
 test("ClipboardPreview renders the canonical plain text through a safe Svelte text node", () => {

@@ -137,6 +137,14 @@ export const recentEntriesCommand: ClipvaultCommandArg<
     limit: args.limit ?? 50,
   });
 
+export const entryByIdCommand: ClipvaultCommandArg<
+  EntryRecord | null,
+  { entryId: number }
+> = (args) =>
+  invoke<EntryRecord | null>("clipvault_entry_by_id", {
+    entryId: args.entryId,
+  });
+
 export const recentEntriesFilteredCommand: ClipvaultCommandArg<
   EntryRecord[],
   {
@@ -145,6 +153,7 @@ export const recentEntriesFilteredCommand: ClipvaultCommandArg<
     tagIds?: number[];
     sourceApp?: SourceAppFilter | null;
     contentType?: ContentTypeValue | null;
+    unassignedOnly?: boolean;
   }
 > = (args) =>
   invoke<EntryRecord[]>("clipvault_recent_entries_filtered", {
@@ -153,15 +162,17 @@ export const recentEntriesFilteredCommand: ClipvaultCommandArg<
     tagIds: args.tagIds ?? [],
     sourceApp: args.sourceApp ?? null,
     contentType: args.contentType ?? null,
+    unassignedOnly: args.unassignedOnly ?? false,
   });
 
 /** Return all capture types present in Historial or one local collection. */
 export const contentTypesCommand: ClipvaultCommandArg<
   ContentTypeValue[],
-  { collectionId?: number | null }
+  { collectionId?: number | null; unassignedOnly?: boolean }
 > = (args) =>
   invoke<ContentTypeValue[]>("clipvault_content_types", {
     collectionId: args.collectionId ?? null,
+    unassignedOnly: args.unassignedOnly ?? false,
   });
 
 export const searchEntriesCommand: ClipvaultCommandArg<
@@ -173,6 +184,7 @@ export const searchEntriesCommand: ClipvaultCommandArg<
     tagIds?: number[];
     sourceApp?: SourceAppFilter | null;
     contentType?: ContentTypeValue | null;
+    unassignedOnly?: boolean;
   }
 > = (args) =>
   invoke<SearchResponse>("clipvault_search_entries", {
@@ -182,6 +194,7 @@ export const searchEntriesCommand: ClipvaultCommandArg<
     tagIds: args.tagIds ?? [],
     sourceApp: args.sourceApp ?? null,
     contentType: args.contentType ?? null,
+    unassignedOnly: args.unassignedOnly ?? false,
   });
 
 /**
@@ -376,6 +389,8 @@ export const completeImageImportCommand: ClipvaultCommandArg<
   });
 
 export const IMAGE_IMPORT_PROGRESS_EVENT = "clipvault://image-import-progress";
+export const PDF_EXPORT_GENERATION_COMPLETE_EVENT =
+  "clipvault://pdf-export-generation-complete";
 
 export const cancelImageImportCommand: ClipvaultCommandArg<
   void,

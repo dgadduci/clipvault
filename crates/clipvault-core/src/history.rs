@@ -1065,6 +1065,17 @@ impl TextHistoryService {
         Ok(repo.recent(limit)?)
     }
 
+    /// Fetch one history entry by its local identifier.
+    pub fn entry_by_id(
+        &self,
+        context: &AppContext,
+        entry_id: i64,
+    ) -> Result<Option<clipvault_db::EntryRecord>, HistoryServiceError> {
+        let mut db = context.database().lock();
+        let repo = EntryRepository::new(db.connection_mut());
+        Ok(repo.find_by_id(entry_id)?)
+    }
+
     /// Same as [`Self::recent_entries`] but optionally restricted to
     /// the entries that belong to `collection_id` (when supplied)
     /// and/or carry every tag in `tag_ids` (AND semantics).
@@ -1112,10 +1123,42 @@ impl TextHistoryService {
         content_type: Option<ContentType>,
         limit: usize,
     ) -> Result<Vec<clipvault_db::EntryRecord>, HistoryServiceError> {
+        self.recent_entries_with_content_type_filter_and_unassigned(
+            context,
+            collection_id,
+            tag_ids,
+            source_app,
+            content_type,
+            false,
+            limit,
+        )
+    }
+
+    /// Same filtered recents query, optionally restricting History to entries
+    /// without membership in any user-defined collection.
+    pub fn recent_entries_with_content_type_filter_and_unassigned(
+        &self,
+        context: &AppContext,
+        collection_id: Option<i64>,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+        unassigned_only: bool,
+        limit: usize,
+    ) -> Result<Vec<clipvault_db::EntryRecord>, HistoryServiceError> {
         let records = {
             let mut db = context.database().lock();
             let repo = EntryRepository::new(db.connection_mut());
-            repo.entries_filtered_by_content_type(collection_id, tag_ids, source_app, content_type)?
+            if unassigned_only {
+                repo.unassigned_entries_filtered_by_content_type(tag_ids, source_app, content_type)?
+            } else {
+                repo.entries_filtered_by_content_type(
+                    collection_id,
+                    tag_ids,
+                    source_app,
+                    content_type,
+                )?
+            }
         };
         // `entries_filtered` already enforces the ordering contract.
         // Truncate to the requested limit so the rail stays
@@ -1131,9 +1174,25 @@ impl TextHistoryService {
         context: &AppContext,
         collection_id: Option<i64>,
     ) -> Result<Vec<ContentType>, HistoryServiceError> {
+        self.available_content_types_with_unassigned(context, collection_id, false)
+    }
+
+    /// Return supported content types in a collection scope or, when
+    /// `unassigned_only` is true, among History entries without user
+    /// collection memberships.
+    pub fn available_content_types_with_unassigned(
+        &self,
+        context: &AppContext,
+        collection_id: Option<i64>,
+        unassigned_only: bool,
+    ) -> Result<Vec<ContentType>, HistoryServiceError> {
         let mut db = context.database().lock();
         let repo = EntryRepository::new(db.connection_mut());
-        Ok(repo.distinct_content_types(collection_id)?)
+        if unassigned_only {
+            Ok(repo.distinct_unassigned_content_types()?)
+        } else {
+            Ok(repo.distinct_content_types(collection_id)?)
+        }
     }
 
     pub fn history_count(&self, context: &AppContext) -> Result<i64, HistoryServiceError> {
@@ -1774,6 +1833,57 @@ mod tests {
             .create_collection(context, name)
             .expect("create collection")
             .id
+    }
+
+    #[test]
+    fn entry_by_id_returns_the_requested_capture_or_none() {
+        let (context, service) = isolated_service();
+        let entry_id = insert_text(&context, "preview lookup");
+
+        let entry = service
+            .entry_by_id(&context, entry_id)
+            .expect("entry lookup")
+            .expect("existing capture");
+        assert_eq!(entry.id, entry_id);
+        assert_eq!(entry.content, "preview lookup");
+        assert!(service
+            .entry_by_id(&context, entry_id + 1)
+            .expect("missing entry lookup")
+            .is_none());
+    }
+
+    #[test]
+    fn recent_unassigned_filter_keeps_history_only_entries() {
+        let (context, service) = isolated_service();
+        let unassigned_id = insert_text(&context, "history only");
+        let assigned_id = insert_text(&context, "in a collection");
+        let collection_id = create_user_collection(&context, "Trabajo");
+        context
+            .organization()
+            .replace_entry_collections(&context, assigned_id, &[collection_id])
+            .expect("assign capture");
+
+        let filtered = service
+            .recent_entries_with_content_type_filter_and_unassigned(
+                &context,
+                None,
+                &[],
+                &SourceAppFilter::default(),
+                None,
+                true,
+                50,
+            )
+            .expect("unassigned recent entries");
+        assert_eq!(
+            filtered.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            vec![unassigned_id],
+        );
+        assert_eq!(
+            service
+                .available_content_types_with_unassigned(&context, None, true)
+                .expect("unassigned content types"),
+            vec![ContentType::Text],
+        );
     }
 
     fn insert_rich_text(context: &AppContext, content: &str) -> i64 {

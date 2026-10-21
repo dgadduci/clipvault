@@ -34,7 +34,6 @@
 
   let captureEnabled: boolean | null = null;
   let shareNotesEnabled: boolean | null = null;
-  let pdfPageBreakBetweenCaptures: boolean | null = null;
   let language: Locale = "en";
   let loading = false;
   let saving = false;
@@ -83,7 +82,6 @@
       if (currentRequest === requestId) {
         captureEnabled = enabled;
         shareNotesEnabled = settings.capture_notes_sharing_enabled ?? false;
-        pdfPageBreakBetweenCaptures = settings.pdf_page_break_between_captures ?? true;
         language = settings.language;
       }
     } catch (loadError) {
@@ -107,27 +105,6 @@
       shareNotesEnabled = settings.capture_notes_sharing_enabled ?? false;
     } catch (saveError) {
       shareNotesEnabled = previous;
-      errorKey = "settings.error.saving";
-    } finally {
-      saving = false;
-    }
-  }
-
-  async function setPdfPageBreakBetweenCaptures(event: Event): Promise<void> {
-    if (pdfPageBreakBetweenCaptures === null || saving) return;
-    const previous = pdfPageBreakBetweenCaptures;
-    const next = (event.currentTarget as HTMLInputElement).checked;
-    pdfPageBreakBetweenCaptures = next;
-    saving = true;
-    errorKey = null;
-    try {
-      const settings = await settingsSetCommand({
-        pdf_page_break_between_captures: next,
-      });
-      pdfPageBreakBetweenCaptures =
-        settings.pdf_page_break_between_captures ?? true;
-    } catch {
-      pdfPageBreakBetweenCaptures = previous;
       errorKey = "settings.error.saving";
     } finally {
       saving = false;
@@ -290,26 +267,6 @@
       {/if}
     {/if}
 
-  </article>
-  <article data-testid="pdf-page-break-setting">
-    <h3>{$t("settings.pdf_export.title")}</h3>
-    <p class="muted">{$t("settings.pdf_export.description")}</p>
-    {#if pdfPageBreakBetweenCaptures === null}
-      <p class="muted" role="status" data-testid="pdf-page-break-loading">
-        {$t("settings.loading")}
-      </p>
-    {:else}
-      <label class="note-sharing-control">
-        <input
-          type="checkbox"
-          checked={pdfPageBreakBetweenCaptures}
-          disabled={saving}
-          on:change={setPdfPageBreakBetweenCaptures}
-          data-testid="pdf-page-break-toggle"
-        />
-        <span>{$t("settings.pdf_export.page_break_between_captures")}</span>
-      </label>
-    {/if}
   </article>
   <article data-testid="capture-note-sharing-setting">
     <h3>{$t("settings.notes.title")}</h3>

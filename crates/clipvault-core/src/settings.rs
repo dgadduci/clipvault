@@ -43,9 +43,6 @@ pub const LOCAL_CLIPBOARD_CAPTURE_ENABLED_KEY: &str = "local_clipboard_capture_e
 /// Local opt-in for including an attached capture note in explicit peer
 /// fetch responses. Missing or malformed values stay disabled.
 pub const CAPTURE_NOTES_SHARING_ENABLED_KEY: &str = "capture_notes_sharing_enabled";
-/// Local preference controlling whether each exported capture starts on a
-/// fresh PDF page. Missing or malformed values use the product default.
-pub const PDF_PAGE_BREAK_BETWEEN_CAPTURES_KEY: &str = "pdf_page_break_between_captures";
 pub const LANGUAGE_SETTING_KEY: &str = "language";
 pub const SUPPORTED_LANGUAGES: [&str; 5] = ["en", "es", "pt", "de", "fr"];
 
@@ -65,18 +62,6 @@ pub fn parse_capture_notes_sharing_enabled(raw: Option<&str>) -> bool {
 
 pub fn capture_notes_sharing_enabled_value(enabled: bool) -> &'static str {
     local_peer_sharing_enabled_value(enabled)
-}
-
-pub fn parse_pdf_page_break_between_captures(raw: Option<&str>) -> bool {
-    !matches!(raw.map(str::trim), Some(value) if value.eq_ignore_ascii_case("false"))
-}
-
-pub fn pdf_page_break_between_captures_value(enabled: bool) -> &'static str {
-    if enabled {
-        "true"
-    } else {
-        "false"
-    }
 }
 
 /// Parse the local capture preference. Missing and malformed values default
@@ -142,10 +127,6 @@ pub struct Settings {
     /// by default and independent of whether this device accepts notes.
     #[serde(default)]
     pub capture_notes_sharing_enabled: bool,
-    /// Start each capture on a new PDF page by default. The serde default
-    /// keeps settings payloads from older versions compatible.
-    #[serde(default = "default_pdf_page_break_between_captures")]
-    pub pdf_page_break_between_captures: bool,
 }
 
 impl Settings {
@@ -163,13 +144,8 @@ impl Settings {
             // itself on the LAN.
             local_peer_sharing_enabled: false,
             capture_notes_sharing_enabled: false,
-            pdf_page_break_between_captures: true,
         }
     }
-}
-
-fn default_pdf_page_break_between_captures() -> bool {
-    true
 }
 
 fn default_language() -> String {
@@ -302,8 +278,6 @@ pub struct SettingsUpdate {
     pub local_peer_sharing_enabled: Option<bool>,
     /// Whether explicitly fetched captures may include their attached note.
     pub capture_notes_sharing_enabled: Option<bool>,
-    /// Whether each capture starts on a fresh page in generated PDFs.
-    pub pdf_page_break_between_captures: Option<bool>,
 }
 
 impl SettingsUpdate {
@@ -320,7 +294,6 @@ impl SettingsUpdate {
             && self.local_peer_display_name.is_none()
             && self.local_peer_sharing_enabled.is_none()
             && self.capture_notes_sharing_enabled.is_none()
-            && self.pdf_page_break_between_captures.is_none()
     }
 
     /// Validate the update against the current [`Settings`]. Returns
@@ -334,7 +307,6 @@ impl SettingsUpdate {
             && self.local_peer_display_name.is_none()
             && self.local_peer_sharing_enabled.is_none()
             && self.capture_notes_sharing_enabled.is_none()
-            && self.pdf_page_break_between_captures.is_none()
         {
             return Err(ValidationError::empty());
         }
@@ -389,10 +361,6 @@ impl SettingsUpdate {
         if let Some(enabled) = self.capture_notes_sharing_enabled {
             next.capture_notes_sharing_enabled = enabled;
         }
-        if let Some(enabled) = self.pdf_page_break_between_captures {
-            next.pdf_page_break_between_captures = enabled;
-        }
-
         Ok(next)
     }
 }
@@ -573,23 +541,6 @@ mod tests {
     }
 
     #[test]
-    fn pdf_page_break_preference_defaults_on_and_round_trips_as_a_setting() {
-        assert!(Settings::defaults().pdf_page_break_between_captures);
-        assert!(parse_pdf_page_break_between_captures(None));
-        assert!(parse_pdf_page_break_between_captures(Some("true")));
-        assert!(!parse_pdf_page_break_between_captures(Some("false")));
-        assert_eq!(pdf_page_break_between_captures_value(false), "false");
-
-        let next = SettingsUpdate {
-            pdf_page_break_between_captures: Some(false),
-            ..SettingsUpdate::default()
-        }
-        .validate(&Settings::defaults())
-        .expect("valid page-break update");
-        assert!(!next.pdf_page_break_between_captures);
-    }
-
-    #[test]
     fn retention_policy_round_trips_through_validate() {
         let update = SettingsUpdate {
             retention: Some(RetentionPolicy::Days7),
@@ -763,7 +714,6 @@ mod tests {
             local_peer_display_name: None,
             local_peer_sharing_enabled: false,
             capture_notes_sharing_enabled: false,
-            pdf_page_break_between_captures: true,
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains("\"retention\":\"days_90\""), "got {json}");
@@ -839,7 +789,6 @@ mod tests {
             local_peer_display_name: Some(Some("Studio".to_string())),
             local_peer_sharing_enabled: Some(true),
             capture_notes_sharing_enabled: Some(true),
-            pdf_page_break_between_captures: Some(false),
         };
         let json = serde_json::to_string(&update).unwrap();
         let parsed: SettingsUpdate = serde_json::from_str(&json).expect("round-trip");

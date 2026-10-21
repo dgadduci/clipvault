@@ -3,7 +3,7 @@
 </svelte:head>
 
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
   import { emitTo, listen } from "@tauri-apps/api/event";
   import { isTauri } from "@tauri-apps/api/core";
   import type {
@@ -40,6 +40,8 @@
     calculateImageImportProgressPercent,
   } from "./lib/imageImportProgress.ts";
   import { orderAvailableContentTypes } from "./lib/contentType.ts";
+  import { isImageEntry } from "./lib/clipboardAsset.ts";
+  import { openImagePreviewWindow } from "./lib/imagePreviewWindow.ts";
   import {
     activeApplicationCommand,
     captureCollectionSetCommand,
@@ -56,6 +58,7 @@
     collectionsSetColorCommand,
     contentTypesCommand,
     exportEntriesPdfCommand,
+    PDF_EXPORT_GENERATION_COMPLETE_EVENT,
     cancelImageImportCommand,
     completeImageImportCommand,
     prepareImageImportCommand,
@@ -166,6 +169,7 @@
   import CreateTextEntryModal from "./CreateTextEntryModal.svelte";
   import ContextualDesktopSetupCard from "./ContextualDesktopSetupCard.svelte";
   import CircularLoadingIndicator from "./CircularLoadingIndicator.svelte";
+  import PdfExportProgressOverlay from "./PdfExportProgressOverlay.svelte";
 
   /**
    * Single source of truth for the visual tokens, computed at module
@@ -356,12 +360,13 @@
    * rail byte-for-byte so the new facet is purely additive.
    */
   let tagFilter: TagFilter = { kind: "all" };
-  /** Additional collection facet shown only while the sidebar is on History. */
+  /** Additional collection facet; only selectable while the sidebar is on History. */
   let collectionFilter: CollectionFilter = { kind: "all" };
   /** Capture type selected for the active local collection scope. */
   let selectedContentType: ContentTypeValue | null = null;
   let selectedDesktopEntryIds: number[] = [];
   let pdfExportInFlight = false;
+  let pdfGenerationInFlight = false;
   let pdfExportError = false;
   let imageImportInFlight = false;
   let imageImportProgressPercent = 0;
@@ -563,6 +568,15 @@
     return activeCollectionScopeId(collectionId);
   }
 
+  function entriesUnassignedOnly(collectionId: number | null): boolean {
+    if (collectionFilter.kind !== "unassigned") return false;
+    if (collectionId === null) return true;
+    const scope = organization?.collections.find(
+      (candidate) => candidate.id === collectionId,
+    );
+    return scope?.kind === "system";
+  }
+
   function hidesSharedSubcollectionCaptures(collectionId: number | null): boolean {
     return collectionId !== null &&
       hiddenSubcollectionCaptureCollectionIds.has(collectionId) &&
@@ -597,12 +611,10 @@
     : "";
 
   /**
-   * Open the shared preview overlay for the supplied entry. The
-   * helper is the single switch the menu `Previsualizar` action and
-   * the per-card `Cmd/Ctrl+Enter` keyboard shortcut route through;
-   * it MUST live on the parent (`App.svelte`) so only one Desktop
-   * preview can be open at a time and the entry the overlay shows
-   * is the one currently visible in the rail.
+   * Open the preview for the supplied entry. Image captures use a
+   * separate resizable native window; text and rich text keep using
+   * the shared in-window overlay. The menu action and per-card
+   * `Cmd/Ctrl+Enter` shortcut both route through this helper.
    *
    * `trigger` is the card element the user activated; the overlay
    * returns focus to it on close.
@@ -612,6 +624,21 @@
     trigger: HTMLElement | null = null,
   ): void {
     if (!entry) return;
+    if (isImageEntry(entry)) {
+      previewEntry = null;
+      previewTrigger = null;
+      void openImagePreviewWindow(
+        entry,
+        "main",
+        $t("preview.window_title"),
+      ).catch(() => {
+        // Preserve the existing in-window preview as a fallback if the
+        // operating system cannot create the separate native window.
+        previewEntry = entry;
+        previewTrigger = trigger;
+      });
+      return;
+    }
     previewEntry = entry;
     previewTrigger = trigger;
   }
@@ -808,6 +835,7 @@
       tagIds: currentTagFilterIds(),
       sourceApp: sourceAppFilter,
       contentType: selectedContentType,
+      unassignedOnly: entriesUnassignedOnly(selectedCollectionId),
     });
   }
 
@@ -1113,7 +1141,10 @@
       const [loadedEntries, noteIds, availableTypes] = await Promise.all([
         loadEntries(),
         entryNoteIdsCommand(),
-        contentTypesCommand({ collectionId: requestCollectionId }).catch(() => null),
+        contentTypesCommand({
+          collectionId: requestCollectionId,
+          unassignedOnly: entriesUnassignedOnly(selectedCollectionId),
+        }).catch(() => null),
       ]);
       if (requestToken !== entriesLoadToken) return;
       contentTypeOptions = orderAvailableContentTypes(availableTypes ?? []);
@@ -1239,10 +1270,12 @@
     next: CollectionFilter,
   ): Promise<void> {
     if (!activeCollectionIsHistory) return;
-    const sameSelection = next.kind === collectionFilter.kind &&
-      (next.kind === "all" ||
-        (collectionFilter.kind === "collection" &&
-          next.collectionId === collectionFilter.collectionId));
+    const sameSelection = next.kind === "all"
+      ? collectionFilter.kind === "all"
+      : next.kind === "unassigned"
+        ? collectionFilter.kind === "unassigned"
+        : collectionFilter.kind === "collection" &&
+          next.collectionId === collectionFilter.collectionId;
     if (sameSelection) return;
     collectionFilter = next;
     selectedContentType = null;
@@ -1264,12 +1297,27 @@
   }
 
   async function exportDesktopSelectionAsPdf(): Promise<void> {
-    if (pdfExportInFlight || selectedDesktopEntryIds.length === 0) return;
+    const entryIds = [...selectedDesktopEntryIds];
+    if (pdfExportInFlight || entryIds.length === 0) return;
     pdfExportInFlight = true;
+    pdfGenerationInFlight = true;
     pdfExportError = false;
+    let unlistenGenerationComplete: (() => void) | null = null;
     try {
+      await tick();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      try {
+        unlistenGenerationComplete = await listen(
+          PDF_EXPORT_GENERATION_COMPLETE_EVENT,
+          () => {
+            pdfGenerationInFlight = false;
+          },
+        );
+      } catch {
+        // Keep export available if the progress listener cannot be registered.
+      }
       await exportEntriesPdfCommand({
-        entryIds: [...selectedDesktopEntryIds],
+        entryIds,
         dialogTitle: $t("pdf_export.dialog.title"),
         filterName: $t("pdf_export.dialog.filter"),
         suggestedFileName: $t("pdf_export.dialog.filename"),
@@ -1277,6 +1325,8 @@
     } catch {
       pdfExportError = true;
     } finally {
+      unlistenGenerationComplete?.();
+      pdfGenerationInFlight = false;
       pdfExportInFlight = false;
     }
   }
@@ -2453,6 +2503,7 @@
           tagIds: currentTagFilterIds(),
           sourceApp: sourceAppFilter,
           contentType: selectedContentType,
+          unassignedOnly: entriesUnassignedOnly(selectedCollectionId),
         });
         return response;
       },
@@ -3096,6 +3147,12 @@
 </script>
 
 <main>
+  {#if pdfGenerationInFlight}
+    <PdfExportProgressOverlay
+      label={$t("pdf_export.generating")}
+      testId="desktop-pdf-export-spinner"
+    />
+  {/if}
   {#if organizationError}
     <p class="status error" role="alert" data-testid="organization-error">
       {$t(organizationError)}
@@ -3209,7 +3266,7 @@
             sourceAppOptions={sourceAppOptions}
             tagFilter={tagFilter}
             tagFilterOptions={tagFilterOptions}
-            showCollectionFilter={activeCollectionIsHistory}
+            collectionFilterDisabled={!activeCollectionIsHistory}
             collectionFilter={collectionFilter}
             collectionFilterOptions={collectionFilterOptions}
             selectedContentType={selectedContentType}

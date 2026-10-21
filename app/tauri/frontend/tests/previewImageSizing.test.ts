@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  clampPreviewCardSize,
   fitPreviewImage,
+  initialImagePreviewWindowSize,
 } from "../src/lib/previewImageSizing.ts";
 
 test("preview image sizing uses 80 percent and preserves portrait proportions", () => {
@@ -34,25 +34,45 @@ test("preview image sizing rejects invalid dimensions and viewports", () => {
   assert.equal(fitPreviewImage(Number.NaN, 100, 100, 100), null);
 });
 
-test("an explicitly enlarged preview may scale up to the image's intrinsic size", () => {
+test("automatic preview fitting fills the viewport without exceeding intrinsic size", () => {
   assert.deepEqual(fitPreviewImage(600, 1200, 1000, 1000, 1), {
     width: 500,
     height: 1000,
   });
 });
 
-test("manual preview card dimensions stay inside the viewport bounds", () => {
-  assert.deepEqual(clampPreviewCardSize(900, 700, 500, 300), {
-    width: 500,
-    height: 300,
+test("native preview fitting upscales beyond intrinsic size and preserves proportions", () => {
+  assert.deepEqual(fitPreviewImage(600, 300, 1200, 1000, null), {
+    width: 1200,
+    height: 600,
   });
-  assert.deepEqual(clampPreviewCardSize(10, 10, 500, 300), {
-    width: 160,
-    height: 120,
+});
+
+test("initial native preview window fits a portrait image to the monitor", () => {
+  const size = initialImagePreviewWindowSize(600, 1200, 1440, 900);
+  assert.ok(size.width <= 1440 * 0.94);
+  assert.ok(size.height <= 900 * 0.92);
+  assert.ok(size.width >= 420);
+  assert.ok(size.height >= 320);
+});
+
+test("initial native preview window preserves room on small displays", () => {
+  const size = initialImagePreviewWindowSize(4000, 2000, 800, 600);
+  assert.ok(size.width <= 800 * 0.94);
+  assert.ok(size.height <= 600 * 0.92);
+
+  const fitted = fitPreviewImage(4000, 2000, size.width - 56, size.height - 160);
+  assert.ok(fitted);
+  assert.equal(fitted.width / fitted.height, 2);
+});
+
+test("initial native preview window uses safe defaults for missing dimensions", () => {
+  assert.deepEqual(initialImagePreviewWindowSize(0, 0, 1280, 800), {
+    width: 960,
+    height: 720,
   });
-  assert.deepEqual(clampPreviewCardSize(10, 10, 100, 80), {
-    width: 100,
-    height: 80,
+  assert.deepEqual(initialImagePreviewWindowSize(900, 900, 0, 0), {
+    width: 632,
+    height: 736,
   });
-  assert.equal(clampPreviewCardSize(100, 100, 0, 80), null);
 });

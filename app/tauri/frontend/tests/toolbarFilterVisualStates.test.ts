@@ -40,7 +40,7 @@ test("toolbar filters have distinct category colors with white foregrounds", () 
     {
       file: "src/CollectionFilter.svelte",
       surface: "collection",
-      activeState: 'data-filter-active={selected.kind === "collection"}',
+      activeState: 'data-filter-active={selected.kind !== "all"}',
       activeSelector: '.collection-filter[data-filter-active="true"] select',
     },
     {
@@ -78,6 +78,6 @@ test("the all/unselected states remain neutral", () => {
 
   assert.match(sourceApp, /data-filter-active=\{selected\.kind !== "all"\}/);
   assert.match(tag, /data-filter-active=\{selected\.kind === "tag"\}/);
-  assert.match(collection, /data-filter-active=\{selected\.kind === "collection"\}/);
+  assert.match(collection, /data-filter-active=\{selected\.kind !== "all"\}/);
   assert.match(contentType, /data-filter-active=\{selected !== null\}/);
 });

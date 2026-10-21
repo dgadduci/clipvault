@@ -61,6 +61,7 @@ fn sync_linux_picker_gnome_runtime_state(_state: &SharedState) {}
 /// the notification.
 pub const ORGANIZATION_UPDATED_EVENT: &str = "clipvault://organization-updated";
 pub const IMAGE_IMPORT_PROGRESS_EVENT: &str = "clipvault://image-import-progress";
+pub const PDF_EXPORT_GENERATION_COMPLETE_EVENT: &str = "clipvault://pdf-export-generation-complete";
 pub const CAPTURE_CONTROL_CHANGED_EVENT: &str = "clipvault://capture-control-changed";
 pub const CAPTURE_CONTROL_ERROR_EVENT: &str = "clipvault://capture-control-error";
 pub const LANGUAGE_CHANGED_EVENT: &str = "clipvault://language-changed";
@@ -181,13 +182,10 @@ pub async fn clipvault_export_pdf(
     suggested_file_name: String,
 ) -> Result<PdfExportSaveResult, CommandError> {
     let context = state.context();
-    let settings = context.settings().load(context);
-    let pdf = PdfExportService::generate(
-        context,
-        &entry_ids,
-        settings.pdf_page_break_between_captures,
-    )
-    .map_err(|_| CommandError::new("pdf_export_error", "PDF export failed"))?;
+    let pdf = PdfExportService::generate(context, &entry_ids)
+        .map_err(|_| CommandError::new("pdf_export_error", "PDF export failed"))?;
+
+    let _ = window.emit_to(window.label(), PDF_EXPORT_GENERATION_COMPLETE_EVENT, ());
 
     let Some(file_path) = window
         .dialog()
@@ -742,6 +740,22 @@ pub fn clipvault_recent_entries(
     Ok(records)
 }
 
+/// Load one local capture for the standalone image-preview window.
+#[tauri::command]
+pub fn clipvault_entry_by_id(
+    state: State<'_, SharedState>,
+    entry_id: i64,
+) -> Result<Option<clipvault_db::EntryRecord>, CommandError> {
+    if entry_id <= 0 {
+        return Ok(None);
+    }
+    state
+        .context()
+        .history()
+        .entry_by_id(state.context(), entry_id)
+        .map_err(|err| CommandError::new("history_error", err.to_string()))
+}
+
 /// Recent entries restricted by collection and/or tags. The arguments
 /// mirror the search filter shape: `collection_id == None` and an
 /// empty `tag_ids` reproduce the unfiltered "Historial" view. The
@@ -758,6 +772,7 @@ pub fn clipvault_recent_entries_filtered(
     tag_ids: Option<Vec<i64>>,
     source_app: Option<clipvault_core::SourceAppFilter>,
     content_type: Option<clipvault_db::ContentType>,
+    unassigned_only: Option<bool>,
 ) -> Result<Vec<clipvault_db::EntryRecord>, CommandError> {
     let limit = limit.unwrap_or(50).min(500);
     let tag_ids = tag_ids.unwrap_or_default();
@@ -765,12 +780,13 @@ pub fn clipvault_recent_entries_filtered(
     let records = state
         .context()
         .history()
-        .recent_entries_with_content_type_filter(
+        .recent_entries_with_content_type_filter_and_unassigned(
             state.context(),
             collection_id,
             &tag_ids,
             &source_app,
             content_type,
+            unassigned_only.unwrap_or(false),
             limit,
         )
         .map_err(|err| CommandError::new("history_error", err.to_string()))?;
@@ -784,11 +800,16 @@ pub fn clipvault_recent_entries_filtered(
 pub fn clipvault_content_types(
     state: State<'_, SharedState>,
     collection_id: Option<i64>,
+    unassigned_only: Option<bool>,
 ) -> Result<Vec<clipvault_db::ContentType>, CommandError> {
     state
         .context()
         .history()
-        .available_content_types(state.context(), collection_id)
+        .available_content_types_with_unassigned(
+            state.context(),
+            collection_id,
+            unassigned_only.unwrap_or(false),
+        )
         .map_err(|err| CommandError::new("history_error", err.to_string()))
 }
 
@@ -820,6 +841,7 @@ pub fn clipvault_search_entries(
     tag_ids: Option<Vec<i64>>,
     source_app: Option<clipvault_core::SourceAppFilter>,
     content_type: Option<clipvault_db::ContentType>,
+    unassigned_only: Option<bool>,
 ) -> Result<SearchResponse, CommandError> {
     let limit = limit.unwrap_or(clipvault_core::SEARCH_DEFAULT_LIMIT);
     let engine_query = clipvault_core::SearchQuery { text: query, limit };
@@ -831,7 +853,13 @@ pub fn clipvault_search_entries(
     let outcome = state
         .context()
         .search()
-        .search_with_content_type_filter(state.context(), &engine_query, &filter, content_type)
+        .search_with_content_type_filter_and_unassigned(
+            state.context(),
+            &engine_query,
+            &filter,
+            content_type,
+            unassigned_only.unwrap_or(false),
+        )
         .map_err(|err| CommandError::new("history_error", err.to_string()))?;
     Ok(SearchResponse {
         note: outcome.note,

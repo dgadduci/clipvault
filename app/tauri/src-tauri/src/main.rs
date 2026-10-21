@@ -174,6 +174,27 @@ fn main() {
             }
 
             if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "image-preview" {
+                    let origin_label = window
+                        .get_webview_window("image-preview")
+                        .and_then(|preview_window| preview_window.url().ok())
+                        .and_then(|url| {
+                            url.query_pairs().find_map(|(key, value)| {
+                                (key == "origin").then(|| value.into_owned())
+                            })
+                    });
+                    if let Some(origin_label) = origin_label
+                        .filter(|label| label == "main" || label == "quick-paste")
+                    {
+                        if let Some(origin_window) = window.get_webview_window(&origin_label) {
+                            let _ = origin_window.show();
+                            let _ = origin_window.set_focus();
+                        }
+                    }
+                    api.prevent_close();
+                    let _ = window.destroy();
+                    return;
+                }
                 if window.label() == "startup-splash" {
                     return;
                 }
@@ -190,6 +211,7 @@ fn main() {
             commands::clipvault_capture_text,
             commands::clipvault_capture_collection_set,
             commands::clipvault_recent_entries,
+            commands::clipvault_entry_by_id,
             commands::clipvault_recent_entries_filtered,
             commands::clipvault_content_types,
             commands::clipvault_history_count,

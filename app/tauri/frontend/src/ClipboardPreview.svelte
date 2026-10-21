@@ -1,10 +1,10 @@
 <script lang="ts">
   /**
-   * Shared preview overlay for the Desktop and Quick Paste surfaces.
+   * Shared capture preview for the Desktop and Quick Paste surfaces.
    *
-   * The component renders a shared preview modal for Desktop and Quick
-   * Paste. Text and rich text remain read-only; image previews also expose
-   * explicit persistent quarter-turn controls.
+   * Text and rich-text previews use an in-window overlay. Native image
+   * previews use the same component in standalone page mode, without an inner
+   * overlay. Image previews also expose persistent quarter-turn controls.
    * The Desktop rail consumes it directly through the
    * `desktop-card-preview` change; Quick Paste consumes the same
    * component so neither surface can drift.
@@ -37,9 +37,8 @@
    *   - "open and close is leak-free" → the `onDestroy` hook
    *     revokes the current blob URL and clears the token map;
    *   - "only one preview open at a time" → the parent owns the
-   *     visibility state; the component always renders a single
-   *     `<div role="dialog">` when `entry` is not `null` and nothing
-   *     otherwise;
+   *     visibility state; the component renders either a modal dialog or
+   *     standalone page when `entry` is not `null` and nothing otherwise;
    *   - "return focus" → when `trigger` is provided, the
    *     close path calls `trigger.focus()` (best-effort) so the
    *     user lands back on the affordance they used.
@@ -64,9 +63,7 @@
   } from "./lib/clipboardAsset.ts";
   import { rotateImageCaptureCommand } from "./lib/tauri.ts";
   import {
-    clampPreviewCardSize,
     fitPreviewImage,
-    RESIZED_PREVIEW_IMAGE_SCALE,
     type PreviewImageSize,
   } from "./lib/previewImageSizing.ts";
   import type { ImageRotationDirection } from "./types.ts";
@@ -99,6 +96,8 @@
   export let accessibleLabel: string | null = null;
   /** Optional callback fired when the overlay requests close. */
   export let onClose: (() => void) | null = null;
+  /** Render image content as the page of a native preview window, without a modal overlay. */
+  export let standaloneImage: boolean = false;
 
   const assetResolver: IconResolver = createClipboardAssetResolver();
 
@@ -115,14 +114,6 @@
   let previewImageSize: PreviewImageSize | null = null;
   let previewCardWidth: number | null = null;
   let previewCardHeight: number | null = null;
-  let manualPreviewCardSize: PreviewImageSize | null = null;
-  let previewResizeDrag: {
-    pointerId: number;
-    startX: number;
-    startY: number;
-    startWidth: number;
-    startHeight: number;
-  } | null = null;
   let overlayEl: HTMLDivElement | null = null;
   let cardEl: HTMLDivElement | null = null;
   let headerEl: HTMLElement | null = null;
@@ -140,7 +131,6 @@
       previewImageSize = null;
       previewCardWidth = null;
       previewCardHeight = null;
-      manualPreviewCardSize = null;
       return;
     }
     if (!overlayEl || !cardEl || !headerEl || !bodyEl || !footerEl) return;
@@ -171,96 +161,35 @@
       cssPixels(rotationErrorStyle?.marginBottom ?? "0") +
       headerEl.getBoundingClientRect().height +
       footerEl.getBoundingClientRect().height;
-    const maxCardWidth = Math.max(0, overlayRect.width - overlayHorizontalInsets);
-    const maxCardHeight = Math.max(0, overlayRect.height - overlayVerticalInsets);
-    const boundedManualSize = manualPreviewCardSize
-      ? clampPreviewCardSize(
-          manualPreviewCardSize.width,
-          manualPreviewCardSize.height,
-          maxCardWidth,
-          maxCardHeight,
+    const imageAreaWidth = standaloneImage
+      ? Math.max(
+          0,
+          bodyEl.clientWidth -
+            cssPixels(bodyStyle.paddingLeft) -
+            cssPixels(bodyStyle.paddingRight),
         )
-      : null;
-    if (boundedManualSize) manualPreviewCardSize = boundedManualSize;
-    const imageAreaWidth =
-      (boundedManualSize?.width ?? maxCardWidth) - cardHorizontalChrome;
-    const imageAreaHeight =
-      (boundedManualSize?.height ?? maxCardHeight) - cardVerticalChrome;
+      : Math.max(0, overlayRect.width - overlayHorizontalInsets - cardHorizontalChrome);
+    const imageAreaHeight = standaloneImage
+      ? Math.max(
+          0,
+          bodyEl.clientHeight -
+            cssPixels(bodyStyle.paddingTop) -
+            cssPixels(bodyStyle.paddingBottom),
+        )
+      : Math.max(0, overlayRect.height - overlayVerticalInsets - cardVerticalChrome);
 
     const fitted = fitPreviewImage(
       currentEntry.payload_width ?? 0,
       currentEntry.payload_height ?? 0,
       imageAreaWidth,
       imageAreaHeight,
-      boundedManualSize ? RESIZED_PREVIEW_IMAGE_SCALE : undefined,
+      standaloneImage ? null : 1,
     );
     if (fitted) {
       previewImageSize = fitted;
-      previewCardWidth = boundedManualSize?.width ?? fitted.width + cardHorizontalChrome;
-      previewCardHeight = boundedManualSize?.height ?? fitted.height + cardVerticalChrome;
+      previewCardWidth = standaloneImage ? null : fitted.width + cardHorizontalChrome;
+      previewCardHeight = standaloneImage ? null : fitted.height + cardVerticalChrome;
     }
-  }
-
-  function resizePreviewCard(width: number, height: number): void {
-    if (!overlayEl) return;
-    const overlayRect = overlayEl.getBoundingClientRect();
-    const overlayStyle = getComputedStyle(overlayEl);
-    const bounded = clampPreviewCardSize(
-      width,
-      height,
-      overlayRect.width -
-        cssPixels(overlayStyle.paddingLeft) -
-        cssPixels(overlayStyle.paddingRight),
-      overlayRect.height -
-        cssPixels(overlayStyle.paddingTop) -
-        cssPixels(overlayStyle.paddingBottom),
-    );
-    if (!bounded) return;
-    manualPreviewCardSize = bounded;
-    updatePreviewImageSize();
-  }
-
-  function onPreviewResizePointerDown(event: PointerEvent): void {
-    if (event.button !== 0 || !cardEl || imageState !== "loaded") return;
-    event.preventDefault();
-    event.stopPropagation();
-    const bounds = cardEl.getBoundingClientRect();
-    previewResizeDrag = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      startWidth: bounds.width,
-      startHeight: bounds.height,
-    };
-    (event.currentTarget as HTMLButtonElement).setPointerCapture(event.pointerId);
-  }
-
-  function onPreviewResizePointerMove(event: PointerEvent): void {
-    if (!previewResizeDrag || event.pointerId !== previewResizeDrag.pointerId) return;
-    resizePreviewCard(
-      previewResizeDrag.startWidth + event.clientX - previewResizeDrag.startX,
-      previewResizeDrag.startHeight + event.clientY - previewResizeDrag.startY,
-    );
-  }
-
-  function stopPreviewResize(event: PointerEvent): void {
-    if (previewResizeDrag?.pointerId === event.pointerId) previewResizeDrag = null;
-  }
-
-  function onPreviewResizeKeydown(event: KeyboardEvent): void {
-    if (!cardEl) return;
-    const step = event.shiftKey ? 32 : 16;
-    const bounds = cardEl.getBoundingClientRect();
-    let width = bounds.width;
-    let height = bounds.height;
-    if (event.key === "ArrowLeft") width -= step;
-    else if (event.key === "ArrowRight") width += step;
-    else if (event.key === "ArrowUp") height += step;
-    else if (event.key === "ArrowDown") height -= step;
-    else return;
-    event.preventDefault();
-    event.stopPropagation();
-    resizePreviewCard(width, height);
   }
 
   function handlePreviewResize(): void {
@@ -280,8 +209,6 @@
         previewImageSize = null;
         previewCardWidth = null;
         previewCardHeight = null;
-        manualPreviewCardSize = null;
-        previewResizeDrag = null;
         seedImageState();
       }
       return;
@@ -297,8 +224,6 @@
       previewImageSize = null;
       previewCardWidth = null;
       previewCardHeight = null;
-      manualPreviewCardSize = null;
-      previewResizeDrag = null;
       seedImageState();
     }
   }
@@ -427,7 +352,7 @@
   }
 
   function onOverlayKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape") {
+    if (!standaloneImage && event.key === "Escape") {
       // `stopPropagation` is required so the `Escape` keystroke does
       // NOT bubble up to a parent `<svelte:window>` listener that
       // would otherwise hide the Quick Paste window while the
@@ -449,10 +374,11 @@
 
   onMount(() => {
     window.addEventListener("resize", handlePreviewResize);
-    // Move focus into the overlay so keyboard users can reach its
-    // close and image rotation controls.
+    // Move focus into the preview so keyboard users can reach its controls and
+    // Escape works immediately in the standalone native window.
     void tick().then(() => {
-      closeButtonEl?.focus();
+      if (standaloneImage) overlayEl?.focus();
+      else closeButtonEl?.focus();
     });
   });
 
@@ -470,8 +396,6 @@
     previewImageSize = null;
     previewCardWidth = null;
     previewCardHeight = null;
-    manualPreviewCardSize = null;
-    previewResizeDrag = null;
   });
 
   function restoreFocus(): void {
@@ -535,11 +459,12 @@
   <div
     bind:this={overlayEl}
     class="cv-preview-overlay"
-    role="dialog"
-    aria-modal="true"
+    class:cv-preview-standalone={standaloneImage}
+    role={standaloneImage ? "main" : "dialog"}
+    aria-modal={standaloneImage ? undefined : "true"}
     aria-label={derivedAccessibleLabel}
     tabindex="-1"
-    data-testid="{testIdPrefix}-overlay"
+    data-testid={standaloneImage ? `${testIdPrefix}-surface` : `${testIdPrefix}-overlay`}
     data-entry-id={record.id}
     data-content-type={record.content_type}
     on:keydown={onOverlayKeydown}
@@ -548,7 +473,7 @@
       bind:this={cardEl}
       class="cv-preview-card"
       class:cv-preview-card-image={isImageEntry(record)}
-      class:cv-preview-card-image-resized={manualPreviewCardSize !== null}
+      class:cv-preview-card-standalone={standaloneImage}
       style={previewCardWidth !== null && previewCardHeight !== null
         ? `width: ${previewCardWidth}px; height: ${previewCardHeight}px;`
         : undefined}
@@ -611,23 +536,25 @@
               </svg>
             </button>
           {/if}
-          <button
-            type="button"
-            class="cv-preview-close"
-            data-testid="{testIdPrefix}-close"
-            aria-label={$t("preview.close")}
-            title={$t("preview.close_escape")}
-            bind:this={closeButtonEl}
-            on:click={handleClose}
-          >
-            ×
-          </button>
+          {#if !standaloneImage}
+            <button
+              type="button"
+              class="cv-preview-close"
+              data-testid="{testIdPrefix}-close"
+              aria-label={$t("preview.close")}
+              title={$t("preview.close_escape")}
+              bind:this={closeButtonEl}
+              on:click={handleClose}
+            >
+              ×
+            </button>
+          {/if}
         </div>
       </header>
       <div
         class="cv-preview-body"
         class:cv-preview-body-image={isImageEntry(record)}
-        class:cv-preview-body-image-resized={manualPreviewCardSize !== null}
+        class:cv-preview-body-image-standalone={standaloneImage}
         bind:this={bodyEl}
         data-testid="{testIdPrefix}-body"
         data-content-type={record.content_type}
@@ -707,7 +634,7 @@
           >{fullText}</pre>
         {/if}
       </div>
-      <footer class="cv-preview-footer" bind:this={footerEl}>
+      <footer class="cv-preview-footer" class:cv-preview-footer-hidden={standaloneImage} bind:this={footerEl}>
         <span
           class="cv-preview-meta"
           data-testid="{testIdPrefix}-meta"
@@ -732,26 +659,6 @@
           {formatElapsedTime(record.created_at, new Date(), $localeStore).visual}
         </span>
       </footer>
-      {#if isImageEntry(record) && imageState === "loaded"}
-        <button
-          type="button"
-          class="cv-preview-resize-handle"
-          data-testid="{testIdPrefix}-resize-image-preview"
-          aria-label={$t("preview.resize_image")}
-          aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Shift+ArrowUp Shift+ArrowDown Shift+ArrowLeft Shift+ArrowRight"
-          title={$t("preview.resize_image")}
-          on:pointerdown={onPreviewResizePointerDown}
-          on:pointermove={onPreviewResizePointerMove}
-          on:pointerup={stopPreviewResize}
-          on:pointercancel={stopPreviewResize}
-          on:lostpointercapture={stopPreviewResize}
-          on:keydown={onPreviewResizeKeydown}
-        >
-          <svg aria-hidden="true" focusable="false" width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
-            <path d="M6 14 14 6M9 14h5V9M4 11l7-7" />
-          </svg>
-        </button>
-      {/if}
     </div>
   </div>
 {/if}
@@ -795,6 +702,29 @@
     overflow: hidden;
   }
 
+  .cv-preview-standalone {
+    position: relative;
+    inset: auto;
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    overflow: hidden;
+    background: #0e1116;
+    z-index: auto;
+  }
+
+  .cv-preview-card-standalone {
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
   .cv-preview-card-image {
     position: relative;
     box-sizing: border-box;
@@ -803,8 +733,32 @@
     grid-template-rows: auto auto auto;
   }
 
-  .cv-preview-card-image-resized {
-    grid-template-rows: auto minmax(0, 1fr) auto;
+  .cv-preview-card-standalone.cv-preview-card-image {
+    width: 100%;
+    max-width: 100%;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .cv-preview-standalone .cv-preview-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .cv-preview-standalone .cv-preview-type {
+    display: none;
+  }
+
+  .cv-preview-standalone .cv-preview-body-image-standalone {
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    padding: 10px;
+    overflow: hidden;
+  }
+
+  .cv-preview-footer-hidden {
+    display: none;
   }
 
   .cv-preview-header {
@@ -921,14 +875,6 @@
     overflow: hidden;
   }
 
-  .cv-preview-body-image-resized {
-    box-sizing: border-box;
-    width: 100%;
-    height: auto;
-    max-width: none;
-    max-height: none;
-  }
-
   .cv-preview-image-rotation-error {
     margin: 0 0 0.5rem;
     max-width: 100%;
@@ -1037,40 +983,6 @@
     flex: 0 0 auto;
     object-fit: contain;
     border-radius: 6px;
-  }
-
-  .cv-preview-card-image .cv-preview-footer {
-    padding-right: 2rem;
-  }
-
-  .cv-preview-resize-handle {
-    position: absolute;
-    right: 2px;
-    bottom: 2px;
-    z-index: 2;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    padding: 0;
-    border: 1px solid rgba(148, 163, 184, 0.3);
-    border-radius: 4px;
-    background: rgba(22, 27, 34, 0.96);
-    color: #94a3b8;
-    cursor: nwse-resize;
-    touch-action: none;
-    user-select: none;
-  }
-
-  .cv-preview-resize-handle:hover {
-    background: #30363d;
-    color: #f0f4f8;
-  }
-
-  .cv-preview-resize-handle:focus-visible {
-    outline: 1px solid #2563eb;
-    outline-offset: 1px;
   }
 
   .cv-preview-image-unavailable {

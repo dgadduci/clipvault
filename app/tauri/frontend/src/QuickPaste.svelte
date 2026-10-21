@@ -16,12 +16,15 @@
   import {
     copyEntryCommand,
     exportEntriesPdfCommand,
+    PDF_EXPORT_GENERATION_COMPLETE_EVENT,
     pasteEntryCommand,
     peerImportSourceAppPresentationsCommand,
     recentEntriesCommand,
     searchEntriesCommand,
     setFavoriteCommand,
   } from "./lib/tauri";
+  import { openImagePreviewWindow } from "./lib/imagePreviewWindow.ts";
+  import PdfExportProgressOverlay from "./PdfExportProgressOverlay.svelte";
   import { runSearch } from "./lib/search";
   import {
     QUICK_PASTE_OPENED_EVENT,
@@ -191,6 +194,7 @@
   let selectionAnchorId: number | null = null;
   let pasteStackInFlight = false;
   let pdfExportInFlight = false;
+  let pdfGenerationInFlight = false;
   let pdfExportError = false;
   let loading = true;
   let emptyMessage = "";
@@ -1420,8 +1424,22 @@
     const entryIds = selectedIdsInSelectionOrder(selectedEntryIds, resultIds);
     if (entryIds.length === 0) return;
     pdfExportInFlight = true;
+    pdfGenerationInFlight = true;
     pdfExportError = false;
+    let unlistenGenerationComplete: (() => void) | null = null;
     try {
+      await tick();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      try {
+        unlistenGenerationComplete = await listen(
+          PDF_EXPORT_GENERATION_COMPLETE_EVENT,
+          () => {
+            pdfGenerationInFlight = false;
+          },
+        );
+      } catch {
+        // Keep export available if the progress listener cannot be registered.
+      }
       await exportEntriesPdfCommand({
         entryIds,
         dialogTitle: $t("pdf_export.dialog.title"),
@@ -1431,6 +1449,8 @@
     } catch {
       pdfExportError = true;
     } finally {
+      unlistenGenerationComplete?.();
+      pdfGenerationInFlight = false;
       pdfExportInFlight = false;
     }
   }
@@ -2180,8 +2200,20 @@
   function openPreviewFor(entryId: number): void {
     const entry = findEntry(mode, recent, hits, entryId);
     if (!entry) return;
-    previewEntryId = entryId;
     openMenuEntryId = null;
+    if (isImageEntry(entry)) {
+      previewEntryId = null;
+      void openImagePreviewWindow(
+        entry,
+        "quick-paste",
+        $t("preview.window_title"),
+      ).catch(() => {
+        // Preserve the in-window preview if the native window cannot be created.
+        previewEntryId = entryId;
+      });
+      return;
+    }
+    previewEntryId = entryId;
   }
 
   /**
@@ -2984,6 +3016,12 @@
 <svelte:window on:keydown={onWindowKeydown} on:pointerdown={onWindowPointerDown} />
 
 <main data-testid="quick-paste-root">
+  {#if pdfGenerationInFlight}
+    <PdfExportProgressOverlay
+      label={$t("pdf_export.generating")}
+      testId="quick-paste-pdf-export-spinner"
+    />
+  {/if}
   <div class="qp-search-row">
     <div class="qp-search-shell" data-testid="quick-paste-search-shell">
       <input

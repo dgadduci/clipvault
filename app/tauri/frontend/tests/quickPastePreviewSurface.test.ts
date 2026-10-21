@@ -161,8 +161,9 @@ test("Quick Paste mounts the in-window preview overlay", () => {
     "the shared preview card template must exist",
   );
   assert.ok(
-    previewSource.includes("role=\"dialog\""),
-    "the shared preview overlay must declare the dialog role",
+    previewSource.includes('role={standaloneImage ? "main" : "dialog"}') &&
+      previewSource.includes("export let standaloneImage: boolean = false"),
+    "the shared preview must keep dialog semantics by default and use page semantics for the native image window",
   );
   assert.ok(
     quickPasteSource.includes("<ClipboardPreview"),

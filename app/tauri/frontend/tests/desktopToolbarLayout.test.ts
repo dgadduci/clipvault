@@ -438,7 +438,8 @@ test("DesktopToolbar keeps all controls in a single horizontal scroll row", () =
   assert.match(filterTokens, /flex:\s*0 0 \$\{FILTER_WIDTH_PX\}px/);
   assert.match(filterTokens, /COMPACT_FILTER_WIDTH_PX = 110/);
   assert.match(filterTokens, /COMPACT_FILTER_MIN_WIDTH_REM = "5\.5rem"/);
-  assert.match(source, /data-testid="create-text-capture-shortcut"/);
+  assert.match(source, /data-testid="create-manual-text-entry"/);
+  assert.doesNotMatch(source, /data-testid="create-text-capture-shortcut"/);
 
   // The menu and filters escape the scroll viewport and follow their
   // triggers, so their option surfaces remain visible and interactive.

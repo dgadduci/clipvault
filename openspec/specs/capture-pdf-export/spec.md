@@ -57,26 +57,32 @@ capturas rich text originales MUST permanecer sin cambios.
 - **THEN** la generación falla antes de mostrar el diálogo de guardado
 - **AND** no se escribe un PDF parcial
 
-### Requirement: Configure page breaks between captures
+### Requirement: Start every capture on a new page
 
-Configuración general MUST permitir elegir si cada captura comienza en una
-página nueva. El ajuste MUST persistirse localmente y su valor predeterminado
-MUST ser activado. Con el ajuste desactivado, el contenido continúa en el
-espacio disponible y las páginas solo se agregan por paginación natural.
+Every selected capture MUST start on a new PDF page, in selection order.
+General Settings MUST NOT expose a preference for changing this behavior.
+Content from a single capture MAY continue on additional pages when it exceeds
+the available page area.
 
-#### Scenario: Default one capture per page
+#### Scenario: Every capture starts on a new page
 
-- **WHEN** la preferencia no existe en una instalación nueva o antigua
-- **THEN** cada captura empieza en una página nueva
-- **AND** el contenido de una captura que excede la página puede continuar en
-  páginas adicionales
+- **WHEN** the selected captures are exported to PDF on a new or older install
+- **THEN** every capture starts on a page after the preceding capture
+- **AND** unused space at the end of the preceding capture's last page is not
+  used by the next capture
 
-#### Scenario: Continuous flow between captures
+#### Scenario: One capture naturally spans multiple pages
 
-- **WHEN** el usuario desactiva la preferencia
-- **THEN** la siguiente captura continúa después de la anterior en el espacio
-  restante
-- **AND** una página nueva solo comienza cuando el contenido ya no cabe
+- **WHEN** a selected capture's content exceeds one page
+- **THEN** that capture continues onto additional pages as needed
+- **AND** the following capture starts on a new page after it
+
+#### Scenario: Ignore an obsolete continuous-flow preference
+
+- **GIVEN** local settings contain an older page-break preference set to false
+- **WHEN** the user exports selected captures
+- **THEN** each capture still starts on a new page
+- **AND** General Settings does not offer a control to restore continuous flow
 
 ### Requirement: Save the PDF to a user-selected local path
 
@@ -161,8 +167,7 @@ selection order.
 
 #### Scenario: Export multiple images on separate pages
 
-- **WHEN** the one-capture-per-page setting is enabled for multiple selected
-  images
+- **WHEN** multiple selected images are exported
 - **THEN** every page shows the image for its corresponding selected capture
 - **AND** the pages follow the user's selection order
 
@@ -185,3 +190,41 @@ selection gating and export behavior.
 - **WHEN** QuickPaste shows the PDF export action for a selection
 - **THEN** its visible content is the text `PDF` in red
 - **AND** activating it still exports the selection without confirming a paste
+
+### Requirement: Show progress while generating a PDF
+
+When PDF generation starts from Desktop or QuickPaste, the initiating window
+MUST show an accessible rotating spinner centered in that window. The spinner
+MUST remain visible until PDF generation completes, then disappear before the
+native save dialog is presented. The PDF button MUST remain disabled until the
+save dialog is completed or cancelled, or the export fails. The completion
+signal MUST be targeted to the initiating window and MUST NOT contain capture
+content or file information.
+
+#### Scenario: Desktop generation progress
+
+- **WHEN** the user starts PDF export from Desktop
+- **THEN** a localized accessible spinner appears centered over the Desktop
+  window while the PDF is generated
+- **AND** it disappears when generation completes, before the save dialog opens
+- **AND** the Desktop PDF button remains disabled until the export action ends
+
+#### Scenario: QuickPaste generation progress
+
+- **WHEN** the user starts PDF export from QuickPaste
+- **THEN** a localized accessible spinner appears centered over QuickPaste while
+  the PDF is generated
+- **AND** it disappears when generation completes, before the save dialog opens
+- **AND** the QuickPaste PDF button remains disabled until the export action ends
+
+#### Scenario: Generation fails or saving is cancelled
+
+- **WHEN** generation fails or the user cancels the save dialog
+- **THEN** the spinner and in-flight button state are cleared
+- **AND** cancellation is not shown as an export error
+
+#### Scenario: Progress event is private to the initiating window
+
+- **WHEN** generation completes for an export started by one application window
+- **THEN** only that window receives the payload-free completion signal
+- **AND** the other window does not show or dismiss a spinner for that export

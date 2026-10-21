@@ -132,6 +132,25 @@ impl SearchService {
         filter: &SearchFilter,
         content_type: Option<ContentType>,
     ) -> Result<SearchServiceOutcome, SearchServiceError> {
+        self.search_with_content_type_filter_and_unassigned(
+            context,
+            query,
+            filter,
+            content_type,
+            false,
+        )
+    }
+
+    /// Same search path with an optional History-only filter for entries that
+    /// have no membership in any user-defined collection.
+    pub fn search_with_content_type_filter_and_unassigned(
+        &self,
+        context: &AppContext,
+        query: &SearchQuery,
+        filter: &SearchFilter,
+        content_type: Option<ContentType>,
+        unassigned_only: bool,
+    ) -> Result<SearchServiceOutcome, SearchServiceError> {
         let limit = clamp_limit(query.limit);
         let clamped_query = SearchQuery {
             text: query.text.clone(),
@@ -148,12 +167,20 @@ impl SearchService {
         let records = {
             let mut db = context.database().lock();
             let repo = EntryRepository::new(db.connection_mut());
-            repo.entries_filtered_by_content_type(
-                filter.collection_id,
-                &filter.tag_ids,
-                &filter.source_app,
-                content_type,
-            )?
+            if unassigned_only {
+                repo.unassigned_entries_filtered_by_content_type(
+                    &filter.tag_ids,
+                    &filter.source_app,
+                    content_type,
+                )?
+            } else {
+                repo.entries_filtered_by_content_type(
+                    filter.collection_id,
+                    &filter.tag_ids,
+                    &filter.source_app,
+                    content_type,
+                )?
+            }
         };
 
         // Build SearchDocuments borrowing from the records we already
@@ -764,6 +791,34 @@ mod tests {
         // The image with the same title lives outside the active
         // collection and must not surface.
         assert!(!ids.contains(&outside));
+    }
+
+    #[test]
+    fn search_can_restrict_history_to_entries_without_user_collections() {
+        let context = bootstrap_with(vec![datetime!(2026-01-02 03:04:05 UTC); 2]);
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let unassigned = insert_entry(&context, "unassigned capture note", when);
+        let assigned = insert_entry(&context, "unassigned capture in project", when);
+        let project = create_user_collection(&context, "Proyecto");
+        assign_to_collection(&context, assigned, project);
+
+        let outcome = service()
+            .search_with_content_type_filter_and_unassigned(
+                &context,
+                &query("unassigned capture"),
+                &SearchFilter::default(),
+                None,
+                true,
+            )
+            .expect("unassigned search");
+        assert_eq!(
+            outcome
+                .hits
+                .iter()
+                .map(|hit| hit.entry_id)
+                .collect::<Vec<_>>(),
+            vec![unassigned],
+        );
     }
 
     #[test]

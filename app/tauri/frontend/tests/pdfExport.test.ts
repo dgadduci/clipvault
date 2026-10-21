@@ -71,3 +71,49 @@ test("frontend bridge invokes one native PDF export command with ordered IDs", (
   assert.match(command, /\.blocking_save_file\(\)/);
   assert.match(command, /std::fs::write\(path, pdf\)/);
 });
+
+test("PDF generation completion is emitted to the initiating window before save dialog", () => {
+  const command = loadSource("..", "src-tauri", "src", "commands.rs");
+  const generate = command.indexOf("PdfExportService::generate(context, &entry_ids)");
+  const signal = command.indexOf("window.emit_to(", generate);
+  const saveDialog = command.indexOf(".blocking_save_file()", signal);
+
+  assert.ok(generate >= 0 && signal > generate && saveDialog > signal);
+  assert.match(command, /window\.emit_to\(window\.label\(\),\s*PDF_EXPORT_GENERATION_COMPLETE_EVENT,\s*\(\)\)/);
+  assert.match(command, /PDF_EXPORT_GENERATION_COMPLETE_EVENT:\s*&str\s*=\s*"clipvault:\/\/pdf-export-generation-complete"/);
+});
+
+test("Desktop and QuickPaste center a generation spinner and keep PDF actions busy through saving", () => {
+  const desktop = loadSource("src", "App.svelte");
+  const quickPaste = loadSource("src", "QuickPaste.svelte");
+  const overlay = loadSource("src", "PdfExportProgressOverlay.svelte");
+  const toolbar = loadSource("src", "DesktopToolbar.svelte");
+
+  for (const source of [desktop, quickPaste]) {
+    assert.match(source, /let pdfGenerationInFlight = false;/);
+    assert.match(source, /PDF_EXPORT_GENERATION_COMPLETE_EVENT,[\s\S]*?pdfGenerationInFlight = false/);
+    assert.match(source, /\{#if pdfGenerationInFlight\}[\s\S]{0,300}<PdfExportProgressOverlay/);
+    assert.match(source, /finally\s*\{\s*unlistenGenerationComplete\?\.\(\);\s*pdfGenerationInFlight = false;\s*pdfExportInFlight = false;/);
+  }
+  assert.match(overlay, /position:\s*fixed;[\s\S]*inset:\s*0/);
+  assert.match(overlay, /CircularLoadingIndicator/);
+  assert.match(toolbar, /disabled=\{selectedEntryIds\.length === 0 \|\| pdfExporting\}/);
+  assert.match(quickPaste, /disabled=\{selectedEntryIds\.size === 0 \|\| pdfExportInFlight\}/);
+});
+
+test("PDF page breaks are fixed and the setting is removed from all locales", () => {
+  const settings = loadSource("src", "GeneralSettingsModal.svelte");
+  const coreSettings = loadSource("..", "..", "..", "crates", "clipvault-core", "src", "settings.rs");
+  const renderer = loadSource("..", "..", "..", "crates", "clipvault-core", "src", "pdf_export.rs");
+
+  assert.doesNotMatch(settings, /pdf-page-break|settings\.pdf_export\.(title|description|page_break_between_captures)/);
+  assert.doesNotMatch(coreSettings, /pdf_page_break_between_captures/);
+  assert.match(renderer, /fn render_captures\(captures: &\[PdfCapture\]\)/);
+  assert.match(renderer, /combined\.append_document\(render_document\(/);
+
+  for (const locale of ["en", "es", "pt", "de", "fr"]) {
+    const catalog = loadSource("src", "locales", `${locale}.json`);
+    assert.match(catalog, /"pdf_export\.generating"/);
+    assert.doesNotMatch(catalog, /"settings\.pdf_export\.(title|description|page_break_between_captures)"/);
+  }
+});

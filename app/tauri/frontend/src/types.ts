@@ -492,7 +492,6 @@ export interface Settings {
    */
   local_peer_display_name: string | null;
   capture_notes_sharing_enabled: boolean;
-  pdf_page_break_between_captures: boolean;
 }
 
 export interface SettingsUpdate {
@@ -503,7 +502,6 @@ export interface SettingsUpdate {
   quick_paste_hotkey?: HotkeySpec | null;
   local_peer_display_name?: string | null;
   capture_notes_sharing_enabled?: boolean;
-  pdf_page_break_between_captures?: boolean;
 }
 
 export type PdfExportSaveResult = "saved" | "cancelled";
@@ -1537,6 +1535,7 @@ export type TagFilter =
 /** Single collection selected as an additional History filter. */
 export type CollectionFilter =
   | { kind: "all" }
+  | { kind: "unassigned" }
   | { kind: "collection"; collectionId: number };
 
 /**

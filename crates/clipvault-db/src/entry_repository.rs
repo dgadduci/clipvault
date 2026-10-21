@@ -1243,12 +1243,67 @@ impl<'a> EntryRepository<'a> {
         Ok(content_types)
     }
 
+    /// Return content types represented by entries with no membership in any
+    /// user-defined collection. The system `Historial` membership is ignored.
+    pub fn distinct_unassigned_content_types(
+        &self,
+    ) -> Result<Vec<ContentType>, EntryRepositoryError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT ce.content_type FROM clipboard_entries ce
+              WHERE NOT EXISTS (
+                SELECT 1 FROM entry_collections ec
+                  JOIN collections c ON c.id = ec.collection_id
+                 WHERE ec.entry_id = ce.id
+                   AND c.kind = 'user'
+              )
+              ORDER BY ce.content_type",
+        )?;
+        let raw_types = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut content_types = raw_types
+            .iter()
+            .filter_map(|raw| parse_content_type(raw))
+            .collect::<Vec<_>>();
+        content_types.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(content_types)
+    }
+
     /// Variant of [`Self::entries_filtered`] that also restricts rows to one
     /// content type when supplied. The type is bound as a parameter so the
     /// query remains safe and the existing no-type call retains its behavior.
     pub fn entries_filtered_by_content_type(
         &self,
         collection_id: Option<i64>,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+    ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
+        self.entries_filtered_with_membership_filter(
+            collection_id,
+            false,
+            tag_ids,
+            source_app,
+            content_type,
+        )
+    }
+
+    /// Return entries without a membership in any user-defined collection,
+    /// while keeping the same tag, source-app and content-type filters as the
+    /// regular History query. The automatic `Historial` membership is ignored.
+    pub fn unassigned_entries_filtered_by_content_type(
+        &self,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+    ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
+        self.entries_filtered_with_membership_filter(None, true, tag_ids, source_app, content_type)
+    }
+
+    fn entries_filtered_with_membership_filter(
+        &self,
+        collection_id: Option<i64>,
+        unassigned_only: bool,
         tag_ids: &[i64],
         source_app: &SourceAppFilter,
         content_type: Option<ContentType>,
@@ -1261,6 +1316,16 @@ impl<'a> EntryRepository<'a> {
         if collection_id.is_some() {
             sql.push_str(
                 " WHERE id IN (SELECT entry_id FROM entry_collections WHERE collection_id = ?)",
+            );
+            first_clause = false;
+        } else if unassigned_only {
+            sql.push_str(
+                " WHERE NOT EXISTS (
+                    SELECT 1 FROM entry_collections ec
+                      JOIN collections c ON c.id = ec.collection_id
+                     WHERE ec.entry_id = clipboard_entries.id
+                       AND c.kind = 'user'
+                )",
             );
             first_clause = false;
         }
@@ -3606,6 +3671,69 @@ mod tests {
             "image entry must surface inside the collection"
         );
         assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn unassigned_filter_ignores_history_membership_and_excludes_user_collections() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (unassigned_text_id, assigned_image_id) = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let unassigned_text_id = repo
+                .insert_or_touch(new_entry("only in history", when))
+                .expect("unassigned text")
+                .record()
+                .id;
+            let assigned_image_id = repo
+                .insert_or_touch(new_image_entry(&"a".repeat(64), 8, 6, when))
+                .expect("assigned image")
+                .record()
+                .id;
+            (unassigned_text_id, assigned_image_id)
+        };
+        let collection_id = {
+            let mut repo = crate::OrganizationRepository::new(db.connection_mut());
+            repo.create_user_collection("Trabajo", "#1565c0", when)
+                .expect("create collection")
+                .id
+        };
+        {
+            let mut repo = crate::OrganizationRepository::new(db.connection_mut());
+            repo.replace_entry_collections(assigned_image_id, &[collection_id], when)
+                .expect("assign image");
+        }
+
+        {
+            let repo = EntryRepository::new(db.connection_mut());
+            let filtered = repo
+                .unassigned_entries_filtered_by_content_type(&[], &SourceAppFilter::default(), None)
+                .expect("unassigned entries");
+            let ids = filtered.iter().map(|entry| entry.id).collect::<Vec<_>>();
+            assert_eq!(ids, vec![unassigned_text_id]);
+            assert_eq!(
+                repo.distinct_unassigned_content_types()
+                    .expect("unassigned content types"),
+                vec![ContentType::Text],
+            );
+        }
+
+        {
+            let mut repo = crate::OrganizationRepository::new(db.connection_mut());
+            repo.replace_entry_collections(assigned_image_id, &[], when)
+                .expect("remove user collection");
+        }
+        let repo = EntryRepository::new(db.connection_mut());
+        let filtered = repo
+            .unassigned_entries_filtered_by_content_type(&[], &SourceAppFilter::default(), None)
+            .expect("entries after unassigning image");
+        let ids = filtered.iter().map(|entry| entry.id).collect::<Vec<_>>();
+        assert!(ids.contains(&unassigned_text_id));
+        assert!(ids.contains(&assigned_image_id));
+        assert_eq!(
+            repo.distinct_unassigned_content_types()
+                .expect("content types after unassigning image"),
+            vec![ContentType::Image, ContentType::Text],
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ import {
   sourceApplicationsCommand,
   recentEntriesFilteredCommand,
   searchEntriesCommand,
+  contentTypesCommand,
 } from "../src/lib/tauri.ts";
 
 type InvokeHandle = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -107,6 +108,26 @@ test("recentEntriesFilteredCommand passes null when the filter is absent", async
     tagIds: [],
   });
   assert.equal(observed?.sourceApp, null);
+  assert.equal(observed?.unassignedOnly, false);
+});
+
+test("recent, search and content-type bridges forward unassigned-only scope", async () => {
+  const observed: Array<{ cmd: string; args?: Record<string, unknown> }> = [];
+  installTauriMock(async (cmd, args) => {
+    observed.push({ cmd, args });
+    if (cmd === "clipvault_search_entries") return { note: "ok", hits: [] };
+    return [];
+  });
+
+  await recentEntriesFilteredCommand({ collectionId: null, unassignedOnly: true });
+  await searchEntriesCommand({ query: "notes", collectionId: null, unassignedOnly: true });
+  await contentTypesCommand({ collectionId: null, unassignedOnly: true });
+
+  assert.deepEqual(observed.map((call) => [call.cmd, call.args?.unassignedOnly]), [
+    ["clipvault_recent_entries_filtered", true],
+    ["clipvault_search_entries", true],
+    ["clipvault_content_types", true],
+  ]);
 });
 
 test("searchEntriesCommand forwards the source-app filter", async () => {
@@ -141,4 +162,5 @@ test("searchEntriesCommand passes null when the filter is absent", async () => {
     tagIds: [],
   });
   assert.equal(observed?.sourceApp, null);
+  assert.equal(observed?.unassignedOnly, false);
 });

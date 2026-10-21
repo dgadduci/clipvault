@@ -7,20 +7,29 @@
   export let options: Collection[] = [];
   export let ariaLabel: string = "";
   export let testId: string = "collection-filter";
+  export let disabled: boolean = false;
   export let onChange: (next: CollectionFilterValue) => void = () => {};
 
   $: selectedValue = selected.kind === "all"
     ? "all"
-    : String(selected.collectionId);
+    : selected.kind === "unassigned"
+      ? "unassigned"
+      : String(selected.collectionId);
   $: selectedTitle = selected.kind === "all"
     ? $t("filter.all")
-    : options.find((collection) => collection.id === selected.collectionId)?.name ??
-      $t("filter.collection");
+    : selected.kind === "unassigned"
+      ? $t("filter.collection_unassigned")
+      : options.find((collection) => collection.id === selected.collectionId)?.name ??
+        $t("filter.collection");
 
   function handleChange(event: Event): void {
     const value = (event.currentTarget as HTMLSelectElement).value;
     if (value === "all") {
       onChange({ kind: "all" });
+      return;
+    }
+    if (value === "unassigned") {
+      onChange({ kind: "unassigned" });
       return;
     }
     const collectionId = Number(value);
@@ -32,7 +41,8 @@
 <div
   class="collection-filter"
   data-testid={testId}
-  data-filter-active={selected.kind === "collection"}
+  data-filter-active={selected.kind !== "all"}
+  data-filter-disabled={disabled}
   data-filter-width="110"
   data-filter-min-width="5.5rem"
   style={`${compactFilterComboboxStyles} --filter-active-background: ${ACTIVE_FILTER_SURFACES.collection};`}
@@ -59,10 +69,12 @@
     title={selectedTitle}
     data-testid={`${testId}-select`}
     data-collection-filter-selected={selected.kind}
-    data-filter-active={selected.kind === "collection"}
+    data-filter-active={selected.kind !== "all"}
+    disabled={disabled}
     on:change={handleChange}
   >
     <option value="all" title={$t("filter.all")}>{$t("filter.all")}</option>
+    <option value="unassigned" title={$t("filter.collection_unassigned")}>{$t("filter.collection_unassigned")}</option>
     {#each options.filter((collection) => collection.kind === "user") as collection (collection.id)}
       <option value={String(collection.id)} title={collection.name}>{collection.name}</option>
     {/each}
@@ -91,6 +103,10 @@
     width: 110px;
   }
 
+  .collection-filter[data-filter-disabled="true"] {
+    opacity: 0.56;
+  }
+
   select {
     appearance: none;
     color-scheme: dark;
@@ -110,6 +126,10 @@
 
   select:hover {
     background: var(--cv-bg-hover, rgba(255, 255, 255, 0.06));
+  }
+
+  select:disabled {
+    cursor: not-allowed;
   }
 
   .collection-filter[data-filter-active="true"] select,

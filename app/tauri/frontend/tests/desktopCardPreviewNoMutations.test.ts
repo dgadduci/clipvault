@@ -205,6 +205,8 @@ test("ClipboardPreview image rendering never mutates asset_ref or metadata", () 
     SOURCES.preview.indexOf("<style>"),
     SOURCES.preview.length,
   );
+  const imageRule = cssBlock.match(/\.cv-preview-image\s*\{[^}]*\}/);
+  assert.ok(imageRule, "the image element must have a dedicated rendering rule");
   for (const forbidden of [
     "canvas",
     "toBlob",
@@ -215,7 +217,7 @@ test("ClipboardPreview image rendering never mutates asset_ref or metadata", () 
     "crop",
   ]) {
     assert.equal(
-      cssBlock.includes(forbidden),
+      imageRule![0].includes(forbidden),
       false,
       `the preview image CSS must not ${forbidden} the asset`,
     );

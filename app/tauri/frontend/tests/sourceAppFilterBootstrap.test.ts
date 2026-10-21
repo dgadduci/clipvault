@@ -183,6 +183,11 @@ test("searchEntriesCommand receives the resolved collection scope and sourceApp 
     /sourceApp:\s*sourceAppFilter/,
     "search must forward the source-app filter",
   );
+  assert.match(
+    body,
+    /unassignedOnly:\s*entriesUnassignedOnly\(selectedCollectionId\)/,
+    "search must forward the unassigned collection filter",
+  );
 });
 
 // ---------------------------------------------------------------------------

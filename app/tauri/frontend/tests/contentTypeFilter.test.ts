@@ -55,9 +55,11 @@ test("DesktopToolbar renders one type filter before Text and the overflow menu",
 });
 
 test("App loads complete scoped type options and composes the selection with recents/search", () => {
+  assert.match(appSource, /contentTypesCommand\(\{/);
+  assert.match(appSource, /collectionId:\s*requestCollectionId/);
   assert.match(
     appSource,
-    /contentTypesCommand\(\{\s*collectionId:\s*requestCollectionId\s*\}\)/,
+    /unassignedOnly:\s*entriesUnassignedOnly\(selectedCollectionId\)/,
   );
   assert.match(appSource, /orderAvailableContentTypes\(availableTypes\s*\?\?\s*\[\]\)/);
   assert.equal((appSource.match(/contentType:\s*selectedContentType/g) ?? []).length, 2);

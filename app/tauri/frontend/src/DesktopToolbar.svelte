@@ -103,11 +103,11 @@
    */
   export let tagFilterOptions: TagFilterOptionValue[] = [];
   /**
-   * Additional collection filter for the Historial view. The parent
-   * owns its state and option refresh; this toolbar only renders and
-   * forwards the selected collection id.
+   * Collection filter for the Historial view. The parent owns its
+   * state and option refresh; this toolbar keeps the control visible
+   * outside Historial but disabled there.
    */
-  export let showCollectionFilter: boolean = false;
+  export let collectionFilterDisabled: boolean = false;
   export let collectionFilter: CollectionFilterValue = { kind: "all" };
   export let collectionFilterOptions: CollectionOptionValue[] = [];
   export let selectedContentType: ContentTypeValue | null = null;
@@ -308,14 +308,13 @@
       ariaLabel={$t("filter.tag")}
       onChange={onTagFilterChange}
     />
-    {#if showCollectionFilter}
-      <CollectionFilter
-        selected={collectionFilter}
-        options={collectionFilterOptions}
-        ariaLabel={$t("filter.collection")}
-        onChange={onCollectionFilterChange}
-      />
-    {/if}
+    <CollectionFilter
+      selected={collectionFilter}
+      options={collectionFilterOptions}
+      ariaLabel={$t("filter.collection")}
+      disabled={collectionFilterDisabled}
+      onChange={onCollectionFilterChange}
+    />
     <ContentTypeFilter
       selected={selectedContentType}
       options={contentTypeOptions}

@@ -54,11 +54,7 @@ enum PdfCapture {
 pub struct PdfExportService;
 
 impl PdfExportService {
-    pub fn generate(
-        context: &AppContext,
-        entry_ids: &[i64],
-        page_break_between_captures: bool,
-    ) -> Result<Vec<u8>, PdfExportError> {
+    pub fn generate(context: &AppContext, entry_ids: &[i64]) -> Result<Vec<u8>, PdfExportError> {
         if entry_ids.is_empty() {
             return Err(PdfExportError::EmptySelection);
         }
@@ -87,7 +83,7 @@ impl PdfExportService {
             .map(|record| load_capture(record, &assets))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let document = render_captures(&captures, page_break_between_captures)?;
+        let document = render_captures(&captures)?;
 
         let mut warnings = Vec::new();
         let bytes = document.save(
@@ -117,25 +113,18 @@ fn deduplicate_ids(entry_ids: &[i64]) -> Vec<i64> {
         .collect()
 }
 
-fn render_captures(
-    captures: &[PdfCapture],
-    page_break_between_captures: bool,
-) -> Result<PdfDocument, PdfExportError> {
-    if page_break_between_captures {
-        let mut combined = PdfDocument::new("ClipVault captures");
-        for (selection_index, capture) in captures.iter().enumerate() {
-            combined.append_document(render_document(
-                std::slice::from_ref(capture),
-                selection_index,
-            )?);
-        }
-        if combined.page_count() == 0 {
-            return Err(PdfExportError::Render);
-        }
-        Ok(combined)
-    } else {
-        render_document(captures, 0)
+fn render_captures(captures: &[PdfCapture]) -> Result<PdfDocument, PdfExportError> {
+    let mut combined = PdfDocument::new("ClipVault captures");
+    for (selection_index, capture) in captures.iter().enumerate() {
+        combined.append_document(render_document(
+            std::slice::from_ref(capture),
+            selection_index,
+        )?);
     }
+    if combined.page_count() == 0 {
+        return Err(PdfExportError::Render);
+    }
+    Ok(combined)
 }
 
 fn load_capture(
@@ -303,11 +292,8 @@ mod tests {
 
     #[test]
     fn text_export_preserves_order_and_line_breaks_in_one_document() {
-        let document = render_captures(
-            &[text("first line\nsecond line"), text("later capture")],
-            false,
-        )
-        .expect("rendered document");
+        let document = render_captures(&[text("first line\nsecond line"), text("later capture")])
+            .expect("rendered document");
         let mut warnings = Vec::new();
         let bytes = document.save(&PdfSaveOptions::default(), &mut warnings);
         let parsed = parsed(&bytes);
@@ -317,7 +303,7 @@ mod tests {
             .flatten()
             .collect::<String>();
 
-        assert_eq!(parsed.page_count(), 1);
+        assert_eq!(parsed.page_count(), 2);
         let first = extracted.find("first line").expect("first capture text");
         let second = extracted.find("second line").expect("line after break");
         let later = extracted.find("later capture").expect("next capture text");
@@ -340,12 +326,10 @@ mod tests {
     }
 
     #[test]
-    fn page_break_preference_controls_capture_boundaries_in_one_pdf() {
+    fn every_capture_starts_on_a_new_page_in_selection_order() {
         let captures = [text("first capture"), text("second capture")];
-        let continuous = render_captures(&captures, false).expect("continuous PDF");
-        let separated = render_captures(&captures, true).expect("page-break PDF");
+        let separated = render_captures(&captures).expect("page-break PDF");
 
-        assert_eq!(continuous.page_count(), 1);
         assert_eq!(separated.page_count(), 2);
         let mut warnings = Vec::new();
         let bytes = separated.save(&PdfSaveOptions::default(), &mut warnings);
@@ -362,9 +346,42 @@ mod tests {
     }
 
     #[test]
+    fn next_capture_starts_after_all_pages_of_a_long_capture() {
+        let mut long_capture = (0..240)
+            .map(|line| format!("content line {line}\n"))
+            .collect::<String>();
+        long_capture.push_str("end of first capture\n");
+        let document = render_captures(&[text(&long_capture), text("start of following capture")])
+            .expect("long capture PDF");
+
+        let mut warnings = Vec::new();
+        let bytes = document.save(&PdfSaveOptions::default(), &mut warnings);
+        let pages = parsed(&bytes).extract_text();
+        let last_page_of_first_capture = pages
+            .iter()
+            .position(|lines| {
+                lines
+                    .iter()
+                    .any(|line| line.contains("end of first capture"))
+            })
+            .expect("last page of first capture");
+        let page_of_second_capture = pages
+            .iter()
+            .position(|lines| {
+                lines
+                    .iter()
+                    .any(|line| line.contains("start of following capture"))
+            })
+            .expect("page of following capture");
+
+        assert!(pages.len() > 2, "the first capture spans multiple pages");
+        assert!(page_of_second_capture > last_page_of_first_capture);
+    }
+
+    #[test]
     fn png_capture_is_embedded_as_an_image_xobject() {
         let png = include_bytes!("../../../app/tauri/src-tauri/icons/32x32.png");
-        let document = render_captures(&[image(png.to_vec(), 32, 32)], false).expect("image PDF");
+        let document = render_captures(&[image(png.to_vec(), 32, 32)]).expect("image PDF");
         assert_eq!(document.page_count(), 1);
         assert!(!document.resources.xobjects.map.is_empty());
     }
@@ -398,7 +415,7 @@ mod tests {
             image(png(160, 90, [255, 0, 0]), 160, 90),
             image(png(60, 120, [0, 255, 0]), 60, 120),
         ];
-        let document = render_captures(&captures, true).expect("image PDF");
+        let document = render_captures(&captures).expect("image PDF");
 
         assert_eq!(document.page_count(), 2);
         let first_ids = document.pages[0].get_xobject_ids();
@@ -445,11 +462,11 @@ mod tests {
         let (_dir, context) = crate::test_support::isolated_harness();
 
         assert!(matches!(
-            PdfExportService::generate(&context, &[], false),
+            PdfExportService::generate(&context, &[]),
             Err(PdfExportError::EmptySelection)
         ));
         assert!(matches!(
-            PdfExportService::generate(&context, &[i64::MAX], false),
+            PdfExportService::generate(&context, &[i64::MAX]),
             Err(PdfExportError::MissingCapture)
         ));
     }
