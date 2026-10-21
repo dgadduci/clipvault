@@ -2,6 +2,7 @@
 //! `clipvault-core` and forwards the typed outcome to the frontend.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[cfg(all(
     feature = "local-peer-pairing-tls",
@@ -15,12 +16,12 @@ use clipvault_core::{
     ActiveAppDiagnostics, Capabilities, ClearOutcome, ClipboardAssetStore,
     CodeLanguageServiceError, ContextualDesktopSetupDismissals, CopyOutcome, DeleteOutcome,
     DesktopSetupIntegration, HistoryOutcome, HotkeySpec, IgnoredAppEntry, IgnoredAppError,
-    LocalSettingsReader, ManualTextCreationOutcome, PasteMode, PasteOutcome, PdfExportService,
-    PickAndAddOutcome, PlatformGuidance, PlatformGuidanceId, PlatformSettingsTarget,
-    RetentionOutcome, RetentionPolicy, RetentionPreview, RichTextAssetStore, SetFavoriteResult,
-    SetTitleOutcome, Settings, SettingsNavigator, SettingsOpenOutcome, SettingsServiceError,
-    SettingsUpdate, TitleValidationError, UpdateTextHistoryOutcome, ValidationCode,
-    ValidationError, WatchTickOutcome,
+    ImageImportProgress, LocalSettingsReader, ManualTextCreationOutcome, PasteMode, PasteOutcome,
+    PdfExportService, PickAndAddOutcome, PlatformGuidance, PlatformGuidanceId,
+    PlatformSettingsTarget, RetentionOutcome, RetentionPolicy, RetentionPreview,
+    RichTextAssetStore, SetFavoriteResult, SetTitleOutcome, Settings, SettingsNavigator,
+    SettingsOpenOutcome, SettingsServiceError, SettingsUpdate, TitleValidationError,
+    UpdateTextHistoryOutcome, ValidationCode, ValidationError, WatchTickOutcome,
 };
 use clipvault_platform::{
     read_icon_bytes, read_source_app_icon_bytes, ActiveAppError, IconReadError,
@@ -59,6 +60,7 @@ fn sync_linux_picker_gnome_runtime_state(_state: &SharedState) {}
 /// surfaces as a frontend test failure instead of silently dropping
 /// the notification.
 pub const ORGANIZATION_UPDATED_EVENT: &str = "clipvault://organization-updated";
+pub const IMAGE_IMPORT_PROGRESS_EVENT: &str = "clipvault://image-import-progress";
 pub const CAPTURE_CONTROL_CHANGED_EVENT: &str = "clipvault://capture-control-changed";
 pub const CAPTURE_CONTROL_ERROR_EVENT: &str = "clipvault://capture-control-error";
 pub const LANGUAGE_CHANGED_EVENT: &str = "clipvault://language-changed";
@@ -237,6 +239,15 @@ pub enum ImageImportResult {
     },
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ImageImportProgressEvent {
+    session_id: u64,
+    bytes_read: u64,
+    total_bytes: u64,
+    completed: usize,
+    total: usize,
+}
+
 /// Open the native multi-file picker and retain selected source paths in
 /// process-local state while the user reviews the final order. Only opaque IDs
 /// and basename labels cross the WebView boundary.
@@ -290,6 +301,7 @@ pub async fn clipvault_prepare_image_import(
 #[tauri::command]
 pub async fn clipvault_complete_image_import(
     app: AppHandle,
+    window: WebviewWindow,
     state: State<'_, SharedState>,
     session_id: u64,
     ordered_file_ids: Vec<u32>,
@@ -312,9 +324,43 @@ pub async fn clipvault_complete_image_import(
     let mut imported = 0;
     let mut duplicates = 0;
 
+    let mut last_progress_event = Instant::now();
+    let mut last_emitted_bytes = 0_u64;
+    let mut last_emitted_completed = 0_usize;
     for outcome in context
         .history()
-        .import_image_files_in_order(context, &paths, collection_id)
+        .import_image_files_in_order_with_byte_progress(
+            context,
+            &paths,
+            collection_id,
+            |progress: ImageImportProgress| {
+                let file_completed = progress.completed != last_emitted_completed;
+                let enough_bytes_read =
+                    progress.bytes_read.saturating_sub(last_emitted_bytes) >= 256 * 1024;
+                let throttle_elapsed = last_progress_event.elapsed() >= Duration::from_millis(100);
+                let batch_finished = progress.total > 0 && progress.completed >= progress.total;
+                if !file_completed && !enough_bytes_read && !throttle_elapsed && !batch_finished {
+                    return;
+                }
+
+                if let Err(error) = app.emit_to(
+                    window.label(),
+                    IMAGE_IMPORT_PROGRESS_EVENT,
+                    ImageImportProgressEvent {
+                        session_id,
+                        bytes_read: progress.bytes_read,
+                        total_bytes: progress.total_bytes,
+                        completed: progress.completed,
+                        total: progress.total,
+                    },
+                ) {
+                    warn!(error = %error, "failed to emit image import progress");
+                }
+                last_emitted_bytes = progress.bytes_read;
+                last_emitted_completed = progress.completed;
+                last_progress_event = Instant::now();
+            },
+        )
     {
         match outcome {
             HistoryOutcome::Stored { .. } => imported += 1,

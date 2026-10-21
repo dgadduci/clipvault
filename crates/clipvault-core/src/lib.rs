@@ -128,7 +128,7 @@ pub use gnome_integration::{
     GnomeTechnicalState, GNOME_CONSENT_STORAGE_KEY, GNOME_STATE_STORAGE_KEY,
 };
 pub use history::{
-    hash_content, HistoryOutcome, HistoryServiceError, ImageRotationDirection,
+    hash_content, HistoryOutcome, HistoryServiceError, ImageImportProgress, ImageRotationDirection,
     ManualTextCreationOutcome, RotateImageOutcome, SetTitleOutcome, TextHistoryService,
     TitleValidationError, UpdateTextHistoryOutcome, MAX_TITLE_LENGTH,
 };

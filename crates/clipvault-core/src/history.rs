@@ -38,7 +38,7 @@ use crate::image_capture_diagnostic::{
     log_image_capture_diagnostic, ColorProfileKind, ImageCaptureDiagnostic, ImageSource,
     RepresentationSource,
 };
-use crate::image_file_import::{decode_image_file, ImageFileImportError};
+use crate::image_file_import::{decode_image_file_with_progress, ImageFileImportError};
 use crate::privacy::{CaptureDecision, PrivacyGate};
 use crate::rich_text::{canonical_rich_text_hash, RichTextAssetStore};
 
@@ -56,6 +56,15 @@ pub enum HistoryOutcome {
     /// The clipboard backend or the repository returned an error.
     /// `message` is a human-readable, non-sensitive description.
     Failed { message: String },
+}
+
+/// Numeric-only progress snapshot for an ordered local image import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageImportProgress {
+    pub bytes_read: u64,
+    pub total_bytes: u64,
+    pub completed: usize,
+    pub total: usize,
 }
 
 impl HistoryOutcome {
@@ -450,6 +459,43 @@ impl TextHistoryService {
         paths: &[std::path::PathBuf],
         collection_id: Option<i64>,
     ) -> Vec<HistoryOutcome> {
+        self.import_image_files_in_order_with_progress(context, paths, collection_id, |_, _| {})
+    }
+
+    /// Import an ordered image batch and report the number of files processed
+    /// after each outcome. The callback receives only numeric counters, so
+    /// callers can surface progress without exposing paths or image content.
+    pub fn import_image_files_in_order_with_progress<F>(
+        &self,
+        context: &AppContext,
+        paths: &[std::path::PathBuf],
+        collection_id: Option<i64>,
+        mut on_progress: F,
+    ) -> Vec<HistoryOutcome>
+    where
+        F: FnMut(usize, usize),
+    {
+        self.import_image_files_in_order_with_byte_progress(
+            context,
+            paths,
+            collection_id,
+            |progress| on_progress(progress.completed, progress.total),
+        )
+    }
+
+    /// Import an ordered image batch and report cumulative encoded bytes read
+    /// during decoding plus the number of completed files. Progress snapshots
+    /// contain no path, filename or image content.
+    pub fn import_image_files_in_order_with_byte_progress<F>(
+        &self,
+        context: &AppContext,
+        paths: &[std::path::PathBuf],
+        collection_id: Option<i64>,
+        mut on_progress: F,
+    ) -> Vec<HistoryOutcome>
+    where
+        F: FnMut(ImageImportProgress),
+    {
         let batch_time = self.clock.now();
         // Keep one nonzero final nanosecond digit across the batch. The
         // repository sorts RFC3339 strings, so equal fractional precision is
@@ -457,19 +503,48 @@ impl TextHistoryService {
         let batch_time = batch_time
             .replace_nanosecond((batch_time.nanosecond() / 10 * 10) + 5)
             .unwrap_or(batch_time);
-        paths
-            .iter()
-            .enumerate()
-            .map(|(index, path)| {
-                let offset = time::Duration::nanoseconds(index as i64 * 10);
-                self.import_image_file_with_created_at(
-                    context,
-                    path,
-                    collection_id,
-                    Some(batch_time - offset),
-                )
-            })
-            .collect()
+        let total_bytes = paths.iter().fold(0_u64, |total, path| {
+            total.saturating_add(
+                std::fs::metadata(path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0),
+            )
+        });
+        let mut bytes_read_before_file = 0_u64;
+        let mut outcomes = Vec::with_capacity(paths.len());
+
+        for (index, path) in paths.iter().enumerate() {
+            let file_size = std::fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let mut current_file_bytes_read = 0_u64;
+            let offset = time::Duration::nanoseconds(index as i64 * 10);
+            let outcome = self.import_image_file_with_created_at_and_progress(
+                context,
+                path,
+                collection_id,
+                Some(batch_time - offset),
+                |file_bytes_read| {
+                    current_file_bytes_read = file_bytes_read.min(file_size);
+                    on_progress(ImageImportProgress {
+                        bytes_read: bytes_read_before_file.saturating_add(current_file_bytes_read),
+                        total_bytes,
+                        completed: index,
+                        total: paths.len(),
+                    });
+                },
+            );
+            bytes_read_before_file = bytes_read_before_file.saturating_add(current_file_bytes_read);
+            on_progress(ImageImportProgress {
+                bytes_read: bytes_read_before_file,
+                total_bytes,
+                completed: index + 1,
+                total: paths.len(),
+            });
+            outcomes.push(outcome);
+        }
+
+        outcomes
     }
 
     fn import_image_file_with_created_at(
@@ -479,7 +554,27 @@ impl TextHistoryService {
         collection_id: Option<i64>,
         created_at: Option<time::OffsetDateTime>,
     ) -> HistoryOutcome {
-        let image = match decode_image_file(path) {
+        self.import_image_file_with_created_at_and_progress(
+            context,
+            path,
+            collection_id,
+            created_at,
+            |_| {},
+        )
+    }
+
+    fn import_image_file_with_created_at_and_progress<F>(
+        &self,
+        context: &AppContext,
+        path: &std::path::Path,
+        collection_id: Option<i64>,
+        created_at: Option<time::OffsetDateTime>,
+        on_bytes_read: F,
+    ) -> HistoryOutcome
+    where
+        F: FnMut(u64),
+    {
+        let image = match decode_image_file_with_progress(path, on_bytes_read) {
             Ok(image) => image,
             Err(error) => {
                 let reason = match error {
@@ -1548,6 +1643,63 @@ mod tests {
     fn hash_handles_empty_string() {
         let h = hash_content("");
         assert_eq!(h.len(), 16);
+    }
+
+    #[test]
+    fn ordered_image_import_reports_progress_after_each_file() {
+        let (context, service) = isolated_service();
+        let paths = [
+            std::path::PathBuf::from("missing-first-image.png"),
+            std::path::PathBuf::from("missing-second-image.png"),
+            std::path::PathBuf::from("missing-third-image.png"),
+        ];
+        let mut progress = Vec::new();
+
+        let outcomes = service.import_image_files_in_order_with_progress(
+            &context,
+            &paths,
+            None,
+            |completed, total| progress.push((completed, total)),
+        );
+
+        assert_eq!(progress, [(1, 3), (2, 3), (3, 3)]);
+        assert!(outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, HistoryOutcome::Failed { .. })));
+    }
+
+    #[test]
+    fn ordered_image_import_reports_encoded_bytes_read() {
+        let (context, service) = isolated_service();
+        let source_dir = tempfile::tempdir().expect("temporary image source directory");
+        let image_path = source_dir.path().join("progress-image.png");
+        image::RgbaImage::from_pixel(128, 96, image::Rgba([40, 80, 120, 255]))
+            .save(&image_path)
+            .expect("write temporary PNG");
+        let expected_total_bytes = std::fs::metadata(&image_path)
+            .expect("image metadata")
+            .len();
+        let mut progress = Vec::new();
+
+        let outcomes = service.import_image_files_in_order_with_byte_progress(
+            &context,
+            std::slice::from_ref(&image_path),
+            None,
+            |snapshot| progress.push(snapshot),
+        );
+
+        assert!(matches!(
+            outcomes.as_slice(),
+            [HistoryOutcome::Failed { .. }]
+        ));
+        assert!(progress
+            .iter()
+            .any(|snapshot| snapshot.bytes_read > 0 && snapshot.completed == 0));
+        let final_progress = progress.last().expect("final progress snapshot");
+        assert_eq!(final_progress.total_bytes, expected_total_bytes);
+        assert_eq!(final_progress.bytes_read, expected_total_bytes);
+        assert_eq!(final_progress.completed, 1);
+        assert_eq!(final_progress.total, 1);
     }
 
     #[test]

@@ -17,6 +17,7 @@
     DesktopSetupIntegration,
     EntryRecord,
     ImageImportFilePreview,
+    ImageImportProgressEvent,
     ImageImportResponse,
     OrganizationSnapshot,
     PeerImportedSourceAppPresentation,
@@ -35,6 +36,9 @@
     TagFilterOption,
   } from "./types";
   import type { ContentTypeValue } from "./lib/contentType.ts";
+  import {
+    calculateImageImportProgressPercent,
+  } from "./lib/imageImportProgress.ts";
   import { orderAvailableContentTypes } from "./lib/contentType.ts";
   import {
     activeApplicationCommand,
@@ -55,6 +59,7 @@
     cancelImageImportCommand,
     completeImageImportCommand,
     prepareImageImportCommand,
+    IMAGE_IMPORT_PROGRESS_EVENT,
     deleteEntryCommand,
     diagnosticsCommand,
     gnomeIntegrationStatusCommand,
@@ -359,6 +364,7 @@
   let pdfExportInFlight = false;
   let pdfExportError = false;
   let imageImportInFlight = false;
+  let imageImportProgressPercent = 0;
   let imageImportError = false;
   let imageImportSummary: Extract<ImageImportResponse, { kind: "completed" }> | null = null;
   let pendingImageImportReview: {
@@ -1332,12 +1338,38 @@
     const pending = pendingImageImportReview;
     if (!pending || imageImportInFlight) return;
     imageImportInFlight = true;
+    imageImportProgressPercent = 0;
     imageImportError = false;
+    let stopProgress: (() => void) | null = null;
     try {
+      try {
+        stopProgress = await listen<ImageImportProgressEvent>(
+          IMAGE_IMPORT_PROGRESS_EVENT,
+          ({ payload }) => {
+            if (
+              payload.session_id !== pending.sessionId ||
+              payload.total <= 0 ||
+              !Number.isFinite(payload.completed) ||
+              !Number.isFinite(payload.total) ||
+              !Number.isFinite(payload.bytes_read) ||
+              !Number.isFinite(payload.total_bytes)
+            ) {
+              return;
+            }
+            imageImportProgressPercent = Math.max(
+              imageImportProgressPercent,
+              calculateImageImportProgressPercent(payload),
+            );
+          },
+        );
+      } catch {
+        // Progress is optional; a listener failure must not block the import.
+      }
       const result = await completeImageImportCommand({
         sessionId: pending.sessionId,
         orderedFileIds: event.detail.orderedFileIds,
       });
+      imageImportProgressPercent = 100;
       pendingImageImportReview = null;
       await finishDesktopImageImport(result);
     } catch {
@@ -1345,6 +1377,7 @@
       pendingImageImportReview = null;
       void cancelImageImportCommand({ sessionId: pending.sessionId }).catch(() => undefined);
     } finally {
+      stopProgress?.();
       imageImportInFlight = false;
     }
   }
@@ -1353,6 +1386,7 @@
     const pending = pendingImageImportReview;
     if (!pending || imageImportInFlight) return;
     pendingImageImportReview = null;
+    imageImportProgressPercent = 0;
     void cancelImageImportCommand({ sessionId: pending.sessionId }).catch(() => undefined);
   }
 
@@ -3091,6 +3125,7 @@
     files={pendingImageImportReview?.files ?? []}
     orderedFileIds={pendingImageImportReview?.orderedFileIds ?? []}
     busy={imageImportInFlight}
+    progressPercent={imageImportProgressPercent}
     on:reorder={reorderDesktopImageImport}
     on:confirm={(event) => void confirmDesktopImageImport(event)}
     on:cancel={cancelDesktopImageImport}

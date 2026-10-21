@@ -375,6 +375,8 @@ export const completeImageImportCommand: ClipvaultCommandArg<
     orderedFileIds: args.orderedFileIds,
   });
 
+export const IMAGE_IMPORT_PROGRESS_EVENT = "clipvault://image-import-progress";
+
 export const cancelImageImportCommand: ClipvaultCommandArg<
   void,
   { sessionId: number }

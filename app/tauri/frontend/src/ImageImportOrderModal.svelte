@@ -8,6 +8,7 @@
   export let files: ImageImportFilePreview[] = [];
   export let orderedFileIds: number[] = [];
   export let busy = false;
+  export let progressPercent = 0;
 
   const dispatch = createEventDispatcher<{
     reorder: { orderedFileIds: number[] };
@@ -100,18 +101,42 @@
     </ol>
 
     <div class="image-import-order-actions">
-      <button type="button" class="secondary" disabled={busy} on:click={cancel}>
-        {$t("common.cancel")}
-      </button>
-      <button
-        type="button"
-        class="primary"
-        disabled={busy || files.length === 0 || orderedFiles.length !== files.length}
-        on:click={confirm}
-        data-testid="image-import-order-confirm"
-      >
-        {busy ? $t("image_import.order.importing") : $t("image_import.order.confirm")}
-      </button>
+      {#if busy}
+        <div class="image-import-progress">
+          <div
+            class="image-import-progress-track"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow={progressPercent}
+            aria-valuetext={$t("image_import.order.progress", { percent: progressPercent })}
+            aria-label={$t("image_import.order.progress", { percent: progressPercent })}
+            data-testid="image-import-progress"
+          >
+            <span
+              class="image-import-progress-fill"
+              style={`width: ${progressPercent}%;`}
+            ></span>
+          </div>
+          <span class="image-import-progress-value" aria-hidden="true">{progressPercent}%</span>
+        </div>
+      {:else}
+        <span class="image-import-progress-placeholder" aria-hidden="true"></span>
+      {/if}
+      <div class="image-import-order-buttons">
+        <button type="button" class="secondary" disabled={busy} on:click={cancel}>
+          {$t("common.cancel")}
+        </button>
+        <button
+          type="button"
+          class="primary"
+          disabled={busy || files.length === 0 || orderedFiles.length !== files.length}
+          on:click={confirm}
+          data-testid="image-import-order-confirm"
+        >
+          {busy ? $t("image_import.order.importing") : $t("image_import.order.confirm")}
+        </button>
+      </div>
     </div>
   </div>
 </Modal>
@@ -164,7 +189,8 @@
   }
 
   .image-import-order-controls,
-  .image-import-order-actions {
+  .image-import-order-actions,
+  .image-import-order-buttons {
     display: flex;
     align-items: center;
     gap: 0.45rem;
@@ -188,8 +214,45 @@
   }
 
   .image-import-order-actions {
-    justify-content: flex-end;
+    justify-content: space-between;
     padding-top: 0.25rem;
+  }
+
+  .image-import-progress,
+  .image-import-progress-placeholder {
+    width: min(10rem, 32%);
+    min-width: 5rem;
+  }
+
+  .image-import-progress {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+  }
+
+  .image-import-progress-track {
+    flex: 1 1 auto;
+    height: 0.5rem;
+    overflow: hidden;
+    border: 1px solid var(--cv-border, #30363d);
+    border-radius: 999px;
+    background: var(--cv-bg, #0d1117);
+  }
+
+  .image-import-progress-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--cv-accent, #2563eb);
+    transition: width 120ms linear;
+  }
+
+  .image-import-progress-value {
+    min-width: 2.4rem;
+    color: var(--cv-fg-muted, #a7b0bc);
+    font-size: var(--cv-tag, 0.65rem);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
   }
 
   .image-import-order-actions .primary {
@@ -200,5 +263,25 @@
 
   .image-import-order-actions .secondary {
     background: transparent;
+  }
+
+  @media (max-width: 480px) {
+    .image-import-progress,
+    .image-import-progress-placeholder {
+      width: 5rem;
+      min-width: 4.5rem;
+    }
+
+    .image-import-progress {
+      gap: 0.35rem;
+    }
+
+    .image-import-order-actions {
+      gap: 0.35rem;
+    }
+
+    .image-import-order-buttons {
+      gap: 0.35rem;
+    }
   }
 </style>

@@ -521,6 +521,15 @@ export interface ImageImportFilePreview {
   display_name: string | null;
 }
 
+/** Metadata-only progress for one active local image-import session. */
+export interface ImageImportProgressEvent {
+  session_id: number;
+  bytes_read: number;
+  total_bytes: number;
+  completed: number;
+  total: number;
+}
+
 export type ImageImportPreparationResponse =
   | { kind: "cancelled" }
   | { kind: "prepared"; session_id: number; files: ImageImportFilePreview[] }
