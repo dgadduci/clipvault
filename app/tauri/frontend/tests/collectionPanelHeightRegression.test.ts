@@ -5,7 +5,7 @@
  * The reported regression is that the sidebar grew in height when
  * collections were added — the user expected the panel to share the
  * stable `--cv-card-rail-height` token with the rail and to scroll
- * the collection list internally instead of expanding the desktop.
+ * its list regions internally instead of expanding the desktop.
  *
  * The tests pin the CSS contract through the rendered source so a
  * future contributor cannot lift the panel above the rail height or
@@ -29,10 +29,9 @@ test("OrganizationSidebar keeps the collection list in a bounded internal scroll
   // The desktop-toolbar-layout change introduced a shared-height
   // workspace: the grid now uses `align-items: stretch` and the
   // sidebar grows with `height: 100%` to match the right column
-  // (toolbar + status + rail). The list below remains the only
-  // internal vertical scroller so adding collections cannot grow
-  // the desktop or move the drop targets outside the visible
-  // panel.
+  // (toolbar + status + rail). The collection and peer scrollers
+  // remain bounded so rows cannot grow the desktop or move the
+  // drop targets outside the visible panel.
   assert.equal(
     /\.collection-list\s*\{[^}]*overflow-y:\s*auto/.test(source),
     true,

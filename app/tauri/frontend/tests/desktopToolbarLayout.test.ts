@@ -738,16 +738,8 @@ test("OrganizationSidebar drops the outer panel visual surface in favour of the 
 
 test("OrganizationSidebar keeps the bounded internal scroller for the collection list", () => {
   const source = stripComments(loadSource("src/OrganizationSidebar.svelte"));
-  // The collection list MUST size itself from the available panel
-  // height, NOT from the number of rows the user has. The pinned
-  // flex triple (`flex: 1 1 0` + `min-height: 0`) plus the
-  // vertical auto overflow is what guarantees that adding
-  // collections can never grow the desktop body.
-  assert.match(
-    source,
-    /\.collection-list\s*\{[^}]*flex:\s*1 1 0/,
-    ".collection-list must consume the remaining vertical space through a zero-basis flex track",
-  );
+  // The shared sidebar grid allocates a bounded 70/30 split; the
+  // collection viewport cannot grow from its number of rows.
   assert.match(
     source,
     /\.collection-list\s*\{[^}]*min-height:\s*0/,

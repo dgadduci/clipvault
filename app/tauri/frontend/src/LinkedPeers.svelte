@@ -173,19 +173,18 @@
 
 <style>
   .linked-peers {
-    /* The section shares the sidebar's vertical space with the
-     * collection list. `flex: 1 1 auto; min-height: 0` keeps the
-     * scroller bounded by the panel height — a long list of
-     * trusted peers does not steal height from the collection
-     * list and vice versa. The header (`flex: 0 0 auto`) stays
-     * pinned above the list at every list length. */
+    /* This section fills the 30% grid track assigned by
+     * OrganizationSidebar. The trusted-peer list gets the
+     * remaining track height and scrolls independently below the
+     * pinned section heading. */
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
     padding-top: 0.55rem;
     border-top: 1px solid var(--cv-border, #30363d);
-    flex: 1 1 0;
-    min-height: 4.5rem;
+    box-sizing: border-box;
+    min-height: 0;
+    overflow: hidden;
   }
   .linked-peers h2 {
     margin: 0;
@@ -231,6 +230,7 @@
     align-items: center;
     gap: 0.45rem;
     font: inherit;
+    font-size: var(--cv-body, 0.9rem);
     text-align: left;
     cursor: pointer;
   }

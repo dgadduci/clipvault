@@ -214,6 +214,8 @@
   "preview.close_escape": "Close (Escape)",
   "preview.rotate_clockwise": "Rotate image clockwise",
   "preview.rotate_counterclockwise": "Rotate image counterclockwise",
+  "preview.zoom_in": "Zoom in on image",
+  "preview.zoom_out": "Zoom out on image",
   "preview.image_rotation_error": "Could not rotate this image. The capture was not changed.",
   "preview.loading_image": "Loading image…",
   "preview.unavailable": "Preview unavailable.",

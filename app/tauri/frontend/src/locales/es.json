@@ -214,6 +214,8 @@
   "preview.close_escape": "Cerrar (Escape)",
   "preview.rotate_clockwise": "Girar imagen en sentido horario",
   "preview.rotate_counterclockwise": "Girar imagen en sentido antihorario",
+  "preview.zoom_in": "Ampliar imagen",
+  "preview.zoom_out": "Reducir imagen",
   "preview.image_rotation_error": "No se pudo girar la imagen. La captura no se modificó.",
   "preview.loading_image": "Cargando imagen…",
   "preview.unavailable": "Vista previa no disponible.",

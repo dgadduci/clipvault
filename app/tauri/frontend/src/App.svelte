@@ -6,6 +6,7 @@
   import { onDestroy, onMount, tick } from "svelte";
   import { emitTo, listen } from "@tauri-apps/api/event";
   import { isTauri } from "@tauri-apps/api/core";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import type {
     ActiveApplicationResponse,
     Capabilities,
@@ -41,6 +42,7 @@
   } from "./lib/imageImportProgress.ts";
   import { orderAvailableContentTypes } from "./lib/contentType.ts";
   import { isImageEntry } from "./lib/clipboardAsset.ts";
+  import { blockWebviewPageZoom } from "./lib/blockWebviewPageZoom.ts";
   import { openImagePreviewWindow } from "./lib/imagePreviewWindow.ts";
   import {
     activeApplicationCommand,
@@ -2436,6 +2438,7 @@
   let detachSearchShortcut: (() => void) | null = null;
   let detachDragOverGuard: (() => void) | null = null;
   let detachPointerDragController: (() => void) | null = null;
+  let detachWebviewPageZoomGuard: (() => void) | null = null;
 
   /**
    * WebKit may deliver `dragover` to the document before the
@@ -3021,6 +3024,8 @@
   }
 
   onMount(() => {
+    void getCurrentWebview().setZoom(1).catch(() => undefined);
+    detachWebviewPageZoomGuard = blockWebviewPageZoom(document);
     // The backend watcher can outlive a webview reload. Re-establish the
     // default Historial scope before the user selects a local collection.
     updateActiveCaptureCollection(null);
@@ -3134,6 +3139,10 @@
     if (detachPointerDragController) {
       detachPointerDragController();
       detachPointerDragController = null;
+    }
+    if (detachWebviewPageZoomGuard) {
+      detachWebviewPageZoomGuard();
+      detachWebviewPageZoomGuard = null;
     }
     if (detachPreviewKeydown) {
       detachPreviewKeydown();

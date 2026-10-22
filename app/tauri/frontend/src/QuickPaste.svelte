@@ -24,6 +24,7 @@
     setFavoriteCommand,
   } from "./lib/tauri";
   import { openImagePreviewWindow } from "./lib/imagePreviewWindow.ts";
+  import { blockWebviewPageZoom } from "./lib/blockWebviewPageZoom.ts";
   import PdfExportProgressOverlay from "./PdfExportProgressOverlay.svelte";
   import { runSearch } from "./lib/search";
   import {
@@ -55,6 +56,7 @@
     toggleSelectedId,
   } from "./lib/multiSelection.ts";
   import { listen } from "@tauri-apps/api/event";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import {
     currentKeyboardShortcut,
     currentPlatformIsMacos,
@@ -2621,6 +2623,7 @@
    * commit cannot re-enter a disposed handler.
    */
   let unlistenHistoryUpdated: (() => void) | null = null;
+  let detachWebviewPageZoomGuard: (() => void) | null = null;
   /**
    * Reference to the result list container. The autoscroll helper
    * uses the element only as a "list exists" sentinel; the actual
@@ -2915,6 +2918,8 @@
   }
 
   onMount(() => {
+    void getCurrentWebview().setZoom(1).catch(() => undefined);
+    detachWebviewPageZoomGuard = blockWebviewPageZoom(document);
     void initializeKeyboardShortcuts();
     void loadShortcutPlatform();
     void loadRecent();
@@ -2994,6 +2999,10 @@
     if (unlistenHistoryUpdated) {
       unlistenHistoryUpdated();
       unlistenHistoryUpdated = null;
+    }
+    if (detachWebviewPageZoomGuard) {
+      detachWebviewPageZoomGuard();
+      detachWebviewPageZoomGuard = null;
     }
     // Revoke every thumbnail and source-app icon blob URL the list
     // minted so a long-lived window does not leak memory.

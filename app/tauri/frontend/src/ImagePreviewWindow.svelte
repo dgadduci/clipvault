@@ -5,6 +5,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import type { EntryRecord } from "./types.ts";
   import ClipboardPreview from "./ClipboardPreview.svelte";
@@ -53,6 +54,11 @@
     window.addEventListener("keydown", onPreviewKeydown);
 
     void (async () => {
+      try {
+        await getCurrentWebview().setZoom(1);
+      } catch {
+        // Browser previews do not expose the Tauri webview API.
+      }
       if (entryId === null) {
         loading = false;
         return;

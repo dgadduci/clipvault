@@ -48,6 +48,7 @@ export async function openImagePreviewWindow(
     minWidth: Math.min(360, size.width),
     minHeight: Math.min(280, size.height),
     resizable: true,
+    zoomHotkeysEnabled: false,
     center: true,
     visible: false,
     focus: false,

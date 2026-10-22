@@ -743,379 +743,380 @@
       </button>
     </form>
   {/if}
-  <ul
-    class="collection-list"
-    role="list"
-    data-collections-drop-viewport={true}
-    bind:this={viewportEl}
-    on:dragenter={(event) => dropZoneHandlers.onDragEnter(event)}
-    on:dragover={(event) => dropZoneHandlers.onDragOver(event)}
-    on:dragleave={(event) => dropZoneHandlers.onDragLeave(event)}
-    on:drop={(event) => dropZoneHandlers.onDrop(event)}
-    use:pointerDropZone
-  >
-    {#each visibleRows as row (row.collection.id)}
-      {@const collection = row.collection}
-      <li
-        class="collection-row"
-        class:subcollection-row={collection.parent_id != null}
-        style={`--collection-row-tint: ${collectionColorTint(
-          collection.color_hex,
-        )};`}
-        class:active={isActive(collection.id)}
-        class:drop-target={isDropTarget(collection)}
-        class:system-collection={collection.kind === "system"}
-        class:drag-over={dragOverCollectionId === collection.id}
-        data-testid="sidebar-collection-row"
-        data-collection-id={collection.id}
-        data-collection-kind={collection.kind}
-        data-collection-parent-id={collection.parent_id ?? null}
-        data-tree-level={row.level}
-        aria-level={row.level}
-        data-droppable={isDropTarget(collection) ? "true" : "false"}
-        data-drop-target={isDropTarget(collection)
-          ? COLLECTION_DROP_TARGET_VALUE
-          : null}
-        data-collection-drop-row={collection.kind === "user" ? "true" : null}
-        on:keydown={(event) => onCollectionRowKeydown(event, collection)}
-        on:click={(event) => onCollectionRowClick(event, collection)}
-      >
-        {#if renamingId === collection.id}
-          <form
-            class="inline-rename"
-            data-testid="sidebar-rename-form"
-            on:submit={(event) => {
-              event.preventDefault();
-              submitRename();
-            }}
-          >
-            <input
-              type="text"
-              bind:value={renameDraft}
-              on:keydown={onRenameKeydown}
-              maxlength="80"
-              aria-label={$t("collections.rename")}
-              class="rename-input"
-              data-testid="sidebar-rename-input"
-            />
-            <button
-              type="submit"
-              class="icon-only confirm-icon"
-              aria-label={$t("collections.confirm_rename")}
-              title={$t("common.confirm_enter")}
-              data-testid="sidebar-rename-save"
-              disabled={renameDraft.trim().length === 0}
-            >
-              <svg
-                aria-hidden="true"
-                focusable="false"
-                width="14"
-                height="14"
-                viewBox="0 0 14 14"
-              >
-                <path
-                  d="M3 7.5l2.6 2.6L11 4.5"
-                  stroke="currentColor"
-                  stroke-width="1.6"
-                  fill="none"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
-            </button>
-            <button
-              type="button"
-              class="icon-only cancel-icon"
-              on:click={cancelRename}
-              aria-label={$t("collections.cancel_rename")}
-              title={$t("common.cancel_escape")}
-              data-testid="sidebar-rename-cancel"
-            >
-              <svg
-                aria-hidden="true"
-                focusable="false"
-                width="14"
-                height="14"
-                viewBox="0 0 14 14"
-              >
-                <path
-                  d="M3 3l8 8M11 3l-8 8"
-                  stroke="currentColor"
-                  stroke-width="1.6"
-                  fill="none"
-                  stroke-linecap="round"
-                />
-              </svg>
-            </button>
-          </form>
-        {:else}
-          {@const collectionDisplayName = isHistory(collection)
-            ? $t("collections.history")
-            : collection.name}
-          {#if collection.parent_id == null && collection.kind === "user" && collectionChildren(collections, collection.id).length > 0}
-            <button
-              type="button"
-              class="icon-only collection-disclosure"
-              aria-expanded={expandedCollectionIds.has(collection.id)}
-              aria-label={$t(expandedCollectionIds.has(collection.id)
-                ? "collections.collapse"
-                : "collections.expand", { name: collectionDisplayName })}
-              title={$t(expandedCollectionIds.has(collection.id)
-                ? "collections.collapse"
-                : "collections.expand", { name: collectionDisplayName })}
-              data-testid="sidebar-collection-disclosure"
-              data-collection-id={collection.id}
-              on:click={(event) => {
-                event.stopPropagation();
-                toggleExpanded(collection.id);
+  <div class="sidebar-lists" data-testid="sidebar-lists">
+    <ul
+      class="collection-list"
+      role="list"
+      data-collections-drop-viewport={true}
+      bind:this={viewportEl}
+      on:dragenter={(event) => dropZoneHandlers.onDragEnter(event)}
+      on:dragover={(event) => dropZoneHandlers.onDragOver(event)}
+      on:dragleave={(event) => dropZoneHandlers.onDragLeave(event)}
+      on:drop={(event) => dropZoneHandlers.onDrop(event)}
+      use:pointerDropZone
+    >
+      {#each visibleRows as row (row.collection.id)}
+        {@const collection = row.collection}
+        <li
+          class="collection-row"
+          class:subcollection-row={collection.parent_id != null}
+          style={`--collection-row-tint: ${collectionColorTint(
+            collection.color_hex,
+          )};`}
+          class:active={isActive(collection.id)}
+          class:drop-target={isDropTarget(collection)}
+          class:system-collection={collection.kind === "system"}
+          class:drag-over={dragOverCollectionId === collection.id}
+          data-testid="sidebar-collection-row"
+          data-collection-id={collection.id}
+          data-collection-kind={collection.kind}
+          data-collection-parent-id={collection.parent_id ?? null}
+          data-tree-level={row.level}
+          aria-level={row.level}
+          data-droppable={isDropTarget(collection) ? "true" : "false"}
+          data-drop-target={isDropTarget(collection)
+            ? COLLECTION_DROP_TARGET_VALUE
+            : null}
+          data-collection-drop-row={collection.kind === "user" ? "true" : null}
+          on:keydown={(event) => onCollectionRowKeydown(event, collection)}
+          on:click={(event) => onCollectionRowClick(event, collection)}
+        >
+          {#if renamingId === collection.id}
+            <form
+              class="inline-rename"
+              data-testid="sidebar-rename-form"
+              on:submit={(event) => {
+                event.preventDefault();
+                submitRename();
               }}
             >
-              <svg aria-hidden="true" focusable="false" width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-                {#if expandedCollectionIds.has(collection.id)}
-                  <path d="M3.5 6l4.5 4.5L12.5 6z" />
-                {:else}
-                  <path d="M6 3.5 10.5 8 6 12.5z" />
-                {/if}
-              </svg>
-            </button>
-          {/if}
-          <button
-            type="button"
-            class="collection-button"
-            class:history={isHistory(collection)}
-            on:click={() => selectCollection(collection.id)}
-            on:dblclick={() => startRename(collection)}
-            aria-pressed={isActive(collection.id)}
-            aria-keyshortcuts={isHistory(collection) ? historyShortcutAccessible || undefined : undefined}
-            aria-label={isHistory(collection)
-              ? `${$t("collections.select_system")}, ${$tPlural("collections.capture_count", collection.capture_count ?? 0)}`
-              : `${$t("collections.rename_hint", { name: collection.name })}, ${$tPlural("collections.capture_count", collection.capture_count ?? 0)}`}
-            title={isHistory(collection)
+              <input
+                type="text"
+                bind:value={renameDraft}
+                on:keydown={onRenameKeydown}
+                maxlength="80"
+                aria-label={$t("collections.rename")}
+                class="rename-input"
+                data-testid="sidebar-rename-input"
+              />
+              <button
+                type="submit"
+                class="icon-only confirm-icon"
+                aria-label={$t("collections.confirm_rename")}
+                title={$t("common.confirm_enter")}
+                data-testid="sidebar-rename-save"
+                disabled={renameDraft.trim().length === 0}
+              >
+                <svg
+                  aria-hidden="true"
+                  focusable="false"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 14 14"
+                >
+                  <path
+                    d="M3 7.5l2.6 2.6L11 4.5"
+                    stroke="currentColor"
+                    stroke-width="1.6"
+                    fill="none"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="icon-only cancel-icon"
+                on:click={cancelRename}
+                aria-label={$t("collections.cancel_rename")}
+                title={$t("common.cancel_escape")}
+                data-testid="sidebar-rename-cancel"
+              >
+                <svg
+                  aria-hidden="true"
+                  focusable="false"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 14 14"
+                >
+                  <path
+                    d="M3 3l8 8M11 3l-8 8"
+                    stroke="currentColor"
+                    stroke-width="1.6"
+                    fill="none"
+                    stroke-linecap="round"
+                  />
+                </svg>
+              </button>
+            </form>
+          {:else}
+            {@const collectionDisplayName = isHistory(collection)
               ? $t("collections.history")
-              : $t("collections.rename_hint", { name: collection.name })}
-            data-testid="sidebar-collection-button"
-            data-collection-id={collection.id}
-          >
-            <span class="collection-name">{collectionDisplayName}</span>
-          </button>
-          {#if collection.parent_id == null && collection.kind === "user" && collectionChildren(collections, collection.id).length > 0}
-            {@const showSubcollectionCaptures = !hiddenSubcollectionCaptureCollectionIds.has(collection.id)}
+              : collection.name}
+            {#if collection.parent_id == null && collection.kind === "user" && collectionChildren(collections, collection.id).length > 0}
+              <button
+                type="button"
+                class="icon-only collection-disclosure"
+                aria-expanded={expandedCollectionIds.has(collection.id)}
+                aria-label={$t(expandedCollectionIds.has(collection.id)
+                  ? "collections.collapse"
+                  : "collections.expand", { name: collectionDisplayName })}
+                title={$t(expandedCollectionIds.has(collection.id)
+                  ? "collections.collapse"
+                  : "collections.expand", { name: collectionDisplayName })}
+                data-testid="sidebar-collection-disclosure"
+                data-collection-id={collection.id}
+                on:click={(event) => {
+                  event.stopPropagation();
+                  toggleExpanded(collection.id);
+                }}
+              >
+                <svg aria-hidden="true" focusable="false" width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+                  {#if expandedCollectionIds.has(collection.id)}
+                    <path d="M3.5 6l4.5 4.5L12.5 6z" />
+                  {:else}
+                    <path d="M6 3.5 10.5 8 6 12.5z" />
+                  {/if}
+                </svg>
+              </button>
+            {/if}
             <button
               type="button"
-              class="icon-only subcollection-visibility-icon"
-              aria-pressed={showSubcollectionCaptures}
-              aria-label={$t(showSubcollectionCaptures
-                ? "collections.hide_subcollection_captures_for"
-                : "collections.show_subcollection_captures_for", {
-                  name: collectionDisplayName,
-                })}
-              title={$t(showSubcollectionCaptures
-                ? "collections.hide_subcollection_captures_for"
-                : "collections.show_subcollection_captures_for", {
-                  name: collectionDisplayName,
-                })}
-              data-testid="sidebar-collection-subcollection-visibility"
+              class="collection-button"
+              class:history={isHistory(collection)}
+              on:click={() => selectCollection(collection.id)}
+              on:dblclick={() => startRename(collection)}
+              aria-pressed={isActive(collection.id)}
+              aria-keyshortcuts={isHistory(collection) ? historyShortcutAccessible || undefined : undefined}
+              aria-label={isHistory(collection)
+                ? `${$t("collections.select_system")}, ${$tPlural("collections.capture_count", collection.capture_count ?? 0)}`
+                : `${$t("collections.rename_hint", { name: collection.name })}, ${$tPlural("collections.capture_count", collection.capture_count ?? 0)}`}
+              title={isHistory(collection)
+                ? $t("collections.history")
+                : $t("collections.rename_hint", { name: collection.name })}
+              data-testid="sidebar-collection-button"
               data-collection-id={collection.id}
-              data-show-subcollection-captures={showSubcollectionCaptures ? "true" : "false"}
-              on:click={(event) => toggleSubcollectionCaptures(collection, event)}
+            >
+              <span class="collection-name">{collectionDisplayName}</span>
+            </button>
+            {#if collection.parent_id == null && collection.kind === "user" && collectionChildren(collections, collection.id).length > 0}
+              {@const showSubcollectionCaptures = !hiddenSubcollectionCaptureCollectionIds.has(collection.id)}
+              <button
+                type="button"
+                class="icon-only subcollection-visibility-icon"
+                aria-pressed={showSubcollectionCaptures}
+                aria-label={$t(showSubcollectionCaptures
+                  ? "collections.hide_subcollection_captures_for"
+                  : "collections.show_subcollection_captures_for", {
+                    name: collectionDisplayName,
+                  })}
+                title={$t(showSubcollectionCaptures
+                  ? "collections.hide_subcollection_captures_for"
+                  : "collections.show_subcollection_captures_for", {
+                    name: collectionDisplayName,
+                  })}
+                data-testid="sidebar-collection-subcollection-visibility"
+                data-collection-id={collection.id}
+                data-show-subcollection-captures={showSubcollectionCaptures ? "true" : "false"}
+                on:click={(event) => toggleSubcollectionCaptures(collection, event)}
+              >
+                <svg aria-hidden="true" focusable="false" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M2.5 12s3.4-6.25 9.5-6.25S21.5 12 21.5 12 18.1 18.25 12 18.25 2.5 12 2.5 12Z" />
+                  <circle cx="12" cy="12" r="2.75" />
+                  {#if !showSubcollectionCaptures}
+                    <path d="m4 4 16 16" />
+                  {/if}
+                </svg>
+              </button>
+            {/if}
+            {#if isHistory(collection)}
+              <span
+                class="badge system"
+                aria-label={$t("collections.system_protected")}
+              >
+                {$t("collections.system_badge")}
+              </span>
+            {:else if hasRemoteOrigin(collection)}
+              <span
+                class="badge remote"
+                data-testid="sidebar-collection-remote-origin"
+                data-peer-bound="true"
+                aria-label={remoteOriginLabel(collection, $t)}
+                title={remoteOriginLabel(collection, $t)}
+              >
+                {$t("collections.imported_badge")}
+              </span>
+            {/if}
+            <span
+              class="badge capture-count"
+              aria-hidden="true"
+              data-testid="sidebar-collection-count"
+              data-count={collection.capture_count ?? 0}
+            >
+              {collection.capture_count ?? 0}
+            </span>
+            <button
+              type="button"
+              class="icon-only note-icon"
+              aria-haspopup="dialog"
+              aria-expanded={pendingNoteCollection?.id === collection.id}
+              aria-label={collection.has_note
+                ? $t("collections.edit_note_for", { name: collectionDisplayName })
+                : $t("collections.add_note_for", { name: collectionDisplayName })}
+              title={collection.has_note ? $t("collections.edit_note") : $t("collections.add_note")}
+              data-testid="sidebar-collection-note"
+              data-collection-id={collection.id}
+              data-has-note={collection.has_note ? "true" : "false"}
+              on:click={(event) => openCollectionNote(collection, event)}
             >
               <svg aria-hidden="true" focusable="false" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M2.5 12s3.4-6.25 9.5-6.25S21.5 12 21.5 12 18.1 18.25 12 18.25 2.5 12 2.5 12Z" />
-                <circle cx="12" cy="12" r="2.75" />
-                {#if !showSubcollectionCaptures}
-                  <path d="m4 4 16 16" />
+                <path d="M7 3.75h7l4 4v11.5A1.75 1.75 0 0 1 16.25 21h-9.5A1.75 1.75 0 0 1 5 19.25v-13.5A2 2 0 0 1 7 3.75Z" />
+                <path d="M14 4v4h4" />
+                {#if collection.has_note}
+                  <path d="M8 12h8M8 16h6" />
+                {:else}
+                  <path d="M11 12v5M8.5 14.5h5" />
                 {/if}
               </svg>
             </button>
-          {/if}
-          {#if isHistory(collection)}
-            <span
-              class="badge system"
-              aria-label={$t("collections.system_protected")}
-            >
-              {$t("collections.system_badge")}
-            </span>
-          {:else if hasRemoteOrigin(collection)}
-            <span
-              class="badge remote"
-              data-testid="sidebar-collection-remote-origin"
-              data-peer-bound="true"
-              aria-label={remoteOriginLabel(collection, $t)}
-              title={remoteOriginLabel(collection, $t)}
-            >
-              {$t("collections.imported_badge")}
-            </span>
-          {/if}
-          <span
-            class="badge capture-count"
-            aria-hidden="true"
-            data-testid="sidebar-collection-count"
-            data-count={collection.capture_count ?? 0}
-          >
-            {collection.capture_count ?? 0}
-          </span>
-          <button
-            type="button"
-            class="icon-only note-icon"
-            aria-haspopup="dialog"
-            aria-expanded={pendingNoteCollection?.id === collection.id}
-            aria-label={collection.has_note
-              ? $t("collections.edit_note_for", { name: collectionDisplayName })
-              : $t("collections.add_note_for", { name: collectionDisplayName })}
-            title={collection.has_note ? $t("collections.edit_note") : $t("collections.add_note")}
-            data-testid="sidebar-collection-note"
-            data-collection-id={collection.id}
-            data-has-note={collection.has_note ? "true" : "false"}
-            on:click={(event) => openCollectionNote(collection, event)}
-          >
-            <svg aria-hidden="true" focusable="false" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M7 3.75h7l4 4v11.5A1.75 1.75 0 0 1 16.25 21h-9.5A1.75 1.75 0 0 1 5 19.25v-13.5A2 2 0 0 1 7 3.75Z" />
-              <path d="M14 4v4h4" />
-              {#if collection.has_note}
-                <path d="M8 12h8M8 16h6" />
-              {:else}
-                <path d="M11 12v5M8.5 14.5h5" />
-              {/if}
-            </svg>
-          </button>
-          <button
-            type="button"
-            class="icon-only actions-menu-trigger"
-            aria-haspopup="menu"
-            aria-expanded={actionsMenuCollectionId === collection.id}
-            aria-controls={`collection-actions-menu-${collection.id}`}
-            aria-label={$t("collections.actions_menu", {
-              name: collectionDisplayName,
-            })}
-            title={$t("collections.actions_menu", {
-              name: collectionDisplayName,
-            })}
-            data-testid="sidebar-collection-menu-trigger"
-            data-collection-id={collection.id}
-            on:click={(event) => toggleActionsMenu(collection, event)}
-            on:keydown={(event) => onActionsMenuTriggerKeydown(collection, event)}
-          >
-            <svg
-              aria-hidden="true"
-              focusable="false"
-              width="18"
-              height="18"
-              viewBox="0 0 18 18"
-              fill="currentColor"
-            >
-              <circle cx="4" cy="9" r="1.6" />
-              <circle cx="9" cy="9" r="1.6" />
-              <circle cx="14" cy="9" r="1.6" />
-            </svg>
-          </button>
-          {#if actionsMenuCollectionId === collection.id}
-            <div
-              id={`collection-actions-menu-${collection.id}`}
-              class="collection-actions-menu"
-              role="menu"
-              tabindex="-1"
+            <button
+              type="button"
+              class="icon-only actions-menu-trigger"
+              aria-haspopup="menu"
+              aria-expanded={actionsMenuCollectionId === collection.id}
+              aria-controls={`collection-actions-menu-${collection.id}`}
               aria-label={$t("collections.actions_menu", {
                 name: collectionDisplayName,
               })}
-              data-testid="sidebar-collection-actions-menu"
+              title={$t("collections.actions_menu", {
+                name: collectionDisplayName,
+              })}
+              data-testid="sidebar-collection-menu-trigger"
               data-collection-id={collection.id}
-              bind:this={actionsMenuEl}
-              use:anchorPopupToViewport={{
-                anchor: () => actionsMenuTriggerEl,
-                align: "end",
-              }}
-              on:keydown={onActionsMenuKeydown}
+              on:click={(event) => toggleActionsMenu(collection, event)}
+              on:keydown={(event) => onActionsMenuTriggerKeydown(collection, event)}
             >
-              {#if collection.parent_id == null && collection.kind === "user" && !hasRemoteOrigin(collection)}
+              <svg
+                aria-hidden="true"
+                focusable="false"
+                width="18"
+                height="18"
+                viewBox="0 0 18 18"
+                fill="currentColor"
+              >
+                <circle cx="4" cy="9" r="1.6" />
+                <circle cx="9" cy="9" r="1.6" />
+                <circle cx="14" cy="9" r="1.6" />
+              </svg>
+            </button>
+            {#if actionsMenuCollectionId === collection.id}
+              <div
+                id={`collection-actions-menu-${collection.id}`}
+                class="collection-actions-menu"
+                role="menu"
+                tabindex="-1"
+                aria-label={$t("collections.actions_menu", {
+                  name: collectionDisplayName,
+                })}
+                data-testid="sidebar-collection-actions-menu"
+                data-collection-id={collection.id}
+                bind:this={actionsMenuEl}
+                use:anchorPopupToViewport={{
+                  anchor: () => actionsMenuTriggerEl,
+                  align: "end",
+                }}
+                on:keydown={onActionsMenuKeydown}
+              >
+                {#if collection.parent_id == null && collection.kind === "user" && !hasRemoteOrigin(collection)}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="collection-action-menu-item"
+                    aria-label={$t("collections.create_subcollection_for", { name: collectionDisplayName })}
+                    title={$t("collections.create_subcollection_for", { name: collectionDisplayName })}
+                    data-testid="sidebar-collection-create-subcollection"
+                    data-collection-id={collection.id}
+                    on:click={() => selectActionsMenuItem(startCreateSubcollection, collection)}
+                  >
+                    <svg aria-hidden="true" focusable="false" width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
+                      <path d="M7.25 2.5a.75.75 0 0 1 1.5 0v4.75h4.75a.75.75 0 0 1 0 1.5H8.75v4.75a.75.75 0 0 1-1.5 0V8.75H2.5a.75.75 0 0 1 0-1.5h4.75z" />
+                    </svg>
+                    <span>{$t("collections.create_subcollection")}</span>
+                  </button>
+                {/if}
                 <button
                   type="button"
                   role="menuitem"
                   class="collection-action-menu-item"
-                  aria-label={$t("collections.create_subcollection_for", { name: collectionDisplayName })}
-                  title={$t("collections.create_subcollection_for", { name: collectionDisplayName })}
-                  data-testid="sidebar-collection-create-subcollection"
+                  aria-haspopup="dialog"
+                  aria-label={$t("collections.change_color", { name: collectionDisplayName })}
+                  title={$t("collections.change_color", { name: collectionDisplayName })}
+                  data-testid="sidebar-collection-color"
                   data-collection-id={collection.id}
-                  on:click={() => selectActionsMenuItem(startCreateSubcollection, collection)}
+                  data-color={collection.color_hex}
+                  on:click={() => selectActionsMenuItem(askEditColor, collection)}
                 >
-                  <svg aria-hidden="true" focusable="false" width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M7.25 2.5a.75.75 0 0 1 1.5 0v4.75h4.75a.75.75 0 0 1 0 1.5H8.75v4.75a.75.75 0 0 1-1.5 0V8.75H2.5a.75.75 0 0 1 0-1.5h4.75z" />
-                  </svg>
-                  <span>{$t("collections.create_subcollection")}</span>
-                </button>
-              {/if}
-              <button
-                type="button"
-                role="menuitem"
-                class="collection-action-menu-item"
-                aria-haspopup="dialog"
-                aria-label={$t("collections.change_color", { name: collectionDisplayName })}
-                title={$t("collections.change_color", { name: collectionDisplayName })}
-                data-testid="sidebar-collection-color"
-                data-collection-id={collection.id}
-                data-color={collection.color_hex}
-                on:click={() => selectActionsMenuItem(askEditColor, collection)}
-              >
-                <span
-                  class="collection-action-color-swatch"
-                  style={`background-color: ${collectionColor(collection.color_hex)};`}
-                  aria-hidden="true"
-                ></span>
-                <span>{$t("collections.change_color", { name: collectionDisplayName })}</span>
-              </button>
-              {#if collection.kind === "user"}
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="collection-action-menu-item danger delete-icon"
-                  on:click={(event) => askDelete(collection, event)}
-                  aria-label={$t("collections.delete", { name: collection.name })}
-                  title={$t("collections.delete", { name: collection.name })}
-                  data-testid="sidebar-collection-delete"
-                  data-collection-id={collection.id}
-                  data-cv-danger="collection-delete"
-                >
-                  <svg
+                  <span
+                    class="collection-action-color-swatch"
+                    style={`background-color: ${collectionColor(collection.color_hex)};`}
                     aria-hidden="true"
-                    focusable="false"
-                    width="18"
-                    height="18"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.8"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <path d="M5 8h14" />
-                    <path d="M10 8V6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2" />
-                    <path d="M7 8l.6 11.2a2 2 0 0 0 2 1.8h4.8a2 2 0 0 0 2-1.8L17 8" />
-                    <path d="M10 11.5v5" />
-                    <path d="M14 11.5v5" />
-                  </svg>
-                  <span>{$t("collections.delete", { name: collection.name })}</span>
+                  ></span>
+                  <span>{$t("collections.change_color", { name: collectionDisplayName })}</span>
                 </button>
-              {/if}
-            </div>
+                {#if collection.kind === "user"}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="collection-action-menu-item danger delete-icon"
+                    on:click={(event) => askDelete(collection, event)}
+                    aria-label={$t("collections.delete", { name: collection.name })}
+                    title={$t("collections.delete", { name: collection.name })}
+                    data-testid="sidebar-collection-delete"
+                    data-collection-id={collection.id}
+                    data-cv-danger="collection-delete"
+                  >
+                    <svg
+                      aria-hidden="true"
+                      focusable="false"
+                      width="18"
+                      height="18"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <path d="M5 8h14" />
+                      <path d="M10 8V6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2" />
+                      <path d="M7 8l.6 11.2a2 2 0 0 0 2 1.8h4.8a2 2 0 0 0 2-1.8L17 8" />
+                      <path d="M10 11.5v5" />
+                      <path d="M14 11.5v5" />
+                    </svg>
+                    <span>{$t("collections.delete", { name: collection.name })}</span>
+                  </button>
+                {/if}
+              </div>
+            {/if}
           {/if}
-        {/if}
-      </li>
-    {/each}
-  </ul>
+        </li>
+      {/each}
+    </ul>
   <!--
-    `Equipos vinculados` lives INSIDE the sidebar so the desktop
-    grid keeps exactly two columns (sidebar + main panel). The
-    scroller is bounded by `min-height: 0; overflow-y: auto` so a
-    long list of trusted peers does not steal height from the
-    collection list and vice versa. Selecting a peer re-emits the
-    `select-peer` event the parent flips through the main panel;
-    selecting a collection (or `Historial`) clears the active
-    peer at the parent so the rail local vuelve a renderizar.
+    `Equipos vinculados` stays inside the sidebar so the desktop
+    grid keeps exactly two columns (sidebar + main panel). This
+    shared list container allocates 70% to collections and 30% to
+    linked peers; both retain independent bounded scroll regions.
+    Selecting a peer re-emits the `select-peer` event the parent
+    routes through the main panel; selecting a collection or
+    `Historial` clears the active peer.
   -->
   <LinkedPeers
     snapshot={linkedPeers}
     {activePeerId}
     on:select-peer={forwardPeerSelection}
   />
+  </div>
 </aside>
 
 <CollectionColorModal
@@ -1165,7 +1166,7 @@
      *     top-to-bottom.
      *   - `height: 100%` + `min-height: 0` makes the panel stretch
      *     to the row the workspace grid owns (`align-items: stretch`)
-     *     while still allowing the internal list to shrink below
+     *     while still allowing the internal list region to shrink below
      *     its intrinsic content so the row height is driven by the
      *     rail, not by the number of collections. `overflow: hidden`
      *     keeps the rounded workspace corners visually consistent
@@ -1194,8 +1195,15 @@
     margin: 0;
     font-size: 1rem;
   }
+  .sidebar-lists {
+    display: grid;
+    grid-template-rows: minmax(0, 7fr) minmax(0, 3fr);
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+  }
   .collection-list {
-    /* Rows remain normal DOM descendants of this fixed viewport, so
+    /* Rows remain normal DOM descendants of this 70% viewport, so
      * visible scrolled rows are still valid drag-and-drop targets. */
     list-style: none;
     margin: 0;
@@ -1203,7 +1211,6 @@
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
-    flex: 1 1 0;
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
@@ -1311,6 +1318,7 @@
     justify-content: space-between;
     gap: 0.5rem;
     font: inherit;
+    font-size: var(--cv-body, 0.9rem);
     line-height: 1.2;
     flex: 1 1 auto;
     min-width: 0;
@@ -1344,7 +1352,7 @@
     flex: 0 0 auto;
     margin-left: auto;
     background: var(--cv-bg-elevated, #161b22);
-    color: var(--cv-muted, #8b949e);
+    color: #fff;
     border-radius: 999px;
     font-size: 0.65rem;
     font-variant-numeric: tabular-nums;

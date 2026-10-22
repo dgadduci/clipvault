@@ -214,6 +214,8 @@
   "preview.close_escape": "Schließen (Escape)",
   "preview.rotate_clockwise": "Bild im Uhrzeigersinn drehen",
   "preview.rotate_counterclockwise": "Bild gegen den Uhrzeigersinn drehen",
+  "preview.zoom_in": "Bild vergrößern",
+  "preview.zoom_out": "Bild verkleinern",
   "preview.image_rotation_error": "Dieses Bild konnte nicht gedreht werden. Der Eintrag wurde nicht geändert.",
   "preview.loading_image": "Bild wird geladen…",
   "preview.unavailable": "Vorschau nicht verfügbar.",

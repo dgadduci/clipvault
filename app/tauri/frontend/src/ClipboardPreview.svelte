@@ -66,6 +66,12 @@
     fitPreviewImage,
     type PreviewImageSize,
   } from "./lib/previewImageSizing.ts";
+  import {
+    IMAGE_PREVIEW_ZOOM_MAX,
+    IMAGE_PREVIEW_ZOOM_MIN,
+    IMAGE_PREVIEW_ZOOM_STEP,
+    scaleImagePreviewZoom,
+  } from "./lib/imagePreviewZoom.ts";
   import type { ImageRotationDirection } from "./types.ts";
   import {
     canonicalLabel as canonicalCodeLanguageLabel,
@@ -111,6 +117,9 @@
   let imageRotationBusy = false;
   let imageRotationRefreshing = false;
   let imageRotationError = false;
+  let imageZoomScale = 1;
+  let imageZoomGestureStartScale = 1;
+  let canZoomCurrentImage = false;
   let previewImageSize: PreviewImageSize | null = null;
   let previewCardWidth: number | null = null;
   let previewCardHeight: number | null = null;
@@ -206,6 +215,8 @@
         imageRotationBusy = false;
         imageRotationRefreshing = false;
         imageRotationError = false;
+        imageZoomScale = 1;
+        imageZoomGestureStartScale = 1;
         previewImageSize = null;
         previewCardWidth = null;
         previewCardHeight = null;
@@ -221,6 +232,8 @@
       imageRotationBusy = false;
       imageRotationRefreshing = false;
       imageRotationError = false;
+      imageZoomScale = 1;
+      imageZoomGestureStartScale = 1;
       previewImageSize = null;
       previewCardWidth = null;
       previewCardHeight = null;
@@ -347,6 +360,57 @@
     }
   }
 
+  function isStandaloneImagePreview(): boolean {
+    return standaloneImage && visibleEntry !== null && isImageEntry(visibleEntry);
+  }
+
+  function canZoomImage(): boolean {
+    return canZoomCurrentImage;
+  }
+
+  $: canZoomCurrentImage =
+    standaloneImage &&
+    visibleEntry !== null &&
+    isImageEntry(visibleEntry) &&
+    imageState === "loaded" &&
+    !imageRotationBusy &&
+    !imageRotationRefreshing;
+
+  function zoomImageBy(factor: number): void {
+    if (!canZoomImage()) return;
+    imageZoomScale = scaleImagePreviewZoom(imageZoomScale, factor);
+  }
+
+  function onImageZoomWheel(event: WheelEvent): void {
+    if (!isStandaloneImagePreview() || (!event.ctrlKey && !event.metaKey)) return;
+    event.preventDefault();
+    if (!canZoomImage()) return;
+
+    const factor = Math.exp(-event.deltaY * 0.002);
+    imageZoomScale = scaleImagePreviewZoom(imageZoomScale, factor);
+  }
+
+  function onImageGestureStart(event: Event): void {
+    if (!isStandaloneImagePreview()) return;
+    event.preventDefault();
+    imageZoomGestureStartScale = imageZoomScale;
+  }
+
+  function onImageGestureChange(event: Event): void {
+    if (!isStandaloneImagePreview()) return;
+    event.preventDefault();
+    if (!canZoomImage()) return;
+
+    const gestureScale = (event as Event & { scale?: number }).scale;
+    if (typeof gestureScale !== "number" || !Number.isFinite(gestureScale)) return;
+    imageZoomScale = scaleImagePreviewZoom(imageZoomGestureStartScale, gestureScale);
+  }
+
+  function onImageGestureEnd(event: Event): void {
+    if (!isStandaloneImagePreview()) return;
+    event.preventDefault();
+  }
+
   function close(): void {
     onClose?.();
   }
@@ -374,6 +438,24 @@
 
   onMount(() => {
     window.addEventListener("resize", handlePreviewResize);
+    if (standaloneImage) {
+      document.addEventListener("wheel", onImageZoomWheel, {
+        capture: true,
+        passive: false,
+      });
+      document.addEventListener("gesturestart", onImageGestureStart, {
+        capture: true,
+        passive: false,
+      });
+      document.addEventListener("gesturechange", onImageGestureChange, {
+        capture: true,
+        passive: false,
+      });
+      document.addEventListener("gestureend", onImageGestureEnd, {
+        capture: true,
+        passive: false,
+      });
+    }
     // Move focus into the preview so keyboard users can reach its controls and
     // Escape works immediately in the standalone native window.
     void tick().then(() => {
@@ -384,6 +466,12 @@
 
   onDestroy(() => {
     window.removeEventListener("resize", handlePreviewResize);
+    if (standaloneImage) {
+      document.removeEventListener("wheel", onImageZoomWheel, true);
+      document.removeEventListener("gesturestart", onImageGestureStart, true);
+      document.removeEventListener("gesturechange", onImageGestureChange, true);
+      document.removeEventListener("gestureend", onImageGestureEnd, true);
+    }
     // Revoke the current image's blob URL so a remount does not
     // leak the previous overlay's bytes; the resolver cache still
     // serves the URL for any consumer that already holds a
@@ -535,6 +623,39 @@
                 <path d="M3 17a9 9 0 0 1 15.5-6.5L21 13" />
               </svg>
             </button>
+            {#if standaloneImage}
+              <button
+                type="button"
+                class="cv-preview-zoom"
+                data-testid="{testIdPrefix}-zoom-in"
+                aria-label={$t("preview.zoom_in")}
+                title={$t("preview.zoom_in")}
+                disabled={!canZoomCurrentImage || imageZoomScale >= IMAGE_PREVIEW_ZOOM_MAX}
+                on:click={() => zoomImageBy(IMAGE_PREVIEW_ZOOM_STEP)}
+              >
+                <svg aria-hidden="true" focusable="false" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="10.8" cy="10.8" r="6.8" />
+                  <path d="m16 16 4.5 4.5" />
+                  <path d="M10.8 7.8v6" />
+                  <path d="M7.8 10.8h6" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="cv-preview-zoom"
+                data-testid="{testIdPrefix}-zoom-out"
+                aria-label={$t("preview.zoom_out")}
+                title={$t("preview.zoom_out")}
+                disabled={!canZoomCurrentImage || imageZoomScale <= IMAGE_PREVIEW_ZOOM_MIN}
+                on:click={() => zoomImageBy(1 / IMAGE_PREVIEW_ZOOM_STEP)}
+              >
+                <svg aria-hidden="true" focusable="false" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="10.8" cy="10.8" r="6.8" />
+                  <path d="m16 16 4.5 4.5" />
+                  <path d="M7.8 10.8h6" />
+                </svg>
+              </button>
+            {/if}
           {/if}
           {#if !standaloneImage}
             <button
@@ -589,6 +710,7 @@
               src={imageUrl}
               alt={titleLabel}
               data-testid="{testIdPrefix}-image"
+              style:transform={standaloneImage ? `scale(${imageZoomScale})` : "none"}
               style={previewImageSize
                 ? `width: ${previewImageSize.width}px; height: ${previewImageSize.height}px;`
                 : undefined}
@@ -853,6 +975,35 @@
     outline-offset: 1px;
   }
 
+  .cv-preview-zoom {
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: #94a3b8;
+    cursor: pointer;
+  }
+
+  .cv-preview-zoom:hover:not(:disabled) {
+    background: rgba(148, 163, 184, 0.18);
+    color: #f0f4f8;
+  }
+
+  .cv-preview-zoom:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  .cv-preview-zoom:focus-visible {
+    outline: 1px solid #2563eb;
+    outline-offset: 1px;
+  }
+
   .cv-preview-body {
     position: relative;
     padding: 0.6rem 0.7rem;
@@ -983,6 +1134,7 @@
     flex: 0 0 auto;
     object-fit: contain;
     border-radius: 6px;
+    transform-origin: center center;
   }
 
   .cv-preview-image-unavailable {

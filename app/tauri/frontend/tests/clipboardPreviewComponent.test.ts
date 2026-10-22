@@ -110,6 +110,18 @@ test("standalone image view renders in the native window without modal semantics
   assert.ok(previewSource.includes("class:cv-preview-body-image-standalone={standaloneImage}"));
 });
 
+test("native image zoom controls react to image readiness and capture gestures before webview zoom", () => {
+  assert.match(
+    previewSource,
+    /\$: canZoomCurrentImage =[\s\S]*?imageState === "loaded"[\s\S]*?!imageRotationRefreshing/,
+  );
+  assert.match(previewSource, /disabled=\{!canZoomCurrentImage \|\| imageZoomScale >= IMAGE_PREVIEW_ZOOM_MAX\}/);
+  assert.match(previewSource, /disabled=\{!canZoomCurrentImage \|\| imageZoomScale <= IMAGE_PREVIEW_ZOOM_MIN\}/);
+  assert.match(previewSource, /document\.addEventListener\("wheel", onImageZoomWheel, \{[\s\S]*?capture: true,[\s\S]*?passive: false/);
+  assert.match(previewSource, /document\.addEventListener\("gesturestart", onImageGestureStart, \{[\s\S]*?capture: true,[\s\S]*?passive: false/);
+  assert.match(previewSource, /document\.removeEventListener\("gesturechange", onImageGestureChange, true\)/);
+});
+
 test("ClipboardPreview renders the canonical plain text through a safe Svelte text node", () => {
   // Svelte escapes interpolated text at the DOM boundary. Pre-escaping
   // here would make the user see entity spellings such as `&quot;`.

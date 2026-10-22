@@ -67,3 +67,14 @@ test("the native preview is direct page content with rotation controls and relia
     "the preview toolbar must expose its rotation controls",
   );
 });
+
+test("the native image preview disables webview zoom and starts at its default scale", () => {
+  const previewWindowSource = readFileSync(
+    resolvePath(process.cwd(), "src", "lib", "imagePreviewWindow.ts"),
+    "utf8",
+  );
+
+  assert.match(previewWindowSource, /zoomHotkeysEnabled:\s*false/);
+  assert.match(previewPageSource, /getCurrentWebview\(\)\.setZoom\(1\)/);
+  assert.ok(previewCapability.permissions.includes("core:webview:allow-set-webview-zoom"));
+});

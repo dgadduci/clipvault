@@ -214,6 +214,8 @@
   "preview.close_escape": "Fermer (Échap)",
   "preview.rotate_clockwise": "Faire pivoter l’image dans le sens horaire",
   "preview.rotate_counterclockwise": "Faire pivoter l’image dans le sens antihoraire",
+  "preview.zoom_in": "Zoomer sur l’image",
+  "preview.zoom_out": "Dézoomer sur l’image",
   "preview.image_rotation_error": "Impossible de faire pivoter cette image. La capture n’a pas été modifiée.",
   "preview.loading_image": "Chargement de l’image…",
   "preview.unavailable": "Aperçu indisponible.",

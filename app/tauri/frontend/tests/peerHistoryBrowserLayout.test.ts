@@ -16,9 +16,9 @@
  *     `.layout`: `OrganizationSidebar` and `.layout-main`. The
  *     previous standalone `<LinkedPeers />` block is gone.
  *   - `OrganizationSidebar` renders the `LinkedPeers` block as a
- *     descendant (sibling of the `collection-list`). Both blocks
- *     share the panel's vertical space as independent scroll
- *     containers (`overflow-y: auto` + `min-height: 0`).
+ *     descendant of a shared list container. That container
+ *     allocates 70% to the collection viewport and 30% to the
+ *     linked-peers section; both retain independent bounded scroll.
  *   - `.layout-main` keeps the previous order: the
  *     `DesktopToolbar` first, then the search-status bar, then
  *     the `HistoryCardRail` (or `RemoteHistoryRail`).
@@ -198,12 +198,33 @@ test("OrganizationSidebar keeps two independent vertical scrollers (collections 
     /\.linked-peers-list\s*\{[^}]*min-height:\s*0/,
     ".linked-peers-list must allow shrinking below its intrinsic content",
   );
-  // The section wrapper must request `flex: 1 1 0` (or similar)
-  // so it shares the panel height with the collection list.
   assert.match(
     linkedPeersSource,
-    /\.linked-peers\s*\{[^}]*flex:\s*1 1 0/,
-    ".linked-peers section must share the sidebar vertical space with .collection-list",
+    /\.linked-peers\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*hidden/,
+    ".linked-peers section must fit its allocated grid track",
+  );
+});
+
+test("OrganizationSidebar allocates 70%/30% of the shared list container", () => {
+  assert.match(
+    sidebarSource,
+    /<div class="sidebar-lists" data-testid="sidebar-lists">\s*<ul\s+class="collection-list"[\s\S]*?<\/ul>[\s\S]*?<LinkedPeers[\s\S]*?\/?>\s*<\/div>/,
+    "the collection list and linked-peers section must share one container",
+  );
+  assert.match(
+    sidebarSource,
+    /\.sidebar-lists\s*\{[^}]*display:\s*grid[^}]*grid-template-rows:\s*minmax\(0,\s*7fr\)\s+minmax\(0,\s*3fr\)/,
+    "the shared container must assign 70% to collections and 30% to linked peers",
+  );
+  assert.match(
+    sidebarSource,
+    /\.sidebar-lists\s*\{[^}]*min-height:\s*0/,
+    "the shared list container must remain bounded by the sidebar",
+  );
+  assert.match(
+    sidebarSource,
+    /<header class="sidebar-header">[\s\S]*?<div class="sidebar-lists"/,
+    "the collection heading must remain outside the shared ratio container",
   );
 });
 
