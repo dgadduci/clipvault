@@ -66,6 +66,11 @@ pub const CAPTURE_CONTROL_CHANGED_EVENT: &str = "clipvault://capture-control-cha
 pub const CAPTURE_CONTROL_ERROR_EVENT: &str = "clipvault://capture-control-error";
 pub const LANGUAGE_CHANGED_EVENT: &str = "clipvault://language-changed";
 
+const IMAGE_IMPORT_PICKER_EXTENSIONS: &[&str] = &[
+    "png", "PNG", "jpg", "JPG", "jpeg", "JPEG", "webp", "WEBP", "gif", "GIF", "bmp", "BMP", "tif",
+    "TIF", "tiff", "TIFF",
+];
+
 #[derive(Debug, Clone, Serialize)]
 struct CaptureControlChanged {
     enabled: bool,
@@ -259,10 +264,7 @@ pub async fn clipvault_prepare_image_import(
     let Some(file_paths) = window
         .dialog()
         .file()
-        .add_filter(
-            filter_name,
-            &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"],
-        )
+        .add_filter(filter_name, IMAGE_IMPORT_PICKER_EXTENSIONS)
         .set_title(dialog_title)
         .blocking_pick_files()
     else {
@@ -2955,6 +2957,17 @@ pub fn clipvault_code_language_set_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_import_picker_includes_lowercase_and_uppercase_extensions() {
+        assert_eq!(
+            IMAGE_IMPORT_PICKER_EXTENSIONS,
+            &[
+                "png", "PNG", "jpg", "JPG", "jpeg", "JPEG", "webp", "WEBP", "gif", "GIF", "bmp",
+                "BMP", "tif", "TIF", "tiff", "TIFF",
+            ],
+        );
+    }
 
     /// Pin the metadata-only event channel identifier so an accidental
     /// rename surfaces as a unit-test failure on the backend instead

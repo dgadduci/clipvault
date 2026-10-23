@@ -126,6 +126,10 @@
   import { ariaShortcut, keyboardShortcuts, shortcutLabel } from "./lib/keyboardShortcuts.ts";
 
   export let entry: EntryRecord;
+  /** Generation for the current collection preview load. */
+  export let previewBatchId: number = 0;
+  /** Reports only the opaque entry id and the preview generation. */
+  export let onPreviewReady: (entryId: number, batchId: number) => void = () => {};
   /** Present only while rendering the matching peer-bound import collection. */
   export let peerImportedSourceApp: PeerImportedSourceAppPresentation | null = null;
   export let hasNote: boolean = false;
@@ -546,6 +550,8 @@
   let thumbnailState: ThumbnailState = hasRenderableImage(entry)
     ? "loading"
     : "error";
+  let thumbnailImageRendered = false;
+  let lastReportedPreviewBatchId = 0;
   /**
    * Mirror of `assetRef` updated synchronously so the `onDestroy`
    * cleanup can revoke the blob URL of the current entry even when the
@@ -559,6 +565,26 @@
    * another entry's thumbnail.
    */
   let thumbnailToken = 0;
+
+  function reportPreviewReady(entryId: number, batchId: number): void {
+    if (batchId <= 0 || lastReportedPreviewBatchId === batchId) return;
+    lastReportedPreviewBatchId = batchId;
+    onPreviewReady(entryId, batchId);
+  }
+
+  function onThumbnailLoad(): void {
+    thumbnailImageRendered = true;
+    reportPreviewReady(entry.id, previewBatchId);
+  }
+
+  $: if (
+    isImage &&
+    previewBatchId > 0 &&
+    (thumbnailState === "error" ||
+      (thumbnailState === "loaded" && thumbnailImageRendered))
+  ) {
+    reportPreviewReady(entry.id, previewBatchId);
+  }
 
   /**
    * Update the coarse state without violating the
@@ -575,6 +601,7 @@
     if (!ref) {
       if (token === thumbnailToken) {
         thumbnailUrl = null;
+        thumbnailImageRendered = false;
         commitThumbnailState("error");
       }
       return;
@@ -584,9 +611,19 @@
     // The transition runs synchronously before the bridge await so
     // a same-tick render cannot land on a `null` URL with no state.
     if (token === thumbnailToken) {
+      thumbnailImageRendered = false;
       commitThumbnailState("loading");
     }
-    const resolution = await assetResolver.resolve(ref);
+    let resolution: Awaited<ReturnType<typeof assetResolver.resolve>>;
+    try {
+      resolution = await assetResolver.resolve(ref);
+    } catch {
+      if (token !== thumbnailToken) return;
+      thumbnailUrl = null;
+      thumbnailImageRendered = false;
+      commitThumbnailState("error");
+      return;
+    }
     if (token !== thumbnailToken) {
       // A newer refresh landed while we awaited the bridge; drop this
       // result so the card never shows another entry's thumbnail.
@@ -597,6 +634,7 @@
       commitThumbnailState("loaded");
     } else {
       thumbnailUrl = null;
+      thumbnailImageRendered = false;
       commitThumbnailState("error");
     }
   }
@@ -628,6 +666,7 @@
       assetResolver.releaseFor(lastAssetRef);
     }
     thumbnailUrl = null;
+    thumbnailImageRendered = false;
     commitThumbnailState("error");
   }
 
@@ -2040,6 +2079,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           alt={imageDimensions
             ? $t("history.card.image_captured_dimensions", { dimensions: imageDimensions })
             : $t("history.card.image_captured")}
+          on:load={onThumbnailLoad}
           on:error={onThumbnailError}
         />
       {:else if thumbnailState === "loading"}
@@ -3199,6 +3239,9 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     color: #93c5fd;
     transition: color 0.15s ease, background 0.15s ease;
   }
+  .card-actions :global(.menu-trigger) {
+    color: #f0f4f8;
+  }
   .card-actions :global(.note-trigger:hover:not(:disabled)) {
     background: rgba(96, 165, 250, 0.18);
   }
@@ -3250,6 +3293,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     flex-direction: column;
     min-width: 11rem;
     background: #0e1116;
+    color: #f0f4f8;
     border: 1px solid #30363d;
     border-radius: 8px;
     padding: 0.25rem;

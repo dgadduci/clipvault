@@ -141,7 +141,19 @@ menu.
 ### Requirement: Card actions and overflow menu
 
 Each card SHALL expose its actions through an accessible lower action area,
-keeping pin/unpin immediately to the left of the ellipsis menu button.
+keeping pin/unpin immediately to the left of the ellipsis menu button. The
+ellipsis trigger and the open menu's normal option labels SHALL use an explicit
+light foreground color that remains readable against their dark surfaces.
+Existing disabled, shortcut-hint, and destructive-action colors SHALL remain
+distinct.
+
+#### Scenario: Card menu has readable light text
+
+- **WHEN** the user views a capture card or opens its ellipsis menu
+- **THEN** the ellipsis glyph and enabled menu option labels are light colored
+  against their dark backgrounds
+- **AND** disabled items, shortcut hints, and the destructive action retain
+  their existing visual states
 
 #### Scenario: Open card menu
 

@@ -115,7 +115,12 @@ local-peer-pairing-tls = [
 # to the X11 / XWayland transport when the data-control protocols
 # are unavailable, so the build stays usable on compositors that do
 # not advertise them.
-arboard-wayland-data-control = ["arboard?/wayland-data-control"]
+arboard-wayland-data-control = [
+    "arboard?/wayland-data-control",
+    "dep:wayland-client",
+    "dep:wayland-protocols",
+    "dep:wayland-protocols-wlr",
+]
 # KDE Plasma Wayland source-application bridge. Pulls in the typed
 # D-Bus receiver the `kde-wayland-source-app-detection` change
 # introduces so Linux builds can subscribe to
@@ -163,6 +168,9 @@ ed25519-dalek = { workspace = true }
 rand_core = { workspace = true }
 
 arboard = { workspace = true, optional = true }
+wayland-client = { workspace = true, optional = true }
+wayland-protocols = { workspace = true, optional = true }
+wayland-protocols-wlr = { workspace = true, optional = true }
 global-hotkey = { workspace = true, optional = true }
 x11rb = { workspace = true, optional = true, features = ["allow-unsafe-code", "xinput", "xtest"] }
 # Dynamic Xlib loader used by the `linux-xlib-init` preflight to call

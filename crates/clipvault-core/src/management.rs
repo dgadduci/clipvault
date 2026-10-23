@@ -1048,6 +1048,14 @@ mod tests {
     /// payload, new revision".
     struct ScriptedBackend {
         reads: Mutex<Vec<Result<Option<String>, clipvault_platform::ClipboardBackendError>>>,
+        image_reads: Mutex<
+            Vec<
+                Result<
+                    Option<clipvault_platform::ClipboardImage>,
+                    clipvault_platform::ClipboardBackendError,
+                >,
+            >,
+        >,
         revisions: Mutex<Vec<clipvault_platform::ClipboardRevision>>,
         monotonic: Mutex<u64>,
     }
@@ -1064,6 +1072,7 @@ mod tests {
                 // order: the first plan entry becomes the last pushed
                 // value and therefore the first popped.
                 reads: Mutex::new(reads),
+                image_reads: Mutex::new(Vec::new()),
                 revisions: Mutex::new(revisions),
                 monotonic: Mutex::new(0),
             }
@@ -1089,6 +1098,17 @@ mod tests {
         }
         fn write_text(&self, _text: &str) -> Result<(), clipvault_platform::ClipboardBackendError> {
             Ok(())
+        }
+        fn read_image(
+            &self,
+        ) -> Result<
+            Option<clipvault_platform::ClipboardImage>,
+            clipvault_platform::ClipboardBackendError,
+        > {
+            self.image_reads.lock().pop().unwrap_or(Ok(None))
+        }
+        fn supports_image_read(&self) -> bool {
+            true
         }
         fn revision(&self) -> clipvault_platform::ClipboardRevision {
             self.next_revision()
@@ -1130,12 +1150,6 @@ mod tests {
         AppContext,
         std::sync::Arc<crate::watcher::CaptureWatcher>,
     ) {
-        use std::sync::Arc;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = clipvault_db::Database::open(dir.path().join("clipvault.db")).expect("open");
-        let mut db = db;
-        db.run_migrations(&clipvault_db::builtin_migrations())
-            .expect("migrate");
         // ScriptedBackend queues are LIFO (`Vec::push` + `Vec::pop`),
         // so iterating the plan in reverse order makes the first
         // entry the first one popped.
@@ -1150,6 +1164,22 @@ mod tests {
             .map(|(_, revision)| clipvault_platform::ClipboardRevision::new(*revision))
             .collect();
         let scripted = Arc::new(ScriptedBackend::new(reads, revisions));
+        build_context_with_scripted_backend(scripted)
+    }
+
+    fn build_context_with_scripted_backend(
+        scripted: Arc<ScriptedBackend>,
+    ) -> (
+        tempfile::TempDir,
+        AppContext,
+        std::sync::Arc<crate::watcher::CaptureWatcher>,
+    ) {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = clipvault_db::Database::open(dir.path().join("clipvault.db")).expect("open");
+        let mut db = db;
+        db.run_migrations(&clipvault_db::builtin_migrations())
+            .expect("migrate");
         let adapters = crate::platform_adapters::PlatformAdapters::new(
             scripted.clone(),
             Arc::new(crate::fakes::FakeHotkeyManager::new()),
@@ -1184,7 +1214,7 @@ mod tests {
     #[test]
     fn recapture_after_delete_creates_a_new_row() {
         // End-to-end regression for the
-        // `recapture-deleted-clipboard-text` OpenSpec change.
+        // `wayland-identical-clipboard-recapture` OpenSpec change.
         //
         // Scenario:
         //   1. The user copies `A` (revision R1); the watcher observes
@@ -1258,6 +1288,68 @@ mod tests {
             1,
             "exactly one row (the recapture) must remain after the deletion"
         );
+    }
+
+    #[test]
+    fn recapture_after_delete_creates_a_new_image_row() {
+        use crate::capture_diagnostic::AttemptOrigin;
+        use crate::watcher::WatchTickOutcome;
+        use clipvault_platform::{ClipboardImage, ClipboardRevision};
+
+        let image =
+            ClipboardImage::new(vec![0x20, 0x40, 0x60, 0xff], 1, 1).expect("valid temporary image");
+        let scripted = Arc::new(ScriptedBackend::new(
+            vec![Ok(None), Ok(None), Ok(None)],
+            vec![
+                ClipboardRevision::new(2),
+                ClipboardRevision::new(1),
+                ClipboardRevision::new(1),
+                ClipboardRevision::new(1),
+            ],
+        ));
+        scripted.image_reads.lock().extend([
+            Ok(Some(image.clone())),
+            Ok(Some(image.clone())),
+            Ok(Some(image)),
+        ]);
+        let (dir, context, watcher) = build_context_with_scripted_backend(scripted);
+
+        let first = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        let first_id = match first {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { id }) => id,
+            other => panic!("first image tick must persist as Stored, got {other:?}"),
+        };
+
+        let deleted = context
+            .management()
+            .delete_entry(&context, first_id, true)
+            .expect("delete image");
+        assert!(matches!(deleted, DeleteOutcome::Removed { removed: 1 }));
+
+        assert_eq!(
+            watcher.tick(&context, None, AttemptOrigin::BackgroundLoop),
+            WatchTickOutcome::Unchanged,
+            "an unchanged clipboard revision must not recreate a deleted image"
+        );
+
+        let recaptured = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        let recaptured_id = match recaptured {
+            WatchTickOutcome::Captured(crate::history::HistoryOutcome::Stored { id }) => id,
+            other => panic!("new image revision must be stored again, got {other:?}"),
+        };
+        assert_ne!(recaptured_id, first_id);
+        assert_eq!(context.history().history_count(&context).unwrap(), 1);
+
+        let record = {
+            let mut db = context.database().lock();
+            clipvault_db::EntryRepository::new(db.connection_mut())
+                .find_by_id(recaptured_id)
+                .expect("find recaptured image")
+                .expect("recaptured row")
+        };
+        assert_eq!(record.content_type, clipvault_db::ContentType::Image);
+        let asset_ref = record.asset_ref.expect("image asset reference");
+        assert!(dir.path().join("data/assets").join(asset_ref).is_file());
     }
 
     #[test]

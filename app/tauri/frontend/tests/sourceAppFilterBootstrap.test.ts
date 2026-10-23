@@ -223,8 +223,8 @@ test("selectCollectionFromSidebar resets the source-app filter to Todas and relo
   );
   assert.match(
     selectByIdMatch[0],
-    /await refreshSourceAppOptions\(targetCollectionId\)/,
-    "collection switch must request options for the destination id immediately",
+    /const sourceAppOptionsRefresh = refreshSourceAppOptions\(targetCollectionId\);[\s\S]*?await refreshEntries\(\);[\s\S]*?await sourceAppOptionsRefresh;/,
+    "collection switch must request destination options without delaying the new rail",
   );
   assert.match(
     selectByIdMatch[0],

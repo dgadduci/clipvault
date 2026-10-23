@@ -34,6 +34,19 @@ test("collection badge numbers stay white and desktop typography keeps its basel
   assert.match(collectionFilter, /select\s*\{[^}]*font-size:\s*var\(--cv-control,\s*0\.85rem\)/s);
 });
 
+test("history card menu trigger and option labels use a light foreground", () => {
+  const card = source("HistoryCard.svelte");
+  const triggerRules = [...card.matchAll(/\.card-actions :global\(\.menu-trigger\)\s*\{([^}]*)\}/gs)];
+  const menuRule = card.match(/\.menu\s*\{([^}]*)\}/s);
+
+  assert.ok(
+    triggerRules.some(([, rule]) => /color:\s*#f0f4f8/.test(rule)),
+    "the card ellipsis trigger must have an explicit light color rule",
+  );
+  assert.ok(menuRule, "the card menu must have a foreground color rule");
+  assert.match(menuRule[1], /color:\s*#f0f4f8/);
+});
+
 test("Desktop and QuickPaste keep the webview zoom at baseline and block browser zoom gestures", () => {
   const app = source("App.svelte");
   const quickPaste = source("QuickPaste.svelte");

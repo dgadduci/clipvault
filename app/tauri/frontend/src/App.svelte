@@ -41,7 +41,11 @@
     calculateImageImportProgressPercent,
   } from "./lib/imageImportProgress.ts";
   import { orderAvailableContentTypes } from "./lib/contentType.ts";
-  import { isImageEntry } from "./lib/clipboardAsset.ts";
+  import { hasRenderableImage, isImageEntry } from "./lib/clipboardAsset.ts";
+  import {
+    createCollectionPreviewLoadBarrier,
+    type CollectionPreviewLoadBarrier,
+  } from "./lib/collectionPreviewLoad.ts";
   import { blockWebviewPageZoom } from "./lib/blockWebviewPageZoom.ts";
   import { openImagePreviewWindow } from "./lib/imagePreviewWindow.ts";
   import {
@@ -212,6 +216,14 @@
   let loading = true;
   let collectionContentLoading = false;
   let clearingOldCollectionContent = false;
+  let collectionSwitchInteractionLocked = false;
+  let collectionSwitchToken = 0;
+  let collectionPreviewBatchId = 0;
+  let activeCollectionPreviewLoad: {
+    requestToken: number;
+    batchId: number;
+    barrier: CollectionPreviewLoadBarrier;
+  } | null = null;
   let entriesLoadToken = 0;
   let startupSplashConnected = false;
   let initialDesktopLoadSettled = false;
@@ -508,6 +520,7 @@
   let dropInFlight: Set<string> = new Set();
   const SEARCH_DEBOUNCE_MS = 120;
   const RAIL_LIMIT = 60;
+  const PROGRESSIVE_ENTRY_HYDRATION_CONCURRENCY = 8;
 
   $: activeCollection = organization?.collections.find(
     (c) => c.id === selectedCollectionId,
@@ -876,7 +889,11 @@
 
   async function hydrateEntryOrganization(
     entries: EntryRecord[],
-    options: { force?: boolean; additionalEntries?: EntryRecord[] } = {},
+    options: {
+      force?: boolean;
+      additionalEntries?: EntryRecord[];
+      progressive?: boolean;
+    } = {},
   ): Promise<void> {
     // The hydration round is anchored on a monotonic token so a
     // stale response can never overwrite a fresher commit (e.g. a
@@ -916,61 +933,80 @@
       pendingEntries,
     );
 
-    const results: EntryOrganizationFetchResult[] = await Promise.all(
-      pendingEntries.map(async (entry): Promise<EntryOrganizationFetchResult> => {
-        try {
-          const [tagIds, collectionIds] = await Promise.all([
-            entryTagsCommand({ entryId: entry.id }),
-            entryCollectionsCommand({ entryId: entry.id }),
-          ]);
-          return {
-            id: entry.id,
-            ok: true,
-            tagIds,
-            collectionIds,
-          };
-        } catch (err) {
-          return {
-            id: entry.id,
-            ok: false,
-            error: err instanceof Error ? err.message : String(err),
-          };
+    const fetchEntryOrganization = async (
+      entry: EntryRecord,
+    ): Promise<EntryOrganizationFetchResult> => {
+      try {
+        const [tagIds, collectionIds] = await Promise.all([
+          entryTagsCommand({ entryId: entry.id }),
+          entryCollectionsCommand({ entryId: entry.id }),
+        ]);
+        return {
+          id: entry.id,
+          ok: true,
+          tagIds,
+          collectionIds,
+        };
+      } catch (err) {
+        return {
+          id: entry.id,
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    };
+
+    const applyResults = (results: EntryOrganizationFetchResult[]): void => {
+      if (token !== entryOrganizationHydrationToken) return;
+
+      if (!organization) {
+        const failed = new Map(entryOrganizationHydration);
+        for (const result of results) {
+          failed.set(result.id, "error");
         }
-      }),
-    );
-
-    if (token !== entryOrganizationHydrationToken) {
-      return;
-    }
-
-    if (!organization) {
-      const failed = new Map(entryOrganizationHydration);
-      for (const entry of pendingEntries) {
-        failed.set(entry.id, "error");
-      }
-      entryOrganizationHydration = failed;
-      organizationError = "app.error.generic";
-      return;
-    }
-
-    const applied = applyEntryOrganizationResults(
-      entryOrganization,
-      entryOrganizationHydration,
-      results,
-      {
-        resolveTags: (tagIds) =>
-          organization!.tags.filter((t) => tagIds.includes(t.id)),
-        resolveCollections: (collectionIds) =>
-          organization!.collections.filter((c) => collectionIds.includes(c.id)),
-      },
-    );
-    entryOrganization = applied.nextOrganization;
-    entryOrganizationHydration = applied.nextHydration;
-    for (const result of results) {
-      if (!result.ok) {
+        entryOrganizationHydration = failed;
         organizationError = "app.error.generic";
+        return;
       }
+
+      const applied = applyEntryOrganizationResults(
+        entryOrganization,
+        entryOrganizationHydration,
+        results,
+        {
+          resolveTags: (tagIds) =>
+            organization!.tags.filter((t) => tagIds.includes(t.id)),
+          resolveCollections: (collectionIds) =>
+            organization!.collections.filter((c) => collectionIds.includes(c.id)),
+        },
+      );
+      entryOrganization = applied.nextOrganization;
+      entryOrganizationHydration = applied.nextHydration;
+      for (const result of results) {
+        if (!result.ok) {
+          organizationError = "app.error.generic";
+        }
+      }
+    };
+
+    if (options.progressive) {
+      let nextEntryIndex = 0;
+      const workerCount = Math.min(
+        PROGRESSIVE_ENTRY_HYDRATION_CONCURRENCY,
+        pendingEntries.length,
+      );
+      await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (nextEntryIndex < pendingEntries.length) {
+          const entry = pendingEntries[nextEntryIndex++];
+          const result = await fetchEntryOrganization(entry);
+          applyResults([result]);
+        }
+      }));
+      return;
     }
+
+    const results = await Promise.all(pendingEntries.map(fetchEntryOrganization));
+    applyResults(results);
   }
 
   async function toggleFavorite(entry: EntryRecord): Promise<void> {
@@ -1135,9 +1171,56 @@
     }
   }
 
+  function cancelActiveCollectionPreviewLoad(): void {
+    activeCollectionPreviewLoad?.barrier.cancel();
+    activeCollectionPreviewLoad = null;
+  }
+
+  function beginCollectionPreviewLoad(
+    loadedEntries: EntryRecord[],
+    requestToken: number,
+  ): CollectionPreviewLoadBarrier {
+    cancelActiveCollectionPreviewLoad();
+    const batchId = ++collectionPreviewBatchId;
+    const barrier = createCollectionPreviewLoadBarrier(
+      loadedEntries.filter(hasRenderableImage).map((entry) => entry.id),
+    );
+    activeCollectionPreviewLoad = { requestToken, batchId, barrier };
+    return barrier;
+  }
+
+  function handleCollectionPreviewReady(
+    entryId: number,
+    batchId: number,
+  ): void {
+    const activeLoad = activeCollectionPreviewLoad;
+    if (
+      !collectionSwitchInteractionLocked ||
+      !activeLoad ||
+      activeLoad.batchId !== batchId ||
+      activeLoad.requestToken !== entriesLoadToken
+    ) {
+      return;
+    }
+    activeLoad.barrier.markReady(entryId);
+  }
+
+  async function waitForPreviewRailPaint(): Promise<void> {
+    await tick();
+    if (document.visibilityState !== "visible") return;
+    // Give the browser one rendered frame with the new cards and spinner
+    // before starting the membership bridge requests for this collection.
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve());
+      });
+    });
+  }
+
   async function refreshEntries(): Promise<void> {
     const requestToken = ++entriesLoadToken;
     const requestCollectionId = entriesCollectionId(selectedCollectionId);
+    cancelActiveCollectionPreviewLoad();
     collectionContentLoading = true;
     try {
       const [loadedEntries, noteIds, availableTypes] = await Promise.all([
@@ -1165,20 +1248,69 @@
       }
       entries = loadedEntries;
       entryNoteIds = new Set(noteIds);
-      if (isFiltering) {
+      if (searchQuery.trim().length > 0) {
         // A reload while the search filter is active must re-run the
         // search so the rail keeps reflecting the latest captures; a
         // stale list could otherwise hide rows the user expects to see.
         await performSearch(searchQuery, { silent: true });
+        if (requestToken !== entriesLoadToken) return;
+        clearingOldCollectionContent = false;
+        await Promise.all([
+          refreshPeerImportedSourceApps(visibleEntries),
+          hydrateEntryOrganization(entries, {
+            progressive: collectionSwitchInteractionLocked,
+          }),
+        ]);
       } else {
         visibleEntries = entries;
-        await refreshPeerImportedSourceApps(entries);
-        await hydrateEntryOrganization(entries);
+        // The new snapshot is now safe to reveal. Source-app and
+        // membership metadata continue in parallel while the cards
+        // (and their own image requests) render progressively.
+        clearingOldCollectionContent = false;
+        const previewBarrier = collectionSwitchInteractionLocked
+          ? beginCollectionPreviewLoad(loadedEntries, requestToken)
+          : null;
+        if (collectionSwitchInteractionLocked) {
+          await waitForPreviewRailPaint();
+          if (requestToken !== entriesLoadToken) return;
+        }
+        await Promise.all([
+          refreshPeerImportedSourceApps(entries),
+          hydrateEntryOrganization(entries, {
+            progressive: collectionSwitchInteractionLocked,
+          }),
+        ]);
+        if (requestToken !== entriesLoadToken) return;
+
+        if (previewBarrier) {
+          const selectedCollection = organization?.collections.find(
+            (collection) => collection.id === selectedCollectionId,
+          ) ?? null;
+          const showSharedCaptures = selectedCollection === null ||
+            !hiddenSubcollectionCaptureCollectionIds.has(selectedCollection.id);
+          const visibleForCollection = projectSubcollectionVisibility(
+            visibleEntries,
+            selectedCollection?.id ?? null,
+            organization?.collections ?? [],
+            entryOrganization,
+            entryOrganizationHydration,
+            showSharedCaptures,
+          );
+          previewBarrier.retainVisible(
+            visibleForCollection
+              .filter(hasRenderableImage)
+              .map((entry) => entry.id),
+          );
+          await previewBarrier.promise;
+        }
       }
     } finally {
       if (requestToken === entriesLoadToken) {
         collectionContentLoading = false;
         clearingOldCollectionContent = false;
+        if (activeCollectionPreviewLoad?.requestToken === requestToken) {
+          cancelActiveCollectionPreviewLoad();
+        }
       }
     }
   }
@@ -1575,6 +1707,12 @@
   async function selectCollectionById(
     targetCollectionId: number | null,
   ): Promise<void> {
+    const switchToken = ++collectionSwitchToken;
+    const focusToRestore = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    collectionSwitchInteractionLocked = true;
+    cancelActiveCollectionPreviewLoad();
     selectedCollectionId = targetCollectionId;
     if (activePeerId === null) {
       updateActiveCaptureCollection(
@@ -1631,12 +1769,21 @@
     // the rail so the cards reflect the new active collection
     // without stale options or stale rows.
     try {
-      await refreshSourceAppOptions(targetCollectionId);
+      const sourceAppOptionsRefresh = refreshSourceAppOptions(targetCollectionId);
       await refreshEntries();
+      await sourceAppOptionsRefresh;
     } catch (err) {
       collectionContentLoading = false;
       clearingOldCollectionContent = false;
       organizationError = "app.error.generic";
+    } finally {
+      if (switchToken === collectionSwitchToken) {
+        collectionSwitchInteractionLocked = false;
+        await tick();
+        if (focusToRestore?.isConnected) {
+          focusToRestore.focus({ preventScroll: true });
+        }
+      }
     }
   }
 
@@ -2370,6 +2517,12 @@
     }
   }
 
+  function blockCollectionSwitchKeyboard(event: KeyboardEvent): void {
+    if (!collectionSwitchInteractionLocked) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+
   function isShortcutBlockedSurface(target: EventTarget | null): boolean {
     if (!(target instanceof HTMLElement)) return false;
     if (
@@ -2436,6 +2589,7 @@
   }
 
   let detachSearchShortcut: (() => void) | null = null;
+  let detachCollectionSwitchKeyboard: (() => void) | null = null;
   let detachDragOverGuard: (() => void) | null = null;
   let detachPointerDragController: (() => void) | null = null;
   let detachWebviewPageZoomGuard: (() => void) | null = null;
@@ -3074,6 +3228,14 @@
         );
       });
     document.addEventListener("keydown", onSearchShortcutKeydown, true);
+    window.addEventListener("keydown", blockCollectionSwitchKeyboard, true);
+    detachCollectionSwitchKeyboard = () => {
+      window.removeEventListener(
+        "keydown",
+        blockCollectionSwitchKeyboard,
+        true,
+      );
+    };
     detachSearchShortcut = () => {
       document.removeEventListener(
         "keydown",
@@ -3089,6 +3251,7 @@
   });
 
   onDestroy(() => {
+    cancelActiveCollectionPreviewLoad();
     contextualSetupRequestId += 1;
     if (contextualSetupFirstFrame !== null) {
       cancelAnimationFrame(contextualSetupFirstFrame);
@@ -3132,6 +3295,10 @@
       detachSearchShortcut();
       detachSearchShortcut = null;
     }
+    if (detachCollectionSwitchKeyboard) {
+      detachCollectionSwitchKeyboard();
+      detachCollectionSwitchKeyboard = null;
+    }
     if (detachDragOverGuard) {
       detachDragOverGuard();
       detachDragOverGuard = null;
@@ -3155,7 +3322,10 @@
   });
 </script>
 
-<main>
+<main
+  inert={collectionSwitchInteractionLocked}
+  aria-busy={collectionContentLoading || collectionSwitchInteractionLocked}
+>
   {#if pdfGenerationInFlight}
     <PdfExportProgressOverlay
       label={$t("pdf_export.generating")}
@@ -3331,7 +3501,10 @@
             onClose={() => closePeerRail()}
           />
         {:else}
-          <div class="collection-content-stage" aria-busy={collectionContentLoading}>
+          <div
+            class="collection-content-stage"
+            aria-busy={collectionContentLoading || collectionSwitchInteractionLocked}
+          >
             <div
               class="collection-content-rail"
               class:clearing-old-content={clearingOldCollectionContent}
@@ -3345,6 +3518,8 @@
                 allTags={organization?.tags ?? []}
                 allCollections={organization?.collections ?? []}
                 activeCollectionId={selectedCollectionId}
+                previewBatchId={collectionPreviewBatchId}
+                onPreviewReady={handleCollectionPreviewReady}
                 entryOrganization={entryOrganization}
                 entryOrganizationHydration={entryOrganizationHydration}
                 isFiltering={isFiltering}
@@ -3361,7 +3536,7 @@
                 onRequestPreview={(entry) => requestPreview(entry, document.activeElement instanceof HTMLElement ? document.activeElement : null)}
               />
             </div>
-            {#if collectionContentLoading}
+            {#if collectionContentLoading || collectionSwitchInteractionLocked}
               <CircularLoadingIndicator
                 variant="overlay"
                 label={$t("collections.loading")}
@@ -3374,6 +3549,17 @@
     </div>
   {/if}
 </main>
+
+{#if collectionSwitchInteractionLocked}
+  <span
+    class="visually-hidden"
+    role="status"
+    aria-live="polite"
+    data-testid="collection-content-loading-status"
+  >
+    {$t("collections.loading")}
+  </span>
+{/if}
 
 <ClipboardPreview
   entry={previewEntry}

@@ -62,22 +62,18 @@ use crate::clipboard::{
 };
 use crate::Capability;
 
+#[cfg(all(target_os = "linux", feature = "arboard-wayland-data-control"))]
+use crate::runtime::linux_wayland_clipboard_revision::WaylandClipboardRevisionMonitor;
 #[cfg(all(target_os = "linux", feature = "linux-x11"))]
 use crate::runtime::linux_x11_clipboard_revision::X11ClipboardRevisionMonitor;
 
 /// Session detection for the Linux clipboard transport.
 ///
-/// The result drives two decisions documented in
-/// `openspec/changes/kde-wayland-clipboard-capture/design.md`:
-///
-/// 1. Whether the X11/XFixes revision stream is authoritative for
-///    the active transport. On a native Wayland session XFixes only
-///    observes the XWayland bridge (when it exists); the monitor
-///    therefore MUST NOT be allowed to suppress a fresh native
-///    Wayland observation that did not also raise an XFixes event.
-/// 2. Which [`ArboardBackend`] identifier the adapter reports to
-///    diagnostics so the operator can correlate a missing capture
-///    with the transport that was actually compiled.
+/// The session selects a candidate backend. On Wayland, a separate
+/// protocol probe determines whether arboard can use native
+/// data-control or will fall back to X11; the revision monitor follows
+/// that same route. Diagnostics report the resolved transport rather
+/// than just the feature compiled into the binary.
 ///
 /// The detection is deliberately conservative: it only consults the
 /// `WAYLAND_DISPLAY` / `DISPLAY` environment variables the Wayland
@@ -87,10 +83,9 @@ use crate::runtime::linux_x11_clipboard_revision::X11ClipboardRevisionMonitor;
 /// the bootstrap agree on the same session answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinuxSession {
-    /// Native Wayland session. `arboard` selects the data-control
-    /// transport when the `wayland-data-control` feature is enabled;
-    /// without it the same build falls back to XWayland and the
-    /// adapter labels the choice explicitly.
+    /// Native Wayland session. `arboard` selects data-control only
+    /// when the feature is enabled and the compositor publishes a
+    /// compatible manager; otherwise it falls back to X11/XWayland.
     Wayland,
     /// Native X11 session. The XFixes ownership stream is the
     /// authoritative revision source.
@@ -128,77 +123,150 @@ enum ArboardBackend {
     /// `wayland-data-control` feature on `arboard`; the feature
     /// itself is Linux-only and pulled in by the
     /// `arboard-wayland-data-control` Cargo feature.
+    #[cfg(feature = "arboard-wayland-data-control")]
     WaylandDataControl,
     /// X11 session served through the `arboard` X11 backend. XFixes
     /// supplies the authoritative revision.
     X11,
     /// Wayland session served through XWayland because the build did
-    /// not enable `wayland-data-control` or the compositor rejected
-    /// the data-control negotiation. The revision monitor only
-    /// observes the XWayland selection stream, not native Wayland
-    /// copies.
+    /// not enable `wayland-data-control` or the compositor does not
+    /// publish a compatible manager. XFixes then observes the same
+    /// X11 selection stream arboard reads.
     XWaylandFallback,
     /// Linux host without a usable Wayland or X11 display server.
     /// The adapter reports `revision = UNKNOWN` so the watcher
     /// cannot invent a recapture from a missing ownership event.
     Unavailable,
+    /// A Wayland revision probe failed before the active transport
+    /// could be identified reliably.
+    #[cfg(feature = "arboard-wayland-data-control")]
+    Unknown,
 }
 
 impl ArboardBackend {
     fn stable_id(self) -> &'static str {
         match self {
+            #[cfg(feature = "arboard-wayland-data-control")]
             ArboardBackend::WaylandDataControl => "wayland_data_control",
             ArboardBackend::X11 => "x11",
             ArboardBackend::XWaylandFallback => "xwayland_fallback",
             ArboardBackend::Unavailable => "unavailable",
+            #[cfg(feature = "arboard-wayland-data-control")]
+            ArboardBackend::Unknown => "unknown",
         }
     }
 }
 
 enum RevisionSource {
-    /// X11 / XWayland ownership stream. Used both for native X11
-    /// sessions and as the fallback transport for Wayland sessions
-    /// when the build does not link the `wayland-data-control`
-    /// backend. On a Wayland session the stream only reflects the
-    /// XWayland bridge — the native Wayland data-control adapter
-    /// must NOT contribute here, so the source is only constructed
-    /// when the active session is X11.
+    /// X11 / XWayland ownership stream. On Wayland it is selected
+    /// only when native data-control is unavailable, matching
+    /// arboard's X11 fallback transport.
     #[cfg(all(target_os = "linux", feature = "linux-x11"))]
     X11(Box<Mutex<X11ClipboardRevisionMonitor>>),
-    /// No trustworthy ownership stream. Used on Wayland sessions
-    /// without a native data-control backend, on hosts that cannot
-    /// initialise XFixes and on every non-Linux build. The watcher
-    /// relies on its existing payload-fingerprint deduplication.
+    /// Native Wayland data-control selection stream.
+    #[cfg(all(target_os = "linux", feature = "arboard-wayland-data-control"))]
+    Wayland(Box<WaylandClipboardRevisionMonitor>),
+    /// No trustworthy ownership stream. The watcher relies on its
+    /// existing payload-fingerprint deduplication.
     Fallback,
 }
 
+#[cfg(all(target_os = "linux", feature = "arboard-wayland-data-control"))]
+enum WaylandRevisionRoute<T> {
+    DataControl(T),
+    X11Fallback,
+    Unknown,
+}
+
+#[cfg(all(target_os = "linux", feature = "arboard-wayland-data-control"))]
+fn route_wayland_probe<T>(probe: Result<Option<T>, ()>) -> WaylandRevisionRoute<T> {
+    match probe {
+        Ok(Some(monitor)) => WaylandRevisionRoute::DataControl(monitor),
+        Ok(None) => WaylandRevisionRoute::X11Fallback,
+        Err(()) => WaylandRevisionRoute::Unknown,
+    }
+}
+
 impl RevisionSource {
-    /// Build the revision source that matches the detected session.
-    ///
-    /// On Linux X11 the XFixes monitor is the only trustworthy
-    /// answer. On Linux Wayland the monitor MUST NOT be selected:
-    /// an X11 ownership change does not prove the native Wayland
-    /// clipboard changed, and using the X11 revision as the
-    /// authoritative signal would suppress valid native Wayland
-    /// captures. The fallback path keeps the watcher polling and
-    /// reports `UNKNOWN`, so the existing fingerprint comparison
-    /// continues to deduplicate ordinary polls without ever
-    /// inventing a recapture.
+    /// Build the revision source and backend label together so the
+    /// event stream describes the transport `arboard` can actually
+    /// use in this session.
     #[cfg(all(target_os = "linux", feature = "linux-x11"))]
-    fn for_session(session: LinuxSession) -> Self {
+    fn for_session(session: LinuxSession) -> (Self, ArboardBackend) {
         match session {
             LinuxSession::X11 => match X11ClipboardRevisionMonitor::new() {
-                Ok(monitor) => Self::X11(Box::new(Mutex::new(monitor))),
-                Err(_) => Self::Fallback,
+                Ok(monitor) => (
+                    Self::X11(Box::new(Mutex::new(monitor))),
+                    ArboardBackend::X11,
+                ),
+                Err(_) => (Self::Fallback, ArboardBackend::X11),
             },
-            // Wayland / Unknown: the XFixes stream would be
-            // misleading, so the adapter falls through to the
-            // fingerprint-only fallback.
-            LinuxSession::Wayland | LinuxSession::Unknown => Self::Fallback,
+            LinuxSession::Wayland => Self::for_wayland_session(),
+            LinuxSession::Unknown => (Self::Fallback, ArboardBackend::Unavailable),
         }
     }
 
-    #[cfg(not(all(target_os = "linux", feature = "linux-x11")))]
+    #[cfg(all(target_os = "linux", feature = "linux-x11"))]
+    fn for_wayland_session() -> (Self, ArboardBackend) {
+        #[cfg(feature = "arboard-wayland-data-control")]
+        {
+            match route_wayland_probe(WaylandClipboardRevisionMonitor::new()) {
+                WaylandRevisionRoute::DataControl(monitor) => (
+                    Self::Wayland(Box::new(monitor)),
+                    ArboardBackend::WaylandDataControl,
+                ),
+                // If no manager/seat is published, arboard's Wayland
+                // initialization also fails and it uses its X11 backend.
+                WaylandRevisionRoute::X11Fallback => Self::x11_fallback_for_wayland(),
+                // An unexpected probe failure does not establish which
+                // transport arboard will use, so do not trust XFixes.
+                WaylandRevisionRoute::Unknown => (Self::Fallback, ArboardBackend::Unknown),
+            }
+        }
+
+        #[cfg(not(feature = "arboard-wayland-data-control"))]
+        {
+            Self::x11_fallback_for_wayland()
+        }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "linux-x11"))]
+    fn x11_fallback_for_wayland() -> (Self, ArboardBackend) {
+        let source = X11ClipboardRevisionMonitor::new()
+            .map(|monitor| Self::X11(Box::new(Mutex::new(monitor))))
+            .unwrap_or(Self::Fallback);
+        (source, ArboardBackend::XWaylandFallback)
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "linux-x11")))]
+    fn for_session(session: LinuxSession) -> (Self, ArboardBackend) {
+        let backend = match session {
+            LinuxSession::Wayland => {
+                #[cfg(feature = "arboard-wayland-data-control")]
+                {
+                    match route_wayland_probe(WaylandClipboardRevisionMonitor::new()) {
+                        WaylandRevisionRoute::DataControl(monitor) => {
+                            return (
+                                Self::Wayland(Box::new(monitor)),
+                                ArboardBackend::WaylandDataControl,
+                            );
+                        }
+                        WaylandRevisionRoute::X11Fallback => ArboardBackend::XWaylandFallback,
+                        WaylandRevisionRoute::Unknown => ArboardBackend::Unknown,
+                    }
+                }
+                #[cfg(not(feature = "arboard-wayland-data-control"))]
+                {
+                    ArboardBackend::XWaylandFallback
+                }
+            }
+            LinuxSession::X11 => ArboardBackend::X11,
+            LinuxSession::Unknown => ArboardBackend::Unavailable,
+        };
+        (Self::Fallback, backend)
+    }
+
+    #[cfg(not(target_os = "linux"))]
     fn for_session(_session: LinuxSession) -> Self {
         Self::Fallback
     }
@@ -211,6 +279,11 @@ impl RevisionSource {
                 .revision()
                 .map(ClipboardRevision::new)
                 .unwrap_or(ClipboardRevision::UNKNOWN),
+            #[cfg(all(target_os = "linux", feature = "arboard-wayland-data-control"))]
+            Self::Wayland(monitor) => monitor
+                .revision()
+                .map(ClipboardRevision::new)
+                .unwrap_or(ClipboardRevision::UNKNOWN),
             // Without an ownership-event stream there is no payload-free
             // baseline to read. Returning UNKNOWN preserves the existing
             // dedupe state instead of manufacturing a false change signal.
@@ -220,7 +293,8 @@ impl RevisionSource {
 
     /// Pair a just-read payload with the revision source for that clipboard
     /// observation. The fallback deliberately ignores payload content: only
-    /// a native ownership event can provide a trustworthy revision.
+    /// an ownership event from the selected transport can provide a
+    /// trustworthy revision.
     fn revision_for_observation(&self, _payload: Option<&ClipboardPayload>) -> ClipboardRevision {
         self.revision()
     }
@@ -252,14 +326,13 @@ impl ArboardClipboard {
     /// injected arguments.
     ///
     /// The default [`Self::new`] constructor infers the session from
-    /// `WAYLAND_DISPLAY`/`DISPLAY`; tests inject a synthetic session
-    /// through this entry point so they do not depend on the host
-    /// environment.
+    /// `WAYLAND_DISPLAY`/`DISPLAY`; tests can inject a synthetic session
+    /// while the Wayland transport probe still uses the live compositor.
     #[cfg(target_os = "linux")]
     fn with_session(session: LinuxSession) -> Self {
-        let backend = linux_backend_for(session);
+        let (revision_source, backend) = RevisionSource::for_session(session);
         Self {
-            revision_source: RevisionSource::for_session(session),
+            revision_source,
             backend,
             arboard_client: Mutex::new(None),
         }
@@ -330,20 +403,6 @@ impl ArboardClipboard {
 /// * No recognised display server → `unavailable`; the watcher
 ///   keeps polling and the rest of ClipVault stays available.
 #[cfg(target_os = "linux")]
-fn linux_backend_for(session: LinuxSession) -> ArboardBackend {
-    match session {
-        LinuxSession::Wayland => {
-            if cfg!(feature = "arboard-wayland-data-control") {
-                ArboardBackend::WaylandDataControl
-            } else {
-                ArboardBackend::XWaylandFallback
-            }
-        }
-        LinuxSession::X11 => ArboardBackend::X11,
-        LinuxSession::Unknown => ArboardBackend::Unavailable,
-    }
-}
-
 fn map_error(error: ArboardError) -> ClipboardBackendError {
     match error {
         ArboardError::ContentNotAvailable | ArboardError::ConversionFailure => {
@@ -568,13 +627,11 @@ impl ClipboardBackend for ArboardClipboard {
         self.revision_source.revision()
     }
 
-    /// One watcher observation: read the payload, then drain the
-    /// session-appropriate revision stream. On Linux X11 the
-    /// revision is event-derived from XFixes; on Wayland sessions
-    /// the adapter reports `ClipboardRevision::UNKNOWN` so the
-    /// watcher cannot use a stale XWayland counter to suppress a
-    /// fresh native capture. The fallback fingerprint comparison
-    /// preserves the existing dedupe semantics either way.
+    /// One watcher observation: read the payload, then read the
+    /// revision stream matching the selected transport. Linux X11
+    /// and XWayland fallback use XFixes; native Wayland uses
+    /// data-control selection events. An unavailable or disconnected
+    /// stream reports `UNKNOWN`, preserving the watcher state.
     ///
     /// The chosen transport is recorded through the metadata-only
     /// [`Self::backend_kind`] identifier; it never includes payload
@@ -747,6 +804,7 @@ mod tests {
         // diagnostics surface and the spec consume. A refactor that
         // renames any of them would break operator logs and the
         // frontend capability matrix; pin them here.
+        #[cfg(feature = "arboard-wayland-data-control")]
         assert_eq!(
             ArboardBackend::WaylandDataControl.stable_id(),
             "wayland_data_control"
@@ -757,24 +815,54 @@ mod tests {
             "xwayland_fallback"
         );
         assert_eq!(ArboardBackend::Unavailable.stable_id(), "unavailable");
+        #[cfg(feature = "arboard-wayland-data-control")]
+        assert_eq!(ArboardBackend::Unknown.stable_id(), "unknown");
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn wayland_session_selects_wayland_or_xwayland_backend() {
-        // The mapping pins the relationship between the
-        // `arboard-wayland-data-control` Cargo feature and the
-        // runtime session: a Wayland build with the feature picks
-        // `wayland_data_control`; without it the build falls back to
-        // XWayland and the diagnostics surface labels the choice
-        // explicitly so a missing capture can be correlated with the
-        // transport that was actually compiled.
-        let backend = linux_backend_for(LinuxSession::Wayland);
-        if cfg!(feature = "arboard-wayland-data-control") {
-            assert_eq!(backend, ArboardBackend::WaylandDataControl);
-        } else {
-            assert_eq!(backend, ArboardBackend::XWaylandFallback);
+    fn wayland_revision_source_matches_the_transport_probe() {
+        // Native data-control must use its own event stream. If the
+        // protocol is absent, arboard uses X11 and XFixes becomes the
+        // matching revision source. Failed probes stay unknown.
+        let (source, backend) = RevisionSource::for_session(LinuxSession::Wayland);
+        match &source {
+            #[cfg(feature = "arboard-wayland-data-control")]
+            RevisionSource::Wayland(_) => {
+                assert_eq!(backend, ArboardBackend::WaylandDataControl);
+            }
+            #[cfg(feature = "linux-x11")]
+            RevisionSource::X11(_) => {
+                assert_eq!(backend, ArboardBackend::XWaylandFallback);
+            }
+            RevisionSource::Fallback => {
+                #[cfg(feature = "arboard-wayland-data-control")]
+                assert!(matches!(
+                    backend,
+                    ArboardBackend::XWaylandFallback | ArboardBackend::Unknown
+                ));
+                #[cfg(not(feature = "arboard-wayland-data-control"))]
+                assert_eq!(backend, ArboardBackend::XWaylandFallback);
+                assert_eq!(source.revision(), ClipboardRevision::UNKNOWN);
+            }
         }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "arboard-wayland-data-control"))]
+    #[test]
+    fn wayland_probe_routes_to_native_fallback_or_unknown() {
+        assert!(matches!(
+            route_wayland_probe(Ok(Some(()))),
+            WaylandRevisionRoute::DataControl(())
+        ));
+        assert!(matches!(
+            route_wayland_probe::<()>(Ok(None)),
+            WaylandRevisionRoute::X11Fallback
+        ));
+        assert!(matches!(
+            route_wayland_probe::<()>(Err(())),
+            WaylandRevisionRoute::Unknown
+        ));
     }
 
     #[cfg(target_os = "linux")]
@@ -783,7 +871,8 @@ mod tests {
         // A native X11 session keeps the historical behaviour: the
         // XFixes ownership stream is the authoritative revision
         // source and the diagnostics label matches.
-        assert_eq!(linux_backend_for(LinuxSession::X11), ArboardBackend::X11);
+        let (_, backend) = RevisionSource::for_session(LinuxSession::X11);
+        assert_eq!(backend, ArboardBackend::X11);
     }
 
     #[cfg(target_os = "linux")]
@@ -793,25 +882,9 @@ mod tests {
         // a revision and the rest of ClipVault keeps running with
         // the local database.
         assert_eq!(
-            linux_backend_for(LinuxSession::Unknown),
+            RevisionSource::for_session(LinuxSession::Unknown).1,
             ArboardBackend::Unavailable
         );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn wayland_session_revision_source_skips_xfixes() {
-        // Contract: a Wayland session MUST NOT consult XFixes, even
-        // when the X11 feature is compiled in. An X11 ownership
-        // change does not prove a native Wayland clipboard change;
-        // using it as the authoritative revision would suppress a
-        // fresh native capture that XWayland never observed.
-        let source = RevisionSource::for_session(LinuxSession::Wayland);
-        assert!(
-            matches!(source, RevisionSource::Fallback),
-            "Wayland session must fall through to the fallback source"
-        );
-        assert_eq!(source.revision(), ClipboardRevision::UNKNOWN);
     }
 
     #[cfg(target_os = "linux")]
@@ -821,7 +894,7 @@ mod tests {
         // display server the adapter MUST report `UNKNOWN` rather
         // than fabricate a monotonic counter the watcher could use
         // to recreate a deleted capture.
-        let source = RevisionSource::for_session(LinuxSession::Unknown);
+        let (source, _) = RevisionSource::for_session(LinuxSession::Unknown);
         assert_eq!(source.revision(), ClipboardRevision::UNKNOWN);
     }
 
@@ -833,7 +906,7 @@ mod tests {
         // or falls back to the watcher fingerprint path. The
         // payload-free `revision()` accessor must NOT be used to
         // recreate a destructive baseline.
-        let source = RevisionSource::for_session(LinuxSession::X11);
+        let (source, _) = RevisionSource::for_session(LinuxSession::X11);
         match source {
             RevisionSource::X11(_) => {
                 // A live X11 connection is reachable on the host: the
@@ -846,6 +919,10 @@ mod tests {
                 // (CI sandbox, headless runner): the fallback must
                 // still refuse to claim a payload-free revision.
                 assert_eq!(source.revision(), ClipboardRevision::UNKNOWN);
+            }
+            #[cfg(feature = "arboard-wayland-data-control")]
+            RevisionSource::Wayland(_) => {
+                panic!("an X11 session must not select the Wayland revision stream");
             }
         }
     }
@@ -861,6 +938,7 @@ mod tests {
             "x11",
             "xwayland_fallback",
             "unavailable",
+            "unknown",
         ];
         // Constructing the adapter is fine in the test sandbox
         // because the constructor only inspects environment

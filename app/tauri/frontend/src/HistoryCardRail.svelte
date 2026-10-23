@@ -40,6 +40,8 @@
   } from "./lib/multiSelection.ts";
 
   export let entries: EntryRecord[] = [];
+  export let previewBatchId: number = 0;
+  export let onPreviewReady: (entryId: number, batchId: number) => void = () => {};
   export let allTags: Tag[] = [];
   export let allCollections: Collection[] = [];
   export let activeCollectionId: number | null = null;
@@ -600,6 +602,8 @@
     {#each entries as entry (entry.id)}
       <HistoryCard
         {entry}
+        {previewBatchId}
+        {onPreviewReady}
         peerImportedSourceApp={peerImportedSourceApps.get(entry.id) ?? null}
         hasNote={entryNoteIds.has(entry.id)}
         assignedTags={lookupTags(entry.id)}

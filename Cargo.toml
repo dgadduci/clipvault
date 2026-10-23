@@ -49,6 +49,13 @@ sha2 = "0.10"
 flate2 = "1"
 global-hotkey = "0.6"
 x11rb = "0.13"
+# Wayland clipboard revision monitoring. These crates are already pulled in
+# transitively by arboard's wl-clipboard-rs backend; direct workspace entries
+# let clipvault-platform subscribe to selection ownership events without
+# reading clipboard contents.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # Direct dependency on the dynamic Xlib loader used by the
 # `linux-x11-quick-paste-thread-safety` change to call `XInitThreads`
 # before any other component opens Xlib. The same crate is already
