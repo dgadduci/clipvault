@@ -34,7 +34,6 @@
     Tag,
     CollectionFilter,
     TagFilter,
-    TagFilterOption,
   } from "./types";
   import type { ContentTypeValue } from "./lib/contentType.ts";
   import {
@@ -62,6 +61,7 @@
     collectionsClearPreviewCommand,
     collectionsRenameCommand,
     collectionsSetColorCommand,
+    collectionTagFilterIdsCommand,
     contentTypesCommand,
     exportEntriesPdfCommand,
     PDF_EXPORT_GENERATION_COMPLETE_EVENT,
@@ -129,6 +129,7 @@
     applyCodeLanguageToDesktopProjections,
   } from "./lib/codeLanguageProjections";
   import { projectSubcollectionVisibility } from "./lib/subcollectionVisibility";
+  import { historyCollectionFilterOptions } from "./lib/collectionTree";
   import {
     matchesSearchShortcut,
     searchShortcutAccessibleLabel,
@@ -378,6 +379,10 @@
    * rail byte-for-byte so the new facet is purely additive.
    */
   let tagFilter: TagFilter = { kind: "all" };
+  let tagFilterOptionIds: number[] = [];
+  let tagFilterOptionsLoadedScopeKey: string | null = null;
+  let tagFilterOptionsRequestScopeKey: string | null = null;
+  let tagFilterOptionsToken = 0;
   /** Additional collection facet; only selectable while the sidebar is on History. */
   let collectionFilter: CollectionFilter = { kind: "all" };
   /** Capture type selected for the active local collection scope. */
@@ -397,42 +402,16 @@
   } | null = null;
   /** Complete distinct types in the active scope, independent of rail paging. */
   let contentTypeOptions: ContentTypeValue[] = [];
-  /**
-   * Tag combobox options. The desktop derives them from the active
-   * scope (`Historial` or the active collection) using the
-   * `entryOrganization` cache the parent already hydrates for the
-   * per-card chips. The set is recomputed reactively on every
-   * cache change so a freshly created tag the user just assigned
-   * immediately becomes a selectable option without a second
-   * round-trip.
-   */
-  $: tagFilterOptions = ((): TagFilterOption[] => {
-    const lookup = new Map<number, TagFilterOption>();
-    for (const [entryId, value] of entryOrganization) {
-      if (entryOrganizationHydration.get(entryId) !== "loaded") continue;
-      for (const tag of value.tags) {
-        if (!lookup.has(tag.id)) {
-          lookup.set(tag.id, { id: tag.id, display_name: tag.display_name });
-        }
-      }
-    }
-    const selectedTagId = tagFilter.kind === "tag" ? tagFilter.tagId : null;
-    if (selectedTagId !== null && !lookup.has(selectedTagId)) {
-      const selectedTag = organization?.tags.find((tag) => tag.id === selectedTagId);
-      if (selectedTag) {
-        lookup.set(selectedTag.id, {
-          id: selectedTag.id,
-          display_name: selectedTag.display_name,
-        });
-      }
-    }
-    return Array.from(lookup.values()).sort((a, b) =>
+  /** Tag options come from a full-scope metadata query, not the paged rail. */
+  $: tagFilterOptions = (organization?.tags ?? [])
+    .filter((tag) => tagFilterOptionIds.includes(tag.id))
+    .map((tag) => ({ id: tag.id, display_name: tag.display_name }))
+    .sort((a, b) =>
       a.display_name.toLowerCase().localeCompare(b.display_name.toLowerCase()),
     );
-  })();
-  $: collectionFilterOptions = (organization?.collections ?? [])
-    .filter((collection) => collection.kind === "user")
-    .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  $: collectionFilterOptions = historyCollectionFilterOptions(
+    organization?.collections ?? [],
+  );
   $: {
     const selectedCollectionFilterId = collectionFilter.kind === "collection"
       ? collectionFilter.collectionId
@@ -597,12 +576,56 @@
     return scope?.kind === "system";
   }
 
-  function hidesSharedSubcollectionCaptures(collectionId: number | null): boolean {
-    return collectionId !== null &&
-      hiddenSubcollectionCaptureCollectionIds.has(collectionId) &&
-      (organization?.collections ?? []).some(
-        (collection) => collection.parent_id === collectionId,
-      );
+  function tagFilterScope(): {
+    collectionId: number | null;
+    unassignedOnly: boolean;
+    key: string;
+  } {
+    const collectionId = entriesCollectionId(selectedCollectionId);
+    const unassignedOnly = entriesUnassignedOnly(selectedCollectionId);
+    return {
+      collectionId,
+      unassignedOnly,
+      key: `${collectionId ?? "history"}:${unassignedOnly ? "unassigned" : "all"}`,
+    };
+  }
+
+  async function refreshTagFilterOptions(force = false): Promise<void> {
+    const scope = tagFilterScope();
+    if (
+      !force &&
+      (tagFilterOptionsLoadedScopeKey === scope.key ||
+        tagFilterOptionsRequestScopeKey === scope.key)
+    ) {
+      return;
+    }
+    if (tagFilterOptionsLoadedScopeKey !== scope.key) {
+      tagFilterOptionIds = [];
+      tagFilterOptionsLoadedScopeKey = null;
+    }
+    const token = ++tagFilterOptionsToken;
+    tagFilterOptionsRequestScopeKey = scope.key;
+    try {
+      const ids = await collectionTagFilterIdsCommand({
+        collectionId: scope.collectionId,
+        unassignedOnly: scope.unassignedOnly,
+      });
+      if (token !== tagFilterOptionsToken || tagFilterScope().key !== scope.key) {
+        return;
+      }
+      tagFilterOptionIds = ids;
+      tagFilterOptionsLoadedScopeKey = scope.key;
+    } catch {
+      if (token === tagFilterOptionsToken) {
+        if (tagFilterOptionsLoadedScopeKey !== scope.key) {
+          tagFilterOptionIds = [];
+        }
+      }
+    } finally {
+      if (token === tagFilterOptionsToken) {
+        tagFilterOptionsRequestScopeKey = null;
+      }
+    }
   }
 
   $: canCreateManualText = activePeerId === null && (
@@ -911,17 +934,24 @@
     // only one entry keeps the existing `loaded` state of every
     // other card, which is the contract `toggleFavorite` relies on.
     const token = ++entryOrganizationHydrationToken;
+    // During a search, `entries` remains the paginated collection page
+    // while `visibleEntries` contains the independently ranked search page.
+    // Reconcile to the rows the rail actually renders so a routine
+    // collection-page refresh cannot drop search-hit metadata from the cache.
+    const organizationVisibleEntries = isFiltering ? visibleEntries : entries;
     const reconciled = reconcileEntryOrganizationToVisible(
       entryOrganization,
       entryOrganizationHydration,
-      entries,
+      organizationVisibleEntries,
     );
     entryOrganization = reconciled.nextOrganization;
     entryOrganizationHydration = reconciled.nextHydration;
 
-    const pendingVisibleEntries = selectPendingEntries(entries, entryOrganizationHydration, {
-      force: options.force,
-    });
+    const pendingVisibleEntries = selectPendingEntries(
+      organizationVisibleEntries,
+      entryOrganizationHydration,
+      { force: options.force },
+    );
     const pendingAdditionalEntries = options.additionalEntries === undefined
       ? []
       : selectPendingEntries(
@@ -1226,6 +1256,7 @@
   }
 
   async function refreshEntries(): Promise<void> {
+    void refreshTagFilterOptions();
     const page = Math.max(1, localPage);
     localPage = page;
     const requestToken = ++entriesLoadToken;
@@ -1431,6 +1462,7 @@
           next.collectionId === collectionFilter.collectionId;
     if (sameSelection) return;
     collectionFilter = next;
+    tagFilter = { kind: "all" };
     selectedContentType = null;
     contentTypeOptions = [];
     localPage = 1;
@@ -2241,6 +2273,7 @@
 
   async function refreshOrganizationForAllEntries(): Promise<void> {
     await refreshOrganization();
+    await refreshTagFilterOptions(true);
     await hydrateEntryOrganization(entries, { force: true });
     await refreshUnorganizedClearableCount();
   }
@@ -2725,12 +2758,11 @@
         .filter((record) => record !== undefined);
       localHasNextPage = records.length > previewPageSize;
       const pageRecords = records.slice(0, previewPageSize);
-      if (hidesSharedSubcollectionCaptures(selectedCollectionId)) {
-        // Search hits can fall outside the recent-entry cache. Load only
-        // their metadata-only memberships before applying the child filter.
-        await hydrateEntryOrganization(entries, { additionalEntries: pageRecords });
-        if (token !== searchToken) return;
-      }
+      // Search hits can fall outside the paginated collection cache.
+      // Hydrate their labels for every search; subcollection visibility
+      // only affects which results are shown, not which cards need metadata.
+      await hydrateEntryOrganization(entries, { additionalEntries: pageRecords });
+      if (token !== searchToken) return;
       visibleEntries = pageRecords;
       void refreshPeerImportedSourceApps(pageRecords);
       searchStatus = pageRecords.length === 0 ? "no_matches" : "ok";

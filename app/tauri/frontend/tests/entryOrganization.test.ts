@@ -190,9 +190,9 @@ test("App.svelte::hydrateEntryOrganization relies on the pure helpers", () => {
   );
   assert.match(
     source,
-    /reconcileEntryOrganizationToVisible\(\s*entryOrganization,\s*entryOrganizationHydration,\s*entries/,
+    /reconcileEntryOrganizationToVisible\(\s*entryOrganization,\s*entryOrganizationHydration,\s*organizationVisibleEntries/,
   );
-  assert.match(source, /selectPendingEntries\(entries, entryOrganizationHydration/);
+  assert.match(source, /selectPendingEntries\(\s*organizationVisibleEntries,\s*entryOrganizationHydration/);
   assert.match(
     source,
     /markEntriesPending\(\s*entryOrganizationHydration,\s*pendingEntries/,
@@ -200,6 +200,36 @@ test("App.svelte::hydrateEntryOrganization relies on the pure helpers", () => {
   assert.match(
     source,
     /applyEntryOrganizationResults\(\s*entryOrganization,\s*entryOrganizationHydration,\s*results/,
+  );
+});
+
+test("search results are hydrated and remain the organization cache scope", () => {
+  const source = stripComments(
+    loadFixture(path.join(FRONTEND_ROOT, "src/App.svelte")),
+  );
+  const hydration = source.match(
+    /async function hydrateEntryOrganization\([\s\S]*?\n  \}/,
+  );
+  assert.ok(hydration, "the shared organization hydration function must exist");
+  assert.match(
+    hydration?.[0] ?? "",
+    /const organizationVisibleEntries = isFiltering \? visibleEntries : entries/,
+    "active search cards, not the unrelated base page, must anchor cache reconciliation",
+  );
+
+  const search = source.match(
+    /async function performSearch\([\s\S]*?\n  \}/,
+  );
+  assert.ok(search, "the shared desktop search function must exist");
+  assert.match(
+    search?.[0] ?? "",
+    /await hydrateEntryOrganization\(entries,\s*\{\s*additionalEntries:\s*pageRecords\s*\}\)/,
+    "every result page must request tags and collection memberships",
+  );
+  assert.doesNotMatch(
+    search?.[0] ?? "",
+    /hidesSharedSubcollectionCaptures/,
+    "label hydration must not depend on the subcollection visibility setting",
   );
 });
 

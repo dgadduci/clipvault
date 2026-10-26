@@ -2779,6 +2779,20 @@ pub fn clipvault_entry_tags(
 }
 
 #[tauri::command]
+pub fn clipvault_tag_filter_ids(
+    state: State<'_, SharedState>,
+    collection_id: Option<i64>,
+    unassigned_only: bool,
+) -> Result<Vec<i64>, CommandError> {
+    // Read-only aggregation across the full collection scope; never emits.
+    state
+        .context()
+        .organization()
+        .tag_ids_in_scope(state.context(), collection_id, unassigned_only)
+        .map_err(organization_command_error)
+}
+
+#[tauri::command]
 pub fn clipvault_entry_collections_set(
     state: State<'_, SharedState>,
     handle: AppHandle<tauri::Wry>,

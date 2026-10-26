@@ -156,6 +156,19 @@ impl OrganizationService {
         Ok(repo.list_tags()?)
     }
 
+    /// Return distinct tags used in the full collection scope. The database
+    /// query is metadata-only and deliberately independent of rail paging.
+    pub fn tag_ids_in_scope(
+        &self,
+        context: &AppContext,
+        collection_id: Option<i64>,
+        unassigned_only: bool,
+    ) -> Result<Vec<i64>, OrganizationServiceError> {
+        let mut db = context.database().lock();
+        let repo = OrganizationRepository::new(db.connection_mut());
+        Ok(repo.tag_ids_in_scope(collection_id, unassigned_only)?)
+    }
+
     pub fn find_tag(
         &self,
         context: &AppContext,

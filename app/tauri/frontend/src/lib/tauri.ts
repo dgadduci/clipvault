@@ -1262,6 +1262,15 @@ export const entryTagsCommand: ClipvaultCommandArg<
   { entryId: number }
 > = (args) => invoke<number[]>("clipvault_entry_tags", { entryId: args.entryId });
 
+export const collectionTagFilterIdsCommand: ClipvaultCommandArg<
+  number[],
+  { collectionId: number | null; unassignedOnly: boolean }
+> = (args) =>
+  invoke<number[]>("clipvault_tag_filter_ids", {
+    collectionId: args.collectionId,
+    unassignedOnly: args.unassignedOnly,
+  });
+
 export const entryCollectionsSetCommand: ClipvaultCommandArg<
   number[],
   { entryId: number; collectionIds: number[] }

@@ -768,6 +768,51 @@ impl<'a> OrganizationRepository<'a> {
         Ok(out)
     }
 
+    /// Return distinct tag ids used by captures in a collection scope.
+    /// This aggregation intentionally has no pagination so filter options
+    /// represent the full scope rather than the currently visible rail page.
+    /// With no collection and `unassigned_only = false`, it covers all
+    /// History captures; the unassigned branch ignores the system History
+    /// membership and excludes any user collection membership.
+    pub fn tag_ids_in_scope(
+        &self,
+        collection_id: Option<i64>,
+        unassigned_only: bool,
+    ) -> Result<Vec<i64>, OrganizationError> {
+        let sql = if collection_id.is_some() {
+            "SELECT DISTINCT entry_tags.tag_id
+             FROM entry_tags
+             JOIN entry_collections
+               ON entry_collections.entry_id = entry_tags.entry_id
+             WHERE entry_collections.collection_id = ?1
+             ORDER BY entry_tags.tag_id ASC"
+        } else if unassigned_only {
+            "SELECT DISTINCT entry_tags.tag_id
+             FROM entry_tags
+             WHERE NOT EXISTS (
+               SELECT 1
+                 FROM entry_collections
+                 JOIN collections ON collections.id = entry_collections.collection_id
+                WHERE entry_collections.entry_id = entry_tags.entry_id
+                  AND collections.kind = 'user'
+             )
+             ORDER BY entry_tags.tag_id ASC"
+        } else {
+            "SELECT DISTINCT tag_id
+             FROM entry_tags
+             ORDER BY tag_id ASC"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = if let Some(collection_id) = collection_id {
+            stmt.query_map(params![collection_id], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(rows)
+    }
+
     pub fn find_tag(&self, id: i64) -> Result<Option<Tag>, OrganizationError> {
         let record = self
             .conn
@@ -2193,6 +2238,85 @@ mod tests {
         );
         let mut repo = EntryRepository::new(conn);
         repo.insert_or_touch(new).expect("insert").record().id
+    }
+
+    #[test]
+    fn tag_ids_in_scope_cover_all_captures_and_respect_collection_scope() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let parent_first = insert_text_entry(db.connection_mut(), "parent first", when);
+        let parent_later = insert_text_entry(db.connection_mut(), "parent later", when);
+        let child_entry = insert_text_entry(db.connection_mut(), "child", when);
+        let other_entry = insert_text_entry(db.connection_mut(), "other", when);
+        let unassigned_entry = insert_text_entry(db.connection_mut(), "unassigned", when);
+
+        let mut org = OrganizationRepository::new(db.connection_mut());
+        let parent = org
+            .create_user_collection("Principal", HISTORY_DEFAULT_COLOR_HEX, when)
+            .expect("parent collection");
+        let child = org
+            .create_subcollection(parent.id, "Hija", HISTORY_DEFAULT_COLOR_HEX, when)
+            .expect("subcollection");
+        let other = org
+            .create_user_collection("Otra", HISTORY_DEFAULT_COLOR_HEX, when)
+            .expect("other collection");
+
+        org.replace_entry_collections(parent_first, &[parent.id], when)
+            .expect("assign first parent capture");
+        org.replace_entry_collections(parent_later, &[parent.id], when)
+            .expect("assign later parent capture");
+        org.replace_entry_collections(child_entry, &[child.id], when)
+            .expect("assign child capture");
+        org.replace_entry_collections(other_entry, &[other.id], when)
+            .expect("assign other capture");
+        org.replace_entry_collections(unassigned_entry, &[], when)
+            .expect("keep last capture unassigned");
+
+        let parent_tag = org
+            .upsert_and_assign_tag(parent_first, "Parent tag", when)
+            .expect("parent tag");
+        org.upsert_and_assign_tag(parent_later, "Parent tag", when)
+            .expect("reuse parent tag");
+        let later_tag = org
+            .upsert_and_assign_tag(parent_later, "Later page tag", when)
+            .expect("later page tag");
+        let child_tag = org
+            .upsert_and_assign_tag(child_entry, "Child tag", when)
+            .expect("child tag");
+        let other_tag = org
+            .upsert_and_assign_tag(other_entry, "Other tag", when)
+            .expect("other tag");
+        let unassigned_tag = org
+            .upsert_and_assign_tag(unassigned_entry, "Unassigned tag", when)
+            .expect("unassigned tag");
+
+        assert_eq!(
+            org.tag_ids_in_scope(Some(parent.id), false)
+                .expect("parent scope tags"),
+            vec![parent_tag.id, later_tag.id],
+            "all parent captures contribute distinct tags, without a page limit",
+        );
+        assert_eq!(
+            org.tag_ids_in_scope(Some(child.id), false)
+                .expect("child scope tags"),
+            vec![child_tag.id],
+        );
+        assert_eq!(
+            org.tag_ids_in_scope(None, false)
+                .expect("all History scope tags"),
+            vec![
+                parent_tag.id,
+                later_tag.id,
+                child_tag.id,
+                other_tag.id,
+                unassigned_tag.id,
+            ],
+        );
+        assert_eq!(
+            org.tag_ids_in_scope(None, true)
+                .expect("unassigned History scope tags"),
+            vec![unassigned_tag.id],
+        );
     }
 
     #[test]

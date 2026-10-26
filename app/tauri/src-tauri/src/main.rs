@@ -283,6 +283,7 @@ fn main() {
             commands::clipvault_tags_delete,
             commands::clipvault_entry_collections,
             commands::clipvault_entry_tags,
+            commands::clipvault_tag_filter_ids,
             commands::clipvault_entry_collections_set,
             commands::clipvault_entry_tags_set,
             commands::clipvault_entry_upsert_tag,

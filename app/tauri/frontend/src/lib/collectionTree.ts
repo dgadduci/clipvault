@@ -52,3 +52,26 @@ export function collectionChildren(
       left.name.toLowerCase().localeCompare(right.name.toLowerCase()),
     );
 }
+
+/**
+ * Build the History collection filter options. Every user collection is
+ * selectable; child labels include their parent so similarly named rows can
+ * be identified without changing the collection id used by the filter.
+ */
+export function historyCollectionFilterOptions(
+  collections: readonly Collection[],
+): Collection[] {
+  const byId = new Map(collections.map((collection) => [collection.id, collection]));
+  return collections
+    .filter((collection) => collection.kind === "user")
+    .map((collection) => {
+      if (collection.parent_id == null) return collection;
+      const parent = byId.get(collection.parent_id);
+      return parent
+        ? { ...collection, name: `${parent.name} / ${collection.name}` }
+        : collection;
+    })
+    .sort((left, right) =>
+      left.name.toLowerCase().localeCompare(right.name.toLowerCase()),
+    );
+}

@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { visibleCollectionRows } from "../src/lib/collectionTree.ts";
+import {
+  historyCollectionFilterOptions,
+  visibleCollectionRows,
+} from "../src/lib/collectionTree.ts";
 import { collectionsCreateSubcollectionCommand } from "../src/lib/tauri.ts";
 import type { Collection } from "../src/types.ts";
 
@@ -58,6 +61,24 @@ test("collapsed roots hide children without changing other roots", () => {
     [
       ["Otra", 1],
       ["Principal", 1],
+    ],
+  );
+});
+
+test("History collection filter includes subcollections with their parent label", () => {
+  const options = historyCollectionFilterOptions([
+    collection(1, "Historial", null, "system"),
+    collection(2, "Trabajo"),
+    collection(3, "Clientes", 2),
+    collection(4, "Archivo"),
+  ]);
+
+  assert.deepEqual(
+    options.map(({ id, name }) => [id, name]),
+    [
+      [4, "Archivo"],
+      [2, "Trabajo"],
+      [3, "Trabajo / Clientes"],
     ],
   );
 });

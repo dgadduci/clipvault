@@ -197,18 +197,28 @@ test("App resets the tag filter when switching collections", () => {
   );
 });
 
-test("App derives tagFilterOptions from the entryOrganization cache", () => {
-  // The desktop MUST derive the combobox options from the
-  // per-entry cache the parent already hydrates, not from a
-  // second bridge call. The reactive declaration is the
-  // single source of truth for the visible list.
+test("App derives tagFilterOptions from the full collection tag query", () => {
+  // The option set must come from a collection-wide metadata query,
+  // not from tags hydrated only for the currently paged cards.
   assert.ok(
     /tagFilterOptions\s*=\s*\(/.test(appSource),
     "App.svelte must derive tagFilterOptions reactively",
   );
   assert.ok(
-    /entryOrganization/.test(appSource),
-    "App.svelte must read the per-entry cache to build the options",
+    /tagFilterOptionIds\.includes\(tag\.id\)/.test(appSource),
+    "App.svelte must map collection-wide tag ids to display labels",
+  );
+  assert.ok(
+    /collectionTagFilterIdsCommand/.test(appSource),
+    "App.svelte must query the full scope independently of the current page",
+  );
+  assert.ok(
+    /async function refreshTagFilterOptions[\s\S]*?entriesCollectionId\(selectedCollectionId\)[\s\S]*?entriesUnassignedOnly\(selectedCollectionId\)/.test(appSource),
+    "tag options must follow the active collection or unassigned History scope",
+  );
+  assert.ok(
+    /async function refreshEntries\(\): Promise<void> \{\s*void refreshTagFilterOptions\(\)/.test(appSource),
+    "scope changes must refresh the tag options with the collection view",
   );
   assert.ok(
     /display_name/.test(appSource),
