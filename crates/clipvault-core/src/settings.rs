@@ -44,7 +44,17 @@ pub const LOCAL_CLIPBOARD_CAPTURE_ENABLED_KEY: &str = "local_clipboard_capture_e
 /// fetch responses. Missing or malformed values stay disabled.
 pub const CAPTURE_NOTES_SHARING_ENABLED_KEY: &str = "capture_notes_sharing_enabled";
 pub const LANGUAGE_SETTING_KEY: &str = "language";
+pub const PREVIEW_PAGE_SIZE_SETTING_KEY: &str = "preview_page_size";
+pub const DEFAULT_PREVIEW_PAGE_SIZE: u16 = 20;
+pub const MIN_PREVIEW_PAGE_SIZE: u16 = 1;
+pub const MAX_PREVIEW_PAGE_SIZE: u16 = 50;
 pub const SUPPORTED_LANGUAGES: [&str; 5] = ["en", "es", "pt", "de", "fr"];
+
+pub fn parse_preview_page_size(raw: Option<&str>) -> u16 {
+    raw.and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|value| (MIN_PREVIEW_PAGE_SIZE..=MAX_PREVIEW_PAGE_SIZE).contains(value))
+        .unwrap_or(DEFAULT_PREVIEW_PAGE_SIZE)
+}
 
 pub fn parse_language(raw: Option<&str>) -> &'static str {
     match raw.map(str::trim) {
@@ -127,6 +137,9 @@ pub struct Settings {
     /// by default and independent of whether this device accepts notes.
     #[serde(default)]
     pub capture_notes_sharing_enabled: bool,
+    /// Number of local and linked-device previews shown in one page.
+    #[serde(default = "default_preview_page_size")]
+    pub preview_page_size: u16,
 }
 
 impl Settings {
@@ -144,12 +157,17 @@ impl Settings {
             // itself on the LAN.
             local_peer_sharing_enabled: false,
             capture_notes_sharing_enabled: false,
+            preview_page_size: DEFAULT_PREVIEW_PAGE_SIZE,
         }
     }
 }
 
 fn default_language() -> String {
     "en".to_string()
+}
+
+fn default_preview_page_size() -> u16 {
+    DEFAULT_PREVIEW_PAGE_SIZE
 }
 
 /// Hotkey specification stored in `app_settings`. Mirrors
@@ -278,6 +296,8 @@ pub struct SettingsUpdate {
     pub local_peer_sharing_enabled: Option<bool>,
     /// Whether explicitly fetched captures may include their attached note.
     pub capture_notes_sharing_enabled: Option<bool>,
+    /// Shared number of local and linked-device previews per page.
+    pub preview_page_size: Option<u16>,
 }
 
 impl SettingsUpdate {
@@ -294,6 +314,7 @@ impl SettingsUpdate {
             && self.local_peer_display_name.is_none()
             && self.local_peer_sharing_enabled.is_none()
             && self.capture_notes_sharing_enabled.is_none()
+            && self.preview_page_size.is_none()
     }
 
     /// Validate the update against the current [`Settings`]. Returns
@@ -307,6 +328,7 @@ impl SettingsUpdate {
             && self.local_peer_display_name.is_none()
             && self.local_peer_sharing_enabled.is_none()
             && self.capture_notes_sharing_enabled.is_none()
+            && self.preview_page_size.is_none()
         {
             return Err(ValidationError::empty());
         }
@@ -360,6 +382,12 @@ impl SettingsUpdate {
         }
         if let Some(enabled) = self.capture_notes_sharing_enabled {
             next.capture_notes_sharing_enabled = enabled;
+        }
+        if let Some(page_size) = self.preview_page_size {
+            if !(MIN_PREVIEW_PAGE_SIZE..=MAX_PREVIEW_PAGE_SIZE).contains(&page_size) {
+                return Err(ValidationError::invalid_preview_page_size());
+            }
+            next.preview_page_size = page_size;
         }
         Ok(next)
     }
@@ -486,6 +514,17 @@ impl ValidationError {
             message: "language is not supported".to_string(),
         }
     }
+
+    pub fn invalid_preview_page_size() -> Self {
+        Self {
+            code: ValidationCode::InvalidPreviewPageSize,
+            field: "preview_page_size",
+            message: format!(
+                "preview page size must be between {} and {}",
+                MIN_PREVIEW_PAGE_SIZE, MAX_PREVIEW_PAGE_SIZE
+            ),
+        }
+    }
 }
 
 impl fmt::Display for ValidationError {
@@ -506,6 +545,7 @@ pub enum ValidationCode {
     InvalidPeerDisplayName,
     PeerDisplayNameTooLong,
     InvalidLanguage,
+    InvalidPreviewPageSize,
 }
 
 impl ValidationCode {
@@ -519,6 +559,7 @@ impl ValidationCode {
             ValidationCode::InvalidPeerDisplayName => "invalid_peer_display_name",
             ValidationCode::PeerDisplayNameTooLong => "peer_display_name_too_long",
             ValidationCode::InvalidLanguage => "invalid_language",
+            ValidationCode::InvalidPreviewPageSize => "invalid_preview_page_size",
         }
     }
 }
@@ -714,6 +755,7 @@ mod tests {
             local_peer_display_name: None,
             local_peer_sharing_enabled: false,
             capture_notes_sharing_enabled: false,
+            preview_page_size: DEFAULT_PREVIEW_PAGE_SIZE,
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains("\"retention\":\"days_90\""), "got {json}");
@@ -779,6 +821,44 @@ mod tests {
     }
 
     #[test]
+    fn preview_page_size_defaults_parses_and_validates_bounds() {
+        assert_eq!(Settings::defaults().preview_page_size, 20);
+        assert_eq!(parse_preview_page_size(None), DEFAULT_PREVIEW_PAGE_SIZE);
+        assert_eq!(parse_preview_page_size(Some(" 35 ")), 35);
+        assert_eq!(
+            parse_preview_page_size(Some("0")),
+            DEFAULT_PREVIEW_PAGE_SIZE
+        );
+        assert_eq!(
+            parse_preview_page_size(Some("51")),
+            DEFAULT_PREVIEW_PAGE_SIZE
+        );
+        assert_eq!(
+            parse_preview_page_size(Some("bad")),
+            DEFAULT_PREVIEW_PAGE_SIZE
+        );
+
+        let updated = SettingsUpdate {
+            preview_page_size: Some(35),
+            ..SettingsUpdate::default()
+        }
+        .validate(&Settings::defaults())
+        .expect("page size within supported range");
+        assert_eq!(updated.preview_page_size, 35);
+
+        for invalid in [0, MAX_PREVIEW_PAGE_SIZE + 1] {
+            let error = SettingsUpdate {
+                preview_page_size: Some(invalid),
+                ..SettingsUpdate::default()
+            }
+            .validate(&Settings::defaults())
+            .expect_err("out-of-range page size must be rejected");
+            assert_eq!(error.code, ValidationCode::InvalidPreviewPageSize);
+            assert_eq!(error.field, "preview_page_size");
+        }
+    }
+
+    #[test]
     fn settings_update_round_trips_through_serde() {
         let update = SettingsUpdate {
             retention: Some(RetentionPolicy::Days7),
@@ -789,6 +869,7 @@ mod tests {
             local_peer_display_name: Some(Some("Studio".to_string())),
             local_peer_sharing_enabled: Some(true),
             capture_notes_sharing_enabled: Some(true),
+            preview_page_size: Some(35),
         };
         let json = serde_json::to_string(&update).unwrap();
         let parsed: SettingsUpdate = serde_json::from_str(&json).expect("round-trip");

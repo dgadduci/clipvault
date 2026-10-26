@@ -30,10 +30,12 @@
 
   const dispatch = createEventDispatcher<{
     desktopIntegrationsRequested: void;
+    previewPageSizeChanged: { pageSize: number };
   }>();
 
   let captureEnabled: boolean | null = null;
   let shareNotesEnabled: boolean | null = null;
+  let previewPageSize = 20;
   let language: Locale = "en";
   let loading = false;
   let saving = false;
@@ -82,6 +84,7 @@
       if (currentRequest === requestId) {
         captureEnabled = enabled;
         shareNotesEnabled = settings.capture_notes_sharing_enabled ?? false;
+        previewPageSize = settings.preview_page_size ?? 20;
         language = settings.language;
       }
     } catch (loadError) {
@@ -105,6 +108,31 @@
       shareNotesEnabled = settings.capture_notes_sharing_enabled ?? false;
     } catch (saveError) {
       shareNotesEnabled = previous;
+      errorKey = "settings.error.saving";
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function savePreviewPageSize(event: Event): Promise<void> {
+    if (saving) return;
+    const input = event.currentTarget as HTMLInputElement;
+    const requested = Number(input.value);
+    if (!Number.isInteger(requested) || requested < 1 || requested > 50) {
+      errorKey = "settings.pagination.range_error";
+      return;
+    }
+
+    const previous = previewPageSize;
+    previewPageSize = requested;
+    saving = true;
+    errorKey = null;
+    try {
+      const settings = await settingsSetCommand({ preview_page_size: requested });
+      previewPageSize = settings.preview_page_size;
+      dispatch("previewPageSizeChanged", { pageSize: previewPageSize });
+    } catch {
+      previewPageSize = previous;
       errorKey = "settings.error.saving";
     } finally {
       saving = false;
@@ -221,6 +249,26 @@
       <option value="de">{$t("language.name.de")}</option>
       <option value="fr">{$t("language.name.fr")}</option>
     </select>
+  </article>
+  <article data-testid="preview-page-size-setting">
+    <h3>{$t("settings.pagination.title")}</h3>
+    <p class="muted">{$t("settings.pagination.description")}</p>
+    <label for="clipvault-preview-page-size">
+      {$t("settings.pagination.label")}
+    </label>
+    <input
+      id="clipvault-preview-page-size"
+      type="number"
+      min="1"
+      max="50"
+      step="1"
+      required
+      value={previewPageSize}
+      on:change={savePreviewPageSize}
+      disabled={saving || loading}
+      data-testid="preview-page-size-input"
+      aria-label={$t("settings.pagination.label")}
+    />
   </article>
   <article data-testid="clipboard-capture-setting">
     <h3>{$t("settings.capture.title")}</h3>

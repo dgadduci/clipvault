@@ -151,8 +151,8 @@ test("source-app combobox still drives refreshEntries on selection change", () =
   );
   assert.match(
     refreshBlock[0],
-    /entries = loadedEntries/,
-    "refreshEntries must publish the rows returned by loadEntries",
+    /localHasNextPage = loadedEntries\.length > previewPageSize;[\s\S]*?const pageEntries = loadedEntries\.slice\(0, previewPageSize\);[\s\S]*?entries = pageEntries/,
+    "refreshEntries must use the extra lookahead row to publish a bounded page",
   );
 });
 

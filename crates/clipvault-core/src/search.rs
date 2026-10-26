@@ -11,9 +11,7 @@
 use clipvault_db::{
     ContentType, EntryRecord, EntryRepository, EntryRepositoryError, SourceAppFilter,
 };
-use clipvault_search::{
-    LocalSearchEngine, SearchDocument, SearchEngine, SearchHit, SearchQuery, SearchResults,
-};
+use clipvault_search::{LocalSearchEngine, SearchDocument, SearchHit, SearchQuery, SearchResults};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -151,6 +149,28 @@ impl SearchService {
         content_type: Option<ContentType>,
         unassigned_only: bool,
     ) -> Result<SearchServiceOutcome, SearchServiceError> {
+        self.search_with_content_type_filter_and_unassigned_page(
+            context,
+            query,
+            filter,
+            content_type,
+            unassigned_only,
+            0,
+        )
+    }
+
+    /// Same filtered search with an offset applied after deterministic
+    /// relevance ordering. All candidates are scored before the page slice is
+    /// chosen, so adjacent pages share the exact same ranking.
+    pub fn search_with_content_type_filter_and_unassigned_page(
+        &self,
+        context: &AppContext,
+        query: &SearchQuery,
+        filter: &SearchFilter,
+        content_type: Option<ContentType>,
+        unassigned_only: bool,
+        offset: usize,
+    ) -> Result<SearchServiceOutcome, SearchServiceError> {
         let limit = clamp_limit(query.limit);
         let clamped_query = SearchQuery {
             text: query.text.clone(),
@@ -212,7 +232,7 @@ impl SearchService {
 
         let engine = LocalSearchEngine;
         let results = engine
-            .search(&clamped_query, &documents)
+            .search_page(&clamped_query, &documents, offset)
             .map_err(map_search_error)?;
 
         Ok(join_with_records(results, records))

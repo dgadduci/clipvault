@@ -88,6 +88,7 @@ export type ImageOutcome =
  */
 export function rowsForPartialOutcome(
   outcome: TextOutcome | ImageOutcome,
+  pageSize = MAX_COMBINED_PAGE_ROWS,
 ): RemoteRailRow[] | null {
   let rows: RemoteRailRow[];
   if (outcome.kind === "text" && outcome.response.kind === "ok") {
@@ -97,10 +98,7 @@ export function rowsForPartialOutcome(
   } else {
     return null;
   }
-  return sortNewestFirst(dedupeByRemoteEntryId(rows)).slice(
-    0,
-    MAX_COMBINED_PAGE_ROWS,
-  );
+  return sortNewestFirst(dedupeByRemoteEntryId(rows)).slice(0, clampPageSize(pageSize));
 }
 
 export interface PageState {
@@ -127,6 +125,14 @@ export interface ApplyOptions {
    * after all existing per-stream buffers have been promoted.
    */
   append: boolean;
+  /** Visible combined rows. Defaults to the protocol maximum for old callers. */
+  pageSize?: number;
+}
+
+function clampPageSize(pageSize: number): number {
+  return Number.isFinite(pageSize)
+    ? Math.max(1, Math.min(MAX_COMBINED_PAGE_ROWS, Math.floor(pageSize)))
+    : MAX_COMBINED_PAGE_ROWS;
 }
 
 /**
@@ -215,7 +221,7 @@ export function applyResponses(
   // returned in the latest response, never from
   // `previous.rows` or `previous.{textBuffer,imageBuffer}`
   // (those rows have already been shown to the user).
-  void options;
+  const pageSize = clampPageSize(options.pageSize ?? MAX_COMBINED_PAGE_ROWS);
   // Surface a typed failure from whichever endpoint reported it
   // first. The renderer collapses the message into the copy it
   // shows next to the retry button.
@@ -331,8 +337,8 @@ export function applyResponses(
   const combined = sortNewestFirst(
     dedupeByRemoteEntryId(newTextRows.concat(newImageRows)),
   );
-  const visible: RemoteRailRow[] = combined.slice(0, MAX_COMBINED_PAGE_ROWS);
-  const hidden: RemoteRailRow[] = combined.slice(MAX_COMBINED_PAGE_ROWS);
+  const visible: RemoteRailRow[] = combined.slice(0, pageSize);
+  const hidden: RemoteRailRow[] = combined.slice(pageSize);
   const { textBuffer, imageBuffer } = splitByStream(hidden);
 
   const nextCursor =
@@ -415,14 +421,17 @@ function formatError(err: unknown): string {
  * up the promotion in a `reactive` block will always see the same
  * output the unit tests assert.
  */
-export function promoteBuffers(previous: PageState): PageState {
+export function promoteBuffers(
+  previous: PageState,
+  pageSize = MAX_COMBINED_PAGE_ROWS,
+): PageState {
   const combined = sortNewestFirst(
     dedupeByRemoteEntryId(
       previous.textBuffer.concat(previous.imageBuffer),
     ),
   );
-  const visible: RemoteRailRow[] = combined.slice(0, MAX_COMBINED_PAGE_ROWS);
-  const hidden: RemoteRailRow[] = combined.slice(MAX_COMBINED_PAGE_ROWS);
+  const visible: RemoteRailRow[] = combined.slice(0, clampPageSize(pageSize));
+  const hidden: RemoteRailRow[] = combined.slice(clampPageSize(pageSize));
   const { textBuffer, imageBuffer } = splitByStream(hidden);
   const textExhausted = previous.cursor.length === 0;
   const imageExhausted = previous.imageCursor.length === 0;

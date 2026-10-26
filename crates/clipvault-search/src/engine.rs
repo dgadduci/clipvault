@@ -119,6 +119,20 @@ impl SearchEngine for LocalSearchEngine {
         query: &SearchQuery,
         documents: &[SearchDocument<'_>],
     ) -> Result<SearchResults, SearchError> {
+        self.search_page(query, documents, 0)
+    }
+}
+
+impl LocalSearchEngine {
+    /// Search and return one slice of the deterministically ranked results.
+    /// The offset is applied only after scoring and sorting, so page changes
+    /// do not alter relevance order.
+    pub fn search_page(
+        &self,
+        query: &SearchQuery,
+        documents: &[SearchDocument<'_>],
+        offset: usize,
+    ) -> Result<SearchResults, SearchError> {
         let normalized = normalize_query(&query.text);
         if normalized.tokens.is_empty() {
             return Ok(SearchResults {
@@ -147,10 +161,10 @@ impl SearchEngine for LocalSearchEngine {
         }
 
         sort_hits(&mut scored, documents);
-        scored.truncate(limit);
+        let hits = scored.into_iter().skip(offset).take(limit).collect();
 
         Ok(SearchResults {
-            hits: scored,
+            hits,
             note: OK_NOTE.to_string(),
         })
     }
@@ -392,6 +406,26 @@ mod tests {
         ];
         let result = engine.search(&query("alpha", 2), &documents).unwrap();
         assert_eq!(result.hits.len(), 2);
+    }
+
+    #[test]
+    fn search_page_applies_offset_after_relevance_ordering() {
+        let engine = LocalSearchEngine;
+        let documents = vec![
+            doc(1, "shared phrase", "2026-01-01T00:00:00Z"),
+            doc(2, "shared phrase", "2026-01-02T00:00:00Z"),
+            doc(3, "shared phrase", "2026-01-03T00:00:00Z"),
+        ];
+        let page_query = query("shared phrase", 1);
+        let page_one = engine
+            .search_page(&page_query, &documents, 0)
+            .expect("page one");
+        let page_two = engine
+            .search_page(&page_query, &documents, 1)
+            .expect("page two");
+
+        assert_eq!(page_one.hits[0].entry_id, 3);
+        assert_eq!(page_two.hits[0].entry_id, 2);
     }
 
     #[test]

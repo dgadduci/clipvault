@@ -87,6 +87,7 @@
     recentEntriesFilteredCommand,
     refreshCapabilitiesCommand,
     searchEntriesCommand,
+    settingsGetCommand,
     setFavoriteCommand,
     kdeKwinIntegrationStatusCommand,
     sourceApplicationsCommand,
@@ -212,6 +213,9 @@
   let capabilities: Capabilities | null = null;
   let activeApp: ActiveApplicationResponse | null = null;
   let entries: EntryRecord[] = [];
+  let previewPageSize = 20;
+  let localPage = 1;
+  let localHasNextPage = false;
   let error: string | null = null;
   let loading = true;
   let collectionContentLoading = false;
@@ -439,6 +443,7 @@
       !collectionFilterOptions.some((collection) => collection.id === selectedCollectionFilterId)
     ) {
       collectionFilter = { kind: "all" };
+      localPage = 1;
       void refreshEntries();
     }
   }
@@ -450,6 +455,7 @@
       !organization.tags.some((tag) => tag.id === selectedTagFilterId)
     ) {
       tagFilter = { kind: "all" };
+      localPage = 1;
       void refreshEntries();
     }
   }
@@ -519,7 +525,6 @@
    */
   let dropInFlight: Set<string> = new Set();
   const SEARCH_DEBOUNCE_MS = 120;
-  const RAIL_LIMIT = 60;
   const PROGRESSIVE_ENTRY_HYDRATION_CONCURRENCY = 8;
 
   $: activeCollection = organization?.collections.find(
@@ -793,6 +798,8 @@
       diagnostics = await diagnosticsCommand();
       capabilities = await platformCapabilitiesCommand();
       activeApp = await activeApplicationCommand();
+      const settings = await settingsGetCommand();
+      previewPageSize = settings.preview_page_size ?? 20;
       await refreshOrganization();
       if (!organization) {
         throw new Error("Organization snapshot is unavailable");
@@ -845,7 +852,8 @@
    */
   async function loadEntries(): Promise<EntryRecord[]> {
     return recentEntriesFilteredCommand({
-      limit: RAIL_LIMIT,
+      limit: previewPageSize + 1,
+      offset: (localPage - 1) * previewPageSize,
       collectionId: entriesCollectionId(selectedCollectionId),
       tagIds: currentTagFilterIds(),
       sourceApp: sourceAppFilter,
@@ -1218,6 +1226,8 @@
   }
 
   async function refreshEntries(): Promise<void> {
+    const page = Math.max(1, localPage);
+    localPage = page;
     const requestToken = ++entriesLoadToken;
     const requestCollectionId = entriesCollectionId(selectedCollectionId);
     cancelActiveCollectionPreviewLoad();
@@ -1232,6 +1242,11 @@
         }).catch(() => null),
       ]);
       if (requestToken !== entriesLoadToken) return;
+      if (page > 1 && loadedEntries.length === 0) {
+        localPage = page - 1;
+        await refreshEntries();
+        return;
+      }
       contentTypeOptions = orderAvailableContentTypes(availableTypes ?? []);
       if (availableTypes === null) {
         organizationError = "app.error.generic";
@@ -1246,13 +1261,15 @@
         await refreshEntries();
         return;
       }
-      entries = loadedEntries;
+      localHasNextPage = loadedEntries.length > previewPageSize;
+      const pageEntries = loadedEntries.slice(0, previewPageSize);
+      entries = pageEntries;
       entryNoteIds = new Set(noteIds);
       if (searchQuery.trim().length > 0) {
         // A reload while the search filter is active must re-run the
         // search so the rail keeps reflecting the latest captures; a
         // stale list could otherwise hide rows the user expects to see.
-        await performSearch(searchQuery, { silent: true });
+        await performSearch(searchQuery, { silent: true, page });
         if (requestToken !== entriesLoadToken) return;
         clearingOldCollectionContent = false;
         await Promise.all([
@@ -1268,7 +1285,7 @@
         // (and their own image requests) render progressively.
         clearingOldCollectionContent = false;
         const previewBarrier = collectionSwitchInteractionLocked
-          ? beginCollectionPreviewLoad(loadedEntries, requestToken)
+          ? beginCollectionPreviewLoad(entries, requestToken)
           : null;
         if (collectionSwitchInteractionLocked) {
           await waitForPreviewRailPaint();
@@ -1358,6 +1375,7 @@
   async function handleSourceAppFilterChange(next: SourceAppFilter): Promise<void> {
     if (sameSourceAppFilter(next, sourceAppFilter)) return;
     sourceAppFilter = next;
+    localPage = 1;
     await refreshEntries();
   }
 
@@ -1397,6 +1415,7 @@
       return;
     }
     tagFilter = next;
+    localPage = 1;
     await refreshEntries();
   }
 
@@ -1414,6 +1433,7 @@
     collectionFilter = next;
     selectedContentType = null;
     contentTypeOptions = [];
+    localPage = 1;
     await refreshEntries();
   }
 
@@ -1422,6 +1442,29 @@
   ): Promise<void> {
     if (selectedContentType === next) return;
     selectedContentType = next;
+    localPage = 1;
+    await refreshEntries();
+  }
+
+  async function handlePreviewPageSizeChanged(
+    event: CustomEvent<{ pageSize: number }>,
+  ): Promise<void> {
+    const nextPageSize = Math.max(1, Math.min(50, Math.floor(event.detail.pageSize)));
+    if (nextPageSize === previewPageSize) return;
+    previewPageSize = nextPageSize;
+    localPage = 1;
+    await refreshEntries();
+  }
+
+  async function goToLocalPage(page: number): Promise<void> {
+    const nextPage = Math.max(1, Math.floor(page));
+    if (
+      nextPage === localPage ||
+      collectionContentLoading ||
+      (nextPage > localPage && !localHasNextPage)
+    ) return;
+    localPage = nextPage;
+    railSelectedEntryId = null;
     await refreshEntries();
   }
 
@@ -1714,6 +1757,8 @@
     collectionSwitchInteractionLocked = true;
     cancelActiveCollectionPreviewLoad();
     selectedCollectionId = targetCollectionId;
+    localPage = 1;
+    localHasNextPage = false;
     if (activePeerId === null) {
       updateActiveCaptureCollection(
         resolveActiveCaptureCollectionId(
@@ -2627,7 +2672,7 @@
 
   async function performSearch(
     query: string,
-    options: { silent?: boolean } = {},
+    options: { silent?: boolean; page?: number } = {},
   ): Promise<void> {
     const trimmed = query.trim();
     if (trimmed.length === 0) {
@@ -2655,7 +2700,8 @@
       invoke: async (q) => {
         const response: SearchResponse = await searchEntriesCommand({
           query: q,
-          limit: RAIL_LIMIT,
+          limit: previewPageSize + 1,
+          offset: ((options.page ?? localPage) - 1) * previewPageSize,
           collectionId: entriesCollectionId(selectedCollectionId),
           tagIds: currentTagFilterIds(),
           sourceApp: sourceAppFilter,
@@ -2677,15 +2723,17 @@
       const records = response.hits
         .map((hit) => hit.record)
         .filter((record) => record !== undefined);
+      localHasNextPage = records.length > previewPageSize;
+      const pageRecords = records.slice(0, previewPageSize);
       if (hidesSharedSubcollectionCaptures(selectedCollectionId)) {
         // Search hits can fall outside the recent-entry cache. Load only
         // their metadata-only memberships before applying the child filter.
-        await hydrateEntryOrganization(entries, { additionalEntries: records });
+        await hydrateEntryOrganization(entries, { additionalEntries: pageRecords });
         if (token !== searchToken) return;
       }
-      visibleEntries = records;
-      void refreshPeerImportedSourceApps(records);
-      searchStatus = records.length === 0 ? "no_matches" : "ok";
+      visibleEntries = pageRecords;
+      void refreshPeerImportedSourceApps(pageRecords);
+      searchStatus = pageRecords.length === 0 ? "no_matches" : "ok";
     } catch (err) {
       if (token !== searchToken) return;
       searchError = "app.search.failed";
@@ -2700,7 +2748,12 @@
 
   function handleSearchInput(value: string): void {
     searchQuery = value;
-    void performSearch(value);
+    localPage = 1;
+    if (value.trim().length === 0) {
+      void refreshEntries();
+    } else {
+      void performSearch(value);
+    }
   }
 
   // ---- Modal coordinator --------------------------------------------------
@@ -3495,11 +3548,14 @@
         {/if}
 
         {#if activePeerId !== null}
-          <RemoteHistoryRail
-            snapshot={peerSnapshot}
-            peerId={activePeerId}
-            onClose={() => closePeerRail()}
-          />
+          {#key previewPageSize}
+            <RemoteHistoryRail
+              snapshot={peerSnapshot}
+              peerId={activePeerId}
+              pageSize={previewPageSize}
+              onClose={() => closePeerRail()}
+            />
+          {/key}
         {:else}
           <div
             class="collection-content-stage"
@@ -3536,6 +3592,29 @@
                 onRequestPreview={(entry) => requestPreview(entry, document.activeElement instanceof HTMLElement ? document.activeElement : null)}
               />
             </div>
+            {#if localPage > 1 || localHasNextPage}
+              <div class="local-preview-pager" data-testid="local-preview-pager">
+                <button
+                  type="button"
+                  data-testid="local-preview-pager-prev"
+                  on:click={() => void goToLocalPage(localPage - 1)}
+                  disabled={localPage <= 1 || collectionContentLoading}
+                >
+                  {$t("remote.history.previous")}
+                </button>
+                <span data-testid="local-preview-page-indicator">
+                  {$t("settings.pagination.page_indicator", { page: localPage })}
+                </span>
+                <button
+                  type="button"
+                  data-testid="local-preview-pager-next"
+                  on:click={() => void goToLocalPage(localPage + 1)}
+                  disabled={!localHasNextPage || collectionContentLoading}
+                >
+                  {$t("remote.history.next")}
+                </button>
+              </div>
+            {/if}
             {#if collectionContentLoading || collectionSwitchInteractionLocked}
               <CircularLoadingIndicator
                 variant="overlay"
@@ -3927,6 +4006,7 @@
     platformOs={diagnostics?.platform_os ?? null}
     displayServer={diagnostics?.display_server ?? null}
     on:desktopIntegrationsRequested={onOpenDesktopIntegrations}
+    on:previewPageSizeChanged={handlePreviewPageSizeChanged}
   />
 </Modal>
 
@@ -4187,9 +4267,34 @@
     );
   }
 
-  :global(.collection-content-rail .rail) {
+  .local-preview-pager {
     display: flex;
-    flex-flow: row nowrap;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    min-height: 2.5rem;
+    color: var(--cv-text-secondary, #cbd5e1);
+  }
+
+  .local-preview-pager button {
+    border: 1px solid var(--cv-border, rgba(148, 163, 184, 0.35));
+    border-radius: 0.5rem;
+    padding: 0.35rem 0.65rem;
+    background: var(--cv-surface, rgba(30, 41, 59, 0.72));
+    color: inherit;
+    cursor: pointer;
+  }
+
+  .local-preview-pager button:disabled {
+    cursor: default;
+    opacity: 0.45;
+  }
+
+  :global(.collection-content-rail .rail) {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: var(--cv-card-size, 240px);
+    grid-template-rows: minmax(0, 1fr);
     width: 100%;
     height: 100%;
     min-width: 0;
@@ -4199,7 +4304,6 @@
   }
 
   :global(.collection-content-rail .rail .card) {
-    flex: 0 0 var(--cv-card-size, 240px);
     width: var(--cv-card-size, 240px);
     min-width: var(--cv-card-size, 240px);
     max-width: var(--cv-card-size, 240px);

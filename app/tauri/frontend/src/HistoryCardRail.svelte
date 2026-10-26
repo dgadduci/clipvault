@@ -639,13 +639,15 @@
    * The rail owns the only horizontal scrollbar the desktop exposes
    * for the cards. The previous layout let the cards push the desktop
    * itself to the right when the user had many captures because the
-   * flex row's intrinsic minimum was wider than the panel. The
-   * fix is structural:
+   * grid's intrinsic minimum was wider than the panel. The fix is
+   * structural:
    *
-   *   - `min-width: 0` is required for a flex child to shrink below
+   *   - `min-width: 0` is required for a grid child to shrink below
    *     its intrinsic content size. Without it, a wide rail could
    *     still grow the parent grid track and defeat the overflow
    *     boundary.
+   *   - `grid-auto-flow: column` and one explicit row keep every
+   *     capture in one horizontal line, including after pagination.
    *   - `width: 100%` keeps the rail pinned to its column.
    *   - `max-width: 100%` is a defensive cap for the rare case where
    *     a parent forgets to constrain the rail.
@@ -663,8 +665,10 @@
   .rail {
     --cv-card-size: 240px;
     box-sizing: border-box;
-    display: flex;
-    flex-flow: row nowrap;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: var(--cv-card-size);
+    grid-template-rows: minmax(0, 1fr);
     gap: 0.75rem;
     width: 100%;
     min-width: 0;
@@ -681,17 +685,15 @@
   }
 
   /*
-   * The card size is fixed through `--cv-card-size`. The `flex: 0 0`
-   * triple is the contract that keeps a card from being squeezed by
-   * the flex row (`flex-grow: 0`, `flex-shrink: 0`) while still
-   * respecting the explicit width. Without the `0 0` a card would
-   * shrink to fit the row and the squares would become rectangles.
+   * Each grid column and card share the same fixed size so a long
+   * page can scroll horizontally without squeezing cards into
+   * rectangles or adding a second row.
    */
   .rail :global(.card) {
-    flex: 0 0 var(--cv-card-size);
     width: var(--cv-card-size);
     min-width: var(--cv-card-size);
     max-width: var(--cv-card-size);
+    height: var(--cv-card-size);
     scroll-snap-align: start;
   }
 

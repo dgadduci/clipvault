@@ -1285,6 +1285,29 @@ impl<'a> EntryRepository<'a> {
             tag_ids,
             source_app,
             content_type,
+            None,
+        )
+    }
+
+    /// Paginated variant of [`Self::entries_filtered_by_content_type`]. The
+    /// filters and chronological ordering are applied before the SQL limit
+    /// and offset so adjacent pages cannot repeat or skip matching rows.
+    pub fn entries_page_filtered_by_content_type(
+        &self,
+        collection_id: Option<i64>,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
+        self.entries_filtered_with_membership_filter(
+            collection_id,
+            false,
+            tag_ids,
+            source_app,
+            content_type,
+            Some((limit, offset)),
         )
     }
 
@@ -1297,7 +1320,33 @@ impl<'a> EntryRepository<'a> {
         source_app: &SourceAppFilter,
         content_type: Option<ContentType>,
     ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
-        self.entries_filtered_with_membership_filter(None, true, tag_ids, source_app, content_type)
+        self.entries_filtered_with_membership_filter(
+            None,
+            true,
+            tag_ids,
+            source_app,
+            content_type,
+            None,
+        )
+    }
+
+    /// Paginated variant for unassigned History entries.
+    pub fn unassigned_entries_page_filtered_by_content_type(
+        &self,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
+        self.entries_filtered_with_membership_filter(
+            None,
+            true,
+            tag_ids,
+            source_app,
+            content_type,
+            Some((limit, offset)),
+        )
     }
 
     fn entries_filtered_with_membership_filter(
@@ -1307,6 +1356,7 @@ impl<'a> EntryRepository<'a> {
         tag_ids: &[i64],
         source_app: &SourceAppFilter,
         content_type: Option<ContentType>,
+        pagination: Option<(usize, usize)>,
     ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
         let mut sql = format!(
             "SELECT {ENTRY_COLUMNS}
@@ -1359,6 +1409,9 @@ impl<'a> EntryRepository<'a> {
             sql.push_str(&format!("({})", predicate.sql));
         }
         sql.push_str(" ORDER BY created_at DESC, id DESC");
+        if pagination.is_some() {
+            sql.push_str(" LIMIT ? OFFSET ?");
+        }
 
         let mut params_dyn: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(cid) = collection_id {
@@ -1378,6 +1431,10 @@ impl<'a> EntryRepository<'a> {
                 ScopedSourceAppParam::Text(text) => Box::new(text) as Box<dyn rusqlite::ToSql>,
                 ScopedSourceAppParam::Integer(value) => Box::new(value) as Box<dyn rusqlite::ToSql>,
             }));
+        }
+        if let Some((limit, offset)) = pagination {
+            params_dyn.push(Box::new(i64::try_from(limit.max(1)).unwrap_or(i64::MAX)));
+            params_dyn.push(Box::new(i64::try_from(offset).unwrap_or(i64::MAX)));
         }
         let bound: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|b| &**b).collect();
         let mut stmt = self.conn.prepare(&sql)?;
@@ -3574,6 +3631,59 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, url_id);
         assert_ne!(filtered[0].id, text_id);
+    }
+
+    #[test]
+    fn entries_page_filtered_by_content_type_uses_stable_offset_after_filters() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (older_url_id, newer_url_id) = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let older_url_id = repo
+                .insert_or_touch(new_entry_with_type("an older url", ContentType::Url, when))
+                .expect("older url")
+                .record()
+                .id;
+            let newer_url_id = repo
+                .insert_or_touch(new_entry_with_type("a newer url", ContentType::Url, when))
+                .expect("newer url")
+                .record()
+                .id;
+            repo.insert_or_touch(new_entry("unfiltered text", when))
+                .expect("text");
+            (older_url_id, newer_url_id)
+        };
+
+        let repo = EntryRepository::new(db.connection_mut());
+        let first_page = repo
+            .entries_page_filtered_by_content_type(
+                None,
+                &[],
+                &SourceAppFilter::default(),
+                Some(ContentType::Url),
+                1,
+                0,
+            )
+            .expect("first page");
+        let second_page = repo
+            .entries_page_filtered_by_content_type(
+                None,
+                &[],
+                &SourceAppFilter::default(),
+                Some(ContentType::Url),
+                1,
+                1,
+            )
+            .expect("second page");
+
+        assert_eq!(
+            first_page.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [newer_url_id]
+        );
+        assert_eq!(
+            second_page.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [older_url_id]
+        );
     }
 
     #[test]

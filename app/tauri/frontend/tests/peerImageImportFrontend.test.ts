@@ -716,6 +716,39 @@ test("behaviour: combined page never exceeds MAX_COMBINED_PAGE_ROWS", () => {
   );
 });
 
+test("behaviour: configured page size limits merged and promoted import previews", () => {
+  const textRows: PeerHistoryRow[] = [];
+  const imageRows: PeerImageBrowseRow[] = [];
+  for (let index = 0; index < 12; index += 1) {
+    textRows.push(buildTextRow(`sized-text-${index}`, `2026-02-${String(20 - index).padStart(2, "0")}T00:00:00Z`));
+    imageRows.push(buildImageRow(`sized-image-${index}`, `2026-01-${String(20 - index).padStart(2, "0")}T00:00:00Z`));
+  }
+
+  const pageSize = 7;
+  const firstPage = applyResponses(
+    { kind: "text", response: textOk(textRows, "text-next") },
+    { kind: "image", response: imageOk(imageRows, "image-next") },
+    emptyPage(),
+    { append: false, pageSize },
+  );
+  assert.equal(firstPage.rows.length, pageSize);
+  assert.equal(
+    firstPage.textBuffer.length + firstPage.imageBuffer.length,
+    textRows.length + imageRows.length - pageSize,
+  );
+
+  const secondPage = promoteBuffers(firstPage, pageSize);
+  assert.equal(secondPage.rows.length, pageSize);
+  assert.equal(secondPage.textBuffer.length + secondPage.imageBuffer.length, 10);
+  assert.equal(
+    new Set([
+      ...firstPage.rows.map((row) => row.row.remote_entry_id),
+      ...secondPage.rows.map((row) => row.row.remote_entry_id),
+    ]).size,
+    firstPage.rows.length + secondPage.rows.length,
+  );
+});
+
 test("behaviour: buffers surface on the next page without dropping or duplicating rows", () => {
   // Stream A returns 50 newest rows (Feb dates), stream B
   // returns 50 strictly older rows (Jan dates). The combined

@@ -71,6 +71,7 @@
     IMAGE_PREVIEW_ZOOM_MIN,
     IMAGE_PREVIEW_ZOOM_STEP,
     scaleImagePreviewZoom,
+    zoomedImagePreviewSize,
   } from "./lib/imagePreviewZoom.ts";
   import type { ImageRotationDirection } from "./types.ts";
   import {
@@ -121,6 +122,7 @@
   let imageZoomGestureStartScale = 1;
   let canZoomCurrentImage = false;
   let previewImageSize: PreviewImageSize | null = null;
+  let displayedPreviewImageSize: PreviewImageSize | null = null;
   let previewCardWidth: number | null = null;
   let previewCardHeight: number | null = null;
   let overlayEl: HTMLDivElement | null = null;
@@ -375,6 +377,11 @@
     imageState === "loaded" &&
     !imageRotationBusy &&
     !imageRotationRefreshing;
+
+  $: displayedPreviewImageSize = zoomedImagePreviewSize(
+    previewImageSize,
+    standaloneImage ? imageZoomScale : 1,
+  );
 
   function zoomImageBy(factor: number): void {
     if (!canZoomImage()) return;
@@ -707,12 +714,12 @@
           {#if imageUrl && imageState === "loaded"}
             <img
               class="cv-preview-image"
+              class:cv-preview-image-standalone={standaloneImage}
               src={imageUrl}
               alt={titleLabel}
               data-testid="{testIdPrefix}-image"
-              style:transform={standaloneImage ? `scale(${imageZoomScale})` : "none"}
-              style={previewImageSize
-                ? `width: ${previewImageSize.width}px; height: ${previewImageSize.height}px;`
+              style={displayedPreviewImageSize
+                ? `width: ${displayedPreviewImageSize.width}px; height: ${displayedPreviewImageSize.height}px;`
                 : undefined}
               on:error={onImageError}
             />
@@ -876,7 +883,9 @@
     max-width: none;
     max-height: none;
     padding: 10px;
-    overflow: hidden;
+    align-items: flex-start;
+    justify-content: flex-start;
+    overflow: auto;
   }
 
   .cv-preview-footer-hidden {
@@ -1134,7 +1143,12 @@
     flex: 0 0 auto;
     object-fit: contain;
     border-radius: 6px;
-    transform-origin: center center;
+  }
+
+  .cv-preview-image-standalone {
+    max-width: none;
+    max-height: none;
+    margin: auto;
   }
 
   .cv-preview-image-unavailable {

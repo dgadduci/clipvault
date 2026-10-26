@@ -9,14 +9,16 @@ function source(file: string): string {
   return readFileSync(path.join(ROOT, "src", file), "utf8");
 }
 
-test("desktop capture cards retain a horizontal, non-wrapping rail", () => {
+test("desktop capture cards retain a single-row horizontal scrolling rail", () => {
   const rail = source("HistoryCardRail.svelte");
   const app = source("App.svelte");
 
-  assert.match(rail, /\.rail\s*\{[^}]*flex-flow:\s*row nowrap/s);
+  assert.match(rail, /\.rail\s*\{[^}]*display:\s*grid/s);
+  assert.match(rail, /\.rail\s*\{[^}]*grid-auto-flow:\s*column/s);
+  assert.match(rail, /\.rail\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\)/s);
   assert.match(rail, /\.rail\s*\{[^}]*overflow-x:\s*auto/s);
   assert.match(rail, /\.rail\s*\{[^}]*overflow-y:\s*hidden/s);
-  assert.match(app, /:global\(\.collection-content-rail \.rail\)\s*\{[^}]*flex-flow:\s*row nowrap/s);
+  assert.match(app, /:global\(\.collection-content-rail \.rail\)\s*\{[^}]*grid-auto-flow:\s*column/s);
 });
 
 test("collection badge numbers stay white and desktop typography keeps its baseline tokens", () => {

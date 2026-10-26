@@ -152,7 +152,7 @@ test("layout grid uses minmax(0, 1fr) on the rail column so cards never expand t
 test("HistoryCardRail styles pin the rail to the available width with horizontal overflow", () => {
   // The `.rail` class must own the horizontal scrollbar so the body
   // never grows with the cards. `min-width: 0` is the structural
-  // guard that lets a flex child shrink below its intrinsic content
+  // guard that lets a grid child shrink below its intrinsic content
   // width.
   const source = loadFixture(
     path.join(FRONTEND_ROOT, "src/HistoryCardRail.svelte"),
@@ -161,11 +161,11 @@ test("HistoryCardRail styles pin the rail to the available width with horizontal
   assert.match(source, /overflow-y:\s*hidden/);
   assert.match(source, /min-width:\s*0/);
   assert.match(source, /max-width:\s*100%/);
-  // The card itself stays a fixed-size square through `flex: 0 0`
-  // — a regression that drops the triple turns the rail into a
-  // wrapping column and the squares into rectangles.
-  assert.match(source, /flex:\s*0 0 var\(--cv-card-size\)/);
+  // The grid creates a fixed-size column per card in a single row.
+  assert.match(source, /grid-auto-flow:\s*column/);
+  assert.match(source, /grid-auto-columns:\s*var\(--cv-card-size\)/);
   assert.match(source, /width:\s*var\(--cv-card-size\)/);
+  assert.match(source, /height:\s*var\(--cv-card-size\)/);
 });
 
 // ---------------------------------------------------------------------------

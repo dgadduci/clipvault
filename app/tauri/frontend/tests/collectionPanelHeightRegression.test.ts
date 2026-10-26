@@ -207,9 +207,8 @@ test("HistoryCardRail pins the rail height to the same token", () => {
     /\.rail\s*\{[^}]*overflow-y:\s*hidden/,
     "the rail must never introduce a vertical scrollbar",
   );
-  assert.match(
-    source,
-    /flex:\s*0 0 var\(--cv-card-size\)/,
-    "the cards must keep their fixed square dimensions",
-  );
+  assert.match(source, /grid-auto-flow:\s*column/);
+  assert.match(source, /grid-auto-columns:\s*var\(--cv-card-size\)/);
+  assert.match(source, /width:\s*var\(--cv-card-size\)/);
+  assert.match(source, /height:\s*var\(--cv-card-size\)/);
 });

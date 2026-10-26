@@ -492,6 +492,7 @@ export interface Settings {
    */
   local_peer_display_name: string | null;
   capture_notes_sharing_enabled: boolean;
+  preview_page_size: number;
 }
 
 export interface SettingsUpdate {
@@ -502,6 +503,7 @@ export interface SettingsUpdate {
   quick_paste_hotkey?: HotkeySpec | null;
   local_peer_display_name?: string | null;
   capture_notes_sharing_enabled?: boolean;
+  preview_page_size?: number;
 }
 
 export type PdfExportSaveResult = "saved" | "cancelled";

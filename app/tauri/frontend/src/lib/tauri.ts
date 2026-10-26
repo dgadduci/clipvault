@@ -149,6 +149,7 @@ export const recentEntriesFilteredCommand: ClipvaultCommandArg<
   EntryRecord[],
   {
     limit?: number;
+    offset?: number;
     collectionId?: number | null;
     tagIds?: number[];
     sourceApp?: SourceAppFilter | null;
@@ -158,6 +159,7 @@ export const recentEntriesFilteredCommand: ClipvaultCommandArg<
 > = (args) =>
   invoke<EntryRecord[]>("clipvault_recent_entries_filtered", {
     limit: args.limit ?? 50,
+    offset: args.offset ?? 0,
     collectionId: args.collectionId ?? null,
     tagIds: args.tagIds ?? [],
     sourceApp: args.sourceApp ?? null,
@@ -180,6 +182,7 @@ export const searchEntriesCommand: ClipvaultCommandArg<
   {
     query: string;
     limit?: number;
+    offset?: number;
     collectionId?: number | null;
     tagIds?: number[];
     sourceApp?: SourceAppFilter | null;
@@ -190,6 +193,7 @@ export const searchEntriesCommand: ClipvaultCommandArg<
   invoke<SearchResponse>("clipvault_search_entries", {
     query: args.query,
     limit: args.limit ?? 50,
+    offset: args.offset ?? 0,
     collectionId: args.collectionId ?? null,
     tagIds: args.tagIds ?? [],
     sourceApp: args.sourceApp ?? null,

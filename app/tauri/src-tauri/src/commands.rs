@@ -770,6 +770,7 @@ pub fn clipvault_entry_by_id(
 pub fn clipvault_recent_entries_filtered(
     state: State<'_, SharedState>,
     limit: Option<usize>,
+    offset: Option<usize>,
     collection_id: Option<i64>,
     tag_ids: Option<Vec<i64>>,
     source_app: Option<clipvault_core::SourceAppFilter>,
@@ -782,7 +783,7 @@ pub fn clipvault_recent_entries_filtered(
     let records = state
         .context()
         .history()
-        .recent_entries_with_content_type_filter_and_unassigned(
+        .recent_entries_page_with_content_type_filter_and_unassigned(
             state.context(),
             collection_id,
             &tag_ids,
@@ -790,6 +791,7 @@ pub fn clipvault_recent_entries_filtered(
             content_type,
             unassigned_only.unwrap_or(false),
             limit,
+            offset.unwrap_or(0),
         )
         .map_err(|err| CommandError::new("history_error", err.to_string()))?;
     Ok(records)
@@ -839,6 +841,7 @@ pub fn clipvault_search_entries(
     state: State<'_, SharedState>,
     query: String,
     limit: Option<usize>,
+    offset: Option<usize>,
     collection_id: Option<i64>,
     tag_ids: Option<Vec<i64>>,
     source_app: Option<clipvault_core::SourceAppFilter>,
@@ -855,12 +858,13 @@ pub fn clipvault_search_entries(
     let outcome = state
         .context()
         .search()
-        .search_with_content_type_filter_and_unassigned(
+        .search_with_content_type_filter_and_unassigned_page(
             state.context(),
             &engine_query,
             &filter,
             content_type,
             unassigned_only.unwrap_or(false),
+            offset.unwrap_or(0),
         )
         .map_err(|err| CommandError::new("history_error", err.to_string()))?;
     Ok(SearchResponse {
@@ -1388,6 +1392,7 @@ impl ValidationCommandError {
             ValidationCode::InvalidPeerDisplayName => "validation_error",
             ValidationCode::PeerDisplayNameTooLong => "validation_error",
             ValidationCode::InvalidLanguage => "validation_error",
+            ValidationCode::InvalidPreviewPageSize => "validation_error",
         };
         Self {
             kind,

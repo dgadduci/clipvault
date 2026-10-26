@@ -1166,6 +1166,42 @@ impl TextHistoryService {
         Ok(records.into_iter().take(limit).collect())
     }
 
+    /// Fetch one SQL-paginated page of filtered entries. `offset` is applied
+    /// after every scope/facet predicate and the repository's stable newest-
+    /// first ordering.
+    pub fn recent_entries_page_with_content_type_filter_and_unassigned(
+        &self,
+        context: &AppContext,
+        collection_id: Option<i64>,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+        unassigned_only: bool,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<clipvault_db::EntryRecord>, HistoryServiceError> {
+        let mut db = context.database().lock();
+        let repo = EntryRepository::new(db.connection_mut());
+        if unassigned_only {
+            Ok(repo.unassigned_entries_page_filtered_by_content_type(
+                tag_ids,
+                source_app,
+                content_type,
+                limit,
+                offset,
+            )?)
+        } else {
+            Ok(repo.entries_page_filtered_by_content_type(
+                collection_id,
+                tag_ids,
+                source_app,
+                content_type,
+                limit,
+                offset,
+            )?)
+        }
+    }
+
     /// Return the supported content types present in the active collection
     /// scope. The repository query is distinct and independent of the rail
     /// page limit, so older entries can still contribute an option.

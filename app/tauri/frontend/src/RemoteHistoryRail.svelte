@@ -79,6 +79,8 @@
    * renders the local rail instead.
    */
   export let peerId: string | null = null;
+  /** Shared page-size setting supplied by the desktop shell. */
+  export let pageSize = 20;
   /**
    * Callback the parent uses to forget the runtime cache entry
    * the peer-pairing commands consult so a subsequent
@@ -429,6 +431,7 @@
         : peerHistoryBrowseCommand({
             peer_id: targetPeer,
             cursor: textCursorPayload,
+            limit: pageSize,
           }).then(
             (response) => ({ kind: "text" as const, response }),
             (err) => ({ kind: "text-error" as const, err }),
@@ -439,6 +442,7 @@
         : peerImageBrowseCommand({
             peer_id: targetPeer,
             cursor: imageCursorPayload,
+            limit: pageSize,
           }).then(
             (response) => ({ kind: "image" as const, response }),
             (err) => ({ kind: "image-error" as const, err }),
@@ -448,7 +452,7 @@
       promise: Promise<T>,
     ): Promise<T> => promise.then((outcome) => {
       if (!options.append && !partialFirstPaintPublished && generation === loadGeneration) {
-        const partialRows = rowsForPartialOutcome(outcome);
+        const partialRows = rowsForPartialOutcome(outcome, pageSize);
         if (partialRows !== null && partialRows.length > 0) {
           rows = partialRows;
           partialFirstPaintPublished = true;
@@ -462,7 +466,10 @@
     ]);
     if (generation !== loadGeneration) return;
     consumeMergeResult(
-      mergeResponses(textOutcome, imageOutcome, snapshotState(), options),
+      mergeResponses(textOutcome, imageOutcome, snapshotState(), {
+        ...options,
+        pageSize,
+      }),
     );
   }
 
@@ -525,7 +532,7 @@
     // genuinely exhausted and the helper flips `exhausted = true`
     // so the button stays disabled.
     if (textBuffer.length > 0 || imageBuffer.length > 0) {
-      consumeMergeResult(promoteBuffers(snapshotState()));
+      consumeMergeResult(promoteBuffers(snapshotState(), pageSize));
       return;
     }
     if (cursor.length === 0 && imageCursor.length === 0) {
