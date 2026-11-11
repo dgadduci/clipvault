@@ -402,7 +402,6 @@ impl ArboardClipboard {
 ///   authoritative revision source.
 /// * No recognised display server → `unavailable`; the watcher
 ///   keeps polling and the rest of ClipVault stays available.
-#[cfg(target_os = "linux")]
 fn map_error(error: ArboardError) -> ClipboardBackendError {
     match error {
         ArboardError::ContentNotAvailable | ArboardError::ConversionFailure => {
