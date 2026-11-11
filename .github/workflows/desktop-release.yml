@@ -33,40 +33,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
           PUSH_TAG: ${{ github.ref_name }}
-        run: |
-          python3 - -&lt;'PY'
-          import json
-          import os
-          import re
-
-          event_name = os.environ["EVENT_NAME"]
-          tag = os.environ["RELEASE_TAG_INPUT"] if event_name == "workflow_dispatch" else os.environ["PUSH_TAG"]
-          if re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag) is None:
-              raise SystemExit(f"Release tag is not stable SemVer: {tag}")
-
-          mac_arm = {
-              "label": "macOS Apple Silicon",
-              "runner": "macos-latest",
-              "rust_target": "aarch64-apple-darwin",
-              "args": "--target aarch64-apple-darwin --bundles app,dmg",
-          }
-          mac_intel = {
-              "label": "macOS Intel",
-              "runner": "macos-latest",
-              "rust_target": "x86_64-apple-darwin",
-              "args": "--target x86_64-apple-darwin --bundles app,dmg",
-          }
-          linux = {
-              "label": "Linux x86_64",
-              "runner": "ubuntu-22.04",
-              "rust_target": "x86_64-unknown-linux-gnu",
-              "args": "--bundles appimage,deb,rpm",
-          }
-          targets = [linux] if event_name == "workflow_dispatch" else [mac_arm, mac_intel, linux]
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"release_tag={tag}\n")
-              output.write(f"build_matrix={json.dumps({'include': targets}, separators=(',', ':'))}\n")
-          PY
+        run: python3 .github/scripts/resolve_release_metadata.py
 
       - name: Check out selected release source
         env:
@@ -84,35 +51,7 @@ jobs:
       - name: Validate stable SemVer tag and canonical versions
         env:
           RELEASE_TAG: ${{ steps.release-metadata.outputs.release_tag }}
-        run: |
-          python3 - -&lt;'PY'
-          import json
-          import os
-          import re
-          import tomllib
-          from pathlib import Path
-
-          tag = os.environ["RELEASE_TAG"]
-          match = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag)
-          if match is None:
-              raise SystemExit(f"Release tag is not stable SemVer: {tag}")
-          expected = tag[1:]
-
-          with Path("Cargo.toml").open("rb") as source:
-              cargo_version = tomllib.load(source)["workspace"]["package"]["version"]
-          tauri_version = json.loads(Path("app/tauri/src-tauri/tauri.conf.json").read_text())["version"]
-          frontend_version = json.loads(Path("app/tauri/frontend/package.json").read_text())["version"]
-          versions = {
-              "tag": expected,
-              "Cargo workspace": cargo_version,
-              "Tauri config": tauri_version,
-              "frontend package": frontend_version,
-          }
-          if any(version != expected for version in versions.values()):
-              detail = ", ".join(f"{name}={version}" for name, version in versions.items())
-              raise SystemExit(f"Version mismatch: {detail}")
-          print(f"Validated release version {expected} across all manifests.")
-          PY
+        run: python3 .github/scripts/validate_release_versions.py
 
       - name: Require a trusted commit on main
         run: |
@@ -147,25 +86,7 @@ jobs:
         env:
           TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          python3 - -&lt;'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          configured_key = json.loads(
-              Path("app/tauri/src-tauri/tauri.conf.json").read_text(encoding="utf-8")
-          )["plugins"]["updater"]["pubkey"]
-          public_key = os.environ.get("TAURI_UPDATER_PUBLIC_KEY", "").strip()
-          private_key = os.environ.get("TAURI_SIGNING_PRIVATE_KEY", "").strip()
-          if not public_key:
-              raise SystemExit("::error::Required GitHub variable is missing: TAURI_UPDATER_PUBLIC_KEY")
-          if not private_key:
-              raise SystemExit("::error::Required GitHub secret is missing: TAURI_SIGNING_PRIVATE_KEY")
-          if public_key != configured_key:
-              raise SystemExit("::error::TAURI_UPDATER_PUBLIC_KEY does not match tauri.conf.json")
-          print("Updater signing configuration is consistent. macOS bundles will use ad-hoc signing.")
-          PY
+        run: python3 .github/scripts/validate_updater_signing.py
 
   build-release:
     name: Build ${{ matrix.label }}
@@ -222,25 +143,7 @@ jobs:
       - name: Prepare updater public key for Tauri bundling
         env:
           TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
-        run: |
-          python3 - -&lt;'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          overlay = {
-              "bundle": {
-                  "createUpdaterArtifacts": True,
-              },
-              "plugins": {
-                  "updater": {
-                      "pubkey": os.environ["TAURI_UPDATER_PUBLIC_KEY"],
-                  },
-              },
-          }
-          Path("app/tauri/src-tauri/tauri.release.conf.json").write_text(
-              json.dumps(overlay), encoding="utf-8")
-          PY
+        run: python3 .github/scripts/prepare_tauri_release_overlay.py
 
       - name: Build and upload signed release artifacts
         uses: tauri-apps/tauri-action@v1
