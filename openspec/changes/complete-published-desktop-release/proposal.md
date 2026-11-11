@@ -19,6 +19,8 @@ los paquetes Linux a ese release existente.
 - Conservar las entradas macOS existentes en `latest.json` al añadir la
   plataforma Linux.
 - Mantener el flujo por tag para releases nuevos y su revisión como borrador.
+- Extraer las validaciones del workflow a scripts Python locales que usan la
+  biblioteca estándar.
 
 ## Fuera de alcance
 

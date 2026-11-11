@@ -36,12 +36,11 @@ jobs:
         run: python3 .github/scripts/resolve_release_metadata.py
 
       - name: Check out selected release source
-        env:
-          RELEASE_TAG: ${{ steps.release-metadata.outputs.release_tag }}
-        run: |
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git fetch --no-tags origin "+refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          git checkout --detach "$RELEASE_TAG"
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release-metadata.outputs.release_tag }}
+          path: release-source
+          fetch-depth: 1
 
       - name: Set up Python for TOML version validation
         uses: actions/setup-python@v5
@@ -51,10 +50,13 @@ jobs:
       - name: Validate stable SemVer tag and canonical versions
         env:
           RELEASE_TAG: ${{ steps.release-metadata.outputs.release_tag }}
+          RELEASE_SOURCE_DIR: release-source
         run: python3 .github/scripts/validate_release_versions.py
 
       - name: Require a trusted commit on main
         run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags origin "+refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           tag_commit=$(git rev-parse "$RELEASE_TAG^{commit}")
           if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$tag_commit" != "$GITHUB_SHA" ]; then
             echo "::error::The release tag changed after this workflow was triggered."

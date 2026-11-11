@@ -4,9 +4,9 @@
 
 1. Una ejecución normal iniciada por un tag crea el mismo borrador y construye
    macOS Apple Silicon, macOS Intel y Linux.
-2. Una ejecución manual recibe un tag estable. CI carga el historial, resuelve
-   ese tag, valida las versiones canónicas y comprueba que su commit pertenece
-   a `main`.
+2. Una ejecución manual recibe un tag estable. CI conserva el checkout del
+   workflow en `main`, carga el código del tag en `release-source`, valida allí
+   las versiones canónicas y comprueba que el commit pertenece a `main`.
 3. Antes de compilar, GitHub API confirma que el release para ese tag existe,
    está publicado y no es preliminar. La matriz manual contiene solo Linux
    x86_64.
@@ -29,6 +29,10 @@
   fusiona las entradas del nuevo target con el manifiesto existente.
 - La subida de artefactos usa los secretos y variables de firma ya requeridos
   por el job de validación.
+- Las rutinas de metadatos, validación y overlay viven en scripts Python del
+  repositorio y usan solo la biblioteca estándar.
+- El checkout de `release-source` queda aislado para que la ejecución manual
+  pueda validar tags antiguos sin ocultar los scripts del workflow actual.
 
 ## Riesgos y mitigaciones
 
