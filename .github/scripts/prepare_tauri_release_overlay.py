@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 
+release_source_dir = Path(os.environ.get("RELEASE_SOURCE_DIR", "."))
 overlay = {
     "bundle": {
         "createUpdaterArtifacts": True,
@@ -13,6 +14,6 @@ overlay = {
         },
     },
 }
-Path("app/tauri/src-tauri/tauri.release.conf.json").write_text(
+(release_source_dir / "app/tauri/src-tauri/tauri.release.conf.json").write_text(
     json.dumps(overlay), encoding="utf-8"
 )

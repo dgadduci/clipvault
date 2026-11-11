@@ -21,6 +21,8 @@ los paquetes Linux a ese release existente.
 - Mantener el flujo por tag para releases nuevos y su revisión como borrador.
 - Extraer las validaciones del workflow a scripts Python locales que usan la
   biblioteca estándar.
+- Mantener los scripts del workflow disponibles desde un checkout de su commit
+  mientras la compilación usa el código del tag publicado.
 
 ## Fuera de alcance
 

@@ -10,6 +10,8 @@
   release para incluir macOS y Linux.
 - [x] 2.4 Extraer la lógica Python del workflow a scripts locales sin
   dependencias adicionales.
+- [x] 2.5 Mantener los helpers del workflow separados del checkout del tag y
+  dirigir el overlay de Tauri al código que se está compilando.
 - [ ] 3.1 Validar el workflow, OpenSpec y el diff.
 - [ ] 3.2 Ejecutar la publicación Linux de `v0.0.22`.
 - [ ] 3.3 Confirmar AppImage, DEB, RPM y `latest.json` con plataformas macOS y

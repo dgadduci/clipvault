@@ -5,8 +5,9 @@
 1. Una ejecución normal iniciada por un tag crea el mismo borrador y construye
    macOS Apple Silicon, macOS Intel y Linux.
 2. Una ejecución manual recibe un tag estable. CI conserva el checkout del
-   workflow en `main`, carga el código del tag en `release-source`, valida allí
-   las versiones canónicas y comprueba que el commit pertenece a `main`.
+   commit que contiene el workflow en `workflow-source`, carga el código del
+   tag en `release-source`, valida allí las versiones canónicas y comprueba que
+   el commit pertenece a `main`.
 3. Antes de compilar, GitHub API confirma que el release para ese tag existe,
    está publicado y no es preliminar. La matriz manual contiene solo Linux
    x86_64.
@@ -32,7 +33,11 @@
 - Las rutinas de metadatos, validación y overlay viven en scripts Python del
   repositorio y usan solo la biblioteca estándar.
 - El checkout de `release-source` queda aislado para que la ejecución manual
-  pueda validar tags antiguos sin ocultar los scripts del workflow actual.
+  pueda validar y compilar tags antiguos sin ocultar los scripts del workflow.
+- Cada job de build conserva los scripts del workflow en un checkout separado
+  y compila desde `release-source`. Los helpers reciben esa ruta explícitamente
+  para escribir el overlay de Tauri dentro del código del tag, que puede
+  preceder a la incorporación de dichos helpers.
 
 ## Riesgos y mitigaciones
 
