@@ -1,24 +1,24 @@
 # Install ClipVault
 
-Download ClipVault from the [latest official release](https://github.com/dgadduci/clipvault/releases/latest). The instructions below were prepared against `v0.0.20` (2026-10-07). The release page always shows the current version.
+Download ClipVault from the [latest official release](https://github.com/dgadduci/clipvault/releases/latest). The instructions below were prepared against `v0.0.22` (2026-11-11). The release page always shows the current version.
 
 ## Choose your download
 
-| Computer | File in release `v0.0.20` | Installation route |
+| Computer | File in release `v0.0.22` | Installation route |
 | --- | --- | --- |
-| Mac with Apple silicon | `ClipVault_0.0.20_aarch64.dmg` | Disk image (`.dmg`) |
-| Mac with Intel processor | `ClipVault_0.0.20_x64.dmg` | Disk image (`.dmg`) |
+| Mac with Apple silicon | `ClipVault_0.0.22_aarch64.dmg` | Disk image (`.dmg`) |
+| Mac with Intel processor | `ClipVault_0.0.22_x64.dmg` | Disk image (`.dmg`) |
 | Mac with Homebrew | Official DMG selected by the cask | `brew install --cask clipvault` |
-| Ubuntu and compatible Debian/Ubuntu-based distributions (e.g. Linux Mint), x86_64 | `ClipVault_0.0.20_amd64.deb` | Debian package installer (`.deb`) |
-| Fedora and other RPM-based x86_64 systems | `ClipVault-0.0.20-1.x86_64.rpm` | RPM package (`dnf` or `zypper`) |
-| Most other x86_64 Linux distributions (e.g. Arch) | `ClipVault_0.0.20_amd64.AppImage` | AppImage |
+| Ubuntu and compatible Debian/Ubuntu-based distributions (e.g. Linux Mint), x86_64 | `ClipVault_0.0.22_amd64.deb` | Debian package installer (`.deb`) |
+| Fedora and other RPM-based x86_64 systems | `ClipVault-0.0.22-1.x86_64.rpm` | RPM package (`dnf` or `zypper`) |
+| Most other x86_64 Linux distributions (e.g. Arch) | `ClipVault_0.0.22_amd64.AppImage` | AppImage |
 
 The file names include the release version. If a newer version is listed, choose the file with the same operating system and processor suffix. Linux ARM packages, Flatpak, Snap, AUR and native Arch packages are not published.
 
-Release `v0.0.20` includes the x86_64 RPM as a direct download. Install the
+Release `v0.0.22` includes the x86_64 RPM as a direct download. Install the
 local file with your distribution's package manager. For example, Fedora uses
-`sudo dnf install ./ClipVault-0.0.20-1.x86_64.rpm`; openSUSE uses
-`sudo zypper install ./ClipVault-0.0.20-1.x86_64.rpm`.
+`sudo dnf install ./ClipVault-0.0.22-1.x86_64.rpm`; openSUSE uses
+`sudo zypper install ./ClipVault-0.0.22-1.x86_64.rpm`.
 
 Container checks installed and removed the package on Fedora 44, and `ldd`
 reported no missing libraries there or in the reported openSUSE check (the
@@ -78,7 +78,7 @@ manager; the screens and menu names may differ. The steps below describe the
 tested Ubuntu GNOME flow, and the other distributions are not listed as
 manually verified unless noted in the verification table.
 
-1. Download `ClipVault_0.0.20_amd64.deb` from the [latest release](https://github.com/dgadduci/clipvault/releases/latest). It is for 64-bit Intel/AMD computers.
+1. Download `ClipVault_0.0.22_amd64.deb` from the [latest release](https://github.com/dgadduci/clipvault/releases/latest). It is for 64-bit Intel/AMD computers.
 2. Open **Files**, then open **Downloads**.
 3. Double-click the `.deb` file. Ubuntu opens its software installer. Select **Install** and enter your computer password if requested.
 4. Open **Show Applications**, search for **ClipVault**, and launch it.
@@ -95,7 +95,7 @@ integration can differ elsewhere. ClipVault does not publish an AUR or native
 Arch package.
 
 1. In Dolphin, open your **Home** folder and create a folder named `Applications` if it does not already exist.
-2. Download `ClipVault_0.0.20_amd64.AppImage` from the [latest release](https://github.com/dgadduci/clipvault/releases/latest), then move it from **Downloads** to `Home/Applications`.
+2. Download `ClipVault_0.0.22_amd64.AppImage` from the [latest release](https://github.com/dgadduci/clipvault/releases/latest), then move it from **Downloads** to `Home/Applications`.
 3. Rename the file to `ClipVault.AppImage`. Keeping it in this location means a panel shortcut can continue to find it.
 4. Right-click the file, choose **Properties**, then **Permissions**. Enable **Is executable** and close the properties window.
 5. Double-click the AppImage. If KDE asks whether to execute or display the file, choose **Execute**.

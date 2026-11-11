@@ -52,7 +52,7 @@ selected captures over the local network.
 
 ## Downloads and platforms
 
-The current `v0.0.20` release provides macOS disk images for Apple silicon and
+The current `v0.0.22` release provides macOS disk images for Apple silicon and
 Intel, plus Linux x86_64 DEB, AppImage and RPM packages. The RPM is a direct
 download and is not yet in the signed updater manifest. Container package
 checks passed on Fedora 44 and an openSUSE library check reported no missing
