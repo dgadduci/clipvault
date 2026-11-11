@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing published stable release tag to complete (for example, v0.0.22)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -12,11 +18,63 @@ jobs:
   validate-release:
     name: Validate release metadata and signing setup
     runs-on: ubuntu-22.04
+    outputs:
+      release_tag: ${{ steps.release-metadata.outputs.release_tag }}
+      build_matrix: ${{ steps.release-metadata.outputs.build_matrix }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Resolve release tag and build targets
+        id: release-metadata
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+          PUSH_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - -&lt;'PY'
+          import json
+          import os
+          import re
+
+          event_name = os.environ["EVENT_NAME"]
+          tag = os.environ["RELEASE_TAG_INPUT"] if event_name == "workflow_dispatch" else os.environ["PUSH_TAG"]
+          if re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag) is None:
+              raise SystemExit(f"Release tag is not stable SemVer: {tag}")
+
+          mac_arm = {
+              "label": "macOS Apple Silicon",
+              "runner": "macos-latest",
+              "rust_target": "aarch64-apple-darwin",
+              "args": "--target aarch64-apple-darwin --bundles app,dmg",
+          }
+          mac_intel = {
+              "label": "macOS Intel",
+              "runner": "macos-latest",
+              "rust_target": "x86_64-apple-darwin",
+              "args": "--target x86_64-apple-darwin --bundles app,dmg",
+          }
+          linux = {
+              "label": "Linux x86_64",
+              "runner": "ubuntu-22.04",
+              "rust_target": "x86_64-unknown-linux-gnu",
+              "args": "--bundles appimage,deb,rpm",
+          }
+          targets = [linux] if event_name == "workflow_dispatch" else [mac_arm, mac_intel, linux]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"release_tag={tag}\n")
+              output.write(f"build_matrix={json.dumps({'include': targets}, separators=(',', ':'))}\n")
+          PY
+
+      - name: Check out selected release source
+        env:
+          RELEASE_TAG: ${{ steps.release-metadata.outputs.release_tag }}
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags origin "+refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          git checkout --detach "$RELEASE_TAG"
 
       - name: Set up Python for TOML version validation
         uses: actions/setup-python@v5
@@ -25,9 +83,9 @@ jobs:
 
       - name: Validate stable SemVer tag and canonical versions
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ steps.release-metadata.outputs.release_tag }}
         run: |
-          python3 - <<'PY'
+          python3 - -&lt;'PY'
           import json
           import os
           import re
@@ -58,18 +116,39 @@ jobs:
 
       - name: Require a trusted commit on main
         run: |
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+          tag_commit=$(git rev-parse "$RELEASE_TAG^{commit}")
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$tag_commit" != "$GITHUB_SHA" ]; then
+            echo "::error::The release tag changed after this workflow was triggered."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$RELEASE_TAG^{commit}" refs/remotes/origin/main; then
             echo "::error::Release tags must point to a commit reachable from main."
             exit 1
           fi
+        env:
+          RELEASE_TAG: ${{ steps.release-metadata.outputs.release_tag }}
+
+      - name: Require an existing published release for manual completion
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.release-metadata.outputs.release_tag }}
+        with:
+          script: |
+            const { data: release } = await github.rest.repos.getReleaseByTag({
+              ...context.repo,
+              tag: process.env.RELEASE_TAG,
+            });
+            if (release.draft || release.prerelease) {
+              core.setFailed(`Release ${process.env.RELEASE_TAG} must already be published as a stable release.`);
+            }
 
       - name: Require updater signing configuration
         env:
           TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
-          python3 - <<'PY'
+          python3 - -&lt;'PY'
           import json
           import os
           from pathlib import Path
@@ -97,23 +176,12 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 1
-      matrix:
-        include:
-          - label: macOS Apple Silicon
-            runner: macos-latest
-            rust_target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin --bundles app,dmg
-          - label: macOS Intel
-            runner: macos-latest
-            rust_target: x86_64-apple-darwin
-            args: --target x86_64-apple-darwin --bundles app,dmg
-          - label: Linux x86_64
-            runner: ubuntu-22.04
-            rust_target: x86_64-unknown-linux-gnu
-            args: --bundles appimage,deb,rpm
+      matrix: ${{ fromJSON(needs.validate-release.outputs.build_matrix) }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-release.outputs.release_tag }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -155,7 +223,7 @@ jobs:
         env:
           TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
         run: |
-          python3 - <<'PY'
+          python3 - -&lt;'PY'
           import json
           import os
           from pathlib import Path
@@ -171,8 +239,7 @@ jobs:
               },
           }
           Path("app/tauri/src-tauri/tauri.release.conf.json").write_text(
-              json.dumps(overlay), encoding="utf-8"
-          )
+              json.dumps(overlay), encoding="utf-8")
           PY
 
       - name: Build and upload signed release artifacts
@@ -186,10 +253,10 @@ jobs:
           projectPath: app/tauri
           tauriScript: cargo tauri
           args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json
-          tagName: ${{ github.ref_name }}
-          releaseName: ClipVault ${{ github.ref_name }}
-          releaseBody: Review the attached installers and updater manifest before publishing this draft release.
-          releaseDraft: true
+          tagName: ${{ needs.validate-release.outputs.release_tag }}
+          releaseName: ClipVault ${{ needs.validate-release.outputs.release_tag }}
+          releaseBody: ClipVault desktop installers for macOS (Apple Silicon and Intel) and Linux x86_64 (AppImage, DEB, RPM). Signed updater artifacts are included where supported.
+          releaseDraft: ${{ github.event_name == 'push' }}
           prerelease: false
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
