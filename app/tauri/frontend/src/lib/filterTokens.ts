@@ -1,41 +1,39 @@
 // Shared layout tokens for the desktop toolbar comboboxes.
 //
-// `quick-paste-desktop-polish` introduced the `TagFilter` combobox
-// between the existing `SourceAppFilter` and the overflow menu.
-// The two comboboxes MUST share the exact same width so the
-// toolbar never reflows when the user toggles between them or
-// selects a long tag / app label. The visual tokens used to live
-// inline inside each component, which caused the previous drift
-// the manual QA pass detected (the tag combobox collapsed to its
-// intrinsic width while the source-app combobox kept a fixed
-// 220px column).
-//
-// The token module owns the canonical values:
-//
-//   - `FILTER_WIDTH_PX` is the reserved pixel width for both
-//     comboboxes. The value matches the previous `SourceAppFilter`
-//     baseline so the source-app combobox never reflows when the
-//     tag combobox mounts.
-//   - `FILTER_MIN_WIDTH_REM` is the minimum width the toolbar
-//     respects when the available space shrinks. The value matches
-//     the previous baseline (`11rem`).
-//
-// Both combobox components import this module and apply the same
-// CSS rules so a future width change is a single-file edit.
+// The source-application filter uses its reduced 168.3px width.
+// Tag, collection and capture-type filters use a separate compact token.
 
-export const FILTER_WIDTH_PX = 220;
-export const FILTER_MIN_WIDTH_REM = "11rem";
+import { COLLECTION_ROW_TINT_OPACITY } from "./collectionColor.ts";
+
+export const FILTER_WIDTH_PX = 168.3;
+export const FILTER_MIN_WIDTH_REM = "8.415rem";
+export const COMPACT_FILTER_WIDTH_PX = 110;
+export const COMPACT_FILTER_MIN_WIDTH_REM = "5.5rem";
+
+/** Category colors for selected desktop toolbar filters. */
+export const ACTIVE_FILTER_SURFACES = {
+  sourceApp: `rgba(37, 99, 235, ${COLLECTION_ROW_TINT_OPACITY})`,
+  tag: `rgba(109, 40, 217, ${COLLECTION_ROW_TINT_OPACITY})`,
+  collection: `rgba(15, 118, 110, ${COLLECTION_ROW_TINT_OPACITY})`,
+  contentType: `rgba(180, 83, 9, ${COLLECTION_ROW_TINT_OPACITY})`,
+} as const;
 
 /**
- * CSS declaration block the toolbar comboboxes paste into their
- * `.source-app-filter` / `.tag-filter` root. The block is
- * intentionally a string so the two components can compose it
- * with their own layout overrides without inheriting Svelte's
- * scoped CSS gymnastics.
+ * CSS declaration block used by the `.source-app-filter` root. The block is
+ * intentionally a string so the component can compose canonical
+ * width declarations with its active-surface custom property.
  */
 export const filterComboboxStyles = `
   flex: 0 0 ${FILTER_WIDTH_PX}px;
   min-width: ${FILTER_MIN_WIDTH_REM};
   max-width: ${FILTER_WIDTH_PX}px;
   width: ${FILTER_WIDTH_PX}px;
+`;
+
+/** Width declarations for the compact tag, collection and type filters. */
+export const compactFilterComboboxStyles = `
+  flex: 0 0 ${COMPACT_FILTER_WIDTH_PX}px;
+  min-width: ${COMPACT_FILTER_MIN_WIDTH_REM};
+  max-width: ${COMPACT_FILTER_WIDTH_PX}px;
+  width: ${COMPACT_FILTER_WIDTH_PX}px;
 `;

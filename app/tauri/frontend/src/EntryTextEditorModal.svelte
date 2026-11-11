@@ -43,14 +43,19 @@
    */
   import { createEventDispatcher, tick } from "svelte";
 
-  import type { EntryRecord } from "./types";
-  import { isEditableTextEntry } from "./types";
+  import type { EntryRecord, EntryTextEditorMode } from "./types";
+  import { isEditableTextEntry, isRichTextEntry } from "./types";
   import Modal from "./Modal.svelte";
-  import { updateTextEntryCommand } from "./lib/tauri";
+  import {
+    convertRichTextToPlainCommand,
+    updateTextEntryCommand,
+  } from "./lib/tauri";
   import { t } from "./lib/localization.ts";
 
   export let open: boolean;
   export let entry: EntryRecord;
+  /** Persistence intent selected by the parent after any warning flow. */
+  export let mode: EntryTextEditorMode = "plain";
   /**
    * Resolved capture title the card already computes for the rail
    * (`displayTitle`). The modal reuses the exact same string —
@@ -115,7 +120,9 @@
   let errorKey: string | null = null;
   let textareaEl: HTMLTextAreaElement | null = null;
 
-  $: isEligible = isEditableTextEntry(entry);
+  $: isEligible = mode === "rich-conversion"
+    ? isRichTextEntry(entry)
+    : isEditableTextEntry(entry);
 
   /**
    * Idempotency stamp that records the entry id the modal last
@@ -206,7 +213,10 @@
     saving = true;
     errorKey = null;
     try {
-      const response = await updateTextEntryCommand({
+      const updateCommand = mode === "rich-conversion"
+        ? convertRichTextToPlainCommand
+        : updateTextEntryCommand;
+      const response = await updateCommand({
         id: entry.id,
         content: draft,
       });

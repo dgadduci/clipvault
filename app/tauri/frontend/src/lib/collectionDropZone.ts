@@ -50,8 +50,9 @@
 //          highlight alive.
 //   - The helper never inspects clipboard content, snippets,
 //          hashes, asset references, paths or image bytes. The
-//          only payload field it reads is the opaque entry id the
-//          card encodes through `parseDragPayloadFromTransfer`.
+//          only external payload field it reads is the opaque entry id the
+//          card encodes through `parseDragPayloadFromTransfer`; selected IDs
+//          come only from the local in-memory pointer session.
 
 import type { Collection } from "../types.ts";
 import {
@@ -59,10 +60,12 @@ import {
   acceptsDragOver,
   endDragSession,
   getActiveDragSessionEntryId,
+  getActiveDragSessionEntryIds,
   parseDragPayloadFromTransfer,
 } from "./dragAndDrop.ts";
 import {
   activePointerDragEntryId,
+  activePointerDragEntryIds,
   type PointerDragDetail,
 } from "./pointerDragAndDrop.ts";
 
@@ -183,7 +186,11 @@ export interface CollectionDropZoneOptions {
   /** Mutate the highlight reactively. */
   setDragOverCollectionId: (id: number | null) => void;
   /** Called when the drop resolves to a valid (entryId, collectionId) pair. */
-  onCardDrop: (entryId: number, collectionId: number) => void;
+  onCardDrop: (
+    entryId: number,
+    collectionId: number,
+    entryIds?: number[],
+  ) => void;
   /** Called when the drop resolves to NO valid payload (foreign drag). */
   onForeignDrop?: () => void;
   /** Called for a valid internal card dropped on a peer-bound collection. */
@@ -340,6 +347,7 @@ export function createCollectionDropZoneHandlers(
       event.dataTransfer?.getData(CLIPVAULT_ENTRY_MIME) ?? null;
     const textPayload = event.dataTransfer?.getData("text/plain") ?? null;
     const sessionEntryId = getActiveDragSessionEntryId();
+    const sessionEntryIds = getActiveDragSessionEntryIds();
     const entryId = parseDragPayloadFromTransfer({
       privatePayload,
       textPayload,
@@ -362,7 +370,15 @@ export function createCollectionDropZoneHandlers(
       options.onPeerBoundDrop?.();
       return;
     }
-    options.onCardDrop(entryId, hit.collection.id);
+    const entryIds =
+      sessionEntryId === entryId && sessionEntryIds.length > 0
+        ? sessionEntryIds
+        : [entryId];
+    if (entryIds.length > 1) {
+      options.onCardDrop(entryId, hit.collection.id, entryIds);
+    } else {
+      options.onCardDrop(entryId, hit.collection.id);
+    }
   }
 
   /**
@@ -425,7 +441,12 @@ export function createCollectionDropZoneHandlers(
     if (hit.collection.is_peer_bound) {
       options.onPeerBoundDrop?.();
     } else {
-      options.onCardDrop(activeEntryId, hit.collection.id);
+      const entryIds = activePointerDragEntryIds();
+      if (entryIds.length > 1) {
+        options.onCardDrop(activeEntryId, hit.collection.id, entryIds);
+      } else {
+        options.onCardDrop(activeEntryId, hit.collection.id);
+      }
     }
   }
 

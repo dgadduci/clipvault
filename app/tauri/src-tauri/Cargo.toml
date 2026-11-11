@@ -127,6 +127,7 @@ clipvault-platform = { path = "../../../crates/clipvault-platform", features = [
 
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-process = "=2.2.1"
+tauri-plugin-dialog = "=2.8.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

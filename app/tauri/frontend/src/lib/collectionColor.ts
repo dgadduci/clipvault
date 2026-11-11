@@ -14,6 +14,7 @@
 
 const FALLBACK_HEX = "#94a3b8";
 const HEX_RE = /^#[0-9a-f]{6}$/;
+export const COLLECTION_ROW_TINT_OPACITY = 0.18;
 
 /**
  * Validate and normalise a `Collection.color_hex` value. Returns the
@@ -29,6 +30,26 @@ export function collectionColor(value: unknown): string {
   const body = value.trim().toLowerCase();
   if (HEX_RE.test(body)) return body;
   return FALLBACK_HEX;
+}
+
+/**
+ * Return a CSS rgba() tint for a collection color. The sidebar uses
+ * this for its row background so malformed legacy values stay safe
+ * and the assigned color can remain translucent over the desktop
+ * surface.
+ */
+export function collectionColorTint(
+  value: unknown,
+  opacity: number = COLLECTION_ROW_TINT_OPACITY,
+): string {
+  const hex = collectionColor(value).slice(1);
+  const red = Number.parseInt(hex.slice(0, 2), 16);
+  const green = Number.parseInt(hex.slice(2, 4), 16);
+  const blue = Number.parseInt(hex.slice(4, 6), 16);
+  const safeOpacity = Number.isFinite(opacity)
+    ? Math.min(1, Math.max(0, opacity))
+    : COLLECTION_ROW_TINT_OPACITY;
+  return `rgba(${red}, ${green}, ${blue}, ${safeOpacity})`;
 }
 
 /**

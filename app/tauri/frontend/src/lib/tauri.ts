@@ -33,6 +33,7 @@ import type {
   LocalPeerProfileResponse,
   MigrationsApplied,
   OrganizationSnapshot,
+  PdfExportSaveResult,
   PasteResponse,
   PeerSharingToggleResponse,
   PeerSnapshot,
@@ -61,8 +62,12 @@ import type {
   Tag,
   TextNoteRecord,
   UpdateTextEntryResponse,
+  RotateImageCaptureResponse,
+  ImageRotationDirection,
   WatchTickResponse,
   HotkeySpec,
+  ImageImportResponse,
+  ImageImportPreparationResponse,
 } from "../types.ts";
 import type { StartupStatus } from "./startup.ts";
 import type { ContentTypeValue } from "./contentType.ts";
@@ -108,6 +113,14 @@ export const captureTextCommand: ClipvaultCommandArg<
     source_app: args.sourceApp ?? null,
   });
 
+export const captureCollectionSetCommand: ClipvaultCommandArg<
+  void,
+  { collectionId: number | null }
+> = (args) =>
+  invoke<void>("clipvault_capture_collection_set", {
+    collectionId: args.collectionId,
+  });
+
 export const captureTickCommand: ClipvaultCommandArg<
   WatchTickResponse,
   { sourceApp?: string | null }
@@ -124,22 +137,44 @@ export const recentEntriesCommand: ClipvaultCommandArg<
     limit: args.limit ?? 50,
   });
 
+export const entryByIdCommand: ClipvaultCommandArg<
+  EntryRecord | null,
+  { entryId: number }
+> = (args) =>
+  invoke<EntryRecord | null>("clipvault_entry_by_id", {
+    entryId: args.entryId,
+  });
+
 export const recentEntriesFilteredCommand: ClipvaultCommandArg<
   EntryRecord[],
   {
     limit?: number;
+    offset?: number;
     collectionId?: number | null;
     tagIds?: number[];
     sourceApp?: SourceAppFilter | null;
     contentType?: ContentTypeValue | null;
+    unassignedOnly?: boolean;
   }
 > = (args) =>
   invoke<EntryRecord[]>("clipvault_recent_entries_filtered", {
     limit: args.limit ?? 50,
+    offset: args.offset ?? 0,
     collectionId: args.collectionId ?? null,
     tagIds: args.tagIds ?? [],
     sourceApp: args.sourceApp ?? null,
     contentType: args.contentType ?? null,
+    unassignedOnly: args.unassignedOnly ?? false,
+  });
+
+/** Return all capture types present in Historial or one local collection. */
+export const contentTypesCommand: ClipvaultCommandArg<
+  ContentTypeValue[],
+  { collectionId?: number | null; unassignedOnly?: boolean }
+> = (args) =>
+  invoke<ContentTypeValue[]>("clipvault_content_types", {
+    collectionId: args.collectionId ?? null,
+    unassignedOnly: args.unassignedOnly ?? false,
   });
 
 export const searchEntriesCommand: ClipvaultCommandArg<
@@ -147,19 +182,23 @@ export const searchEntriesCommand: ClipvaultCommandArg<
   {
     query: string;
     limit?: number;
+    offset?: number;
     collectionId?: number | null;
     tagIds?: number[];
     sourceApp?: SourceAppFilter | null;
     contentType?: ContentTypeValue | null;
+    unassignedOnly?: boolean;
   }
 > = (args) =>
   invoke<SearchResponse>("clipvault_search_entries", {
     query: args.query,
     limit: args.limit ?? 50,
+    offset: args.offset ?? 0,
     collectionId: args.collectionId ?? null,
     tagIds: args.tagIds ?? [],
     sourceApp: args.sourceApp ?? null,
     contentType: args.contentType ?? null,
+    unassignedOnly: args.unassignedOnly ?? false,
   });
 
 /**
@@ -318,6 +357,52 @@ export const settingsSetCommand: ClipvaultCommandArg<
   SettingsUpdate
 > = (args) =>
   invoke<Settings>("clipvault_settings_set", { update: args });
+
+export const exportEntriesPdfCommand: ClipvaultCommandArg<
+  PdfExportSaveResult,
+  {
+    entryIds: number[];
+    dialogTitle: string;
+    filterName: string;
+    suggestedFileName: string;
+  }
+> = (args) =>
+  invoke<PdfExportSaveResult>("clipvault_export_pdf", {
+    entryIds: args.entryIds,
+    dialogTitle: args.dialogTitle,
+    filterName: args.filterName,
+    suggestedFileName: args.suggestedFileName,
+  });
+
+export const prepareImageImportCommand: ClipvaultCommandArg<
+  ImageImportPreparationResponse,
+  { dialogTitle: string; filterName: string }
+> = (args) =>
+  invoke<ImageImportPreparationResponse>("clipvault_prepare_image_import", {
+    dialogTitle: args.dialogTitle,
+    filterName: args.filterName,
+  });
+
+export const completeImageImportCommand: ClipvaultCommandArg<
+  ImageImportResponse,
+  { sessionId: number; orderedFileIds: number[] }
+> = (args) =>
+  invoke<ImageImportResponse>("clipvault_complete_image_import", {
+    sessionId: args.sessionId,
+    orderedFileIds: args.orderedFileIds,
+  });
+
+export const IMAGE_IMPORT_PROGRESS_EVENT = "clipvault://image-import-progress";
+export const PDF_EXPORT_GENERATION_COMPLETE_EVENT =
+  "clipvault://pdf-export-generation-complete";
+
+export const cancelImageImportCommand: ClipvaultCommandArg<
+  void,
+  { sessionId: number }
+> = (args) =>
+  invoke<void>("clipvault_cancel_image_import", {
+    sessionId: args.sessionId,
+  });
 
 export const keyboardShortcutsGetCommand:
   ClipvaultCommand<KeyboardShortcutsSnapshot> = () =>
@@ -986,6 +1071,29 @@ export const updateTextEntryCommand: ClipvaultCommandArg<
     content: args.content,
   });
 
+export const rotateImageCaptureCommand: ClipvaultCommandArg<
+  RotateImageCaptureResponse,
+  { entryId: number; direction: ImageRotationDirection }
+> = (args) =>
+  invoke<RotateImageCaptureResponse>("clipvault_rotate_image_capture", {
+    entryId: args.entryId,
+    direction: args.direction,
+  });
+
+/**
+ * Explicitly convert a rich-text history entry to plain text. The
+ * separate command ensures the backend validates that the live row is
+ * still rich before clearing its rich metadata and asset references.
+ */
+export const convertRichTextToPlainCommand: ClipvaultCommandArg<
+  UpdateTextEntryResponse,
+  { id: number; content: string }
+> = (args) =>
+  invoke<UpdateTextEntryResponse>("clipvault_convert_rich_text_to_plain", {
+    entryId: args.id,
+    content: args.content,
+  });
+
 export const createManualTextCommand: ClipvaultCommandArg<
   CreateManualTextResponse,
   { collectionId: number; content: string }
@@ -1044,6 +1152,15 @@ export const collectionsCreateCommand: ClipvaultCommandArg<
   { name: string }
 > = (args) =>
   invoke<Collection>("clipvault_collections_create", { name: args.name });
+
+export const collectionsCreateSubcollectionCommand: ClipvaultCommandArg<
+  Collection,
+  { parentId: number; name: string }
+> = (args) =>
+  invoke<Collection>("clipvault_collections_create_subcollection", {
+    parentId: args.parentId,
+    name: args.name,
+  });
 
 export const collectionsRenameCommand: ClipvaultCommandArg<
   Collection,
@@ -1144,6 +1261,15 @@ export const entryTagsCommand: ClipvaultCommandArg<
   number[],
   { entryId: number }
 > = (args) => invoke<number[]>("clipvault_entry_tags", { entryId: args.entryId });
+
+export const collectionTagFilterIdsCommand: ClipvaultCommandArg<
+  number[],
+  { collectionId: number | null; unassignedOnly: boolean }
+> = (args) =>
+  invoke<number[]>("clipvault_tag_filter_ids", {
+    collectionId: args.collectionId,
+    unassignedOnly: args.unassignedOnly,
+  });
 
 export const entryCollectionsSetCommand: ClipvaultCommandArg<
   number[],

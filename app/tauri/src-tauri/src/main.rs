@@ -99,7 +99,9 @@ fn main() {
 
     init_tracing();
 
-    let builder = tauri::Builder::default().plugin(tauri_plugin_process::init());
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init());
 
     // The updater public key and endpoint live in tauri.conf.json. This keeps
     // locally packaged production builds able to verify signed releases too;
@@ -172,6 +174,27 @@ fn main() {
             }
 
             if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "image-preview" {
+                    let origin_label = window
+                        .get_webview_window("image-preview")
+                        .and_then(|preview_window| preview_window.url().ok())
+                        .and_then(|url| {
+                            url.query_pairs().find_map(|(key, value)| {
+                                (key == "origin").then(|| value.into_owned())
+                            })
+                    });
+                    if let Some(origin_label) = origin_label
+                        .filter(|label| label == "main" || label == "quick-paste")
+                    {
+                        if let Some(origin_window) = window.get_webview_window(&origin_label) {
+                            let _ = origin_window.show();
+                            let _ = origin_window.set_focus();
+                        }
+                    }
+                    api.prevent_close();
+                    let _ = window.destroy();
+                    return;
+                }
                 if window.label() == "startup-splash" {
                     return;
                 }
@@ -186,11 +209,18 @@ fn main() {
             commands::clipvault_database_path,
             commands::clipvault_migrations_applied,
             commands::clipvault_capture_text,
+            commands::clipvault_capture_collection_set,
             commands::clipvault_recent_entries,
+            commands::clipvault_entry_by_id,
             commands::clipvault_recent_entries_filtered,
+            commands::clipvault_content_types,
             commands::clipvault_history_count,
             commands::clipvault_search_entries,
             commands::clipvault_capture_tick,
+            commands::clipvault_export_pdf,
+            commands::clipvault_prepare_image_import,
+            commands::clipvault_complete_image_import,
+            commands::clipvault_cancel_image_import,
             commands::clipvault_platform_capabilities,
             commands::clipvault_paste_entry,
             commands::clipvault_copy_entry,
@@ -228,6 +258,7 @@ fn main() {
             commands::clipvault_ignored_app_linux_add,
             commands::clipvault_set_entry_title,
             commands::clipvault_update_text_entry,
+            commands::clipvault_convert_rich_text_to_plain,
             commands::clipvault_create_manual_text,
             commands::clipvault_entry_note,
             commands::clipvault_entry_note_ids,
@@ -236,9 +267,11 @@ fn main() {
             commands::clipvault_set_collection_note,
             commands::clipvault_source_app_icon,
             commands::clipvault_clipboard_asset,
+            commands::clipvault_rotate_image_capture,
             commands::clipvault_rich_text_preview,
             commands::clipvault_organization_snapshot,
             commands::clipvault_collections_create,
+            commands::clipvault_collections_create_subcollection,
             commands::clipvault_collections_rename,
             commands::clipvault_collections_delete,
             commands::clipvault_collections_delete_preview,
@@ -250,6 +283,7 @@ fn main() {
             commands::clipvault_tags_delete,
             commands::clipvault_entry_collections,
             commands::clipvault_entry_tags,
+            commands::clipvault_tag_filter_ids,
             commands::clipvault_entry_collections_set,
             commands::clipvault_entry_tags_set,
             commands::clipvault_entry_upsert_tag,

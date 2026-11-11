@@ -63,30 +63,74 @@ function extractBlockAfter(source: string, anchor: string): string {
   return source.slice(start);
 }
 
-test("ClipboardPreview declares a dialog role for the overlay", () => {
+test("ClipboardPreview uses modal semantics only for its in-window overlay", () => {
   // The overlay must announce itself as a modal so screen readers
   // do not leak focus into the underlying rail. The `role="dialog"`
   // is the documented contract for the Quick Paste overlay and
   // Desktop preview alike.
   assert.ok(
-    previewSource.includes('role="dialog"'),
+    previewSource.includes('role={standaloneImage ? "main" : "dialog"}'),
     "the overlay must declare role=\"dialog\"",
   );
   assert.ok(
-    previewSource.includes('aria-modal="true"'),
+    previewSource.includes('aria-modal={standaloneImage ? undefined : "true"}'),
     "the overlay must declare aria-modal=\"true\"",
   );
+});
+
+test("preview stays open on outside interaction and closes only by button or Escape", () => {
+  assert.equal(previewSource.includes("onOverlayClick"), false);
+  assert.equal(previewSource.includes("on:click={onOverlayClick}"), false);
+  assert.ok(previewSource.includes("on:keydown={onOverlayKeydown}"));
+  assert.ok(previewSource.includes("on:click={handleClose}"));
+
+  const escapeHandler = extractFunctionBody(previewSource, "onOverlayKeydown");
+  assert.match(escapeHandler, /event\.key\s*===\s*"Escape"/);
+  assert.match(escapeHandler, /close\(\)/);
+});
+
+test("image preview fits automatically and has no internal zoom handle", () => {
+  assert.equal(previewSource.includes("cv-preview-resize-handle"), false);
+  assert.equal(previewSource.includes("onPreviewResizePointer"), false);
+  assert.ok(previewSource.includes("export let standaloneImage: boolean = false"));
+  assert.ok(previewSource.includes("class:cv-preview-standalone={standaloneImage}"));
+  assert.ok(previewSource.includes("class:cv-preview-card-standalone={standaloneImage}"));
+  assert.ok(previewSource.includes('window.addEventListener("resize", handlePreviewResize)'));
+  assert.ok(previewSource.includes("      standaloneImage ? null : 1,\n    );"));
+  assert.match(
+    previewSource,
+    /\{#if !standaloneImage\}[\s\S]*?data-testid="\{testIdPrefix\}-close"[\s\S]*?\{\/if\}/,
+    "the in-window close button is available only for the modal overlay",
+  );
+});
+
+test("standalone image view renders in the native window without modal semantics", () => {
+  assert.ok(previewSource.includes('role={standaloneImage ? "main" : "dialog"}'));
+  assert.ok(previewSource.includes('aria-modal={standaloneImage ? undefined : "true"}'));
+  assert.ok(previewSource.includes("class:cv-preview-body-image-standalone={standaloneImage}"));
+});
+
+test("native image zoom controls react to image readiness and capture gestures before webview zoom", () => {
+  assert.match(
+    previewSource,
+    /\$: canZoomCurrentImage =[\s\S]*?imageState === "loaded"[\s\S]*?!imageRotationRefreshing/,
+  );
+  assert.match(previewSource, /disabled=\{!canZoomCurrentImage \|\| imageZoomScale >= IMAGE_PREVIEW_ZOOM_MAX\}/);
+  assert.match(previewSource, /disabled=\{!canZoomCurrentImage \|\| imageZoomScale <= IMAGE_PREVIEW_ZOOM_MIN\}/);
+  assert.match(previewSource, /document\.addEventListener\("wheel", onImageZoomWheel, \{[\s\S]*?capture: true,[\s\S]*?passive: false/);
+  assert.match(previewSource, /document\.addEventListener\("gesturestart", onImageGestureStart, \{[\s\S]*?capture: true,[\s\S]*?passive: false/);
+  assert.match(previewSource, /document\.removeEventListener\("gesturechange", onImageGestureChange, true\)/);
 });
 
 test("ClipboardPreview renders the canonical plain text through a safe Svelte text node", () => {
   // Svelte escapes interpolated text at the DOM boundary. Pre-escaping
   // here would make the user see entity spellings such as `&quot;`.
   assert.ok(
-    previewSource.includes("entryFullPreviewText(entry)"),
+    previewSource.includes("entryFullPreviewText(visibleEntry)"),
     "the overlay must consult entryFullPreviewText (full canonical text)",
   );
   assert.ok(
-    previewSource.includes('$: fullText = entry == null ? "" : entryFullPreviewText(entry);'),
+    previewSource.includes('$: fullText = visibleEntry == null ? "" : entryFullPreviewText(visibleEntry);'),
     "the bound value must stay identical to the canonical capture",
   );
   const textIndex = previewSource.indexOf(">{fullText}</pre>");
@@ -100,7 +144,7 @@ test("ClipboardPreview renders the canonical plain text through a safe Svelte te
     "captured plain text must be inserted as a text node, never active HTML",
   );
   assert.equal(
-    previewSource.includes("escapeForPreview(entryFullPreviewText(entry))"),
+    previewSource.includes("escapeForPreview(entryFullPreviewText(visibleEntry))"),
     false,
     "the plain text branch must not pre-encode the capture as HTML entities",
   );
@@ -268,6 +312,24 @@ test("ClipboardPreview renders images through object-fit: contain", () => {
   );
 });
 
+test("image preview card fits the image and keeps ten pixels of inner spacing", () => {
+  const cssBlock = previewSource.slice(
+    previewSource.indexOf("<style>"),
+    previewSource.length,
+  );
+  const cardRule = cssBlock.match(/\.cv-preview-card-image\s*\{[^}]*\}/);
+  const bodyRule = cssBlock.match(/\.cv-preview-body-image\s*\{[^}]*\}/);
+  assert.ok(cardRule);
+  assert.ok(bodyRule);
+  assert.match(cardRule![0], /width:\s*fit-content/);
+  assert.match(bodyRule![0], /padding:\s*10px/);
+  assert.ok(previewSource.includes("fitPreviewImage("));
+  assert.ok(previewSource.includes("fitted.width +"));
+  assert.ok(previewSource.includes("style={previewCardWidth !== null"));
+  assert.ok(previewSource.includes('window.addEventListener("resize", handlePreviewResize)'));
+  assert.ok(previewSource.includes("class:cv-preview-card-image={isImageEntry(record)}"));
+});
+
 test("ClipboardPreview accepts a trigger element so close returns focus", () => {
   // The overlay must restore focus to the trigger when the user
   // closes it. The `trigger` export and the `restoreFocus` helper
@@ -285,11 +347,11 @@ test("ClipboardPreview accepts a trigger element so close returns focus", () => 
 
 test("ClipboardPreview keeps the entry.metadata-only contract", () => {
   // The component MUST NOT receive or render content_hash,
-  // content_size, mime_type, payload_width, payload_height,
-  // source_app, source_app_name, source_app_icon_ref,
+  // content_size, mime_type, source_app, source_app_name, source_app_icon_ref,
   // rich_html_ref, rich_rtf_ref or rich_preview_ref. Those stay
   // inside the bridge; the preview only renders the typed display
-  // surface (title, source label, elapsed time, body).
+  // surface (title, source label, elapsed time, body). Pixel dimensions are
+  // safe metadata used only to fit the image into the modal.
   //
   // `asset_ref` is allowed because the shared resolver needs it
   // to bridge through the validated command — it never reaches
@@ -302,8 +364,6 @@ test("ClipboardPreview keeps the entry.metadata-only contract", () => {
     "content_hash",
     "content_size",
     "mime_type",
-    "payload_width",
-    "payload_height",
     "source_app",
     "source_app_name",
     "source_app_icon_ref",

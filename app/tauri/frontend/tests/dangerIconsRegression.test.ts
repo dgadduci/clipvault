@@ -193,8 +193,8 @@ test("OrganizationSidebar delete icon uses the documented danger colour", () => 
   );
   assert.match(
     source,
-    /\.icon-only\.danger\.delete-icon\s*\{[^}]*--cv-danger/,
-    "the sidebar delete button CSS must use --cv-danger",
+    /\.collection-action-menu-item\.danger\.delete-icon\s*\{[^}]*--cv-danger/,
+    "the sidebar delete menu item CSS must use --cv-danger",
   );
 });
 
@@ -203,7 +203,8 @@ test("OrganizationSidebar delete icon is local, accessible and replaces the lega
   const buttonMatch = source.match(
     /<button[\s\S]*?data-testid="sidebar-collection-delete"[\s\S]*?<\/button>/,
   );
-  assert.ok(buttonMatch, "the sidebar delete button must exist");
+  assert.ok(buttonMatch, "the sidebar delete menu item must exist");
+  assert.match(buttonMatch[0], /role="menuitem"/);
   assert.match(
     buttonMatch[0],
     /<svg[^>]*viewBox="0 0 24 24"/,
@@ -241,6 +242,11 @@ test("OrganizationSidebar requests collection deletion from its parent", () => {
     /dispatch\(\s*"delete",\s*\{\s*collectionId:\s*collection\.id\s*\}\s*\)/,
   );
   assert.doesNotMatch(source, /pendingDeleteBusy|sidebar-delete-modal/);
+  assert.match(
+    source,
+    /\{#if collection\.kind === "user"\}[\s\S]*?data-testid="sidebar-collection-delete"/,
+    "only user collection menus may offer deletion",
+  );
 });
 
 test("App confirms collection deletion with safe counts and reconfirms stale previews", () => {

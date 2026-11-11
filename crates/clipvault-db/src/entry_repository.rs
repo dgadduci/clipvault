@@ -216,8 +216,8 @@ pub struct SetSourceAppMetadataOutcome {
 ///   persisted content; no mutation happened and no event will be
 ///   emitted upstream.
 /// - `NotFound`: the target id does not exist.
-/// - `NotEditable`: the row is an image or carries rich-text
-///   metadata that the editor must never touch.
+/// - `NotEditable`: the plain-text operation targeted an image or a
+///   rich row without the explicit conversion intent.
 /// - `EmptyContent`: the trimmed input is empty.
 /// - `DuplicateContent`: another live row already owns the
 ///   canonical hash the new text would produce; the operation
@@ -230,6 +230,12 @@ pub enum UpdateTextOutcome {
     NotEditable,
     EmptyContent,
     DuplicateContent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextEditMode {
+    PlainText,
+    ConvertRichToPlain,
 }
 
 /// Single distinct source-application entry the combobox query
@@ -299,6 +305,27 @@ impl<'a> EntryRepository<'a> {
         self.insert_or_touch_inner(new, Some(collection_id))
     }
 
+    /// Add an existing entry to an eligible local user collection without
+    /// changing any of its other memberships. This is used after ordinary
+    /// clipboard capture so a selected collection can receive new and
+    /// deduplicated entries alike.
+    pub fn add_entry_to_local_collection(
+        &mut self,
+        entry_id: i64,
+        collection_id: i64,
+        created_at: OffsetDateTime,
+    ) -> Result<(), EntryRepositoryError> {
+        let tx = self.conn.transaction()?;
+        validate_local_collection_target(&tx, collection_id)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO entry_collections (entry_id, collection_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![entry_id, collection_id, format_timestamp(created_at)],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn insert_or_touch_inner(
         &mut self,
         new: NewEntry,
@@ -306,7 +333,7 @@ impl<'a> EntryRepository<'a> {
     ) -> Result<EntryOutcome, EntryRepositoryError> {
         let tx = self.conn.transaction()?;
         if let Some(collection_id) = collection_id {
-            validate_manual_collection_target(&tx, collection_id)?;
+            validate_local_collection_target(&tx, collection_id)?;
         }
         let plain_hash = new.content_hash.clone();
         let rich_hash = new.rich_text_hash.clone();
@@ -434,6 +461,58 @@ impl<'a> EntryRepository<'a> {
 
     pub fn find_by_id(&self, id: i64) -> Result<Option<EntryRecord>, EntryRepositoryError> {
         fetch_by_id(self.conn, id)
+    }
+
+    /// Replace the persisted pixels and metadata for one image entry.
+    ///
+    /// `expected_asset_ref` makes the write conditional on the image still
+    /// being the version the caller read before transforming it. This keeps
+    /// a slower rotation from overwriting a newer image update. Other entry
+    /// columns and collection memberships are deliberately left untouched.
+    pub fn replace_image_asset(
+        &mut self,
+        id: i64,
+        expected_asset_ref: &str,
+        content_hash: &str,
+        asset_ref: &str,
+        content_size: i64,
+        payload_width: u32,
+        payload_height: u32,
+        now: OffsetDateTime,
+    ) -> Result<Option<EntryRecord>, EntryRepositoryError> {
+        let tx = self.conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE clipboard_entries
+             SET content_hash = ?1,
+                 content_size = ?2,
+                 asset_ref = ?3,
+                 mime_type = ?4,
+                 payload_width = ?5,
+                 payload_height = ?6,
+                 updated_at = ?7
+             WHERE id = ?8
+               AND content_type = ?9
+               AND asset_ref = ?10",
+            params![
+                content_hash,
+                content_size,
+                asset_ref,
+                crate::entry::IMAGE_MIME_PNG,
+                payload_width,
+                payload_height,
+                format_timestamp(now),
+                id,
+                ContentType::Image.as_str(),
+                expected_asset_ref,
+            ],
+        )?;
+        let record = if updated == 0 {
+            None
+        } else {
+            fetch_by_id(&tx, id)?
+        };
+        tx.commit()?;
+        Ok(record)
     }
 
     /// Refresh only the `updated_at` / `last_seen_at` columns of
@@ -1129,6 +1208,67 @@ impl<'a> EntryRepository<'a> {
         self.entries_filtered_by_content_type(collection_id, tag_ids, source_app, None)
     }
 
+    /// Return the distinct, supported content types represented in a
+    /// collection scope. `None` is Historial and therefore includes every
+    /// entry. This metadata query is deliberately independent of the recent
+    /// entries limit so a type on an older card remains selectable.
+    pub fn distinct_content_types(
+        &self,
+        collection_id: Option<i64>,
+    ) -> Result<Vec<ContentType>, EntryRepositoryError> {
+        let sql = if collection_id.is_some() {
+            "SELECT DISTINCT content_type FROM clipboard_entries
+             WHERE id IN (
+               SELECT entry_id FROM entry_collections WHERE collection_id = ?1
+             )
+             ORDER BY content_type"
+        } else {
+            "SELECT DISTINCT content_type FROM clipboard_entries
+             ORDER BY content_type"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let raw_types = if let Some(collection_id) = collection_id {
+            stmt.query_map(params![collection_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        let mut content_types = raw_types
+            .iter()
+            .filter_map(|raw| parse_content_type(raw))
+            .collect::<Vec<_>>();
+        content_types.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(content_types)
+    }
+
+    /// Return content types represented by entries with no membership in any
+    /// user-defined collection. The system `Historial` membership is ignored.
+    pub fn distinct_unassigned_content_types(
+        &self,
+    ) -> Result<Vec<ContentType>, EntryRepositoryError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT ce.content_type FROM clipboard_entries ce
+              WHERE NOT EXISTS (
+                SELECT 1 FROM entry_collections ec
+                  JOIN collections c ON c.id = ec.collection_id
+                 WHERE ec.entry_id = ce.id
+                   AND c.kind = 'user'
+              )
+              ORDER BY ce.content_type",
+        )?;
+        let raw_types = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut content_types = raw_types
+            .iter()
+            .filter_map(|raw| parse_content_type(raw))
+            .collect::<Vec<_>>();
+        content_types.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(content_types)
+    }
+
     /// Variant of [`Self::entries_filtered`] that also restricts rows to one
     /// content type when supplied. The type is bound as a parameter so the
     /// query remains safe and the existing no-type call retains its behavior.
@@ -1139,6 +1279,85 @@ impl<'a> EntryRepository<'a> {
         source_app: &SourceAppFilter,
         content_type: Option<ContentType>,
     ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
+        self.entries_filtered_with_membership_filter(
+            collection_id,
+            false,
+            tag_ids,
+            source_app,
+            content_type,
+            None,
+        )
+    }
+
+    /// Paginated variant of [`Self::entries_filtered_by_content_type`]. The
+    /// filters and chronological ordering are applied before the SQL limit
+    /// and offset so adjacent pages cannot repeat or skip matching rows.
+    pub fn entries_page_filtered_by_content_type(
+        &self,
+        collection_id: Option<i64>,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
+        self.entries_filtered_with_membership_filter(
+            collection_id,
+            false,
+            tag_ids,
+            source_app,
+            content_type,
+            Some((limit, offset)),
+        )
+    }
+
+    /// Return entries without a membership in any user-defined collection,
+    /// while keeping the same tag, source-app and content-type filters as the
+    /// regular History query. The automatic `Historial` membership is ignored.
+    pub fn unassigned_entries_filtered_by_content_type(
+        &self,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+    ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
+        self.entries_filtered_with_membership_filter(
+            None,
+            true,
+            tag_ids,
+            source_app,
+            content_type,
+            None,
+        )
+    }
+
+    /// Paginated variant for unassigned History entries.
+    pub fn unassigned_entries_page_filtered_by_content_type(
+        &self,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
+        self.entries_filtered_with_membership_filter(
+            None,
+            true,
+            tag_ids,
+            source_app,
+            content_type,
+            Some((limit, offset)),
+        )
+    }
+
+    fn entries_filtered_with_membership_filter(
+        &self,
+        collection_id: Option<i64>,
+        unassigned_only: bool,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+        pagination: Option<(usize, usize)>,
+    ) -> Result<Vec<EntryRecord>, EntryRepositoryError> {
         let mut sql = format!(
             "SELECT {ENTRY_COLUMNS}
              FROM clipboard_entries"
@@ -1147,6 +1366,16 @@ impl<'a> EntryRepository<'a> {
         if collection_id.is_some() {
             sql.push_str(
                 " WHERE id IN (SELECT entry_id FROM entry_collections WHERE collection_id = ?)",
+            );
+            first_clause = false;
+        } else if unassigned_only {
+            sql.push_str(
+                " WHERE NOT EXISTS (
+                    SELECT 1 FROM entry_collections ec
+                      JOIN collections c ON c.id = ec.collection_id
+                     WHERE ec.entry_id = clipboard_entries.id
+                       AND c.kind = 'user'
+                )",
             );
             first_clause = false;
         }
@@ -1180,6 +1409,9 @@ impl<'a> EntryRepository<'a> {
             sql.push_str(&format!("({})", predicate.sql));
         }
         sql.push_str(" ORDER BY created_at DESC, id DESC");
+        if pagination.is_some() {
+            sql.push_str(" LIMIT ? OFFSET ?");
+        }
 
         let mut params_dyn: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(cid) = collection_id {
@@ -1199,6 +1431,10 @@ impl<'a> EntryRepository<'a> {
                 ScopedSourceAppParam::Text(text) => Box::new(text) as Box<dyn rusqlite::ToSql>,
                 ScopedSourceAppParam::Integer(value) => Box::new(value) as Box<dyn rusqlite::ToSql>,
             }));
+        }
+        if let Some((limit, offset)) = pagination {
+            params_dyn.push(Box::new(i64::try_from(limit.max(1)).unwrap_or(i64::MAX)));
+            params_dyn.push(Box::new(i64::try_from(offset).unwrap_or(i64::MAX)));
         }
         let bound: Vec<&dyn rusqlite::ToSql> = params_dyn.iter().map(|b| &**b).collect();
         let mut stmt = self.conn.prepare(&sql)?;
@@ -1476,6 +1712,52 @@ impl<'a> EntryRepository<'a> {
         new_content_size: i64,
         now: OffsetDateTime,
     ) -> Result<UpdateTextOutcome, EntryRepositoryError> {
+        self.update_text_inner(
+            id,
+            new_content,
+            new_content_hash,
+            new_content_type,
+            new_content_size,
+            now,
+            TextEditMode::PlainText,
+        )
+    }
+
+    /// Convert an existing rich-text row to plain text in place. The
+    /// conversion uses the same validation and duplicate checks as
+    /// [`Self::update_text`], but only accepts rows that still have a
+    /// complete rich representation and clears all rich metadata in
+    /// the same transaction as the text update.
+    pub fn convert_rich_text_to_plain(
+        &mut self,
+        id: i64,
+        new_content: &str,
+        new_content_hash: &str,
+        new_content_type: ContentType,
+        new_content_size: i64,
+        now: OffsetDateTime,
+    ) -> Result<UpdateTextOutcome, EntryRepositoryError> {
+        self.update_text_inner(
+            id,
+            new_content,
+            new_content_hash,
+            new_content_type,
+            new_content_size,
+            now,
+            TextEditMode::ConvertRichToPlain,
+        )
+    }
+
+    fn update_text_inner(
+        &mut self,
+        id: i64,
+        new_content: &str,
+        new_content_hash: &str,
+        new_content_type: ContentType,
+        new_content_size: i64,
+        now: OffsetDateTime,
+        mode: TextEditMode,
+    ) -> Result<UpdateTextOutcome, EntryRepositoryError> {
         let tx = self.conn.transaction()?;
 
         let existing = match fetch_by_id(&tx, id)? {
@@ -1491,16 +1773,23 @@ impl<'a> EntryRepository<'a> {
             }
         };
 
-        if !existing.content_type.is_textual()
-            || existing.asset_ref.is_some()
+        let has_image_metadata = existing.asset_ref.is_some()
             || existing.mime_type.is_some()
             || existing.payload_width.is_some()
-            || existing.payload_height.is_some()
-            || existing.rich_text_hash.is_some()
+            || existing.payload_height.is_some();
+        let has_any_rich_metadata = existing.rich_text_hash.is_some()
             || existing.rich_html_ref.is_some()
             || existing.rich_rtf_ref.is_some()
             || existing.rich_preview_ref.is_some()
-        {
+            || existing.rich_html_size.is_some()
+            || existing.rich_rtf_size.is_some();
+        let eligible = existing.content_type.is_textual()
+            && !has_image_metadata
+            && match mode {
+                TextEditMode::PlainText => !has_any_rich_metadata,
+                TextEditMode::ConvertRichToPlain => existing.has_rich_text(),
+            };
+        if !eligible {
             tx.rollback()?;
             return Ok(UpdateTextOutcome::NotEditable);
         }
@@ -1510,7 +1799,11 @@ impl<'a> EntryRepository<'a> {
             return Ok(UpdateTextOutcome::EmptyContent);
         }
 
-        if existing.content_hash == new_content_hash {
+        let unchanged = match mode {
+            TextEditMode::PlainText => existing.content_hash == new_content_hash,
+            TextEditMode::ConvertRichToPlain => existing.content == new_content,
+        };
+        if unchanged {
             // The new text is byte-for-byte identical to the
             // persisted one. Drop the transaction and surface a
             // no-op so the shell does not emit a content mutation
@@ -1545,23 +1838,52 @@ impl<'a> EntryRepository<'a> {
         }
 
         let now_str = format_timestamp(now);
-        tx.execute(
-            "UPDATE clipboard_entries
-                SET content = ?1,
-                    content_type = ?2,
-                    content_size = ?3,
-                    content_hash = ?4,
-                    updated_at = ?5
-              WHERE id = ?6",
-            params![
-                new_content,
-                new_content_type.as_str(),
-                new_content_size,
-                new_content_hash,
-                now_str,
-                id,
-            ],
-        )?;
+        match mode {
+            TextEditMode::PlainText => {
+                tx.execute(
+                    "UPDATE clipboard_entries
+                        SET content = ?1,
+                            content_type = ?2,
+                            content_size = ?3,
+                            content_hash = ?4,
+                            updated_at = ?5
+                      WHERE id = ?6",
+                    params![
+                        new_content,
+                        new_content_type.as_str(),
+                        new_content_size,
+                        new_content_hash,
+                        now_str,
+                        id,
+                    ],
+                )?;
+            }
+            TextEditMode::ConvertRichToPlain => {
+                tx.execute(
+                    "UPDATE clipboard_entries
+                        SET content = ?1,
+                            content_type = ?2,
+                            content_size = ?3,
+                            content_hash = ?4,
+                            updated_at = ?5,
+                            rich_text_hash = NULL,
+                            rich_html_ref = NULL,
+                            rich_rtf_ref = NULL,
+                            rich_preview_ref = NULL,
+                            rich_html_size = NULL,
+                            rich_rtf_size = NULL
+                      WHERE id = ?6",
+                    params![
+                        new_content,
+                        new_content_type.as_str(),
+                        new_content_size,
+                        new_content_hash,
+                        now_str,
+                        id,
+                    ],
+                )?;
+            }
+        }
         let record = fetch_by_id(&tx, id)?.expect("row updated above must still exist");
         tx.commit()?;
         Ok(UpdateTextOutcome::Updated { record })
@@ -1829,7 +2151,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord> {
     })
 }
 
-fn validate_manual_collection_target(
+fn validate_local_collection_target(
     tx: &Transaction<'_>,
     collection_id: i64,
 ) -> Result<(), EntryRepositoryError> {
@@ -2145,6 +2467,63 @@ mod tests {
             EntryRepository::new(db.connection_mut()).count().unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn add_entry_to_local_collection_is_additive_idempotent_and_validated() {
+        let (_dir, mut db) = open_temp_db();
+        let captured_at = datetime!(2026-01-02 03:04:05 UTC);
+        let entry_id = {
+            let mut entries = EntryRepository::new(db.connection_mut());
+            entries
+                .insert_or_touch(new_entry("active capture", captured_at))
+                .expect("capture")
+                .record()
+                .id
+        };
+        let (parent_id, child_id) = {
+            let mut organization = crate::OrganizationRepository::new(db.connection_mut());
+            let parent_id = organization
+                .create_user_collection("Parent", "#1565c0", captured_at)
+                .expect("parent collection")
+                .id;
+            let child_id = organization
+                .create_subcollection(parent_id, "Child", "#1565c0", captured_at)
+                .expect("child collection")
+                .id;
+            organization
+                .replace_entry_collections(entry_id, &[parent_id], captured_at)
+                .expect("initial parent membership");
+            (parent_id, child_id)
+        };
+
+        {
+            let mut entries = EntryRepository::new(db.connection_mut());
+            entries
+                .add_entry_to_local_collection(entry_id, child_id, captured_at)
+                .expect("add child membership");
+            entries
+                .add_entry_to_local_collection(entry_id, child_id, captured_at)
+                .expect("duplicate add is idempotent");
+            assert!(matches!(
+                entries.add_entry_to_local_collection(entry_id, i64::MAX, captured_at),
+                Err(EntryRepositoryError::Organization(
+                    crate::organization::OrganizationError::CollectionNotFound(i64::MAX)
+                ))
+            ));
+        }
+
+        let memberships = crate::OrganizationRepository::new(db.connection_mut())
+            .entry_collection_ids(entry_id)
+            .expect("memberships");
+        let history_id = crate::OrganizationRepository::new(db.connection_mut())
+            .system_collection_id(crate::organization::HISTORY_STABLE_KEY)
+            .expect("history lookup")
+            .expect("history collection");
+        assert!(memberships.contains(&history_id));
+        assert!(memberships.contains(&parent_id));
+        assert!(memberships.contains(&child_id));
+        assert_eq!(memberships.len(), 3);
     }
 
     #[test]
@@ -3255,6 +3634,103 @@ mod tests {
     }
 
     #[test]
+    fn entries_page_filtered_by_content_type_uses_stable_offset_after_filters() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (older_url_id, newer_url_id) = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let older_url_id = repo
+                .insert_or_touch(new_entry_with_type("an older url", ContentType::Url, when))
+                .expect("older url")
+                .record()
+                .id;
+            let newer_url_id = repo
+                .insert_or_touch(new_entry_with_type("a newer url", ContentType::Url, when))
+                .expect("newer url")
+                .record()
+                .id;
+            repo.insert_or_touch(new_entry("unfiltered text", when))
+                .expect("text");
+            (older_url_id, newer_url_id)
+        };
+
+        let repo = EntryRepository::new(db.connection_mut());
+        let first_page = repo
+            .entries_page_filtered_by_content_type(
+                None,
+                &[],
+                &SourceAppFilter::default(),
+                Some(ContentType::Url),
+                1,
+                0,
+            )
+            .expect("first page");
+        let second_page = repo
+            .entries_page_filtered_by_content_type(
+                None,
+                &[],
+                &SourceAppFilter::default(),
+                Some(ContentType::Url),
+                1,
+                1,
+            )
+            .expect("second page");
+
+        assert_eq!(
+            first_page.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [newer_url_id]
+        );
+        assert_eq!(
+            second_page.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [older_url_id]
+        );
+    }
+
+    #[test]
+    fn distinct_content_types_are_complete_and_collection_scoped() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let collection_id = {
+            let mut organization = crate::OrganizationRepository::new(db.connection_mut());
+            organization
+                .create_user_collection("Tipos", "#1565c0", when)
+                .expect("create collection")
+                .id
+        };
+        {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.insert_or_touch(new_entry_with_type("history only", ContentType::Text, when))
+                .expect("text entry");
+            repo.insert_or_touch_in_local_collection(
+                new_entry_with_type("first url", ContentType::Url, when),
+                collection_id,
+            )
+            .expect("first url entry");
+            repo.insert_or_touch_in_local_collection(
+                new_entry_with_type("second url", ContentType::Url, when),
+                collection_id,
+            )
+            .expect("second url entry");
+            repo.insert_or_touch_in_local_collection(
+                new_entry_with_type("code", ContentType::Code, when),
+                collection_id,
+            )
+            .expect("code entry");
+        }
+
+        let repo = EntryRepository::new(db.connection_mut());
+        assert_eq!(
+            repo.distinct_content_types(None).expect("history types"),
+            vec![ContentType::Code, ContentType::Text, ContentType::Url],
+        );
+        assert_eq!(
+            repo.distinct_content_types(Some(collection_id))
+                .expect("collection types"),
+            vec![ContentType::Code, ContentType::Url],
+        );
+    }
+
+    #[test]
     fn entries_filtered_by_collection_includes_image_rows() {
         // Regression: selecting a user collection must not drop image
         // rows that belong to it. The buggy
@@ -3305,6 +3781,69 @@ mod tests {
             "image entry must surface inside the collection"
         );
         assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn unassigned_filter_ignores_history_membership_and_excludes_user_collections() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (unassigned_text_id, assigned_image_id) = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let unassigned_text_id = repo
+                .insert_or_touch(new_entry("only in history", when))
+                .expect("unassigned text")
+                .record()
+                .id;
+            let assigned_image_id = repo
+                .insert_or_touch(new_image_entry(&"a".repeat(64), 8, 6, when))
+                .expect("assigned image")
+                .record()
+                .id;
+            (unassigned_text_id, assigned_image_id)
+        };
+        let collection_id = {
+            let mut repo = crate::OrganizationRepository::new(db.connection_mut());
+            repo.create_user_collection("Trabajo", "#1565c0", when)
+                .expect("create collection")
+                .id
+        };
+        {
+            let mut repo = crate::OrganizationRepository::new(db.connection_mut());
+            repo.replace_entry_collections(assigned_image_id, &[collection_id], when)
+                .expect("assign image");
+        }
+
+        {
+            let repo = EntryRepository::new(db.connection_mut());
+            let filtered = repo
+                .unassigned_entries_filtered_by_content_type(&[], &SourceAppFilter::default(), None)
+                .expect("unassigned entries");
+            let ids = filtered.iter().map(|entry| entry.id).collect::<Vec<_>>();
+            assert_eq!(ids, vec![unassigned_text_id]);
+            assert_eq!(
+                repo.distinct_unassigned_content_types()
+                    .expect("unassigned content types"),
+                vec![ContentType::Text],
+            );
+        }
+
+        {
+            let mut repo = crate::OrganizationRepository::new(db.connection_mut());
+            repo.replace_entry_collections(assigned_image_id, &[], when)
+                .expect("remove user collection");
+        }
+        let repo = EntryRepository::new(db.connection_mut());
+        let filtered = repo
+            .unassigned_entries_filtered_by_content_type(&[], &SourceAppFilter::default(), None)
+            .expect("entries after unassigning image");
+        let ids = filtered.iter().map(|entry| entry.id).collect::<Vec<_>>();
+        assert!(ids.contains(&unassigned_text_id));
+        assert!(ids.contains(&assigned_image_id));
+        assert_eq!(
+            repo.distinct_unassigned_content_types()
+                .expect("content types after unassigning image"),
+            vec![ContentType::Image, ContentType::Text],
+        );
     }
 
     #[test]
@@ -4987,6 +5526,272 @@ mod tests {
         };
         assert_eq!(stored.content, "styled text");
         assert!(stored.has_rich_text());
+    }
+
+    #[test]
+    fn convert_rich_text_to_plain_clears_rich_metadata_and_preserves_entry_metadata() {
+        let (_dir, mut db) = open_temp_db();
+        let captured_at = datetime!(2026-01-02 03:04:05 UTC);
+        let edited_at = datetime!(2026-01-02 03:10:00 UTC);
+        let entry_id = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let id = repo
+                .insert_or_touch(new_rich_entry(
+                    "styled text",
+                    "rich-hash-conversion",
+                    Some("<b>styled text</b>"),
+                    Some(b"{\\rtf1 styled text}"),
+                    captured_at,
+                ))
+                .expect("insert rich entry")
+                .record()
+                .id;
+            repo.set_title(id, Some("Rich title"), captured_at)
+                .expect("title");
+            repo.set_favorite(id, true, captured_at).expect("favorite");
+            repo.set_source_app_metadata(
+                id,
+                Some("Editor"),
+                Some("application-icons/editor.png"),
+                captured_at,
+            )
+            .expect("source app");
+            id
+        };
+        let (collection_id, tag_id) = {
+            let mut repo = crate::OrganizationRepository::new(db.connection_mut());
+            let collection = repo
+                .create_user_collection("Rich captures", "#1565c0", captured_at)
+                .expect("collection")
+                .id;
+            let tag = repo.upsert_tag("rich", captured_at).expect("tag").id;
+            repo.replace_entry_collections(entry_id, &[collection], captured_at)
+                .expect("attach collection");
+            repo.replace_entry_tags(entry_id, &[tag], captured_at)
+                .expect("attach tag");
+            (collection, tag)
+        };
+
+        let new_content = "https://example.com/edited";
+        let (new_hash, new_size) = compute_text_metadata(new_content);
+        let outcome = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            repo.convert_rich_text_to_plain(
+                entry_id,
+                new_content,
+                &new_hash,
+                ContentType::Url,
+                new_size,
+                edited_at,
+            )
+            .expect("convert rich text")
+        };
+        let UpdateTextOutcome::Updated { record } = outcome else {
+            panic!("expected Updated, got {outcome:?}");
+        };
+        assert_eq!(record.id, entry_id);
+        assert_eq!(record.content, new_content);
+        assert_eq!(record.content_hash, new_hash);
+        assert_eq!(record.content_size, new_size);
+        assert_eq!(record.content_type, ContentType::Url);
+        assert_eq!(record.updated_at, format_timestamp(edited_at));
+        assert_eq!(record.created_at, format_timestamp(captured_at));
+        assert_eq!(record.last_seen_at, format_timestamp(captured_at));
+        assert_eq!(record.title.as_deref(), Some("Rich title"));
+        assert!(record.is_pinned);
+        assert_eq!(record.source_app_name.as_deref(), Some("Editor"));
+        assert_eq!(
+            record.source_app_icon_ref.as_deref(),
+            Some("application-icons/editor.png")
+        );
+        assert!(record.asset_ref.is_none());
+        assert!(record.mime_type.is_none());
+        assert!(record.payload_width.is_none());
+        assert!(record.payload_height.is_none());
+        assert!(record.rich_text_hash.is_none());
+        assert!(record.rich_html_ref.is_none());
+        assert!(record.rich_rtf_ref.is_none());
+        assert!(record.rich_preview_ref.is_none());
+        assert!(record.rich_html_size.is_none());
+        assert!(record.rich_rtf_size.is_none());
+        let mut repo = EntryRepository::new(db.connection_mut());
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(
+                entry_id,
+                "second edit",
+                "second-edit-hash",
+                ContentType::Text,
+                11,
+                edited_at + time::Duration::minutes(1),
+            )
+            .expect("already converted entry"),
+            UpdateTextOutcome::NotEditable
+        ));
+
+        let org_repo = crate::OrganizationRepository::new(db.connection_mut());
+        assert!(org_repo
+            .entry_collection_ids(entry_id)
+            .expect("entry collections")
+            .contains(&collection_id));
+        assert!(org_repo
+            .entry_tag_ids(entry_id)
+            .expect("entry tags")
+            .contains(&tag_id));
+    }
+
+    #[test]
+    fn convert_rich_text_to_plain_rejects_noop_empty_non_rich_and_duplicate_inputs() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (plain_id, rich_id, image_id) = {
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let plain_id = repo
+                .insert_or_touch(new_entry("duplicate target", when))
+                .expect("plain")
+                .record()
+                .id;
+            let rich_id = repo
+                .insert_or_touch(new_rich_entry(
+                    "styled source",
+                    "rich-hash-guard",
+                    Some("<b>styled source</b>"),
+                    None,
+                    when,
+                ))
+                .expect("rich")
+                .record()
+                .id;
+            let image_id = repo
+                .insert_or_touch(new_image_entry(&"ee".repeat(32), 4, 4, when))
+                .expect("image")
+                .record()
+                .id;
+            (plain_id, rich_id, image_id)
+        };
+        let original = {
+            let repo = EntryRepository::new(db.connection_mut());
+            repo.find_by_id(rich_id).unwrap().unwrap()
+        };
+        let mut repo = EntryRepository::new(db.connection_mut());
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(
+                9999,
+                "missing target",
+                "missing-hash",
+                ContentType::Text,
+                14,
+                when,
+            )
+            .expect("missing entry"),
+            UpdateTextOutcome::NotFound
+        ));
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(rich_id, "", "empty-hash", ContentType::Text, 0, when,)
+                .expect("empty input"),
+            UpdateTextOutcome::EmptyContent
+        ));
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(
+                rich_id,
+                &original.content,
+                &original.content_hash,
+                original.content_type,
+                original.content_size,
+                when + time::Duration::minutes(1),
+            )
+            .expect("unchanged input"),
+            UpdateTextOutcome::Noop { .. }
+        ));
+        let duplicate = repo.find_by_id(plain_id).unwrap().unwrap();
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(
+                rich_id,
+                &duplicate.content,
+                &duplicate.content_hash,
+                duplicate.content_type,
+                duplicate.content_size,
+                when + time::Duration::minutes(1),
+            )
+            .expect("duplicate input"),
+            UpdateTextOutcome::DuplicateContent
+        ));
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(
+                plain_id,
+                "replacement",
+                "replacement-hash",
+                ContentType::Text,
+                11,
+                when + time::Duration::minutes(1),
+            )
+            .expect("plain entry"),
+            UpdateTextOutcome::NotEditable
+        ));
+        assert!(matches!(
+            repo.convert_rich_text_to_plain(
+                image_id,
+                "replacement",
+                "image-replacement-hash",
+                ContentType::Text,
+                11,
+                when + time::Duration::minutes(1),
+            )
+            .expect("image entry"),
+            UpdateTextOutcome::NotEditable
+        ));
+
+        let unchanged = repo.find_by_id(rich_id).unwrap().unwrap();
+        assert_eq!(unchanged.content, original.content);
+        assert_eq!(unchanged.updated_at, original.updated_at);
+        assert!(unchanged.has_rich_text());
+    }
+
+    #[test]
+    fn convert_rich_text_to_plain_survives_database_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("clipvault.db");
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let later = datetime!(2026-01-02 03:10:00 UTC);
+        let id;
+        {
+            let mut db = crate::Database::open(&db_path).expect("open");
+            db.run_migrations(&crate::builtin_migrations())
+                .expect("migrate");
+            let mut repo = EntryRepository::new(db.connection_mut());
+            id = repo
+                .insert_or_touch(new_rich_entry(
+                    "styled before restart",
+                    "rich-hash-restart",
+                    Some("<b>styled before restart</b>"),
+                    None,
+                    when,
+                ))
+                .expect("insert rich")
+                .record()
+                .id;
+            let (hash, size) = compute_text_metadata("plain after restart");
+            assert!(matches!(
+                repo.convert_rich_text_to_plain(
+                    id,
+                    "plain after restart",
+                    &hash,
+                    ContentType::Text,
+                    size,
+                    later,
+                )
+                .expect("convert"),
+                UpdateTextOutcome::Updated { .. }
+            ));
+        }
+
+        let mut db = reopen_db(&db_path);
+        let repo = EntryRepository::new(db.connection_mut());
+        let stored = repo.find_by_id(id).unwrap().unwrap();
+        assert_eq!(stored.content, "plain after restart");
+        assert_eq!(stored.updated_at, format_timestamp(later));
+        assert!(!stored.has_rich_text());
+        assert!(stored.rich_html_ref.is_none());
+        assert!(stored.rich_preview_ref.is_none());
     }
 
     #[test]

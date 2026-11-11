@@ -5,7 +5,7 @@
 //! - the `Collection` and `Tag` row layouts the Tauri shell
 //!   serialises;
 //! - the `OrganizationRepository` that the core service uses to
-//!   manage flat collections, free tags and many-to-many
+//!   manage one-level collections, free tags and many-to-many
 //!   associations;
 //! - the validation rules (name normalisation, length, case
 //!   insensitivity, deduplication) the core layer depends on so the
@@ -79,6 +79,8 @@ pub enum OrganizationError {
     TagNameTaken(String),
     #[error("collection {0} does not exist")]
     CollectionNotFound(i64),
+    #[error("collection {0} cannot own subcollections")]
+    InvalidCollectionParent(i64),
     #[error("tag {0} does not exist")]
     TagNotFound(i64),
     #[error("entry {0} does not exist")]
@@ -110,9 +112,18 @@ pub enum OrganizationError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Collection {
     pub id: i64,
+    /// Parent user collection for a one-level subcollection. `None`
+    /// means this row is at the root of the collection tree.
+    #[serde(default)]
+    pub parent_id: Option<i64>,
     pub stable_key: Option<String>,
     pub name: String,
     pub kind: CollectionKind,
+    /// Number of capture-count contributions represented by this collection.
+    /// Root user collections add parent-only memberships to each direct
+    /// subcollection's count; subcollections and system collections use their
+    /// own memberships. Projected from `entry_collections`, never persisted.
+    pub capture_count: i64,
     /// Normalised `#rrggbb` colour the sidebar square and the card
     /// labels render. The repository refuses any other value at write
     /// time so every consumer can trust the format.
@@ -243,7 +254,7 @@ impl<'a> OrganizationRepository<'a> {
 
     /// List every collection sorted so the system `Historial` row
     /// always comes first and user collections follow in a
-    /// deterministic case-insensitive order. The query performs a
+    /// deterministic case-insensitive order within their tree level. The query performs a
     /// metadata-only left join with `peer_collection_bindings`
     /// (and `known_peers` when the binding is present) so the
     /// projection can carry the `is_peer_bound` flag and the
@@ -255,12 +266,44 @@ impl<'a> OrganizationRepository<'a> {
                     c.created_at, c.updated_at,
                     CASE WHEN pcb.peer_id IS NULL THEN 0 ELSE 1 END AS is_peer_bound,
                     NULLIF(TRIM(kp.display_name), '') AS peer_display_name,
-                    CASE WHEN cn.collection_id IS NULL THEN 0 ELSE 1 END AS has_note
+                    CASE WHEN cn.collection_id IS NULL THEN 0 ELSE 1 END AS has_note,
+                    COALESCE(entry_counts.capture_count, 0) AS capture_count,
+                    c.parent_id
              FROM collections c
              LEFT JOIN peer_collection_bindings pcb ON pcb.collection_id = c.id
              LEFT JOIN known_peers kp ON kp.peer_id = pcb.peer_id
              LEFT JOIN collection_notes cn ON cn.collection_id = c.id
+             LEFT JOIN (
+                 SELECT collection_id, COUNT(*) AS capture_count
+                 FROM (
+                     SELECT ec.collection_id, ec.entry_id
+                     FROM entry_collections ec
+                     JOIN collections owner ON owner.id = ec.collection_id
+                     WHERE owner.parent_id IS NOT NULL
+                        OR NOT EXISTS (
+                            SELECT 1
+                            FROM collections child
+                            JOIN entry_collections child_entries
+                              ON child_entries.collection_id = child.id
+                            WHERE child.parent_id = owner.id
+                              AND child_entries.entry_id = ec.entry_id
+                        )
+                     UNION ALL
+                     SELECT parent.id AS collection_id, child_entries.entry_id
+                     FROM collections parent
+                     JOIN collections child
+                       ON child.parent_id = parent.id
+                      AND child.kind = 'user'
+                     JOIN entry_collections child_entries
+                       ON child_entries.collection_id = child.id
+                     WHERE parent.parent_id IS NULL
+                       AND parent.kind = 'user'
+                 ) collection_count_contributions
+                 GROUP BY collection_id
+             ) entry_counts ON entry_counts.collection_id = c.id
              ORDER BY CASE WHEN c.kind = 'system' THEN 0 ELSE 1 END,
+                      c.parent_id IS NOT NULL,
+                      c.parent_id,
                       c.name COLLATE NOCASE ASC",
         )?;
         let rows = stmt.query_map([], row_to_collection)?;
@@ -286,11 +329,41 @@ impl<'a> OrganizationRepository<'a> {
                         c.created_at, c.updated_at,
                         CASE WHEN pcb.peer_id IS NULL THEN 0 ELSE 1 END AS is_peer_bound,
                         NULLIF(TRIM(kp.display_name), '') AS peer_display_name,
-                        CASE WHEN cn.collection_id IS NULL THEN 0 ELSE 1 END AS has_note
+                        CASE WHEN cn.collection_id IS NULL THEN 0 ELSE 1 END AS has_note,
+                        COALESCE(entry_counts.capture_count, 0) AS capture_count,
+                        c.parent_id
                  FROM collections c
                  LEFT JOIN peer_collection_bindings pcb ON pcb.collection_id = c.id
                  LEFT JOIN known_peers kp ON kp.peer_id = pcb.peer_id
                  LEFT JOIN collection_notes cn ON cn.collection_id = c.id
+                 LEFT JOIN (
+                     SELECT collection_id, COUNT(*) AS capture_count
+                     FROM (
+                         SELECT ec.collection_id, ec.entry_id
+                         FROM entry_collections ec
+                         JOIN collections owner ON owner.id = ec.collection_id
+                         WHERE owner.parent_id IS NOT NULL
+                            OR NOT EXISTS (
+                                SELECT 1
+                                FROM collections child
+                                JOIN entry_collections child_entries
+                                  ON child_entries.collection_id = child.id
+                                WHERE child.parent_id = owner.id
+                                  AND child_entries.entry_id = ec.entry_id
+                            )
+                         UNION ALL
+                         SELECT parent.id AS collection_id, child_entries.entry_id
+                         FROM collections parent
+                         JOIN collections child
+                           ON child.parent_id = parent.id
+                          AND child.kind = 'user'
+                         JOIN entry_collections child_entries
+                           ON child_entries.collection_id = child.id
+                         WHERE parent.parent_id IS NULL
+                           AND parent.kind = 'user'
+                     ) collection_count_contributions
+                     GROUP BY collection_id
+                 ) entry_counts ON entry_counts.collection_id = c.id
                  WHERE c.id = ?1",
                 params![id],
                 row_to_collection,
@@ -324,9 +397,57 @@ impl<'a> OrganizationRepository<'a> {
         tx.commit()?;
         Ok(Collection {
             id,
+            parent_id: None,
             stable_key: None,
             name: trimmed,
             kind: CollectionKind::User,
+            capture_count: 0,
+            color_hex: normalised,
+            created_at: ts.clone(),
+            updated_at: ts,
+            is_peer_bound: false,
+            peer_display_name: None,
+            has_note: false,
+        })
+    }
+
+    /// Create a direct child of an existing top-level user collection.
+    /// The trigger installed by migration 0022 independently enforces
+    /// the same invariant for every SQL write path.
+    pub fn create_subcollection(
+        &mut self,
+        parent_id: i64,
+        name: &str,
+        color_hex: &str,
+        now: OffsetDateTime,
+    ) -> Result<Collection, OrganizationError> {
+        let trimmed = validate_user_collection_name(name)?;
+        let normalised = validate_collection_color(color_hex)?;
+        let parent = self
+            .find_collection(parent_id)?
+            .ok_or(OrganizationError::CollectionNotFound(parent_id))?;
+        if parent.is_system() || parent.parent_id.is_some() || parent.is_peer_bound {
+            return Err(OrganizationError::InvalidCollectionParent(parent_id));
+        }
+        if self.collection_name_exists(&trimmed)? {
+            return Err(OrganizationError::CollectionNameTaken(trimmed));
+        }
+        let ts = format_timestamp(now);
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO collections (stable_key, name, kind, color_hex, created_at, updated_at, parent_id)
+             VALUES (NULL, ?1, 'user', ?2, ?3, ?3, ?4)",
+            params![trimmed, normalised, ts, parent_id],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(Collection {
+            id,
+            parent_id: Some(parent_id),
+            stable_key: None,
+            name: trimmed,
+            kind: CollectionKind::User,
+            capture_count: 0,
             color_hex: normalised,
             created_at: ts.clone(),
             updated_at: ts,
@@ -455,6 +576,24 @@ impl<'a> OrganizationRepository<'a> {
         collection_deletion_preview(self.conn, id)
     }
 
+    /// Return the direct-membership preview used by the existing clear
+    /// collection flow. Clearing a parent does not implicitly clear its
+    /// children because capture membership is independent.
+    pub fn preview_collection_clear(
+        &self,
+        id: i64,
+    ) -> Result<CollectionDeletionPreview, OrganizationError> {
+        let collection = self
+            .find_collection(id)?
+            .ok_or(OrganizationError::CollectionNotFound(id))?;
+        if collection.is_system() {
+            return Err(OrganizationError::SystemCollectionProtected(
+                HISTORY_STABLE_KEY,
+            ));
+        }
+        collection_direct_preview(self.conn, id)
+    }
+
     /// Delete a user collection atomically, either preserving all
     /// associated entries outside of the collection or deleting those
     /// entries from local history. The preview counts are checked in
@@ -467,14 +606,14 @@ impl<'a> OrganizationRepository<'a> {
         expected: CollectionDeletionPreview,
     ) -> Result<CollectionDeletionOutcome, OrganizationError> {
         let tx = self.conn.transaction()?;
-        let collection_kind: Option<(String, Option<String>)> = tx
+        let collection_kind: Option<(String, Option<String>, Option<i64>)> = tx
             .query_row(
-                "SELECT kind, stable_key FROM collections WHERE id = ?1",
+                "SELECT kind, stable_key, parent_id FROM collections WHERE id = ?1",
                 params![id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        let Some((kind, stable_key)) = collection_kind else {
+        let Some((kind, stable_key, parent_id)) = collection_kind else {
             return Err(OrganizationError::CollectionNotFound(id));
         };
         if kind == "system" || stable_key.as_deref() == Some(HISTORY_STABLE_KEY) {
@@ -492,7 +631,10 @@ impl<'a> OrganizationRepository<'a> {
             tx.execute(
                 "DELETE FROM clipboard_entries
                  WHERE id IN (
-                    SELECT entry_id FROM entry_collections WHERE collection_id = ?1
+                    SELECT DISTINCT ec.entry_id
+                      FROM entry_collections ec
+                      JOIN collections target ON target.id = ec.collection_id
+                     WHERE target.id = ?1 OR target.parent_id = ?1
                  )",
                 params![id],
             )?
@@ -509,11 +651,31 @@ impl<'a> OrganizationRepository<'a> {
                 "INSERT OR IGNORE INTO entry_collections (entry_id, collection_id, created_at)
                  SELECT ec.entry_id, ?1, ec.created_at
                    FROM entry_collections ec
-                  WHERE ec.collection_id = ?2",
+                   JOIN collections target ON target.id = ec.collection_id
+                  WHERE target.id = ?2 OR target.parent_id = ?2",
                 params![history_id, id],
             )?;
             0
         };
+
+        // A child deletion uses its own explicit two-way scope: keeping
+        // its entries means moving only the missing parent memberships,
+        // while retaining every other membership and the capture row.
+        // Parent deletion keeps the established preserve-in-History flow.
+        if let Some(parent_id) = parent_id {
+            if delete_entries {
+                // The child entries were deleted above. Parent remains a
+                // separate collection and is not part of the FK cascade.
+            } else {
+                tx.execute(
+                    "INSERT OR IGNORE INTO entry_collections (entry_id, collection_id, created_at)
+                     SELECT ec.entry_id, ?1, ec.created_at
+                       FROM entry_collections ec
+                      WHERE ec.collection_id = ?2",
+                    params![parent_id, id],
+                )?;
+            }
+        }
 
         let removed_collection =
             tx.execute("DELETE FROM collections WHERE id = ?1", params![id])?;
@@ -550,7 +712,7 @@ impl<'a> OrganizationRepository<'a> {
             ));
         }
 
-        let current = collection_deletion_preview(&tx, id)?;
+        let current = collection_direct_preview(&tx, id)?;
         if current != expected {
             return Ok(CollectionClearOutcome::PreviewChanged { preview: current });
         }
@@ -604,6 +766,51 @@ impl<'a> OrganizationRepository<'a> {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// Return distinct tag ids used by captures in a collection scope.
+    /// This aggregation intentionally has no pagination so filter options
+    /// represent the full scope rather than the currently visible rail page.
+    /// With no collection and `unassigned_only = false`, it covers all
+    /// History captures; the unassigned branch ignores the system History
+    /// membership and excludes any user collection membership.
+    pub fn tag_ids_in_scope(
+        &self,
+        collection_id: Option<i64>,
+        unassigned_only: bool,
+    ) -> Result<Vec<i64>, OrganizationError> {
+        let sql = if collection_id.is_some() {
+            "SELECT DISTINCT entry_tags.tag_id
+             FROM entry_tags
+             JOIN entry_collections
+               ON entry_collections.entry_id = entry_tags.entry_id
+             WHERE entry_collections.collection_id = ?1
+             ORDER BY entry_tags.tag_id ASC"
+        } else if unassigned_only {
+            "SELECT DISTINCT entry_tags.tag_id
+             FROM entry_tags
+             WHERE NOT EXISTS (
+               SELECT 1
+                 FROM entry_collections
+                 JOIN collections ON collections.id = entry_collections.collection_id
+                WHERE entry_collections.entry_id = entry_tags.entry_id
+                  AND collections.kind = 'user'
+             )
+             ORDER BY entry_tags.tag_id ASC"
+        } else {
+            "SELECT DISTINCT tag_id
+             FROM entry_tags
+             ORDER BY tag_id ASC"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = if let Some(collection_id) = collection_id {
+            stmt.query_map(params![collection_id], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        Ok(rows)
     }
 
     pub fn find_tag(&self, id: i64) -> Result<Option<Tag>, OrganizationError> {
@@ -1034,9 +1241,11 @@ fn row_to_collection(row: &rusqlite::Row<'_>) -> rusqlite::Result<Collection> {
     let is_peer_bound_raw: i64 = row.get(7)?;
     Ok(Collection {
         id: row.get(0)?,
+        parent_id: row.get(11)?,
         stable_key: row.get(1)?,
         name: row.get(2)?,
         kind,
+        capture_count: row.get(10)?,
         color_hex: row.get(4)?,
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
@@ -1047,6 +1256,25 @@ fn row_to_collection(row: &rusqlite::Row<'_>) -> rusqlite::Result<Collection> {
 }
 
 fn collection_deletion_preview(
+    conn: &Connection,
+    id: i64,
+) -> Result<CollectionDeletionPreview, OrganizationError> {
+    let (entries, favorites) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(scoped.is_pinned), 0)
+           FROM (
+               SELECT DISTINCT ce.id, ce.is_pinned
+                 FROM entry_collections ec
+                 JOIN clipboard_entries ce ON ce.id = ec.entry_id
+                 JOIN collections target ON target.id = ec.collection_id
+                WHERE target.id = ?1 OR target.parent_id = ?1
+           ) scoped",
+        params![id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(CollectionDeletionPreview { entries, favorites })
+}
+
+fn collection_direct_preview(
     conn: &Connection,
     id: i64,
 ) -> Result<CollectionDeletionPreview, OrganizationError> {
@@ -1289,6 +1517,644 @@ mod tests {
     }
 
     #[test]
+    fn create_subcollection_requires_a_user_root_parent() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (parent, child) = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            let parent = org
+                .create_user_collection("Principal", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("parent");
+            let child = org
+                .create_subcollection(parent.id, "Hija", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("child");
+            assert_eq!(child.parent_id, Some(parent.id));
+            (parent, child)
+        };
+        let other_root = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.create_user_collection("Otra raíz", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("other root")
+                .id
+        };
+        seed_peer(&mut db, "peer-subcollection", "Equipo remoto");
+        let imported_root = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.create_user_collection("Equipo remoto", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("imported root")
+                .id
+        };
+        {
+            let mut imports = crate::PeerImportRepository::new(db.connection_mut());
+            imports
+                .upsert_binding("peer-subcollection", imported_root, when)
+                .expect("bind imported root");
+            assert!(
+                imports
+                    .upsert_binding("peer-subcollection", parent.id, when)
+                    .is_err(),
+                "a root with children cannot become peer-bound"
+            );
+            assert!(
+                imports
+                    .upsert_binding("peer-subcollection", child.id, when)
+                    .is_err(),
+                "a subcollection cannot become peer-bound"
+            );
+        }
+        let history_id = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.system_collection_id(HISTORY_STABLE_KEY)
+                .expect("history lookup")
+                .expect("history exists")
+        };
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            assert!(matches!(
+                org.create_subcollection(
+                    history_id,
+                    "Bajo historial",
+                    HISTORY_DEFAULT_COLOR_HEX,
+                    when,
+                ),
+                Err(OrganizationError::InvalidCollectionParent(id)) if id == history_id
+            ));
+            assert!(matches!(
+                org.create_subcollection(
+                    child.id,
+                    "Nieta",
+                    HISTORY_DEFAULT_COLOR_HEX,
+                    when,
+                ),
+                Err(OrganizationError::InvalidCollectionParent(id)) if id == child.id
+            ));
+            assert_eq!(
+                org.find_collection(parent.id)
+                    .expect("parent lookup")
+                    .expect("parent remains")
+                    .parent_id,
+                None
+            );
+            assert!(matches!(
+                org.create_subcollection(
+                    imported_root,
+                    "Bajo importada",
+                    HISTORY_DEFAULT_COLOR_HEX,
+                    when,
+                ),
+                Err(OrganizationError::InvalidCollectionParent(id)) if id == imported_root
+            ));
+        }
+        let direct_sql = db.connection_mut().execute(
+            "INSERT INTO collections (name, kind, color_hex, created_at, updated_at, parent_id)
+             VALUES ('Illegal grandchild', 'user', '#1565c0', 'now', 'now', ?1)",
+            params![child.id],
+        );
+        assert!(
+            direct_sql.is_err(),
+            "the schema trigger rejects nested children"
+        );
+        let reparent_with_child = db.connection_mut().execute(
+            "UPDATE collections SET parent_id = ?1 WHERE id = ?2",
+            params![other_root, parent.id],
+        );
+        assert!(
+            reparent_with_child.is_err(),
+            "a parent with children cannot be turned into a child"
+        );
+    }
+
+    #[test]
+    fn deleting_child_and_keeping_captures_adds_parent_without_losing_memberships() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (parent, child, other) = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            let parent = org
+                .create_user_collection("Principal", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("parent");
+            let child = org
+                .create_subcollection(parent.id, "Hija", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("child");
+            let other = org
+                .create_user_collection("Otra", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("other");
+            (parent.id, child.id, other.id)
+        };
+        let capture = insert_text_entry(db.connection_mut(), "preserved child capture", when);
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.replace_entry_collections(capture, &[child, other], when)
+                .expect("assign independently");
+        }
+        let preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_deletion(child).expect("preview")
+        };
+        assert_eq!(preview.entries, 1);
+        let outcome = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.delete_collection_with_scope(child, false, preview)
+                .expect("delete child and keep capture")
+        };
+        assert_eq!(
+            outcome,
+            CollectionDeletionOutcome::Deleted { removed_entries: 0 }
+        );
+        let (parent_membership, other_membership, history_membership) = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            let ids = org.entry_collection_ids(capture).expect("memberships");
+            (
+                ids.contains(&parent),
+                ids.contains(&other),
+                ids.iter().any(|id| {
+                    org.find_collection(*id)
+                        .expect("collection lookup")
+                        .is_some_and(|collection| {
+                            collection.stable_key.as_deref() == Some(HISTORY_STABLE_KEY)
+                        })
+                }),
+            )
+        };
+        assert!(parent_membership);
+        assert!(other_membership);
+        assert!(history_membership);
+        let org = OrganizationRepository::new(db.connection_mut());
+        assert!(org.find_collection(child).expect("child lookup").is_none());
+        assert!(org
+            .find_collection(parent)
+            .expect("parent lookup")
+            .is_some());
+    }
+
+    #[test]
+    fn deleting_child_everywhere_removes_its_entries_but_keeps_parent() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (parent, child, other) = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            let parent = org
+                .create_user_collection("Principal", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("parent");
+            let child = org
+                .create_subcollection(parent.id, "Hija", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("child");
+            let other = org
+                .create_user_collection("Otra", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("other");
+            (parent.id, child.id, other.id)
+        };
+        let capture =
+            insert_text_entry(db.connection_mut(), "globally deleted child capture", when);
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.replace_entry_collections(capture, &[child, parent, other], when)
+                .expect("assign capture");
+        }
+        let preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_deletion(child).expect("preview")
+        };
+        assert_eq!(preview.entries, 1);
+        db.connection_mut()
+            .execute(
+                "UPDATE clipboard_entries SET is_pinned = 1 WHERE id = ?1",
+                params![capture],
+            )
+            .expect("favorite capture after preview");
+        let stale = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.delete_collection_with_scope(child, true, preview)
+                .expect("stale child preview")
+        };
+        assert_eq!(
+            stale,
+            CollectionDeletionOutcome::PreviewChanged {
+                preview: CollectionDeletionPreview {
+                    entries: 1,
+                    favorites: 1,
+                },
+            }
+        );
+        let outcome = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.delete_collection_with_scope(
+                child,
+                true,
+                CollectionDeletionPreview {
+                    entries: 1,
+                    favorites: 1,
+                },
+            )
+            .expect("delete child and capture everywhere")
+        };
+        assert_eq!(
+            outcome,
+            CollectionDeletionOutcome::Deleted { removed_entries: 1 }
+        );
+        let count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM clipboard_entries WHERE id = ?1",
+                params![capture],
+                |row| row.get(0),
+            )
+            .expect("count capture");
+        assert_eq!(count, 0);
+        let org = OrganizationRepository::new(db.connection_mut());
+        assert!(org
+            .find_collection(parent)
+            .expect("parent lookup")
+            .is_some());
+        assert!(org.find_collection(other).expect("other lookup").is_some());
+    }
+
+    #[test]
+    fn parent_badge_sums_subcollection_counts_and_refreshes_after_removal() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (parent, child_one, child_two, other) = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            let parent = org
+                .create_user_collection("Principal", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("parent");
+            let child_one = org
+                .create_subcollection(parent.id, "Hija uno", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("first child");
+            let child_two = org
+                .create_subcollection(parent.id, "Hija dos", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("second child");
+            let other = org
+                .create_user_collection("Otra", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("other");
+            (parent.id, child_one.id, child_two.id, other.id)
+        };
+
+        let parent_only = insert_text_entry(db.connection_mut(), "parent only", when);
+        let child_one_only = insert_text_entry(db.connection_mut(), "child one only", when);
+        let child_two_only = insert_text_entry(db.connection_mut(), "child two only", when);
+        let shared = insert_text_entry(db.connection_mut(), "shared children", when);
+        let other_only = insert_text_entry(db.connection_mut(), "other only", when);
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.replace_entry_collections(parent_only, &[parent], when)
+                .expect("parent membership");
+            org.replace_entry_collections(child_one_only, &[child_one], when)
+                .expect("first child membership");
+            org.replace_entry_collections(child_two_only, &[child_two], when)
+                .expect("second child membership");
+            org.replace_entry_collections(shared, &[parent, child_one, child_two], when)
+                .expect("shared memberships");
+            org.replace_entry_collections(other_only, &[other], when)
+                .expect("other membership");
+        }
+
+        {
+            let org = OrganizationRepository::new(db.connection_mut());
+            let rows = org.list_collections().expect("list counts");
+            let count = |id| {
+                rows.iter()
+                    .find(|collection| collection.id == id)
+                    .expect("collection row")
+                    .capture_count
+            };
+            assert_eq!(
+                count(parent),
+                5,
+                "parent adds child counts and excludes overlapping direct memberships"
+            );
+            assert_eq!(count(child_one), 2, "first child counts direct memberships");
+            assert_eq!(
+                count(child_two),
+                2,
+                "second child counts direct memberships"
+            );
+            assert_eq!(count(other), 1, "unrelated collection remains independent");
+            assert_eq!(
+                org.find_collection(parent)
+                    .expect("find parent")
+                    .expect("parent row")
+                    .capture_count,
+                5,
+                "individual lookup uses the same subtree count"
+            );
+        }
+
+        let clear_preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_clear(parent)
+                .expect("parent direct-membership preview")
+        };
+        assert_eq!(clear_preview.entries, 2);
+        let cleared = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.clear_collection_with_scope(parent, false, clear_preview)
+                .expect("clear direct parent memberships")
+        };
+        assert_eq!(
+            cleared,
+            CollectionClearOutcome::Cleared { removed_entries: 0 }
+        );
+        {
+            let org = OrganizationRepository::new(db.connection_mut());
+            let rows = org.list_collections().expect("list after clear");
+            let parent_row = rows
+                .iter()
+                .find(|collection| collection.id == parent)
+                .expect("parent remains");
+            assert_eq!(
+                parent_row.capture_count, 4,
+                "clearing direct memberships leaves child entries in the parent total"
+            );
+        }
+
+        let deletion_preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_deletion(child_one)
+                .expect("child deletion preview")
+        };
+        assert_eq!(deletion_preview.entries, 2);
+        let deleted = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.delete_collection_with_scope(child_one, true, deletion_preview)
+                .expect("delete child and its captures everywhere")
+        };
+        assert_eq!(
+            deleted,
+            CollectionDeletionOutcome::Deleted { removed_entries: 2 }
+        );
+
+        let org = OrganizationRepository::new(db.connection_mut());
+        let rows = org.list_collections().expect("list after child deletion");
+        let count = |id| {
+            rows.iter()
+                .find(|collection| collection.id == id)
+                .expect("remaining collection row")
+                .capture_count
+        };
+        assert_eq!(
+            count(parent),
+            1,
+            "deleted child entries leave the parent total"
+        );
+        assert_eq!(
+            count(child_two),
+            1,
+            "shared deleted entry leaves the sibling"
+        );
+        assert_eq!(count(other), 1, "unrelated collection is unchanged");
+        assert!(org
+            .find_collection(child_one)
+            .expect("find deleted child")
+            .is_none());
+
+        let deletion_preview = org
+            .preview_collection_deletion(parent)
+            .expect("parent deletion preview");
+        assert_eq!(deletion_preview.entries, 1);
+        let deleted_parent = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.delete_collection_with_scope(parent, true, deletion_preview)
+                .expect("delete parent, children and their remaining captures")
+        };
+        assert_eq!(
+            deleted_parent,
+            CollectionDeletionOutcome::Deleted { removed_entries: 1 }
+        );
+
+        let org = OrganizationRepository::new(db.connection_mut());
+        assert!(org
+            .find_collection(parent)
+            .expect("find deleted parent")
+            .is_none());
+        assert!(org
+            .find_collection(child_two)
+            .expect("find deleted sibling")
+            .is_none());
+        assert_eq!(
+            org.find_collection(
+                org.system_collection_id(HISTORY_STABLE_KEY)
+                    .expect("history id")
+                    .expect("history")
+            )
+            .expect("find History")
+            .expect("History row")
+            .capture_count,
+            2,
+            "deleting the parent tree removes its remaining capture from History"
+        );
+        assert_eq!(
+            org.find_collection(other)
+                .expect("find unrelated collection")
+                .expect("unrelated row")
+                .capture_count,
+            1
+        );
+    }
+
+    #[test]
+    fn parent_deletion_preview_counts_distinct_child_tree_and_cascades_children() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (parent, child) = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            let parent = org
+                .create_user_collection("Principal", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("parent");
+            let child = org
+                .create_subcollection(parent.id, "Hija", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("child");
+            (parent.id, child.id)
+        };
+        let shared = insert_text_entry(db.connection_mut(), "shared tree capture", when);
+        let child_only = insert_text_entry(db.connection_mut(), "child only capture", when);
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.replace_entry_collections(shared, &[parent, child], when)
+                .expect("shared memberships");
+            org.replace_entry_collections(child_only, &[child], when)
+                .expect("child membership");
+        }
+        db.connection_mut()
+            .execute(
+                "UPDATE clipboard_entries SET is_pinned = 1 WHERE id = ?1",
+                params![shared],
+            )
+            .expect("pin shared capture");
+        let preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_deletion(parent)
+                .expect("tree preview")
+        };
+        assert_eq!(preview.entries, 2, "shared memberships count only once");
+        assert_eq!(preview.favorites, 1);
+        let outcome = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.delete_collection_with_scope(parent, false, preview)
+                .expect("delete parent and keep in History")
+        };
+        assert_eq!(
+            outcome,
+            CollectionDeletionOutcome::Deleted { removed_entries: 0 }
+        );
+        let remaining: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM clipboard_entries WHERE id IN (?1, ?2)",
+                params![shared, child_only],
+                |row| row.get(0),
+            )
+            .expect("remaining captures");
+        assert_eq!(remaining, 2);
+        let org = OrganizationRepository::new(db.connection_mut());
+        assert!(org
+            .find_collection(parent)
+            .expect("parent lookup")
+            .is_none());
+        assert!(org.find_collection(child).expect("child lookup").is_none());
+        let history_id = org
+            .system_collection_id(HISTORY_STABLE_KEY)
+            .expect("history")
+            .expect("history exists");
+        assert_eq!(
+            org.entry_collection_ids(shared).expect("shared membership"),
+            vec![history_id]
+        );
+        assert_eq!(
+            org.entry_collection_ids(child_only)
+                .expect("child membership"),
+            vec![history_id]
+        );
+    }
+
+    #[test]
+    fn clearing_parent_collection_keeps_child_memberships_independent() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let (parent, child) = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            let parent = org
+                .create_user_collection("Principal", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("parent");
+            let child = org
+                .create_subcollection(parent.id, "Hija", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("child");
+            (parent.id, child.id)
+        };
+        let parent_capture = insert_text_entry(db.connection_mut(), "parent capture", when);
+        let child_capture = insert_text_entry(db.connection_mut(), "child capture", when);
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.replace_entry_collections(parent_capture, &[parent], when)
+                .expect("parent membership");
+            org.replace_entry_collections(child_capture, &[child], when)
+                .expect("child membership");
+        }
+        let deletion_preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_deletion(parent)
+                .expect("tree preview")
+        };
+        let clear_preview = {
+            let org = OrganizationRepository::new(db.connection_mut());
+            org.preview_collection_clear(parent)
+                .expect("direct preview")
+        };
+        assert_eq!(deletion_preview.entries, 2);
+        assert_eq!(clear_preview.entries, 1);
+        let outcome = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.clear_collection_with_scope(parent, false, clear_preview)
+                .expect("clear parent only")
+        };
+        assert_eq!(
+            outcome,
+            CollectionClearOutcome::Cleared { removed_entries: 0 }
+        );
+        let org = OrganizationRepository::new(db.connection_mut());
+        assert!(!org
+            .entry_collection_ids(parent_capture)
+            .expect("parent capture")
+            .contains(&parent));
+        assert!(org
+            .entry_collection_ids(child_capture)
+            .expect("child capture")
+            .contains(&child));
+        assert!(org
+            .find_collection(child)
+            .expect("child collection")
+            .is_some());
+    }
+
+    #[test]
+    fn subcollection_migration_preserves_existing_capture_metadata_and_assets() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let collection = {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.create_user_collection("Existente", HISTORY_DEFAULT_COLOR_HEX, when)
+                .expect("collection")
+        };
+        let capture = insert_text_entry(db.connection_mut(), "existing capture", when);
+        {
+            let mut org = OrganizationRepository::new(db.connection_mut());
+            org.replace_entry_collections(capture, &[collection.id], when)
+                .expect("membership");
+        }
+        db.connection_mut()
+            .execute(
+                "UPDATE clipboard_entries SET asset_ref = 'clipboard/existing.png' WHERE id = ?1",
+                params![capture],
+            )
+            .expect("asset reference");
+        db.connection_mut()
+            .execute("INSERT INTO collection_notes (collection_id, body, updated_at) VALUES (?1, 'nota local', 'now')", params![collection.id])
+            .expect("collection note");
+
+        let migrations = crate::builtin_migrations();
+        let migration = migrations.last().expect("subcollection migration");
+        crate::rollback_migration(&mut db, migration).expect("roll back migration");
+        db.run_migrations(std::slice::from_ref(migration))
+            .expect("reapply migration");
+
+        let asset_ref: String = db
+            .connection()
+            .query_row(
+                "SELECT asset_ref FROM clipboard_entries WHERE id = ?1",
+                params![capture],
+                |row| row.get(0),
+            )
+            .expect("asset reference remains");
+        assert_eq!(asset_ref, "clipboard/existing.png");
+        let note_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM collection_notes WHERE collection_id = ?1",
+                params![collection.id],
+                |row| row.get(0),
+            )
+            .expect("note remains");
+        assert_eq!(note_count, 1);
+        let repo = OrganizationRepository::new(db.connection_mut());
+        assert_eq!(
+            repo.entry_collection_ids(capture).expect("membership"),
+            vec![
+                repo.system_collection_id(HISTORY_STABLE_KEY)
+                    .expect("history")
+                    .expect("history exists"),
+                collection.id,
+            ]
+        );
+        assert_eq!(
+            repo.find_collection(collection.id)
+                .expect("collection")
+                .expect("exists")
+                .parent_id,
+            None
+        );
+    }
+
+    #[test]
     fn set_collection_color_normalises_and_persists() {
         let (_dir, mut db) = open_temp_db();
         let later = datetime!(2026-01-02 03:09:00 UTC);
@@ -1372,6 +2238,85 @@ mod tests {
         );
         let mut repo = EntryRepository::new(conn);
         repo.insert_or_touch(new).expect("insert").record().id
+    }
+
+    #[test]
+    fn tag_ids_in_scope_cover_all_captures_and_respect_collection_scope() {
+        let (_dir, mut db) = open_temp_db();
+        let when = datetime!(2026-01-02 03:04:05 UTC);
+        let parent_first = insert_text_entry(db.connection_mut(), "parent first", when);
+        let parent_later = insert_text_entry(db.connection_mut(), "parent later", when);
+        let child_entry = insert_text_entry(db.connection_mut(), "child", when);
+        let other_entry = insert_text_entry(db.connection_mut(), "other", when);
+        let unassigned_entry = insert_text_entry(db.connection_mut(), "unassigned", when);
+
+        let mut org = OrganizationRepository::new(db.connection_mut());
+        let parent = org
+            .create_user_collection("Principal", HISTORY_DEFAULT_COLOR_HEX, when)
+            .expect("parent collection");
+        let child = org
+            .create_subcollection(parent.id, "Hija", HISTORY_DEFAULT_COLOR_HEX, when)
+            .expect("subcollection");
+        let other = org
+            .create_user_collection("Otra", HISTORY_DEFAULT_COLOR_HEX, when)
+            .expect("other collection");
+
+        org.replace_entry_collections(parent_first, &[parent.id], when)
+            .expect("assign first parent capture");
+        org.replace_entry_collections(parent_later, &[parent.id], when)
+            .expect("assign later parent capture");
+        org.replace_entry_collections(child_entry, &[child.id], when)
+            .expect("assign child capture");
+        org.replace_entry_collections(other_entry, &[other.id], when)
+            .expect("assign other capture");
+        org.replace_entry_collections(unassigned_entry, &[], when)
+            .expect("keep last capture unassigned");
+
+        let parent_tag = org
+            .upsert_and_assign_tag(parent_first, "Parent tag", when)
+            .expect("parent tag");
+        org.upsert_and_assign_tag(parent_later, "Parent tag", when)
+            .expect("reuse parent tag");
+        let later_tag = org
+            .upsert_and_assign_tag(parent_later, "Later page tag", when)
+            .expect("later page tag");
+        let child_tag = org
+            .upsert_and_assign_tag(child_entry, "Child tag", when)
+            .expect("child tag");
+        let other_tag = org
+            .upsert_and_assign_tag(other_entry, "Other tag", when)
+            .expect("other tag");
+        let unassigned_tag = org
+            .upsert_and_assign_tag(unassigned_entry, "Unassigned tag", when)
+            .expect("unassigned tag");
+
+        assert_eq!(
+            org.tag_ids_in_scope(Some(parent.id), false)
+                .expect("parent scope tags"),
+            vec![parent_tag.id, later_tag.id],
+            "all parent captures contribute distinct tags, without a page limit",
+        );
+        assert_eq!(
+            org.tag_ids_in_scope(Some(child.id), false)
+                .expect("child scope tags"),
+            vec![child_tag.id],
+        );
+        assert_eq!(
+            org.tag_ids_in_scope(None, false)
+                .expect("all History scope tags"),
+            vec![
+                parent_tag.id,
+                later_tag.id,
+                child_tag.id,
+                other_tag.id,
+                unassigned_tag.id,
+            ],
+        );
+        assert_eq!(
+            org.tag_ids_in_scope(None, true)
+                .expect("unassigned History scope tags"),
+            vec![unassigned_tag.id],
+        );
     }
 
     #[test]

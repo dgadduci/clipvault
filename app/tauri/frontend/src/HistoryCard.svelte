@@ -118,12 +118,18 @@
   import CollectionSelectorModal from "./CollectionSelectorModal.svelte";
   import CollectionMembershipModal from "./CollectionMembershipModal.svelte";
   import EntryTextEditorModal from "./EntryTextEditorModal.svelte";
+  import RichTextConversionWarningModal from "./RichTextConversionWarningModal.svelte";
   import TextNoteModal from "./TextNoteModal.svelte";
-  import { isEditableTextEntry } from "./types";
+  import type { EntryTextEditorMode } from "./types";
+  import { isEditableTextEntry, isRichTextEntry } from "./types";
   import { localeStore, t } from "./lib/localization.ts";
   import { ariaShortcut, keyboardShortcuts, shortcutLabel } from "./lib/keyboardShortcuts.ts";
 
   export let entry: EntryRecord;
+  /** Generation for the current collection preview load. */
+  export let previewBatchId: number = 0;
+  /** Reports only the opaque entry id and the preview generation. */
+  export let onPreviewReady: (entryId: number, batchId: number) => void = () => {};
   /** Present only while rendering the matching peer-bound import collection. */
   export let peerImportedSourceApp: PeerImportedSourceAppPresentation | null = null;
   export let hasNote: boolean = false;
@@ -163,21 +169,11 @@
     entry: EntryRecord,
     collectionId: number,
   ) => Promise<void> = async () => {};
-  /**
-   * Whether this card is the rail's currently selected entry. The
-   * flag is local UI state: a `true` value exposes `aria-selected`,
-   * paints the selected styling and shows the platform-aware preview
-   * shortcut hint (the same matcher `ClipboardPreview` consumes).
-   * Selection is purely visual; the card never writes the value back
-   * to SQLite, the clipboard or a backend command.
-   */
+  /** Whether this card belongs to the rail's ephemeral multi-selection. */
   export let selected: boolean = false;
-  /**
-   * Forward the user gesture that flipped selection. The rail owns
-   * the canonical id so two cards racing a `mousedown`/`keydown`
-   * cannot end up with two selections; the helper receives the id
-   * the user just picked (or `null` to clear the selection).
-   */
+  /** Active card used by single-entry shortcuts and the preview hint. */
+  export let active: boolean = false;
+  /** Forward a single-card active-id update; the rail applies group semantics. */
   export let onSelect: (entryId: number | null) => void = () => {};
   /**
    * Whether this card's ellipsis menu is currently open. The flag
@@ -205,7 +201,11 @@
   const dispatch = createEventDispatcher<{
     "menu-toggle": { id: number; open: boolean };
     "preview-request": { id: number };
-    "select-request": { id: number | null };
+    "select-request": {
+      id: number | null;
+      toggle?: boolean;
+      range?: boolean;
+    };
   }>();
 
   /** Local override of the persisted title so edits feel instant. */
@@ -281,11 +281,12 @@
    * never at a specific target id.
    */
   function handleCardEditTextShortcutClose(): void {
-    if (!textEditorOpen) return;
+    if (!textEditorOpen && !richConversionWarningOpen) return;
     // This is a rail-forced close while another card becomes the target;
     // do not restore focus to this obsolete card.
     textEditorReturnFocusTarget = null;
     textEditorOpen = false;
+    richConversionWarningOpen = false;
   }
   function handleCardEntryNoteShortcutClose(): void {
     if (!noteModalOpen) return;
@@ -549,6 +550,8 @@
   let thumbnailState: ThumbnailState = hasRenderableImage(entry)
     ? "loading"
     : "error";
+  let thumbnailImageRendered = false;
+  let lastReportedPreviewBatchId = 0;
   /**
    * Mirror of `assetRef` updated synchronously so the `onDestroy`
    * cleanup can revoke the blob URL of the current entry even when the
@@ -562,6 +565,26 @@
    * another entry's thumbnail.
    */
   let thumbnailToken = 0;
+
+  function reportPreviewReady(entryId: number, batchId: number): void {
+    if (batchId <= 0 || lastReportedPreviewBatchId === batchId) return;
+    lastReportedPreviewBatchId = batchId;
+    onPreviewReady(entryId, batchId);
+  }
+
+  function onThumbnailLoad(): void {
+    thumbnailImageRendered = true;
+    reportPreviewReady(entry.id, previewBatchId);
+  }
+
+  $: if (
+    isImage &&
+    previewBatchId > 0 &&
+    (thumbnailState === "error" ||
+      (thumbnailState === "loaded" && thumbnailImageRendered))
+  ) {
+    reportPreviewReady(entry.id, previewBatchId);
+  }
 
   /**
    * Update the coarse state without violating the
@@ -578,6 +601,7 @@
     if (!ref) {
       if (token === thumbnailToken) {
         thumbnailUrl = null;
+        thumbnailImageRendered = false;
         commitThumbnailState("error");
       }
       return;
@@ -587,9 +611,19 @@
     // The transition runs synchronously before the bridge await so
     // a same-tick render cannot land on a `null` URL with no state.
     if (token === thumbnailToken) {
+      thumbnailImageRendered = false;
       commitThumbnailState("loading");
     }
-    const resolution = await assetResolver.resolve(ref);
+    let resolution: Awaited<ReturnType<typeof assetResolver.resolve>>;
+    try {
+      resolution = await assetResolver.resolve(ref);
+    } catch {
+      if (token !== thumbnailToken) return;
+      thumbnailUrl = null;
+      thumbnailImageRendered = false;
+      commitThumbnailState("error");
+      return;
+    }
     if (token !== thumbnailToken) {
       // A newer refresh landed while we awaited the bridge; drop this
       // result so the card never shows another entry's thumbnail.
@@ -600,6 +634,7 @@
       commitThumbnailState("loaded");
     } else {
       thumbnailUrl = null;
+      thumbnailImageRendered = false;
       commitThumbnailState("error");
     }
   }
@@ -631,6 +666,7 @@
       assetResolver.releaseFor(lastAssetRef);
     }
     thumbnailUrl = null;
+    thumbnailImageRendered = false;
     commitThumbnailState("error");
   }
 
@@ -650,12 +686,11 @@
   $: isRich = hasRenderableRichText(entry);
   /**
    * Whether the card exposes the `Editar captura` action. The
-   * predicate mirrors the backend guard so a stale frontend
-   * cannot surface the action for an image or rich-text entry —
-   * the storage layer will refuse the call anyway, but keeping
-   * the menu honest avoids a misleading affordance.
+   * predicate mirrors the backend guards so a stale frontend
+   * cannot surface the action for an image or malformed entry;
+   * rich-text entries use the explicit conversion warning first.
    */
-  $: canEditText = isEditableTextEntry(entry);
+  $: canEditCapture = isEditableTextEntry(entry) || isRichTextEntry(entry);
 
   // ---------------------------------------------------------------
   // Paste menu actions.
@@ -971,6 +1006,8 @@
    * editor state.
    */
   let textEditorOpen = false;
+  let textEditorMode: EntryTextEditorMode = "plain";
+  let richConversionWarningOpen = false;
   /**
    * Focus destination for the currently open text editor. Normal
    * user-initiated closes return to this card; a rail-forced close while
@@ -1235,17 +1272,35 @@
     closeMenuAfterAction();
   }
 
-  /**
-   * Open the text editor modal. The guard rejects ineligible
-   * entries so a stale foreground cannot open the editor for an
-   * image or a rich-text row even if the menu somehow exposes the
-   * action; the storage layer is the second line of defence.
-   */
+  /** Route plain entries directly to the editor and rich entries through
+   * the explicit conversion warning before opening that same editor. */
   function openTextEditor(): void {
-    if (!canEditText) return;
+    if (isEditableTextEntry(entry)) {
+      textEditorMode = "plain";
+      textEditorReturnFocusTarget = cardArticleEl;
+      textEditorOpen = true;
+      closeMenuAfterAction();
+      return;
+    }
+    if (isRichTextEntry(entry)) {
+      richConversionWarningOpen = true;
+      closeMenuAfterAction();
+    }
+  }
+
+  function confirmRichTextConversion(): void {
+    if (!isRichTextEntry(entry)) {
+      richConversionWarningOpen = false;
+      return;
+    }
+    richConversionWarningOpen = false;
+    textEditorMode = "rich-conversion";
     textEditorReturnFocusTarget = cardArticleEl;
     textEditorOpen = true;
-    closeMenuAfterAction();
+  }
+
+  function closeRichTextConversionWarning(): void {
+    richConversionWarningOpen = false;
   }
 
   /**
@@ -1258,6 +1313,7 @@
   function closeTextEditor(): void {
     textEditorReturnFocusTarget = cardArticleEl;
     textEditorOpen = false;
+    textEditorMode = "plain";
     dispatchSelect(entry.id);
     queueMicrotask(() => {
       if (cardArticleEl && document.contains(cardArticleEl)) {
@@ -1306,8 +1362,8 @@
    *
    * The shortcut MUST:
    *
-   *   - be a no-op when the card is not eligible (`canEditText`)
-   *     so an image or rich-text row never opens the editor;
+   *   - be a no-op when the card is neither plain-text editable nor
+   *     a rich-text row eligible for explicit conversion;
    *   - be a no-op when the keyboard event target is itself an
    *     interactive surface (input, textarea, select, button,
    *     contenteditable, the ellipsis menu, the editor modal or the
@@ -1679,7 +1735,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       // typing `e` outside the card keeps its native behaviour and
       // the shortcut never races the existing `Escape` /
       // `Cmd/Ctrl+Enter` flows.
-      if (!canEditText) return;
+      if (!canEditCapture) return;
       if (isInsideModalTarget(event.target)) return;
       event.preventDefault();
       openTextEditor();
@@ -1693,7 +1749,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       // Escape when the user is editing the title, browsing the menu
       // or typing inside an input — `isInteractiveTarget` already
       // covers those branches.
-      if (selected) {
+      if (selected || active) {
         event.preventDefault();
         dispatchSelect(null);
       }
@@ -1704,7 +1760,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     // card. A card that is not selected ignores the shortcut so
     // `Cmd/Ctrl+Enter` cannot silently open a preview for an entry
     // the user did not pick.
-    if (!selected) return;
+    if (!active) return;
     event.preventDefault();
     requestPreview();
   }
@@ -1714,9 +1770,12 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
    * helper centralises the dispatch path so the click handler and
    * the `Escape` shortcut share one branch.
    */
-  function dispatchSelect(next: number | null): void {
+  function dispatchSelect(
+    next: number | null,
+    modifiers: { toggle?: boolean; range?: boolean } = {},
+  ): void {
     onSelect(next);
-    dispatch("select-request", { id: next });
+    dispatch("select-request", { id: next, ...modifiers });
   }
 
   /**
@@ -1726,15 +1785,17 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
    * collection / paste / delete control keeps its existing action
    * and never accidentally flips the selection.
    *
-   * Clicking the non-interactive surface of the currently selected
-   * card clears the selection; clicking any other card moves the
-   * selection to that card. The helper never writes the value to
-   * SQLite or any backend command — the rail is the single source of
-   * truth.
+   * A plain click asks the rail to keep one selected card (the rail
+   * preserves its legacy click-again-to-clear behavior). Ctrl/Cmd-click
+   * toggles a card and Shift-click selects an inclusive range. The
+   * helper never writes selection to SQLite or a backend command.
    */
   function onCardSurfaceClick(event: MouseEvent): void {
     if (isInteractiveTarget(event.target)) return;
-    dispatchSelect(selected ? null : entry.id);
+    dispatchSelect(entry.id, {
+      toggle: event.metaKey || event.ctrlKey,
+      range: event.shiftKey && !event.metaKey && !event.ctrlKey,
+    });
   }
 
   // Dragging is delegated to the singleton pointer controller installed by
@@ -1759,9 +1820,11 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   class="card"
   class:menu-open={menuOpen}
   class:card-selected={selected}
+  class:card-active={active}
   data-testid="history-card"
   data-entry-id={entry.id}
   data-selected={selected ? "true" : "false"}
+  data-active={active ? "true" : "false"}
   aria-label={displayTitle}
   aria-selected={selected}
   draggable="false"
@@ -2016,6 +2079,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
           alt={imageDimensions
             ? $t("history.card.image_captured_dimensions", { dimensions: imageDimensions })
             : $t("history.card.image_captured")}
+          on:load={onThumbnailLoad}
           on:error={onThumbnailError}
         />
       {:else if thumbnailState === "loading"}
@@ -2277,7 +2341,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   {/if}
 
   <footer class="card-actions" class:has-note={hasNote}>
-    {#if selected}
+    {#if active}
       <span
         class="preview-hint"
         data-testid="history-card-preview-hint"
@@ -2435,7 +2499,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       >
         {$t("history.card.restore_title")}
       </button>
-      {#if canEditText}
+      {#if canEditCapture}
         <button
           type="button"
           role="menuitem"
@@ -2598,9 +2662,19 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
   on:close={() => { membershipModalOpen = false; }}
 />
 
+<RichTextConversionWarningModal
+  open={richConversionWarningOpen}
+  entryId={entry.id}
+  displayTitle={displayTitle}
+  returnFocusTo={menuTriggerEl}
+  on:close={closeRichTextConversionWarning}
+  on:confirm={confirmRichTextConversion}
+/>
+
 <EntryTextEditorModal
   open={textEditorOpen}
   {entry}
+  mode={textEditorMode}
   {displayTitle}
   returnFocusTo={textEditorReturnFocusTarget}
   on:close={closeTextEditor}
@@ -2639,24 +2713,19 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
       background 120ms ease;
   }
 
-  /*
-   * Visual selection state the rail drives through the `selected`
-   * prop. The contract is `entry.id === selectedEntryId` (strict);
-   * the same predicate powers `aria-selected`, the preview-shortcut
-   * hint and the `data-selected` attribute so the four indicators
-   * can never drift. The previous baseline painted the class on the
-   * DOM but never declared the rule so the user only ever saw the
-   * default card chrome and could not tell which row was active —
-   * the regression surfaced as "clicking card 3 still selects card 1".
-   * The accent border, the soft ring and the lighter background are
-   * the same palette the Quick Paste row uses so the two surfaces
-   * read as the same affordance.
-   */
+  /* Visual state for cards that belong to the ephemeral group selection. */
   .card.card-selected {
     border-color: rgba(96, 165, 250, 0.85);
     background: rgba(96, 165, 250, 0.08);
     box-shadow:
       0 0 0 1px rgba(96, 165, 250, 0.45),
+      0 6px 18px rgba(15, 23, 42, 0.55);
+  }
+
+  .card.card-active {
+    border-color: rgba(96, 165, 250, 0.95);
+    box-shadow:
+      0 0 0 1px rgba(96, 165, 250, 0.55),
       0 6px 18px rgba(15, 23, 42, 0.55);
   }
 
@@ -2677,7 +2746,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
    * ArrowRight moves `selectedEntryId`; scoping this rule prevents
    * that residual focus from painting a second selected card.
    */
-  .card.card-selected:focus-visible {
+  .card.card-active:focus-visible {
     border-color: rgba(96, 165, 250, 0.85);
     outline: 2px solid var(--cv-focus-ring, rgba(37, 99, 235, 0.85));
     outline-offset: 1px;
@@ -2705,7 +2774,8 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
    * Selection wins over the open-menu cue so a card that owns both
    * flags keeps the blue accent the keyboard shortcut requires.
    */
-  .card.card-selected.menu-open {
+  .card.card-selected.menu-open,
+  .card.card-active.menu-open {
     border-color: rgba(96, 165, 250, 0.85);
     box-shadow:
       0 0 0 1px rgba(96, 165, 250, 0.45),
@@ -3169,6 +3239,9 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     color: #93c5fd;
     transition: color 0.15s ease, background 0.15s ease;
   }
+  .card-actions :global(.menu-trigger) {
+    color: #f0f4f8;
+  }
   .card-actions :global(.note-trigger:hover:not(:disabled)) {
     background: rgba(96, 165, 250, 0.18);
   }
@@ -3220,6 +3293,7 @@ const position: CardMenuPosition = computeCardMenuPosition(rect, viewport);
     flex-direction: column;
     min-width: 11rem;
     background: #0e1116;
+    color: #f0f4f8;
     border: 1px solid #30363d;
     border-radius: 8px;
     padding: 0.25rem;

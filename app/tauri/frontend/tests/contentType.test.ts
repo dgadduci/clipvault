@@ -2,12 +2,22 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  CONTENT_TYPE_VALUES,
   contentTypeLabel,
   defaultCardTitle,
   isKnownContentType,
+  orderAvailableContentTypes,
   validateTitle,
   MAX_TITLE_LENGTH,
 } from "../src/lib/contentType.ts";
+
+test("available capture types follow the canonical order without duplicates", () => {
+  assert.deepEqual(
+    orderAvailableContentTypes(["url", "image", "url", "text"]),
+    ["text", "url", "image"],
+  );
+  assert.equal(CONTENT_TYPE_VALUES.length, 15);
+});
 
 test("contentTypeLabel maps every documented variant", () => {
   const cases: Array<[string, string]> = [

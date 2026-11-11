@@ -956,9 +956,11 @@ impl PeerImageImportPersistence for InMemoryImageImportPersistence {
             id,
             Collection {
                 id,
+                parent_id: None,
                 stable_key: None,
                 name: name.to_string(),
                 kind: CollectionKind::User,
+                capture_count: 0,
                 color_hex: color_hex.to_string(),
                 created_at: ts.clone(),
                 updated_at: ts,
@@ -1296,9 +1298,11 @@ impl PeerImageImportPersistence for InMemoryImageImportPersistence {
                     id,
                     Collection {
                         id,
+                        parent_id: None,
                         stable_key: None,
                         name: candidate,
                         kind: CollectionKind::User,
+                        capture_count: 0,
                         color_hex: clipvault_db::HISTORY_DEFAULT_COLOR_HEX.to_string(),
                         created_at: ts.clone(),
                         updated_at: ts,

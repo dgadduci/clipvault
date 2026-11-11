@@ -5,7 +5,7 @@
  * The reported regression is that the sidebar grew in height when
  * collections were added — the user expected the panel to share the
  * stable `--cv-card-rail-height` token with the rail and to scroll
- * the collection list internally instead of expanding the desktop.
+ * its list regions internally instead of expanding the desktop.
  *
  * The tests pin the CSS contract through the rendered source so a
  * future contributor cannot lift the panel above the rail height or
@@ -29,10 +29,9 @@ test("OrganizationSidebar keeps the collection list in a bounded internal scroll
   // The desktop-toolbar-layout change introduced a shared-height
   // workspace: the grid now uses `align-items: stretch` and the
   // sidebar grows with `height: 100%` to match the right column
-  // (toolbar + status + rail). The list below remains the only
-  // internal vertical scroller so adding collections cannot grow
-  // the desktop or move the drop targets outside the visible
-  // panel.
+  // (toolbar + status + rail). The collection and peer scrollers
+  // remain bounded so rows cannot grow the desktop or move the
+  // drop targets outside the visible panel.
   assert.equal(
     /\.collection-list\s*\{[^}]*overflow-y:\s*auto/.test(source),
     true,
@@ -175,6 +174,20 @@ test("Desktop layout stretches both columns to the rail height", () => {
   );
 });
 
+test("Desktop layout gives the collections and linked teams panel 10% more width", () => {
+  const source = loadSource("src/App.svelte");
+  assert.match(
+    source,
+    /\.layout\s*\{[^}]*grid-template-columns:\s*minmax\(198px,\s*242px\)\s+minmax\(0,\s*1fr\)/,
+    "the sidebar grid column must grow from 180–220px to 198–242px",
+  );
+  assert.match(
+    source,
+    /@media\s*\(max-width:\s*720px\)[\s\S]*?\.layout\s*\{\s*grid-template-columns:\s*1fr/,
+    "the mobile single-column layout must remain unchanged",
+  );
+});
+
 test("HistoryCardRail pins the rail height to the same token", () => {
   const source = loadSource("src/HistoryCardRail.svelte");
   // The rail height must come from the same `--cv-card-rail-height`
@@ -194,9 +207,8 @@ test("HistoryCardRail pins the rail height to the same token", () => {
     /\.rail\s*\{[^}]*overflow-y:\s*hidden/,
     "the rail must never introduce a vertical scrollbar",
   );
-  assert.match(
-    source,
-    /flex:\s*0 0 var\(--cv-card-size\)/,
-    "the cards must keep their fixed square dimensions",
-  );
+  assert.match(source, /grid-auto-flow:\s*column/);
+  assert.match(source, /grid-auto-columns:\s*var\(--cv-card-size\)/);
+  assert.match(source, /width:\s*var\(--cv-card-size\)/);
+  assert.match(source, /height:\s*var\(--cv-card-size\)/);
 });

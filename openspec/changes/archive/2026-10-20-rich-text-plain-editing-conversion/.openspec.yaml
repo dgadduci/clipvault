@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-16
+goal: Permitir editar el contenido textual de una captura rich con confirmación
+  previa y persistir la conversión solo al guardar.

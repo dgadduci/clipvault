@@ -17,12 +17,13 @@
 #[cfg(feature = "clipboard-arboard")]
 pub mod clipboard_arboard;
 
-// The revision monitor is deliberately separate from the payload adapter: it
-// only observes XFixes ownership notifications and never reads clipboard
-// bytes. On Wayland the current text adapter is served through XWayland, so
-// this same monitor is also its reliable copy-event source.
+// Revision monitors are deliberately separate from the payload adapter: they
+// observe selection ownership metadata and never read clipboard bytes.
 #[cfg(all(target_os = "linux", feature = "linux-x11"))]
 pub(crate) mod linux_x11_clipboard_revision;
+
+#[cfg(all(target_os = "linux", feature = "arboard-wayland-data-control"))]
+pub(crate) mod linux_wayland_clipboard_revision;
 
 pub mod composite_clipboard;
 

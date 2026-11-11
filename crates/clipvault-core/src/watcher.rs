@@ -129,6 +129,7 @@ struct CaptureWatcherInner {
     clipboard: Arc<dyn ClipboardBackend>,
     state: Mutex<WatcherState>,
     capture_control: Mutex<CaptureControlState>,
+    active_collection_id: Mutex<Option<i64>>,
 }
 
 struct CaptureControlState {
@@ -187,8 +188,20 @@ impl CaptureWatcher {
                     enabled,
                     baseline_required: false,
                 }),
+                active_collection_id: Mutex::new(None),
             }),
         }
+    }
+
+    /// Set the local collection that should receive subsequent captures.
+    /// `None` means the active view is Historial or a remote history.
+    pub fn set_active_collection_id(&self, collection_id: Option<i64>) {
+        *self.inner.active_collection_id.lock() = collection_id.filter(|id| *id > 0);
+    }
+
+    /// Return the current in-memory local capture destination.
+    pub fn active_collection_id(&self) -> Option<i64> {
+        *self.inner.active_collection_id.lock()
     }
 
     /// Whether local clipboard capture is currently enabled.
@@ -568,12 +581,14 @@ impl CaptureWatcher {
             return WatchTickOutcome::Suppressed;
         }
         let history = context.history();
+        let active_collection_id = self.active_collection_id();
         let outcome = history.record_clipboard_payload_with_correlation(
             context,
             payload,
             source_app,
             correlation_id,
         );
+        history.add_outcome_to_local_collection(context, &outcome, active_collection_id);
         if let Some(id) = correlation_id {
             debug_handle.sink().outcome(
                 id,
@@ -1023,6 +1038,74 @@ mod tests {
             second,
             WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
         ));
+    }
+
+    #[test]
+    fn tick_assigns_new_and_duplicate_entries_to_the_active_collection() {
+        let backend = Arc::new(FakeClipboardBackend::new());
+        script_revisions(
+            &backend,
+            &[
+                (Some("same capture"), 1),
+                (Some("same capture"), 2),
+                (Some("history only"), 3),
+            ],
+        );
+        let context = bootstrap_default();
+        let watcher = CaptureWatcher::new(backend, Duration::from_millis(10));
+        let background_watcher = watcher.clone();
+        let parent_id = context
+            .organization()
+            .create_collection(&context, "Parent")
+            .expect("parent collection")
+            .id;
+        let child_id = context
+            .organization()
+            .create_subcollection(&context, parent_id, "Active child")
+            .expect("child collection")
+            .id;
+
+        background_watcher.set_active_collection_id(Some(parent_id));
+        let first = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        let entry_id = match first {
+            WatchTickOutcome::Captured(HistoryOutcome::Stored { id }) => id,
+            other => panic!("expected stored capture, got {other:?}"),
+        };
+
+        watcher.set_active_collection_id(Some(child_id));
+        let duplicate = background_watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        assert_eq!(
+            duplicate,
+            WatchTickOutcome::Captured(HistoryOutcome::Duplicate { id: entry_id })
+        );
+
+        watcher.set_active_collection_id(None);
+        let history_only = watcher.tick(&context, None, AttemptOrigin::BackgroundLoop);
+        let history_only_id = match history_only {
+            WatchTickOutcome::Captured(HistoryOutcome::Stored { id }) => id,
+            other => panic!("expected stored capture, got {other:?}"),
+        };
+
+        let memberships = context
+            .organization()
+            .entry_collection_ids(&context, entry_id)
+            .expect("active memberships");
+        let history_id = context
+            .organization()
+            .history_collection_id(&context)
+            .expect("history collection");
+        assert!(memberships.contains(&history_id));
+        assert!(memberships.contains(&parent_id));
+        assert!(memberships.contains(&child_id));
+        assert_eq!(memberships.len(), 3);
+
+        assert_eq!(
+            context
+                .organization()
+                .entry_collection_ids(&context, history_only_id)
+                .expect("history-only memberships"),
+            vec![history_id]
+        );
     }
 
     #[test]

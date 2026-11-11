@@ -354,6 +354,75 @@ fn watcher_captures_an_image_through_the_same_pipeline() {
     assert_eq!(h.assets_on_disk().len(), 1);
 }
 
+#[test]
+fn watcher_captures_successive_images_without_a_trusted_revision() {
+    let h = harness(vec![]);
+    let watcher = clipvault_core::CaptureWatcher::new(
+        Arc::clone(&h.clipboard) as Arc<dyn ClipboardBackend>,
+        std::time::Duration::from_millis(10),
+    );
+    let queue_observation = |image| {
+        h.clipboard.push_revision(ClipboardRevision::UNKNOWN);
+        h.clipboard.push_read(Ok(None));
+        h.clipboard.push_image_read(image);
+    };
+
+    queue_observation(Ok(Some(bitmap(8, 8, 0x33))));
+    assert!(matches!(
+        watcher.tick(
+            &h.context,
+            None,
+            clipvault_core::AttemptOrigin::BackgroundLoop
+        ),
+        WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
+    ));
+
+    queue_observation(Ok(Some(bitmap(8, 8, 0x44))));
+    assert!(matches!(
+        watcher.tick(
+            &h.context,
+            None,
+            clipvault_core::AttemptOrigin::BackgroundLoop
+        ),
+        WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
+    ));
+
+    // The watcher still collapses an ordinary poll of the same image.
+    queue_observation(Ok(Some(bitmap(8, 8, 0x44))));
+    assert_eq!(
+        watcher.tick(
+            &h.context,
+            None,
+            clipvault_core::AttemptOrigin::BackgroundLoop
+        ),
+        WatchTickOutcome::Unchanged
+    );
+
+    // A soft image-read failure does not prevent a later changed image.
+    queue_observation(Err(ClipboardBackendError::UnsupportedFormat));
+    assert_eq!(
+        watcher.tick(
+            &h.context,
+            None,
+            clipvault_core::AttemptOrigin::BackgroundLoop
+        ),
+        WatchTickOutcome::Ignored
+    );
+
+    queue_observation(Ok(Some(bitmap(8, 8, 0x55))));
+    assert!(matches!(
+        watcher.tick(
+            &h.context,
+            None,
+            clipvault_core::AttemptOrigin::BackgroundLoop
+        ),
+        WatchTickOutcome::Captured(HistoryOutcome::Stored { .. })
+    ));
+
+    assert_eq!(h.history_count(), 3);
+    assert_eq!(h.assets_on_disk().len(), 3);
+}
+
 // ---------------------------------------------------------------------
 // 2. Dedupe and asset reuse.
 // ---------------------------------------------------------------------

@@ -830,9 +830,11 @@ impl PeerImportPersistence for InMemoryImportPersistence {
             id,
             Collection {
                 id,
+                parent_id: None,
                 stable_key: None,
                 name: name.to_string(),
                 kind: CollectionKind::User,
+                capture_count: 0,
                 color_hex: color_hex.to_string(),
                 created_at: ts.clone(),
                 updated_at: ts,

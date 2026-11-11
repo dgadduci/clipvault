@@ -38,7 +38,7 @@ test("local collection refresh hides stale rows and reuses the shared busy indic
   assert.match(app, /entriesLoadToken/);
   assert.match(app, /class:clearing-old-content=\{clearingOldCollectionContent\}/);
   assert.match(app, /testId="collection-content-loading"/);
-  assert.match(app, /aria-busy=\{collectionContentLoading\}/);
+  assert.match(app, /aria-busy=\{collectionContentLoading \|\| collectionSwitchInteractionLocked\}/);
   assert.match(app, /async function refreshEntries\(\)[\s\S]*?finally \{[\s\S]*?collectionContentLoading = false/);
 });
 

@@ -24,10 +24,10 @@
    * asset references, and the dispatched payload only carries the
    * resulting tag ids — never user-supplied names.
    */
-  import { createEventDispatcher, tick } from "svelte";
+  import { afterUpdate, createEventDispatcher, tick } from "svelte";
   import { t } from "./lib/localization.ts";
   import type { Tag } from "./types";
-  import { tagsCreateCommand } from "./lib/tauri";
+  import { tagsCreateCommand, tagsDeleteCommand } from "./lib/tauri";
 
   export let open: boolean;
   export let candidateTags: Tag[] = [];
@@ -58,6 +58,8 @@
    * associations untouched.
    */
   let selection: Set<number> = new Set(initialSelection);
+  /** Tags explicitly added while the persisted selection is still loading. */
+  let pendingAddedTagIds: Set<number> = new Set();
   /**
    * Map of `{ id → Tag }` for tags created during this modal
    * session but not yet mirrored in the candidate snapshot. The
@@ -71,6 +73,9 @@
   let adding = false;
   let saving = false;
   let addErrorKey: string | null = null;
+  let deleteErrorKey: string | null = null;
+  let pendingDeleteTagId: number | null = null;
+  let deletingTagId: number | null = null;
   /** Last visible character count the modal observed. */
   const MAX_NAME_CHARS = 80;
 
@@ -123,7 +128,8 @@
    * The button is also disabled while the modal is mid-save or
    * mid-create, mirroring the existing `saving` / `adding` guards.
    */
-  $: saveEnabled = loaded && !saving && !adding;
+  $: saveEnabled = loaded && !saving && !adding &&
+    pendingDeleteTagId === null && deletingTagId === null;
   /**
    * Existing tag whose normalised identity matches the current
    * input. When present, **Añadir** short-circuits to a selection
@@ -140,9 +146,11 @@
     );
   })();
 
-  $: addEnabled = trimmedInput.length > 0 && !adding;
+  $: addEnabled = trimmedInput.length > 0 && !adding &&
+    pendingDeleteTagId === null && deletingTagId === null;
 
   function toggle(tagId: number): void {
+    if (!loaded || pendingDeleteTagId !== null || deletingTagId !== null) return;
     const next = new Set(selection);
     if (next.has(tagId)) {
       next.delete(tagId);
@@ -156,6 +164,17 @@
     return selection.has(tagId);
   }
 
+  function selectTag(tagId: number): void {
+    const nextSelection = new Set(selection);
+    nextSelection.add(tagId);
+    selection = nextSelection;
+    if (!loaded) {
+      const nextPending = new Set(pendingAddedTagIds);
+      nextPending.add(tagId);
+      pendingAddedTagIds = nextPending;
+    }
+  }
+
   /**
    * Reset the local state. Called whenever the modal opens so a
    * cancelled-then-reopened session never carries stale
@@ -163,16 +182,36 @@
    */
   function reset(initial: number[]): void {
     selection = new Set(initial);
+    pendingAddedTagIds = new Set();
     search = "";
     locallyCreated = new Map();
     addErrorKey = null;
+    deleteErrorKey = null;
+    pendingDeleteTagId = null;
+    deletingTagId = null;
     adding = false;
     saving = false;
   }
 
-  $: if (open) {
-    reset(initialSelection);
-  }
+  // Organization snapshots can update `initialSelection` while this
+  // modal remains open (for example, after creating a tag). Reset only
+  // on the closed -> open transition so local checkbox changes survive.
+  let previousOpen = false;
+  let loadedOnceThisOpen = false;
+  afterUpdate(() => {
+    const justOpened = open && !previousOpen;
+    previousOpen = open;
+    if (justOpened) {
+      reset(initialSelection);
+      loadedOnceThisOpen = loaded;
+    } else if (open && loaded && !loadedOnceThisOpen) {
+      loadedOnceThisOpen = true;
+      const hydratedSelection = new Set(initialSelection);
+      for (const tagId of pendingAddedTagIds) hydratedSelection.add(tagId);
+      selection = hydratedSelection;
+      pendingAddedTagIds = new Set();
+    }
+  });
 
   async function focusSearch(): Promise<void> {
     await tick();
@@ -185,6 +224,12 @@
 
   function onDialogKeydown(event: KeyboardEvent): void {
     if (event.key === "Escape") {
+      if (pendingDeleteTagId !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        cancelDeleteTag();
+        return;
+      }
       event.preventDefault();
       onCancel();
     }
@@ -206,7 +251,7 @@
   async function onAdd(): Promise<void> {
     addErrorKey = null;
     const trimmed = trimmedInput;
-    if (!trimmed || adding) return;
+    if (!trimmed || adding || pendingDeleteTagId !== null || deletingTagId !== null) return;
     if (trimmed.length > MAX_NAME_CHARS) {
       addErrorKey = "tags.error.name_too_long";
       return;
@@ -217,9 +262,7 @@
     // at the same row the user can already see in the list.
     const existing = matchingExistingTag;
     if (existing !== null) {
-      const next = new Set(selection);
-      next.add(existing.id);
-      selection = next;
+      selectTag(existing.id);
       search = "";
       return;
     }
@@ -229,14 +272,49 @@
       const next = new Map(locallyCreated);
       next.set(created.id, created);
       locallyCreated = next;
-      const nextSelection = new Set(selection);
-      nextSelection.add(created.id);
-      selection = nextSelection;
+      selectTag(created.id);
       search = "";
     } catch (error) {
       addErrorKey = "tags.error.add";
     } finally {
       adding = false;
+    }
+  }
+
+  function requestDeleteTag(tagId: number): void {
+    if (adding || saving || deletingTagId !== null) return;
+    pendingDeleteTagId = tagId;
+    deleteErrorKey = null;
+  }
+
+  function cancelDeleteTag(): void {
+    if (deletingTagId !== null) return;
+    pendingDeleteTagId = null;
+    deleteErrorKey = null;
+  }
+
+  async function confirmDeleteTag(tagId: number): Promise<void> {
+    if (pendingDeleteTagId !== tagId || deletingTagId !== null) return;
+    deleteErrorKey = null;
+    deletingTagId = tagId;
+    try {
+      await tagsDeleteCommand({ tagId });
+      const nextSelection = new Set(selection);
+      nextSelection.delete(tagId);
+      selection = nextSelection;
+      const nextPending = new Set(pendingAddedTagIds);
+      nextPending.delete(tagId);
+      pendingAddedTagIds = nextPending;
+      const nextLocallyCreated = new Map(locallyCreated);
+      nextLocallyCreated.delete(tagId);
+      locallyCreated = nextLocallyCreated;
+      pendingDeleteTagId = null;
+      await tick();
+      searchInputEl?.focus();
+    } catch {
+      deleteErrorKey = "tags.selector.delete_error";
+    } finally {
+      deletingTagId = null;
     }
   }
 
@@ -341,6 +419,7 @@
           aria-label={$t("tags.selector.search_create")}
           maxlength={MAX_NAME_CHARS}
           on:keydown={onInputKeydown}
+          disabled={pendingDeleteTagId !== null || deletingTagId !== null}
           class="selector-search"
           data-testid="tag-selector-search"
         />
@@ -364,6 +443,15 @@
       {$t(addErrorKey)}
     </p>
   {/if}
+  {#if deleteErrorKey}
+    <p
+      class="selector-error"
+      role="alert"
+      data-testid="tag-selector-delete-error"
+    >
+      {$t(deleteErrorKey)}
+    </p>
+  {/if}
   {#if !loaded}
     <p
       class="selector-info"
@@ -373,23 +461,84 @@
       {$t("tags.selector.loading")}
     </p>
   {/if}
-      <ul class="selector-list" role="listbox" aria-multiselectable="true">
+      <ul class="selector-list" aria-label={$t("tags.selector.title")}>
         {#each filteredTags as tag (tag.id)}
           <li
-            role="option"
-            aria-selected={isSelected(tag.id)}
             data-testid="tag-selector-row"
             data-tag-id={tag.id}
           >
-            <label>
-              <input
-                type="checkbox"
-                checked={isSelected(tag.id)}
-                on:change={() => toggle(tag.id)}
-                data-testid="tag-selector-checkbox"
-              />
-              <span class="tag-label">{tag.display_name}</span>
-            </label>
+            <div class="selector-tag-row">
+              <label title={tag.display_name}>
+                <input
+                  type="checkbox"
+                  checked={isSelected(tag.id)}
+                  disabled={!loaded || pendingDeleteTagId !== null || deletingTagId !== null}
+                  on:change={() => toggle(tag.id)}
+                  data-testid="tag-selector-checkbox"
+                />
+                <span class="tag-label">{tag.display_name}</span>
+              </label>
+              <button
+                type="button"
+                class="tag-delete"
+                aria-label={$t("tags.selector.delete_action", { name: tag.display_name })}
+                title={$t("tags.selector.delete_action", { name: tag.display_name })}
+                aria-busy={deletingTagId === tag.id}
+                disabled={deletingTagId !== null ||
+                  (pendingDeleteTagId !== null && pendingDeleteTagId !== tag.id)}
+                on:click={() => requestDeleteTag(tag.id)}
+                data-testid="tag-selector-delete"
+                data-tag-id={tag.id}
+              >
+                <svg
+                  aria-hidden="true"
+                  focusable="false"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M4 7h16" />
+                  <path d="M10 11v6m4-6v6" />
+                  <path d="m6 7 1 13h10l1-13" />
+                  <path d="M9 7V4h6v3" />
+                </svg>
+              </button>
+            </div>
+            {#if pendingDeleteTagId === tag.id}
+              <div
+                class="tag-delete-confirmation"
+                role="group"
+                aria-label={$t("tags.selector.confirm_delete", { name: tag.display_name })}
+                data-testid="tag-selector-delete-confirmation"
+              >
+                <p>{$t("tags.selector.confirm_delete", { name: tag.display_name })}</p>
+                <div class="tag-delete-actions">
+                  <button
+                    type="button"
+                    class="secondary small"
+                    on:click={cancelDeleteTag}
+                    disabled={deletingTagId !== null}
+                    data-testid="tag-selector-delete-cancel"
+                  >
+                    {$t("common.cancel")}
+                  </button>
+                  <button
+                    type="button"
+                    class="tag-delete-confirm small"
+                    on:click={() => void confirmDeleteTag(tag.id)}
+                    disabled={deletingTagId !== null}
+                    data-testid="tag-selector-delete-confirm"
+                  >
+                    {$t("common.delete")}
+                  </button>
+                </div>
+              </div>
+            {/if}
           </li>
         {:else}
           <li class="empty" data-testid="tag-selector-empty">
@@ -504,6 +653,11 @@
     padding: 0.45rem 0.6rem;
     border-top: 1px solid #1f2937;
   }
+  .selector-tag-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
   .selector-list li:first-child {
     border-top: 0;
   }
@@ -511,7 +665,72 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    flex: 1 1 auto;
+    min-width: 0;
     cursor: pointer;
+  }
+  .tag-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tag-delete {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    width: 1.8rem;
+    height: 1.8rem;
+    padding: 0;
+    border: 1px solid #7f1d1d;
+    border-radius: 6px;
+    background: transparent;
+    color: #f87171;
+    cursor: pointer;
+  }
+  .tag-delete:hover:not(:disabled) {
+    background: rgba(185, 28, 28, 0.16);
+    color: #fca5a5;
+  }
+  .tag-delete:focus-visible,
+  .tag-delete-confirm:focus-visible {
+    outline: 2px solid rgba(37, 99, 235, 0.65);
+    outline-offset: 2px;
+  }
+  .tag-delete-confirmation {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-top: 0.45rem;
+    padding: 0.45rem;
+    border: 1px solid #7f1d1d;
+    border-radius: 6px;
+    background: rgba(127, 29, 29, 0.16);
+  }
+  .tag-delete-confirmation p {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin: 0;
+    color: #fecaca;
+    font-size: 0.78rem;
+  }
+  .tag-delete-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 0.35rem;
+  }
+  button.tag-delete-confirm {
+    border: 1px solid #b91c1c;
+    border-radius: 6px;
+    padding: 0.3rem 0.55rem;
+    background: #991b1b;
+    color: white;
+    cursor: pointer;
+  }
+  button.tag-delete-confirm:hover:not(:disabled) {
+    background: #7f1d1d;
   }
   .selector-list .empty {
     color: #94a3b8;

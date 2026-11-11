@@ -114,8 +114,8 @@ test("loadEntries resolves the collection scope from the selected id", () => {
   const body = block[0];
   assert.match(
     body,
-    /collectionId:\s*activeCollectionScopeId\(selectedCollectionId\)/,
-    "loadEntries must derive the request scope from the selected collection id",
+    /collectionId:\s*entriesCollectionId\(selectedCollectionId\)/,
+    "loadEntries must combine the sidebar scope with the History collection filter",
   );
   assert.match(
     body,
@@ -151,8 +151,8 @@ test("source-app combobox still drives refreshEntries on selection change", () =
   );
   assert.match(
     refreshBlock[0],
-    /entries = loadedEntries/,
-    "refreshEntries must publish the rows returned by loadEntries",
+    /localHasNextPage = loadedEntries\.length > previewPageSize;[\s\S]*?const pageEntries = loadedEntries\.slice\(0, previewPageSize\);[\s\S]*?entries = pageEntries/,
+    "refreshEntries must use the extra lookahead row to publish a bounded page",
   );
 });
 
@@ -175,13 +175,18 @@ test("searchEntriesCommand receives the resolved collection scope and sourceApp 
   const body = searchBlock[0];
   assert.match(
     body,
-    /collectionId:\s*activeCollectionScopeId\(selectedCollectionId\)/,
-    "search must derive its scope from the selected collection id",
+    /collectionId:\s*entriesCollectionId\(selectedCollectionId\)/,
+    "search must combine the sidebar scope with the History collection filter",
   );
   assert.match(
     body,
     /sourceApp:\s*sourceAppFilter/,
     "search must forward the source-app filter",
+  );
+  assert.match(
+    body,
+    /unassignedOnly:\s*entriesUnassignedOnly\(selectedCollectionId\)/,
+    "search must forward the unassigned collection filter",
   );
 });
 
@@ -218,8 +223,8 @@ test("selectCollectionFromSidebar resets the source-app filter to Todas and relo
   );
   assert.match(
     selectByIdMatch[0],
-    /await refreshSourceAppOptions\(targetCollectionId\)/,
-    "collection switch must request options for the destination id immediately",
+    /const sourceAppOptionsRefresh = refreshSourceAppOptions\(targetCollectionId\);[\s\S]*?await refreshEntries\(\);[\s\S]*?await sourceAppOptionsRefresh;/,
+    "collection switch must request destination options without delaying the new rail",
   );
   assert.match(
     selectByIdMatch[0],

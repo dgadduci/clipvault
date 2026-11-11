@@ -60,6 +60,7 @@ local-peer-identity-keychain = ["clipvault-platform/local-peer-identity-keychain
 clipvault-db = { path = "../clipvault-db" }
 clipvault-platform = { path = "../clipvault-platform" }
 clipvault-search = { path = "../clipvault-search" }
+printpdf = { version = "=0.12.8", default-features = false, features = ["html", "png"] }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -69,6 +70,7 @@ tracing-subscriber = { workspace = true }
 time = { workspace = true }
 parking_lot = { workspace = true }
 png = { workspace = true }
+image = { workspace = true }
 sha2 = { workspace = true }
 tempfile = "3.10"
 # `flate2` is the canonical zlib encoder the PNG `iCCP` chunk

@@ -149,19 +149,20 @@ test("DesktopToolbar renders a single ellipsis trigger with accessible semantics
 
 test("text-entry action follows the existing filter controls and precedes the overflow menu", () => {
   const source = stripComments(loadSource("src/DesktopToolbar.svelte"));
-  const tagFilter = source.indexOf("<TagFilter");
+  const contentTypeFilter = source.indexOf("<ContentTypeFilter");
   const textAction = source.indexOf('data-testid="create-manual-text-entry"');
   const overflow = source.indexOf('data-testid="open-overflow-menu"');
-  assert.ok(tagFilter >= 0, "toolbar keeps its existing filter controls");
-  assert.ok(textAction > tagFilter, "text action follows the existing filters");
+  assert.ok(contentTypeFilter >= 0, "toolbar mounts the capture type filter");
+  assert.ok(textAction > contentTypeFilter, "text action follows the type filter");
   assert.ok(overflow > textAction, "overflow menu follows the text action");
   assert.equal(
-    source.includes("<CaptureTypeFilter"),
-    false,
-    "toolbar must not render the duplicate type-filter select",
+    source.split("<ContentTypeFilter").length - 1,
+    1,
+    "toolbar renders exactly one capture type filter",
   );
   assert.match(source, /aria-label=\{\$t\("toolbar\.text_capture\.aria"\)\}/);
-  assert.match(source, /<span>\{\$t\("toolbar\.text_capture\.label"\)\}<\/span>/);
+  assert.doesNotMatch(source, /toolbar\.text_capture\.label/);
+  assert.doesNotMatch(source, /create-text-capture-shortcut/);
   const menuStart = source.indexOf('data-testid="overflow-menu"');
   const menuEnd = source.indexOf("{/if}", menuStart);
   assert.equal(
@@ -357,7 +358,7 @@ test("App.svelte keeps the two-column grid with stretch alignment and min-width:
   // stays bounded while the right column owns the rest of the row.
   assert.match(
     source,
-    /grid-template-columns:\s*minmax\(180px,\s*220px\)\s*minmax\(0,\s*1fr\)/,
+    /grid-template-columns:\s*minmax\(198px,\s*242px\)\s*minmax\(0,\s*1fr\)/,
   );
   // `align-items: stretch` is the new contract that lets the
   // sidebar grow with the right column instead of pinning to a
@@ -431,10 +432,14 @@ test("DesktopToolbar keeps all controls in a single horizontal scroll row", () =
   assert.match(source, /\.toolbar-row\s*\{[^}]*flex-wrap:\s*nowrap/);
   assert.match(source, /\.toolbar-row\s*\{[^}]*overflow-x:\s*auto/);
   assert.match(source, /\.toolbar-row\s*\{[^}]*height:\s*fit-content/);
-  assert.match(source, /\.search-shell\s*\{[^}]*flex:\s*1 0 240px/);
+  assert.match(source, /\.search-shell\s*\{[^}]*flex:\s*0 0 180px/);
   assert.match(source, /\.actions\s*\{[^}]*flex-wrap:\s*nowrap/);
   const filterTokens = loadSource("src/lib/filterTokens.ts");
   assert.match(filterTokens, /flex:\s*0 0 \$\{FILTER_WIDTH_PX\}px/);
+  assert.match(filterTokens, /COMPACT_FILTER_WIDTH_PX = 110/);
+  assert.match(filterTokens, /COMPACT_FILTER_MIN_WIDTH_REM = "5\.5rem"/);
+  assert.match(source, /data-testid="create-manual-text-entry"/);
+  assert.doesNotMatch(source, /data-testid="create-text-capture-shortcut"/);
 
   // The menu and filters escape the scroll viewport and follow their
   // triggers, so their option surfaces remain visible and interactive.
@@ -442,6 +447,7 @@ test("DesktopToolbar keeps all controls in a single horizontal scroll row", () =
   for (const filterSource of [
     loadSource("src/SourceAppFilter.svelte"),
     loadSource("src/TagFilter.svelte"),
+    loadSource("src/ContentTypeFilter.svelte"),
   ]) {
     assert.match(filterSource, /use:anchorPopupToViewport=/);
     assert.match(filterSource, /\.listbox\s*\{[^}]*position:\s*fixed/);
@@ -732,16 +738,8 @@ test("OrganizationSidebar drops the outer panel visual surface in favour of the 
 
 test("OrganizationSidebar keeps the bounded internal scroller for the collection list", () => {
   const source = stripComments(loadSource("src/OrganizationSidebar.svelte"));
-  // The collection list MUST size itself from the available panel
-  // height, NOT from the number of rows the user has. The pinned
-  // flex triple (`flex: 1 1 auto` + `min-height: 0`) plus the
-  // vertical auto overflow is what guarantees that adding
-  // collections can never grow the desktop body.
-  assert.match(
-    source,
-    /\.collection-list\s*\{[^}]*flex:\s*1 1 auto/,
-    ".collection-list must consume the remaining vertical space through flex: 1 1 auto",
-  );
+  // The shared sidebar grid allocates a bounded 70/30 split; the
+  // collection viewport cannot grow from its number of rows.
   assert.match(
     source,
     /\.collection-list\s*\{[^}]*min-height:\s*0/,

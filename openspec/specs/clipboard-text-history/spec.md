@@ -129,17 +129,66 @@ Each text history entry SHALL persist an identifier, content, content type `text
 
 ### Requirement: Prevent duplicate history entries
 
-ClipVault SHALL use the content hash to prevent identical consecutive or repeated text content from creating redundant history rows.
+ClipVault SHALL use a metadata-only clipboard revision counter combined with
+a content hash to prevent redundant history rows. Linux Wayland SHALL select
+the revision source that corresponds to the clipboard transport actually
+used: Wayland data-control when available, or X11/XWayland ownership events
+when `arboard` falls back to X11. When no matching reliable source is
+available, ClipVault SHALL preserve the `UNKNOWN` fallback and SHALL NOT
+manufacture a revision from payload changes. The shared watcher treats a poll
+as a fresh observation only when the platform revision differs from the
+previous observation. Persistence deduplicates identical text against live
+history rows only; once a row is removed, the same text at a new revision is
+stored with a fresh opaque identifier.
+
+#### Scenario: Deleted text is recaptured after an identical clipboard copy
+
+- **GIVEN** a text capture with hash `H` existed at revision `R1` and was
+  deleted
+- **AND** the watcher baselined against `R1` while the clipboard still held
+  `H`
+- **WHEN** the user copies the same text again and the active clipboard
+  transport reports revision `R2` (R2 > R1)
+- **THEN** the watcher observes `R2` and persistence creates a new text row
+  with a new opaque identifier
+- **AND** a poll that still sees `H` at `R1` does not recreate the deleted row
 
 #### Scenario: Identical content is copied again
 
-- **WHEN** text with a hash already present in history is copied again
-- **THEN** ClipVault does not create a second identical row and updates the existing entry's latest-seen metadata as defined by the data model
+- **WHEN** text with a hash already present in history is copied again and
+  the clipboard reports a new revision
+- **THEN** ClipVault does not create a second identical row and updates the
+  existing entry's latest-seen metadata according to the duplicate policy
 
 #### Scenario: Different content is copied
 
-- **WHEN** the clipboard content differs and produces a different hash
-- **THEN** ClipVault creates a new history entry without modifying the prior entry's content
+- **WHEN** the clipboard content differs and produces a different hash at a
+  new revision
+- **THEN** ClipVault creates a new history entry without modifying the prior
+  entry's content
+
+#### Scenario: Clipboard remains unchanged between polls
+
+- **WHEN** the clipboard reports the same revision across consecutive polls
+- **THEN** the watcher returns `Unchanged` without persisting another row
+
+#### Scenario: Wayland X11 fallback uses its ownership stream
+
+- **GIVEN** the application runs in a Wayland session without a supported
+  data-control protocol and `arboard` uses X11/XWayland
+- **WHEN** a new clipboard selection is published, including one with the
+  same text as the deleted entry
+- **THEN** ClipVault uses the XFixes ownership revision from that X11/XWayland
+  transport to evaluate the observation
+- **AND** it does not leave the revision as `UNKNOWN` merely because the
+  desktop session is Wayland
+
+#### Scenario: Wayland revision source cannot be verified
+
+- **WHEN** the data-control monitor fails unexpectedly and the active
+  transport cannot be identified reliably
+- **THEN** ClipVault reports `UNKNOWN` and preserves the watcher's state
+- **AND** it does not manufacture a new revision from the text or its hash
 
 ### Requirement: Maintain history across restarts
 
@@ -163,14 +212,17 @@ Captured text SHALL remain available after the application restarts until it is 
 ### Requirement: Edit an eligible textual history entry
 
 ClipVault SHALL allow a user to replace the content of an eligible textual
-history entry in place. An eligible entry SHALL have a textual
+history entry in place. An eligible plain-text entry SHALL have a textual
 `content_type`, no image asset metadata and no rich-text payload references.
-The edit SHALL preserve the entry identifier and all organization and
-presentation metadata that is unrelated to the text.
+A rich-text entry SHALL be editable only through an explicit conversion flow:
+the user must confirm that the edit will remove rich formatting, change the
+canonical plain text, and activate Guardar. Editing SHALL preserve the entry
+identifier and all organization and presentation metadata unrelated to the
+text.
 
 #### Scenario: Save edited text
 
-- **WHEN** the user changes an eligible entry and activates Guardar
+- **WHEN** the user changes an eligible plain-text entry and activates Guardar
 - **THEN** ClipVault persists the new text in the same SQLite row and keeps the
   same entry ID
 - **AND** it recomputes `content_size`, `content_hash` and `content_type` using
@@ -178,12 +230,49 @@ presentation metadata that is unrelated to the text.
 - **AND** it updates `updated_at` without changing `created_at` or
   `last_seen_at`
 
+#### Scenario: Rich entry requests explicit conversion
+
+- **WHEN** the user selects `Editar captura` for an entry with rich-text
+  payload references
+- **THEN** ClipVault warns that saving a modified draft will convert the
+  capture to plain text and remove its rich representations
+- **AND** confirming the warning opens the existing text editor with the
+  entry's canonical plain text and resolved title
+- **AND** neither opening the warning nor confirming it changes the entry
+
+#### Scenario: Cancel rich conversion before saving
+
+- **WHEN** the user cancels the warning or closes the editor without saving
+- **THEN** the rich entry, its metadata and its rich asset references remain
+  unchanged
+- **AND** no conversion command is committed
+
+#### Scenario: Save changed text and convert rich entry
+
+- **WHEN** the user confirms the warning, changes the canonical plain text to
+  a non-empty different value and activates Guardar
+- **THEN** ClipVault converts the same SQLite row to a plain-text entry
+- **AND** it recomputes `content_size`, `content_hash` and `content_type` using
+  the same deterministic rules as capture
+- **AND** it clears the row's rich-text hash, representation references,
+  preview reference and rich size metadata
+- **AND** it updates `updated_at` without changing `created_at` or
+  `last_seen_at`
+
+#### Scenario: Unchanged draft cannot convert a rich entry
+
+- **WHEN** the user confirms the warning but leaves the canonical plain text
+  unchanged, including after reverting edits to the original text
+- **THEN** Guardar remains disabled and no backend mutation is requested
+- **AND** the entry remains rich with all persisted metadata and assets intact
+
 #### Scenario: Text edit preserves metadata
 
 - **WHEN** an entry with a title, favorite state, tags, collections,
   source-app metadata or local asset references is edited
-- **THEN** those fields remain unchanged
-- **AND** the edit does not create a second entry, asset or membership
+- **THEN** those fields remain unchanged unless they are rich-text references
+  cleared by a successful conversion
+- **AND** the edit does not create a second entry or membership
 
 #### Scenario: Empty content is rejected
 
@@ -193,9 +282,18 @@ presentation metadata that is unrelated to the text.
 
 #### Scenario: Editing to the same text is idempotent
 
-- **WHEN** the submitted text is byte-for-byte equal to the persisted content
+- **WHEN** the submitted text for an eligible plain-text entry is byte-for-byte
+  equal to the persisted content
 - **THEN** ClipVault returns a `noop` result
 - **AND** it does not create a new row or emit a content mutation event
+
+#### Scenario: Rich conversion rejects unchanged text at the backend
+
+- **WHEN** a conversion request reaches the backend with text byte-for-byte
+  equal to the rich entry's canonical plain text
+- **THEN** ClipVault returns a `noop` result and leaves the row rich and
+  unchanged
+- **AND** no history update event is emitted
 
 #### Scenario: Edited text conflicts with another entry
 
@@ -219,39 +317,53 @@ presentation metadata that is unrelated to the text.
 
 #### Scenario: Non-textual or rich entry is protected
 
-- **WHEN** an edit targets an image or an entry with rich-text payload
-  references
+- **WHEN** the plain-text edit operation targets an image entry or a rich
+  entry without an explicit conversion request
 - **THEN** ClipVault returns `not_editable`
 - **AND** it does not change content, metadata or assets
 
 ### Requirement: Persist and expose text-edit results safely
 
-The text-edit mutation SHALL run in one local SQLite transaction and SHALL be
-available through a thin Tauri command and a typed TypeScript bridge. The
-command MAY accept the user-entered draft because editing requires it, but the
-draft SHALL NOT be written to logs, diagnostics, drag payloads or event
-payloads.
+The text-edit and rich-to-plain conversion mutations SHALL run in one local
+SQLite transaction and SHALL be available through thin Tauri commands and
+typed TypeScript bridges. A command MAY accept the user-entered draft because
+editing requires it, but the draft SHALL NOT be written to logs, diagnostics,
+drag payloads or event payloads. Rich conversion SHALL validate the current
+row and its rich references in the backend rather than trusting frontend
+eligibility state.
 
 #### Scenario: Successful edit refreshes consumers
 
-- **WHEN** an edit commits successfully
+- **WHEN** a plain-text edit or rich-to-plain conversion commits successfully
 - **THEN** the command returns a typed updated result and the existing
   `clipvault://history-updated` event is emitted with an empty payload or an
   equivalent metadata-only signal
 - **AND** the card, history, search and Quick Paste use the persisted text
+- **AND** the converted entry is available only as plain text through its
+  capture actions
 
 #### Scenario: Failed edit is atomic
 
 - **WHEN** validation, duplicate detection or SQLite persistence fails
-- **THEN** the transaction rolls back
+- **THEN** the transaction rolls back and the entry's prior content, metadata
+  and rich references remain intact
 - **AND** the frontend keeps the draft visible with a safe error
 - **AND** the previous persisted entry remains available
 
+#### Scenario: Rich assets are not removed while shared
+
+- **WHEN** a successful conversion clears rich references from one entry and
+  an asset is still referenced by another entry
+- **THEN** the shared asset remains available to the other entry
+- **AND** an asset is collected only after commit and after the repository
+  confirms that no entry references it
+
 #### Scenario: Edit survives restart
 
-- **WHEN** the user saves a valid edit and restarts ClipVault
+- **WHEN** the user saves a valid edit or rich conversion and restarts ClipVault
 - **THEN** the new text, hash, size and type are loaded from SQLite
 - **AND** the entry remains available to history, search and Quick Paste
+- **AND** a converted entry has no rich-text representation available
 
 ### Requirement: Pause and resume local clipboard capture
 

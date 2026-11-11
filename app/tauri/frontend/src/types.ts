@@ -365,6 +365,24 @@ export function isEditableTextEntry(entry: EntryRecord): boolean {
   return true;
 }
 
+/**
+ * Whether a history entry carries a complete, text-backed rich capture
+ * that can be explicitly converted to plain text. The predicate mirrors
+ * `EntryRecord::has_rich_text` in the database crate and excludes rows
+ * with image payload metadata.
+ */
+export function isRichTextEntry(entry: EntryRecord): boolean {
+  if (entry.content_type === "image") return false;
+  if (entry.asset_ref != null || entry.mime_type != null) return false;
+  if (entry.payload_width != null || entry.payload_height != null) return false;
+  return (
+    entry.rich_text_hash != null &&
+    (entry.rich_html_ref != null || entry.rich_rtf_ref != null)
+  );
+}
+
+export type EntryTextEditorMode = "plain" | "rich-conversion";
+
 export type SetFavoriteResponse =
   | { kind: "updated"; entry: EntrySummary }
   | { kind: "not_found" };
@@ -397,6 +415,13 @@ export type UpdateTextEntryResponse =
   | { kind: "not_editable" }
   | { kind: "empty_content" }
   | { kind: "duplicate_content" };
+
+export type ImageRotationDirection = "clockwise" | "counterclockwise";
+
+export type RotateImageCaptureResponse =
+  | { kind: "updated"; entry: EntryRecord }
+  | { kind: "not_found" }
+  | { kind: "not_image" };
 
 export type DeleteResponse =
   | { kind: "removed"; removed: number }
@@ -467,6 +492,7 @@ export interface Settings {
    */
   local_peer_display_name: string | null;
   capture_notes_sharing_enabled: boolean;
+  preview_page_size: number;
 }
 
 export interface SettingsUpdate {
@@ -477,7 +503,42 @@ export interface SettingsUpdate {
   quick_paste_hotkey?: HotkeySpec | null;
   local_peer_display_name?: string | null;
   capture_notes_sharing_enabled?: boolean;
+  preview_page_size?: number;
 }
+
+export type PdfExportSaveResult = "saved" | "cancelled";
+
+export type ImageImportResponse =
+  | {
+      kind: "completed";
+      imported: number;
+      duplicates: number;
+      skipped: number;
+    };
+
+export interface ImageImportFilePreview {
+  id: number;
+  display_name: string | null;
+}
+
+/** Metadata-only progress for one active local image-import session. */
+export interface ImageImportProgressEvent {
+  session_id: number;
+  bytes_read: number;
+  total_bytes: number;
+  completed: number;
+  total: number;
+}
+
+export type ImageImportPreparationResponse =
+  | { kind: "cancelled" }
+  | { kind: "prepared"; session_id: number; files: ImageImportFilePreview[] }
+  | {
+      kind: "completed";
+      imported: number;
+      duplicates: number;
+      skipped: number;
+    };
 
 /**
  * Metadata-only projection the frontend reads through
@@ -1354,10 +1415,15 @@ export type CollectionKind = "system" | "user";
 
 export interface Collection {
   id: number;
+  /** Parent id for a one-level subcollection; null for root collections. */
+  parent_id?: number | null;
   /** Stable key reserved for system collections (`history` for `Historial`). */
   stable_key: string | null;
   name: string;
   kind: CollectionKind;
+  /** Current number of stored captures in this collection, when supplied by
+   * the organization snapshot. */
+  capture_count?: number;
   /**
    * Normalised opaque RGB colour the sidebar square and the
    * per-card collection labels render. The backend rejects any
@@ -1467,6 +1533,12 @@ export interface SourceApplicationOption {
 export type TagFilter =
   | { kind: "all" }
   | { kind: "tag"; tagId: number };
+
+/** Single collection selected as an additional History filter. */
+export type CollectionFilter =
+  | { kind: "all" }
+  | { kind: "unassigned" }
+  | { kind: "collection"; collectionId: number };
 
 /**
  * Single metadata-only entry the tag combobox renders. The frontend

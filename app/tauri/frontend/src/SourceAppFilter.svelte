@@ -35,7 +35,7 @@
   import { createIconResolver } from "./lib/iconResolver.ts";
   import { sourceAppIconCommand } from "./lib/tauri.ts";
   import { APP_FALLBACK_ICON_SVG } from "./lib/contentTypeIcons.ts";
-  import { filterComboboxStyles } from "./lib/filterTokens.ts";
+  import { ACTIVE_FILTER_SURFACES, filterComboboxStyles } from "./lib/filterTokens.ts";
   import { t } from "./lib/localization.ts";
   import type {
     SourceAppFilter,
@@ -375,9 +375,9 @@
 <div
     class="source-app-filter"
     data-testid={testId}
-    data-filter-width="220"
-    data-filter-min-width="11rem"
-    style={filterComboboxStyles}
+    data-filter-width="168.3"
+    data-filter-min-width="8.415rem"
+    style={`${filterComboboxStyles} --filter-active-background: ${ACTIVE_FILTER_SURFACES.sourceApp};`}
   >
   <button
     type="button"
@@ -392,6 +392,7 @@
     on:keydown={onTriggerKeydown}
     data-testid={`${testId}-trigger`}
     data-source-app-selected={selected.kind}
+    data-filter-active={selected.kind !== "all"}
   >
     <span class="trigger-icon" aria-hidden="true" data-testid={`${testId}-trigger-icon`}>
       {#if (selected.kind === "known" || selected.kind === "imported") && selectedOptionIconUrl}
@@ -467,18 +468,16 @@
 
 <style>
   .source-app-filter {
-    /* The combobox shares its width with the `TagFilter` sibling.
-     * The token module `lib/filterTokens.ts` owns the canonical
-     * `220px` / `11rem` baseline; the inline `style` on the root
-     * div applies the same declaration so a CSS refactor cannot
-     * re-introduce the drift the manual QA pass detected. */
+    /* The token module `lib/filterTokens.ts` owns the canonical
+     * `168.3px` / `8.415rem` width; the inline `style` on the root
+     * div applies the same declaration so component sizing cannot drift. */
     position: relative;
     display: inline-flex;
     align-items: center;
-    flex: 0 1 220px;
-    min-width: 11rem;
-    max-width: 220px;
-    width: 220px;
+    flex: 0 0 168.3px;
+    min-width: 8.415rem;
+    max-width: 168.3px;
+    width: 168.3px;
   }
 
   .trigger {
@@ -499,6 +498,17 @@
 
   .trigger:hover {
     background: var(--cv-bg-hover, rgba(255, 255, 255, 0.06));
+  }
+
+  .trigger[data-filter-active="true"],
+  .trigger[data-filter-active="true"]:hover {
+    background: var(--filter-active-background);
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.34);
+  }
+
+  .trigger[data-filter-active="true"] .trigger-icon {
+    color: #fff;
   }
 
   .trigger:focus-visible {

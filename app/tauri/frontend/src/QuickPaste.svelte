@@ -3,27 +3,39 @@
   import type {
     CopyResponse,
     EntryRecord,
+    EntryTextEditorMode,
+    PasteResponse,
     PlatformGuidance,
     PeerImportedSourceAppPresentation,
     SearchHit,
     SearchResponse,
   } from "./types";
-  import { isEditableTextEntry } from "./types";
+  import { isEditableTextEntry, isRichTextEntry } from "./types";
   import { visualTokenCss } from "./lib/visualTokens";
+  import { COLLECTION_ROW_TINT_OPACITY } from "./lib/collectionColor.ts";
   import {
     copyEntryCommand,
+    exportEntriesPdfCommand,
+    PDF_EXPORT_GENERATION_COMPLETE_EVENT,
+    pasteEntryCommand,
     peerImportSourceAppPresentationsCommand,
     recentEntriesCommand,
     searchEntriesCommand,
     setFavoriteCommand,
   } from "./lib/tauri";
+  import { openImagePreviewWindow } from "./lib/imagePreviewWindow.ts";
+  import { blockWebviewPageZoom } from "./lib/blockWebviewPageZoom.ts";
+  import PdfExportProgressOverlay from "./PdfExportProgressOverlay.svelte";
   import { runSearch } from "./lib/search";
   import {
     QUICK_PASTE_OPENED_EVENT,
     QUICK_PASTE_WINDOW_LABEL,
     hideQuickPasteWindow,
   } from "./lib/quickPasteBridge";
-  import { performCopyFlow } from "./lib/quickPasteController";
+  import {
+    performCopyFlow,
+    performPasteStackFlow,
+  } from "./lib/quickPasteController";
   import {
     capabilitiesOf,
     clampedSelectedIndex,
@@ -37,7 +49,14 @@
     type CopyMode,
     type QuickPasteMenuAction,
   } from "./lib/quickPasteActions";
+  import {
+    retainVisibleIds,
+    selectIdRange,
+    selectedIdsInSelectionOrder,
+    toggleSelectedId,
+  } from "./lib/multiSelection.ts";
   import { listen } from "@tauri-apps/api/event";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import {
     currentKeyboardShortcut,
     currentPlatformIsMacos,
@@ -114,6 +133,7 @@
   import PlatformGuidanceModal from "./PlatformGuidanceModal.svelte";
   import ClipboardPreview from "./ClipboardPreview.svelte";
   import EntryTextEditorModal from "./EntryTextEditorModal.svelte";
+  import RichTextConversionWarningModal from "./RichTextConversionWarningModal.svelte";
   import Modal from "./Modal.svelte";
 
   /**
@@ -172,6 +192,12 @@
    * next result list lands.
    */
   let selectedEntryId: number | null = null;
+  let selectedEntryIds = new Set<number>();
+  let selectionAnchorId: number | null = null;
+  let pasteStackInFlight = false;
+  let pdfExportInFlight = false;
+  let pdfGenerationInFlight = false;
+  let pdfExportError = false;
   let loading = true;
   let emptyMessage = "";
   let guidance: PlatformGuidance | null = null;
@@ -278,6 +304,11 @@
    * `null` means no editor is open.
    */
   let quickPasteEditorEntry: EntryRecord | null = null;
+  let quickPasteEditorMode: EntryTextEditorMode = "plain";
+  let quickPasteRichConversionWarning: {
+    entry: EntryRecord;
+    displayTitle: string;
+  } | null = null;
   /**
    * Stable id of the row the `Captura no editable` dialog should
    * return focus to when the user dismisses it. The id is captured
@@ -870,8 +901,12 @@
     const total = resultIds.length;
     if (total === 0) {
       selectedIndex = 0;
+      selectedEntryId = null;
+      selectedEntryIds = new Set();
+      selectionAnchorId = null;
       return;
     }
+    selectedEntryIds = retainVisibleIds(selectedEntryIds, resultIds);
     // Re-anchor the index on the stable entry id whenever the
     // candidate set changes. If the previously selected id is no
     // longer visible the helper falls back to the previous index
@@ -884,6 +919,15 @@
     );
     const currentId = resultIds[selectedIndex];
     selectedEntryId = currentId ?? null;
+    if (currentId !== undefined && selectedEntryIds.size === 0) {
+      selectedEntryIds = new Set([currentId]);
+      selectionAnchorId = currentId;
+    } else if (
+      selectionAnchorId !== null &&
+      !resultIds.includes(selectionAnchorId)
+    ) {
+      selectionAnchorId = selectedEntryId;
+    }
   }
 
   // ---------------------------------------------------------------
@@ -1195,7 +1239,7 @@
     return entryFullPreviewText(entry);
   }
 
-  function moveSelection(delta: number): void {
+  function moveSelection(delta: number, extendRange = false): void {
     // Arrow keys CLAMP at the ends of the list. Wrapping with the
     // modulo operator would silently teleport the selection from
     // the last row back to the first (and vice versa) the moment the
@@ -1213,6 +1257,16 @@
     }
     selectedIndex = next;
     selectedEntryId = resultIds[next] ?? null;
+    if (selectedEntryId !== null) {
+      if (extendRange) {
+        const anchorId = selectionAnchorId ?? resultIds[next - delta] ?? selectedEntryId;
+        selectedEntryIds = selectIdRange(resultIds, anchorId, selectedEntryId);
+        selectionAnchorId = anchorId;
+      } else {
+        selectedEntryIds = new Set([selectedEntryId]);
+        selectionAnchorId = selectedEntryId;
+      }
+    }
     scrollSelectedIntoView();
   }
 
@@ -1220,6 +1274,10 @@
     if (resultIds.length === 0) return;
     selectedIndex = 0;
     selectedEntryId = resultIds[0] ?? null;
+    if (selectedEntryId !== null) {
+      selectedEntryIds = new Set([selectedEntryId]);
+      selectionAnchorId = selectedEntryId;
+    }
     scrollSelectedIntoView();
   }
 
@@ -1227,6 +1285,10 @@
     if (resultIds.length === 0) return;
     selectedIndex = resultIds.length - 1;
     selectedEntryId = resultIds[resultIds.length - 1] ?? null;
+    if (selectedEntryId !== null) {
+      selectedEntryIds = new Set([selectedEntryId]);
+      selectionAnchorId = selectedEntryId;
+    }
     scrollSelectedIntoView();
   }
 
@@ -1239,7 +1301,7 @@
    * function and the keyboard shortcut that follows lands on the
    * same row.
    */
-  function selectEntryOnClick(clickedEntryId: number): void {
+  function selectEntryOnClick(clickedEntryId: number, event?: MouseEvent): void {
     if (resultIds.length === 0) return;
     selectedIndex = selectedIndexForClick(
       resultIds,
@@ -1247,6 +1309,23 @@
       selectedIndex,
     );
     selectedEntryId = resultIds[selectedIndex] ?? clickedEntryId;
+    if (event?.metaKey || event?.ctrlKey) {
+      toggleEntrySelection(clickedEntryId);
+      return;
+    } else {
+      selectedEntryIds = new Set([clickedEntryId]);
+      selectionAnchorId = clickedEntryId;
+    }
+    scrollSelectedIntoView();
+  }
+
+  /** Toggle one result without copying or hiding Quick Paste. */
+  function toggleEntrySelection(entryId: number): void {
+    if (!resultIds.includes(entryId)) return;
+    selectedIndex = selectedIndexForClick(resultIds, entryId, selectedIndex);
+    selectedEntryId = entryId;
+    selectedEntryIds = toggleSelectedId(selectedEntryIds, entryId);
+    selectionAnchorId = entryId;
     scrollSelectedIntoView();
   }
 
@@ -1331,9 +1410,51 @@
       // "Enter without selection must not paste / copy".
       return;
     }
-    const entryId = resultIds[selectedIndex];
+    if (pasteStackInFlight) return;
+    const selectedVisibleIds = resultIds.filter((id) => selectedEntryIds.has(id));
+    if (selectedVisibleIds.length > 1) {
+      await runPasteStack(selectedVisibleIds);
+      return;
+    }
+    const entryId = selectedVisibleIds[0] ?? resultIds[selectedIndex];
     if (entryId == null) return;
     await confirmEntry(entryId, { hideAfterSuccess: true });
+  }
+
+  async function exportSelectedEntriesAsPdf(): Promise<void> {
+    if (pdfExportInFlight) return;
+    const entryIds = selectedIdsInSelectionOrder(selectedEntryIds, resultIds);
+    if (entryIds.length === 0) return;
+    pdfExportInFlight = true;
+    pdfGenerationInFlight = true;
+    pdfExportError = false;
+    let unlistenGenerationComplete: (() => void) | null = null;
+    try {
+      await tick();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      try {
+        unlistenGenerationComplete = await listen(
+          PDF_EXPORT_GENERATION_COMPLETE_EVENT,
+          () => {
+            pdfGenerationInFlight = false;
+          },
+        );
+      } catch {
+        // Keep export available if the progress listener cannot be registered.
+      }
+      await exportEntriesPdfCommand({
+        entryIds,
+        dialogTitle: $t("pdf_export.dialog.title"),
+        filterName: $t("pdf_export.dialog.filter"),
+        suggestedFileName: $t("pdf_export.dialog.filename"),
+      });
+    } catch {
+      pdfExportError = true;
+    } finally {
+      unlistenGenerationComplete?.();
+      pdfGenerationInFlight = false;
+      pdfExportInFlight = false;
+    }
   }
 
   /**
@@ -1358,8 +1479,67 @@
    * activations.
    */
   function handleRowClick(entryId: number, event?: MouseEvent): void {
-    selectEntryOnClick(entryId);
+    if (event?.metaKey || event?.ctrlKey) {
+      selectEntryOnClick(entryId, event);
+      return;
+    }
+    selectEntryOnClick(entryId, event);
     void confirmEntry(entryId, { shiftKey: event?.shiftKey ?? false, hideAfterSuccess: false });
+  }
+
+  async function runPasteStack(entryIds: readonly number[]): Promise<void> {
+    if (pasteStackInFlight) return;
+    const orderedEntries = resultIds
+      .filter((id) => entryIds.includes(id))
+      .map((id) => findEntry(mode, recent, hits, id))
+      .filter((entry): entry is EntryRecord => entry !== null);
+    if (orderedEntries.length < 2) {
+      const fallbackId = orderedEntries[0]?.id;
+      if (fallbackId !== undefined) await confirmEntry(fallbackId, { hideAfterSuccess: true });
+      return;
+    }
+    pasteStackInFlight = true;
+    guidance = null;
+    pasteError = null;
+    pinError = null;
+    openMenuEntryId = null;
+    try {
+      const outcome = await performPasteStackFlow({
+        bridge: {
+          captureActiveApp: async () => ({
+            available: false,
+            name: null,
+            identifier: null,
+          }),
+          show: async () => undefined,
+          focus: async () => undefined,
+          emitOpened: async () => undefined,
+          hide: hideQuickPasteWindow,
+        },
+        pasteFns: orderedEntries.map((entry) => {
+          const action = quickPasteConfirmAction(capabilitiesOf(entry), false);
+          const pasteMode = action.kind === "copy" ? action.mode : null;
+          return () => pasteEntryCommand({ id: entry.id, mode: pasteMode });
+        }),
+      });
+      if (outcome.kind === "failed") {
+        if ("guidance" in outcome.response && outcome.response.guidance) {
+          guidance = outcome.response.guidance;
+        }
+        pasteError = outcome.pastedCount > 0
+          ? $t("quickpaste.stack.partial_error", { count: outcome.pastedCount })
+          : readPasteError(outcome.response);
+      }
+    } catch (error) {
+      pasteError = error instanceof Error ? error.message : String(error);
+    } finally {
+      pasteStackInFlight = false;
+    }
+  }
+
+  function readPasteError(response: PasteResponse | { error: string }): string {
+    if ("error" in response) return response.error;
+    return response.message ?? `Paste ${response.kind}`;
   }
 
   /**
@@ -1715,8 +1895,8 @@
    *
    *   - resolve the entry by id from the live `recent` / `hits`
    *     feeds, never from a stale closure;
-   *   - reject the activation when the resolved entry is not eligible
-   *     for the persistent editor (image, rich text, missing row);
+   *   - route rich entries to the conversion warning and reject
+   *     images or malformed rows;
    *   - close the menu popover so the dialog renders on top of an
    *     empty list rather than stacking on top of the open menu;
    *   - store the snapshot of the entry the editor will persist so
@@ -1726,7 +1906,7 @@
    *     is responsible for the actual editing surface, draft,
    *     persistence and accessibility.
    *
-   * The handler never invokes the `updateTextEntryCommand` directly;
+   * The handler never invokes a persistence command directly;
    * that contract belongs to the modal so the double-submit lock,
    * the error surface and the close dispatcher stay in one place.
    */
@@ -1747,16 +1927,42 @@
       // row.
       return;
     }
+    if (isRichTextEntry(entry)) {
+      openMenuEntryId = null;
+      quickPasteRichConversionWarning = {
+        entry,
+        displayTitle: renderTitle(mode, recent, hits, entry.id, $t),
+      };
+      return;
+    }
     if (!isEditableTextEntry(entry)) {
-      // `quickPasteMenuActions` already gates the entry shape, but
-      // the predicate is re-evaluated here so a stale menu that
-      // somehow mounted against a rich / image row can never reach
-      // the editor.
+      // Recheck eligibility after resolving the live row so a stale
+      // menu can never open the editor for an image or malformed row.
       return;
     }
     openMenuEntryId = null;
     quickPasteEditorEntry = entry;
+    quickPasteEditorMode = "plain";
     quickPasteEditorOpen = true;
+  }
+
+  function confirmQuickPasteRichConversion(): void {
+    const pending = quickPasteRichConversionWarning;
+    if (!pending) return;
+    const currentEntry = findEntry(mode, recent, hits, pending.entry.id);
+    quickPasteRichConversionWarning = null;
+    if (!currentEntry || !isRichTextEntry(currentEntry)) return;
+    quickPasteEditorEntry = currentEntry;
+    quickPasteEditorMode = "rich-conversion";
+    quickPasteEditorOpen = true;
+  }
+
+  function closeQuickPasteRichConversionWarning(): void {
+    suppressNextWindowEscape = true;
+    quickPasteRichConversionWarning = null;
+    requestAnimationFrame(() => {
+      suppressNextWindowEscape = false;
+    });
   }
 
   /**
@@ -1800,6 +2006,7 @@
     suppressNextWindowEscape = true;
     quickPasteEditorOpen = false;
     quickPasteEditorEntry = null;
+    quickPasteEditorMode = "plain";
     requestAnimationFrame(() => {
       suppressNextWindowEscape = false;
     });
@@ -1891,20 +2098,24 @@
     entryId: number,
   ): HTMLElement | null {
     const anchor = menuAnchorEls[entryId];
-    if (anchor) return anchor;
+    if (anchor && document.contains(anchor)) return anchor;
     const row = rowRefs.get(entryId);
-    if (row) return row;
+    if (row && document.contains(row)) return row;
     return null;
   }
 
+  function resolveQuickPasteRichWarningFocusTarget(): HTMLElement | null {
+    const pending = quickPasteRichConversionWarning;
+    return pending
+      ? resolveQuickPasteEditorFocusTarget(pending.entry.id)
+      : null;
+  }
+
   /**
-   * Open the informative `Captura no editable` dialog for the entry
-   * the user activated `Cmd/Ctrl+E` against. The dialog is the
-   * single switch the keyboard listener consults when the matcher
-   * resolves to an image / rich-text row so the user gets a clear
-   * explanation without the editor silently mounting against an
-   * ineligible entry (or against a stale row the menu or shortcut
-   * might have left from a previous edit cycle).
+   * Open the informative `Captura no editable` dialog for an image
+   * entry the user activated `Cmd/Ctrl+E` against. Rich-text rows
+   * use the separate conversion warning; this helper never mounts
+   * the editor against an image or stale row.
    *
    * The dialog reuses the shared `Modal.svelte` shell so the focus
    * trap, the Escape / backdrop contract and the accessible
@@ -1991,8 +2202,20 @@
   function openPreviewFor(entryId: number): void {
     const entry = findEntry(mode, recent, hits, entryId);
     if (!entry) return;
-    previewEntryId = entryId;
     openMenuEntryId = null;
+    if (isImageEntry(entry)) {
+      previewEntryId = null;
+      void openImagePreviewWindow(
+        entry,
+        "quick-paste",
+        $t("preview.window_title"),
+      ).catch(() => {
+        // Preserve the in-window preview if the native window cannot be created.
+        previewEntryId = entryId;
+      });
+      return;
+    }
+    previewEntryId = entryId;
   }
 
   /**
@@ -2039,6 +2262,16 @@
 
   function onWindowKeydown(event: KeyboardEvent): void {
     if (guidance) return;
+    const target = event.target as HTMLElement | null;
+    if (
+      event.key === "Enter" &&
+      target instanceof HTMLButtonElement &&
+      target.dataset.testid === "quick-paste-multi-select"
+    ) {
+      event.preventDefault();
+      void handleEnter();
+      return;
+    }
     // The preview overlay is the only modal layered on top of Quick
     // Paste. `Escape` MUST close the preview first so the user can
     // dismiss it without losing the window; a second `Escape` falls
@@ -2150,7 +2383,7 @@
       // fallback (`quickPasteEditorEntry` / `quickPasteEditorEntryId`)
       // was deliberately removed: it caused the second `Cmd/Ctrl+E`
       // activation to silently reopen an older entry when the
-      // currently selected entry was image / rich text or empty.
+      // currently selected entry was an image, invalid row or empty.
       const selectedId =
         selectedEntryId !== null &&
         resultIds.indexOf(selectedEntryId) >= 0
@@ -2161,10 +2394,19 @@
       if (!entry) {
         return;
       }
+      if (isRichTextEntry(entry)) {
+        event.preventDefault();
+        openMenuEntryId = null;
+        quickPasteRichConversionWarning = {
+          entry,
+          displayTitle: renderTitle(mode, recent, hits, entry.id, $t),
+        };
+        return;
+      }
       if (!isEditableTextEntry(entry)) {
         // Surface the informative dialog instead of opening the
-        // editor so the user gets a clear explanation for image /
-        // rich-text rows. The dialog never invokes the
+        // editor so the user gets a clear explanation for image
+        // rows. The dialog never invokes the
         // `updateTextEntryCommand` bridge and never mutates the
         // entry, but reuses the shared `Modal.svelte` shell so the
         // focus trap, the Escape / backdrop contract and the
@@ -2177,15 +2419,16 @@
       event.preventDefault();
       openMenuEntryId = null;
       quickPasteEditorEntry = entry;
+      quickPasteEditorMode = "plain";
       quickPasteEditorOpen = true;
       return;
     }
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      moveSelection(1);
+      moveSelection(1, event.shiftKey);
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
-      moveSelection(-1);
+      moveSelection(-1, event.shiftKey);
     } else if (event.key === "Home") {
       event.preventDefault();
       jumpToFirst();
@@ -2337,11 +2580,11 @@
     if (event.key === "ArrowDown") {
       event.preventDefault();
       event.stopPropagation();
-      moveSelection(1);
+      moveSelection(1, event.shiftKey);
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
       event.stopPropagation();
-      moveSelection(-1);
+      moveSelection(-1, event.shiftKey);
     } else if (event.key === "Home") {
       event.preventDefault();
       event.stopPropagation();
@@ -2380,6 +2623,7 @@
    * commit cannot re-enter a disposed handler.
    */
   let unlistenHistoryUpdated: (() => void) | null = null;
+  let detachWebviewPageZoomGuard: (() => void) | null = null;
   /**
    * Reference to the result list container. The autoscroll helper
    * uses the element only as a "list exists" sentinel; the actual
@@ -2458,6 +2702,9 @@
     // the hotkey fires. The bridge only emits a null payload, so we
     // intentionally do not look at the event details.
     selectedIndex = 0;
+    selectedEntryId = null;
+    selectedEntryIds = new Set();
+    selectionAnchorId = null;
     query = "";
     void loadRecent();
     // The autofocus contract from the compact-UI spec: focus the
@@ -2671,6 +2918,8 @@
   }
 
   onMount(() => {
+    void getCurrentWebview().setZoom(1).catch(() => undefined);
+    detachWebviewPageZoomGuard = blockWebviewPageZoom(document);
     void initializeKeyboardShortcuts();
     void loadShortcutPlatform();
     void loadRecent();
@@ -2751,6 +3000,10 @@
       unlistenHistoryUpdated();
       unlistenHistoryUpdated = null;
     }
+    if (detachWebviewPageZoomGuard) {
+      detachWebviewPageZoomGuard();
+      detachWebviewPageZoomGuard = null;
+    }
     // Revoke every thumbnail and source-app icon blob URL the list
     // minted so a long-lived window does not leak memory.
     assetResolver.release();
@@ -2772,6 +3025,12 @@
 <svelte:window on:keydown={onWindowKeydown} on:pointerdown={onWindowPointerDown} />
 
 <main data-testid="quick-paste-root">
+  {#if pdfGenerationInFlight}
+    <PdfExportProgressOverlay
+      label={$t("pdf_export.generating")}
+      testId="quick-paste-pdf-export-spinner"
+    />
+  {/if}
   <div class="qp-search-row">
     <div class="qp-search-shell" data-testid="quick-paste-search-shell">
       <input
@@ -2796,6 +3055,12 @@
       </span>
     </div>
   </div>
+
+  {#if pdfExportError}
+    <p class="qp-status qp-status-error" role="alert" data-testid="pdf-export-error">
+      {$t("pdf_export.error")}
+    </p>
+  {/if}
 
   <div class="qp-results-region" data-testid="quick-paste-results-region">
     {#if loading}
@@ -2837,6 +3102,8 @@
         class="qp-entries"
         data-testid="quick-paste-results"
         data-row-height={ROW_HEIGHT_PX}
+        role="listbox"
+        aria-multiselectable="true"
         bind:this={resultsListEl}
       >
         {#each resultIds as id, index (id)}
@@ -2861,10 +3128,12 @@
           <li
             class="qp-row"
             class:qp-row-active={index === selectedIndex}
+            class:qp-row-multi-selected={selectedEntryIds.has(id)}
             style="--qp-row-height: {ROW_HEIGHT_PX}px; --qp-title-row-height: {TITLE_ROW_HEIGHT_PX}px; --qp-capture-line-height: {CAPTURE_LINE_HEIGHT_PX}px; --qp-capture-content-height: {CAPTURE_CONTENT_HEIGHT_PX}px; --qp-footer-height: {FOOTER_HEIGHT_PX}px;"
             data-entry-id={id}
             data-testid="quick-paste-row"
             data-selected={index === selectedIndex ? "true" : "false"}
+            data-multi-selected={selectedEntryIds.has(id) ? "true" : "false"}
             data-content-type={contentType}
             data-thumb-state={isImage ? thumbState : "none"}
             data-row-height={ROW_HEIGHT_PX}
@@ -2874,7 +3143,7 @@
             data-row-footer-height={FOOTER_HEIGHT_PX}
             data-pinned={isPinned ? "true" : "false"}
             role="option"
-            aria-selected={index === selectedIndex}
+            aria-selected={selectedEntryIds.has(id)}
             aria-label={title}
             title={title}
             on:click={(event) => handleRowClick(id, event)}
@@ -2935,22 +3204,51 @@
                 </span>
               {/if}
               {#if index === selectedIndex}
-                <span
-                  class="qp-preview-hint"
-                  data-testid="quick-paste-preview-hint"
-                  data-preview-platform={shortcutPlatform}
-                  title={$keyboardShortcuts && previewShortcutAccessibleLabel(shortcutPlatform, $t)}
-                  aria-label={$keyboardShortcuts && previewShortcutAccessibleLabel(shortcutPlatform, $t)}
-                  aria-keyshortcuts={$keyboardShortcuts && previewShortcutKeyAttribute(shortcutPlatform)}
-                >
-                  <span class="qp-preview-hint-label">{$t("history.card.preview")}</span>
+                {#if selectedEntryIds.size > 1}
                   <span
-                    class="qp-preview-hint-keys"
-                    aria-hidden="true"
+                    class="qp-preview-hint"
+                    data-testid="quick-paste-stack-hint"
+                    title={$t("quickpaste.stack.hint", { count: selectedEntryIds.size })}
+                    aria-label={$t("quickpaste.stack.hint", { count: selectedEntryIds.size })}
+                    aria-keyshortcuts="Enter"
                   >
-                    {$keyboardShortcuts && previewShortcutLabel(shortcutPlatform)}
+                    <span class="qp-preview-hint-label">
+                      {$t("quickpaste.stack.selected_count", { count: selectedEntryIds.size })}
+                    </span>
+                    <span class="qp-preview-hint-keys" aria-hidden="true">Enter</span>
                   </span>
-                </span>
+                {:else}
+                  <span
+                    class="qp-preview-hint"
+                    data-testid="quick-paste-preview-hint"
+                    data-preview-platform={shortcutPlatform}
+                    title={$keyboardShortcuts && previewShortcutAccessibleLabel(shortcutPlatform, $t)}
+                    aria-label={$keyboardShortcuts && previewShortcutAccessibleLabel(shortcutPlatform, $t)}
+                    aria-keyshortcuts={$keyboardShortcuts && previewShortcutKeyAttribute(shortcutPlatform)}
+                  >
+                    <span class="qp-preview-hint-label">{$t("history.card.preview")}</span>
+                    <span
+                      class="qp-preview-hint-keys"
+                      aria-hidden="true"
+                    >
+                      {$keyboardShortcuts && previewShortcutLabel(shortcutPlatform)}
+                    </span>
+                  </span>
+                {/if}
+                <button
+                  type="button"
+                  class="qp-export-pdf"
+                  style={`--pdf-row-tint-opacity: ${COLLECTION_ROW_TINT_OPACITY}`}
+                  aria-label={$t("pdf_export.button")}
+                  title={$t("pdf_export.button")}
+                  aria-busy={pdfExportInFlight}
+                  disabled={selectedEntryIds.size === 0 || pdfExportInFlight}
+                  data-testid="quick-paste-export-pdf"
+                  data-selected-count={selectedEntryIds.size}
+                  on:click|stopPropagation={() => void exportSelectedEntriesAsPdf()}
+                >
+                  {$t("pdf_export.short_label")}
+                </button>
               {/if}
               <button
                 type="button"
@@ -3147,6 +3445,45 @@
               {#if entry}
                 <button
                   type="button"
+                  class="qp-multi-select"
+                  class:qp-multi-select-active={selectedEntryIds.has(id)}
+                  data-testid="quick-paste-multi-select"
+                  data-entry-id={id}
+                  aria-pressed={selectedEntryIds.has(id)}
+                  aria-label={$t(
+                    selectedEntryIds.has(id)
+                      ? "quickpaste.selection.deselect_for"
+                      : "quickpaste.selection.select_for",
+                    { title },
+                  )}
+                  title={$t(
+                    selectedEntryIds.has(id)
+                      ? "quickpaste.selection.deselect_for"
+                      : "quickpaste.selection.select_for",
+                    { title },
+                  )}
+                  on:click|stopPropagation={() => toggleEntrySelection(id)}
+                >
+                  <svg
+                    aria-hidden="true"
+                    focusable="false"
+                    width="13"
+                    height="13"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <rect x="1.5" y="1.5" width="13" height="13" rx="2.5" />
+                    {#if selectedEntryIds.has(id)}
+                      <path d="m4.25 8.1 2.35 2.35 5.15-5.1" />
+                    {/if}
+                  </svg>
+                </button>
+                <button
+                  type="button"
                   class="qp-menu-trigger"
                   data-testid="quick-paste-menu-trigger"
                   aria-haspopup="menu"
@@ -3279,6 +3616,22 @@
 {/if}
 
 <!--
+  Rich-to-plain warning shared with the desktop card flow. The
+  warning only authorizes opening the editor; persistence is owned
+  by EntryTextEditorModal and its explicit conversion mode.
+-->
+{#if quickPasteRichConversionWarning}
+  <RichTextConversionWarningModal
+    open={true}
+    entryId={quickPasteRichConversionWarning.entry.id}
+    displayTitle={quickPasteRichConversionWarning.displayTitle}
+    returnFocusTo={resolveQuickPasteRichWarningFocusTarget()}
+    on:close={closeQuickPasteRichConversionWarning}
+    on:confirm={confirmQuickPasteRichConversion}
+  />
+{/if}
+
+<!--
   Persistent text editor modal. The window owns the lifecycle
   (`quickPasteEditorOpen` / `quickPasteEditorEntry`) and forwards
   a stable focus return target so the menu trigger or, when the
@@ -3304,6 +3657,7 @@
   <EntryTextEditorModal
     open={quickPasteEditorOpen}
     entry={quickPasteEditorEntry}
+    mode={quickPasteEditorMode}
     displayTitle={editorTitle}
     returnFocusTo={editorFocusTarget}
     on:close={handleQuickPasteEditorClose}
@@ -3312,10 +3666,10 @@
 
 <!--
   Informative `Captura no editable` dialog. The window mounts this
-  modal ONLY when the `Cmd/Ctrl+E` shortcut resolves to an image or
-  rich-text entry; the menu matrix already gates `Editar captura`
-  out for those entry shapes, so the dialog is a defence-in-depth
-  surface for the keyboard path. The dialog reuses the shared
+  modal ONLY when the `Cmd/Ctrl+E` shortcut resolves to an image;
+  rich-text entries use the conversion warning above. The menu
+  matrix also keeps `Editar captura` hidden for images. The dialog
+  reuses the shared
   `Modal.svelte` shell so the focus trap, Escape handling and
   backdrop dismissal stay in lockstep with the rest of the Quick
   Paste surfaces; the helper never invokes
@@ -3622,6 +3976,11 @@
 
   .qp-row:hover {
     background: rgba(37, 99, 235, 0.12);
+  }
+
+  .qp-row-multi-selected:not(.qp-row-active) {
+    background: rgba(37, 99, 235, 0.16);
+    border-color: rgba(96, 165, 250, 0.68);
   }
 
   .qp-row-active,
@@ -4001,7 +4360,7 @@
 
   .qp-row-line-footer {
     /* Footer/meta track that hosts the optional code-language
-     * badge, the elapsed-time label and the menu trigger. The
+     * badge, the elapsed-time label, the selection control and the menu trigger. The
      * footer lives OUTSIDE `capture-content` so the second visual
      * line of the capture-content area always belongs exclusively
      * to the preview — the time and the menu can never count as
@@ -4010,15 +4369,14 @@
      * every entry shape (text, image, code with a badge).
      *
      * The footer grid distributes the available width with a
-     * flexible spacer, then auto-width slots for the badge (when
-     * present), the elapsed time and the menu trigger. The badge
-     * column collapses to its natural width and is only present
+     * flexible spacer, then slots for the badge (when present), the elapsed
+     * time and the two controls. The badge is only present
      * when the entry carries a canonical code classification, so
      * non-code rows do not reserve any width for it. The menu
-     * trigger takes a fixed 18px column so the footer never
-     * shifts when the menu opens or closes. */
+     * selection and menu controls each take a fixed 18px column so the footer
+     * never shifts when either control opens or closes. */
     display: grid;
-    grid-template-columns: 1fr auto auto 18px;
+    grid-template-columns: 1fr auto 18px 18px;
     align-items: center;
     column-gap: 0.4rem;
     min-width: 0;
@@ -4027,6 +4385,44 @@
     overflow: hidden;
     font-size: var(--cv-tag, 0.65rem);
     line-height: 1.2;
+  }
+
+  .qp-multi-select {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 1px solid rgba(148, 163, 184, 0.55);
+    border-radius: 4px;
+    background: transparent;
+    color: #94a3b8;
+    cursor: pointer;
+  }
+
+  .qp-multi-select:hover,
+  .qp-multi-select:focus-visible {
+    border-color: #60a5fa;
+    color: #dbeafe;
+    outline: none;
+  }
+
+  .qp-multi-select-active {
+    border-color: #2563eb;
+    background: #2563eb;
+    color: #ffffff;
+  }
+
+  .qp-row-active .qp-multi-select {
+    border-color: rgba(255, 255, 255, 0.7);
+    color: #ffffff;
+  }
+
+  .qp-row-active .qp-multi-select-active {
+    border-color: #ffffff;
+    background: #ffffff;
+    color: #1d4ed8;
   }
 
   .qp-elapsed {
@@ -4357,6 +4753,39 @@
     color: #f0f4f8;
     font-variant-numeric: tabular-nums;
   }
+
+  .qp-export-pdf {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 28px;
+    height: 21px;
+    padding: 0;
+    border: 1px solid rgba(248, 81, 73, 0.55);
+    border-radius: 5px;
+    background: rgba(248, 81, 73, var(--pdf-row-tint-opacity, 0.18));
+    color: #f85149;
+    font-size: 9px;
+    font-weight: 800;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .qp-export-pdf:hover:not(:disabled) {
+    background: rgba(248, 81, 73, 0.3);
+  }
+
+  .qp-export-pdf:focus-visible {
+    outline: 2px solid #fca5a5;
+    outline-offset: 1px;
+  }
+
+  .qp-export-pdf:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
   .qp-row-active .qp-preview-hint {
     background: rgba(255, 255, 255, 0.22);
     border-color: rgba(255, 255, 255, 0.4);

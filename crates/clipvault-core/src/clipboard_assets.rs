@@ -833,6 +833,29 @@ fn rebuild_for_pasteboard_metadata(
 /// compressed_profile))`. The helper exists so the rebuild path
 /// can forward an existing `iCCP` chunk's deflate-compressed
 /// profile without re-deflating it.
+fn png_chunk_payload(bytes: &[u8], target: [u8; 4]) -> Option<&[u8]> {
+    if !looks_like_png(bytes) {
+        return None;
+    }
+    let mut offset = PNG_SIGNATURE.len();
+    while offset.checked_add(12)? <= bytes.len() {
+        let length = u32::from_be_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?);
+        let length = usize::try_from(length).ok()?;
+        let kind_start = offset.checked_add(4)?;
+        let payload_start = offset.checked_add(8)?;
+        let payload_end = payload_start.checked_add(length)?;
+        let chunk_end = payload_end.checked_add(4)?;
+        if chunk_end > bytes.len() {
+            return None;
+        }
+        if bytes.get(kind_start..kind_start + 4)? == target {
+            return bytes.get(payload_start..payload_end);
+        }
+        offset = chunk_end;
+    }
+    None
+}
+
 fn split_iccp_chunk(payload: &[u8]) -> Option<(String, (u8, Vec<u8>))> {
     let nul = payload.iter().position(|&b| b == 0)?;
     if nul == 0 || nul > 79 {
@@ -1044,6 +1067,97 @@ pub fn rebuild_png_with_metadata(
     icc_chunk: Option<IccChunk>,
     srgb_intent: Option<u8>,
 ) -> Result<Vec<u8>, AssetError> {
+    rebuild_png_with_visual_metadata(
+        width,
+        height,
+        rgba,
+        phys_payload,
+        icc_chunk,
+        srgb_intent,
+        None,
+        None,
+    )
+}
+
+/// Re-encode an image while carrying forward the visual PNG metadata that
+/// remains valid after its pixels are transformed. Text and orientation
+/// metadata are intentionally omitted; resolution and color interpretation
+/// are retained so a quarter-turn does not change how the image is presented.
+pub(crate) fn normalize_image_preserving_visual_metadata(
+    image: &ClipboardImage,
+    source_png: &[u8],
+) -> Result<NormalizedImage, AssetError> {
+    let summary = clipvault_platform::png_metadata_summary(source_png);
+    let icc_chunk = summary
+        .icc_profile_chunk
+        .as_deref()
+        .and_then(split_iccp_chunk)
+        .map(
+            |(profile_name, (compression_method, compressed_profile))| IccChunk {
+                profile_name,
+                compression_method,
+                compressed_profile,
+            },
+        );
+    let srgb_intent = if icc_chunk.is_none() && summary.has_srgb {
+        png_chunk_payload(source_png, *b"sRGB")
+            .filter(|payload| payload.len() == 1 && payload[0] <= 3)
+            .map(|payload| payload[0])
+    } else {
+        None
+    };
+    let has_color_profile = icc_chunk.is_some() || summary.has_srgb;
+    let gamma = if !has_color_profile && summary.has_gama {
+        png_chunk_payload(source_png, *b"gAMA").filter(|payload| payload.len() == 4)
+    } else {
+        None
+    };
+    let chromaticities = if !has_color_profile && summary.has_chrm {
+        png_chunk_payload(source_png, *b"cHRM").filter(|payload| payload.len() == 32)
+    } else {
+        None
+    };
+    let png = rebuild_png_with_visual_metadata(
+        image.width(),
+        image.height(),
+        image.rgba(),
+        rotate_phys_axes(summary.phys),
+        icc_chunk,
+        srgb_intent,
+        gamma,
+        chromaticities,
+    )?;
+    let hash = sha256_hex(&png);
+    Ok(NormalizedImage {
+        png,
+        hash,
+        width: image.width(),
+        height: image.height(),
+        original_png_bytes: None,
+        source: NormalizedSource::LegacyEncoded,
+    })
+}
+
+fn rotate_phys_axes(phys_payload: Option<[u8; 9]>) -> Option<[u8; 9]> {
+    phys_payload.map(|mut payload| {
+        let x_pixels_per_unit = [payload[0], payload[1], payload[2], payload[3]];
+        let y_pixels_per_unit = [payload[4], payload[5], payload[6], payload[7]];
+        payload[0..4].copy_from_slice(&y_pixels_per_unit);
+        payload[4..8].copy_from_slice(&x_pixels_per_unit);
+        payload
+    })
+}
+
+fn rebuild_png_with_visual_metadata(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    phys_payload: Option<[u8; 9]>,
+    icc_chunk: Option<IccChunk>,
+    srgb_intent: Option<u8>,
+    gamma: Option<&[u8]>,
+    chromaticities: Option<&[u8]>,
+) -> Result<Vec<u8>, AssetError> {
     let expected = checked_rgba_len(width, height)
         .map_err(|_| AssetError::InvalidDimensions { width, height })?;
     if rgba.len() != expected {
@@ -1059,6 +1173,20 @@ pub fn rebuild_png_with_metadata(
             reason: error.to_string(),
         })?;
 
+        if let Some(payload) = chromaticities {
+            writer
+                .write_chunk(png::chunk::ChunkType(*b"cHRM"), payload)
+                .map_err(|error| AssetError::Encode {
+                    reason: error.to_string(),
+                })?;
+        }
+        if let Some(payload) = gamma {
+            writer
+                .write_chunk(png::chunk::ChunkType(*b"gAMA"), payload)
+                .map_err(|error| AssetError::Encode {
+                    reason: error.to_string(),
+                })?;
+        }
         if let Some(payload) = phys_payload {
             writer
                 .write_chunk(png::chunk::ChunkType(*b"pHYs"), &payload)

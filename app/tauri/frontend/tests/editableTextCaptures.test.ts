@@ -5,7 +5,7 @@
  * The tests pin the contract the rail relies on:
  *
  *   - `HistoryCard.svelte` exposes a stable `Editar captura`
- *     menu item gated on `isEditableTextEntry(entry)`;
+ *     menu item for eligible plain and rich text entries;
  *   - the menu item is the only place the editor opens from;
  *     drag/mousedown, click, F2 / Enter / dblclick, the title
  *     editor and the preview shortcut MUST NOT open it;
@@ -55,8 +55,14 @@ const cardSource = stripComments(loadSource("src/HistoryCard.svelte"));
 const modalSource = stripComments(
   loadSource("src/EntryTextEditorModal.svelte"),
 );
+const conversionWarningSource = stripComments(
+  loadSource("src/RichTextConversionWarningModal.svelte"),
+);
 const typesSource = stripComments(loadSource("src/types.ts"));
 const tauriBridgeSource = stripComments(loadSource("src/lib/tauri.ts"));
+const tauriCommandsSource = stripComments(
+  loadSource("../src-tauri/src/commands.rs"),
+);
 
 // ---------------------------------------------------------------------------
 // Menu surface: the action is exposed, gated, and reachable only from the
@@ -74,21 +80,52 @@ test("card menu exposes the Editar captura entry point", () => {
   );
 });
 
-test("Editar captura is gated on the eligibility predicate", () => {
-  // The menu item must be wrapped in a `{#if canEditText}` block so
-  // image / rich-text rows never see the action, and so a stale
-  // foreground cannot open the editor for ineligible rows.
+test("Editar captura is gated on plain or rich conversion eligibility", () => {
+  // The menu item uses the combined predicate so image rows never
+  // see the action while rich rows can enter the warning flow.
   const editIndex = cardSource.indexOf('data-testid="history-card-edit-text"');
-  const predicateIndex = cardSource.indexOf("canEditText");
+  const predicateIndex = cardSource.indexOf("canEditCapture");
   assert.notEqual(editIndex, -1);
   assert.notEqual(predicateIndex, -1);
-  // Find the `{#if canEditText}` guard preceding the menu item.
-  const guardOpen = cardSource.lastIndexOf("{#if canEditText}", editIndex);
+  const guardOpen = cardSource.lastIndexOf("{#if canEditCapture}", editIndex);
   const guardClose = cardSource.indexOf("{/if}", guardOpen);
-  assert.notEqual(guardOpen, -1, "the menu item must be gated on canEditText");
+  assert.notEqual(guardOpen, -1, "the menu item must be gated on canEditCapture");
   assert.ok(
     guardOpen < editIndex && editIndex < guardClose,
-    "Editar captura must sit inside the {#if canEditText} guard",
+    "Editar captura must sit inside the {#if canEditCapture} guard",
+  );
+});
+
+test("rich card opens a localized warning before entering conversion mode", () => {
+  assert.match(
+    cardSource,
+    /import RichTextConversionWarningModal from "\.\/RichTextConversionWarningModal\.svelte"/,
+  );
+  assert.match(
+    cardSource,
+    /function openTextEditor\(\):\s*void\s*\{[\s\S]*?if\s*\(\s*isRichTextEntry\(entry\)\s*\)\s*\{[\s\S]*?richConversionWarningOpen\s*=\s*true/,
+    "a rich card must show the warning before the editor opens",
+  );
+  assert.match(
+    cardSource,
+    /function confirmRichTextConversion\(\):\s*void\s*\{[\s\S]*?if\s*\(!isRichTextEntry\(entry\)\)[\s\S]*?textEditorMode\s*=\s*"rich-conversion"[\s\S]*?textEditorOpen\s*=\s*true/,
+    "confirmation must revalidate the row before opening the shared editor",
+  );
+  assert.match(
+    cardSource,
+    /<EntryTextEditorModal[\s\S]*?mode=\{textEditorMode\}/,
+  );
+  assert.match(
+    conversionWarningSource,
+    /descriptionId=\{descriptionId\}[\s\S]*?data-testid="rich-text-conversion-warning-message"/,
+    "the conversion warning must be associated with its localized description",
+  );
+  assert.match(conversionWarningSource, /on:click=\{close\}/);
+  assert.match(conversionWarningSource, /on:click=\{confirm\}/);
+  assert.doesNotMatch(
+    conversionWarningSource,
+    /convertRichTextToPlainCommand|updateTextEntryCommand/,
+    "confirming or cancelling the warning must not persist by itself",
   );
 });
 
@@ -185,24 +222,29 @@ test("modal disables Guardar while the IPC round-trip is in flight", () => {
   );
 });
 
-test("modal forwards the draft only through updateTextEntryCommand", () => {
-  // The IPC contract: only the bridge carries the draft. The modal
-  // never logs, attributes or events the text.
+test("modal forwards the draft only through its mode-specific typed bridge", () => {
+  // The IPC contract: only the selected bridge carries the draft.
+  // The modal never logs, attributes or events the text.
   const tauriImport = modalSource.match(
-    /import\s*\{[^}]*updateTextEntryCommand[^}]*\}\s*from\s*"\.\/lib\/tauri"/,
+    /import\s*\{[^}]*convertRichTextToPlainCommand[^}]*updateTextEntryCommand[^}]*\}\s*from\s*"\.\/lib\/tauri"/,
   );
   assert.notEqual(
     tauriImport,
     null,
-    "the modal must consume updateTextEntryCommand from ./lib/tauri",
+    "the modal must consume both mode-specific commands from ./lib/tauri",
   );
   const invokeMatch = modalSource.match(
-    /await\s+updateTextEntryCommand\(\s*\{[\s\S]{0,200}?id:\s*entry\.id[\s\S]{0,200}?content:\s*draft[\s\S]{0,200}?\}\s*\)/,
+    /await\s+updateCommand\(\s*\{[\s\S]{0,200}?id:\s*entry\.id[\s\S]{0,200}?content:\s*draft[\s\S]{0,200}?\}\s*\)/,
   );
   assert.notEqual(
     invokeMatch,
     null,
-    "the modal must call updateTextEntryCommand with id + content",
+    "the modal must call its selected command with id + content",
+  );
+  assert.match(
+    modalSource,
+    /mode\s*===\s*"rich-conversion"\s*\?\s*convertRichTextToPlainCommand\s*:\s*updateTextEntryCommand/,
+    "rich conversions must use the explicit conversion command",
   );
   // No log of the draft.
   assert.ok(
@@ -278,6 +320,33 @@ test("bridge exports updateTextEntryCommand with the documented signature", () =
       tauriBridgeSource,
     ),
     "the bridge must target `clipvault_update_text_entry`",
+  );
+});
+
+test("bridge exports a separate typed command for rich-to-plain conversion", () => {
+  assert.match(
+    tauriBridgeSource,
+    /export const convertRichTextToPlainCommand:[\s\S]*?UpdateTextEntryResponse[\s\S]*?id:\s*number[\s\S]*?content:\s*string/,
+    "the rich conversion bridge must carry the entry id and edited text through the typed response",
+  );
+  assert.match(
+    tauriBridgeSource,
+    /invoke<UpdateTextEntryResponse>\("clipvault_convert_rich_text_to_plain"/,
+    "the rich conversion bridge must target the explicit Tauri operation",
+  );
+  const command = tauriCommandsSource.match(
+    /pub fn clipvault_convert_rich_text_to_plain\([\s\S]*?\n\}/,
+  );
+  assert.notEqual(command, null, "the thin Tauri conversion command must exist");
+  assert.match(
+    command?.[0] ?? "",
+    /\.convert_rich_text_to_plain\(/,
+    "the command must delegate conversion to the core history service",
+  );
+  assert.match(
+    command?.[0] ?? "",
+    /HISTORY_UPDATED_EVENT,\s*\(\)/,
+    "the command must emit only the existing metadata-only history update event",
   );
 });
 
@@ -512,14 +581,16 @@ test("card listens to the close dispatcher and owns the textEditorOpen flag", ()
 
   // The card must keep the openTextEditor entry point so the
   // second click on "Editar captura" reaches the modal again. The
-  // guard must still gate on `canEditText` so an ineligible entry
-  // cannot reach the editor through any path.
+  // Plain entries open directly. Rich entries enter the explicit
+  // warning flow before the shared editor opens.
   const openFn = cardSource.match(
     /function openTextEditor\(\):\s*void\s*\{[\s\S]*?\n  \}/,
   );
   assert.notEqual(openFn, null, "openTextEditor must exist in HistoryCard");
   const openBody = openFn?.[0] ?? "";
-  assert.match(openBody, /if\s*\(\s*!canEditText\s*\)\s*return/);
+  assert.match(openBody, /if\s*\(\s*isEditableTextEntry\(entry\)\s*\)/);
+  assert.match(openBody, /if\s*\(\s*isRichTextEntry\(entry\)\s*\)/);
+  assert.match(openBody, /richConversionWarningOpen\s*=\s*true/);
   assert.match(openBody, /textEditorOpen\s*=\s*true/);
   assert.match(openBody, /closeMenuAfterAction\(\)/);
 
@@ -676,8 +747,9 @@ test("pointerDragAndDrop singleton stays intact across reopen cycles", () => {
 //     routed through the same `openTextEditor` entry point used by
 //     the menu, with `aria-keyshortcuts="Control+E"` and a stable
 //     testid on the shortcut hint;
-//   - the matcher refuses images, rich-text, the editor modal and
-//     every interactive target without installing a global
+//   - the matcher refuses images, routes rich text through its
+//     warning, and refuses the editor modal and interactive targets
+//     without installing a global
 //     `document`/`window` listener and without firing `preventDefault`
 //     outside the accepted branch.
 // ---------------------------------------------------------------------------
@@ -920,7 +992,7 @@ test("Ctrl+E shortcut lives on the card keyboard handler and delegates to openTe
 });
 
 test("Ctrl+E matcher rejects ineligible entries and modal targets, calls preventDefault only when accepted", () => {
-  // The matcher must refuse ineligible entries (`canEditText`) and
+  // The matcher must refuse entries outside `canEditCapture` and
   // any target that lives inside a `[role="dialog"]`. Both checks
   // must appear inside the same branch so `preventDefault` only
   // runs when the shortcut is accepted.
@@ -935,8 +1007,8 @@ test("Ctrl+E matcher rejects ineligible entries and modal targets, calls prevent
   const branchBody = branch?.[0] ?? "";
   assert.match(
     branchBody,
-    /if\s*\(\s*!canEditText\s*\)\s*return/,
-    "the Ctrl+E branch must early-return when canEditText is false",
+    /if\s*\(\s*!canEditCapture\s*\)\s*return/,
+    "the Ctrl+E branch must early-return when canEditCapture is false",
   );
   assert.match(
     branchBody,

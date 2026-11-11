@@ -61,7 +61,7 @@
 
 use crate::clipboard::{
     ClipboardBackend, ClipboardBackendError, ClipboardImage, ClipboardObservation,
-    ClipboardPayload, ClipboardRevision, RichTextPayload,
+    ClipboardRevision, RichTextPayload,
 };
 use crate::runtime::macos_clipboard_main_queue;
 use crate::Capability;

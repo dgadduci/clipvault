@@ -33,11 +33,19 @@
     horizontalRailNextSelectionIdGeneric,
     type HorizontalRailDirection,
   } from "./lib/horizontalRailNavigation.ts";
+  import {
+    retainVisibleIds,
+    selectIdRange,
+    toggleSelectedId,
+  } from "./lib/multiSelection.ts";
 
   export let entries: EntryRecord[] = [];
+  export let previewBatchId: number = 0;
+  export let onPreviewReady: (entryId: number, batchId: number) => void = () => {};
   export let allTags: Tag[] = [];
   export let allCollections: Collection[] = [];
   export let activeCollectionId: number | null = null;
+  let previousCollectionId = activeCollectionId;
   export let peerImportedSourceApps: Map<
     number,
     PeerImportedSourceAppPresentation
@@ -96,21 +104,12 @@
 
   /** Active card id (the only card whose menu is currently open). */
   let openCardId: number | null = null;
-  /**
-   * Local selection state. `null` means no card is selected; any
-   * other value is the id of the entry the user picked by clicking
-   * the non-interactive surface of a card. The state lives on the
-   * rail because two cards racing a `mousedown` event must never
-   * end up with two selected ids.
-   *
-   * The state is exposed to the parent through
-   * `bind:selectedEntryId` so `App.svelte` can drive the
-   * desktop-level `Cmd/Ctrl+Enter` keyboard matcher without going
-   * through a global selector. The rail is the single source of
-   * truth: the parent only reads the value to dispatch the
-   * keyboard shortcut.
-   */
+  /** Active entry for one-item shortcuts; multi-selection stays rail-local. */
   export let selectedEntryId: number | null = null;
+  export let onSelectionChange: (entryIds: number[]) => void = () => {};
+  let selectedEntryIds = new Set<number>();
+  let selectionAnchorId: number | null = null;
+  $: onSelectionChange([...selectedEntryIds]);
   /**
    * Reference to the rendered card DOM keyed by entry id. The
    * `horizontalRailNextSelectionId` helper produces the next id and
@@ -166,16 +165,26 @@
   }
 
   $: visibleEntryIds = new Set(entries.map((entry) => entry.id));
-  $: if (
-    selectedEntryId !== null &&
-    !visibleEntryIds.has(selectedEntryId)
-  ) {
-    // The selected entry is no longer in the visible scope (it was
-    // deleted, filtered out, moved to another collection, or the
-    // rail was rebuilt). The state is dropped silently so a stale
-    // selection cannot survive a refresh / search / collection
-    // change — the spec forbids persisting or restoring it.
+  $: if (previousCollectionId !== activeCollectionId) {
+    previousCollectionId = activeCollectionId;
+    selectedEntryIds = new Set();
     selectedEntryId = null;
+    selectionAnchorId = null;
+  }
+  $: {
+    const retained = retainVisibleIds(selectedEntryIds, entries.map((entry) => entry.id));
+    if (
+      retained.size !== selectedEntryIds.size ||
+      [...retained].some((id) => !selectedEntryIds.has(id))
+    ) {
+      selectedEntryIds = retained;
+    }
+    if (selectedEntryId !== null && !visibleEntryIds.has(selectedEntryId)) {
+      selectedEntryId = null;
+    }
+    if (selectionAnchorId !== null && !visibleEntryIds.has(selectionAnchorId)) {
+      selectionAnchorId = selectedEntryId;
+    }
   }
 
   function handleMenuToggle(event: CustomEvent<{ id: number; open: boolean }>) {
@@ -199,9 +208,51 @@
   }
 
   function handleSelectRequest(
-    event: CustomEvent<{ id: number | null }>,
+    event: CustomEvent<{
+      id: number | null;
+      toggle?: boolean;
+      range?: boolean;
+    }>,
   ): void {
-    selectedEntryId = event.detail.id;
+    const { id, toggle = false, range = false } = event.detail;
+    if (id === null) {
+      selectedEntryId = null;
+      selectedEntryIds = new Set();
+      selectionAnchorId = null;
+      return;
+    }
+    if (!visibleEntryIds.has(id)) return;
+    selectedEntryId = id;
+    if (range) {
+      selectedEntryIds = selectIdRange(
+        entries.map((entry) => entry.id),
+        selectionAnchorId ?? id,
+        id,
+      );
+      if (selectionAnchorId === null) selectionAnchorId = id;
+      return;
+    }
+    if (toggle) {
+      selectedEntryIds = toggleSelectedId(selectedEntryIds, id);
+      selectionAnchorId = id;
+      if (!selectedEntryIds.has(id)) {
+        const remaining = [...selectedEntryIds];
+        selectedEntryId = remaining[remaining.length - 1] ?? null;
+      }
+      return;
+    }
+    // Preserve the established click-again-to-clear behavior for a
+    // single selection. A plain click on one item in a group collapses
+    // the group to that item.
+    if (selectedEntryIds.size === 1 && selectedEntryIds.has(id)) {
+      selectedEntryIds = new Set();
+      selectedEntryId = null;
+      selectionAnchorId = null;
+    } else {
+      selectedEntryIds = new Set([id]);
+      selectedEntryId = id;
+      selectionAnchorId = id;
+    }
   }
 
   /**
@@ -344,6 +395,8 @@
       }
       event.preventDefault();
       selectedEntryId = null;
+      selectedEntryIds = new Set();
+      selectionAnchorId = null;
     }
   }
 
@@ -411,7 +464,20 @@
       scrollSelectedCardIntoView(navigation.nextId);
       return;
     }
+    const previousSelectedEntryId = selectedEntryId;
     selectedEntryId = navigation.nextId;
+    if (event.shiftKey) {
+      const anchorId = selectionAnchorId ?? previousSelectedEntryId ?? navigation.nextId;
+      selectedEntryIds = selectIdRange(
+        visibleIds,
+        anchorId,
+        navigation.nextId,
+      );
+      selectionAnchorId = anchorId;
+    } else {
+      selectedEntryIds = new Set([navigation.nextId]);
+      selectionAnchorId = navigation.nextId;
+    }
     scrollSelectedCardIntoView(navigation.nextId);
   }
 
@@ -536,6 +602,8 @@
     {#each entries as entry (entry.id)}
       <HistoryCard
         {entry}
+        {previewBatchId}
+        {onPreviewReady}
         peerImportedSourceApp={peerImportedSourceApps.get(entry.id) ?? null}
         hasNote={entryNoteIds.has(entry.id)}
         assignedTags={lookupTags(entry.id)}
@@ -551,7 +619,8 @@
         {onTogglePin}
         {onRequestDelete}
         {onAfterMutation}
-        selected={selectedEntryId === entry.id}
+        selected={selectedEntryIds.has(entry.id)}
+        active={selectedEntryId === entry.id}
         onSelect={(id: number | null) => {
           selectedEntryId = id;
         }}
@@ -570,13 +639,15 @@
    * The rail owns the only horizontal scrollbar the desktop exposes
    * for the cards. The previous layout let the cards push the desktop
    * itself to the right when the user had many captures because the
-   * flex row's intrinsic minimum was wider than the panel. The
-   * fix is structural:
+   * grid's intrinsic minimum was wider than the panel. The fix is
+   * structural:
    *
-   *   - `min-width: 0` is required for a flex child to shrink below
+   *   - `min-width: 0` is required for a grid child to shrink below
    *     its intrinsic content size. Without it, a wide rail could
    *     still grow the parent grid track and defeat the overflow
    *     boundary.
+   *   - `grid-auto-flow: column` and one explicit row keep every
+   *     capture in one horizontal line, including after pagination.
    *   - `width: 100%` keeps the rail pinned to its column.
    *   - `max-width: 100%` is a defensive cap for the rare case where
    *     a parent forgets to constrain the rail.
@@ -594,8 +665,10 @@
   .rail {
     --cv-card-size: 240px;
     box-sizing: border-box;
-    display: flex;
-    flex-direction: row;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: var(--cv-card-size);
+    grid-template-rows: minmax(0, 1fr);
     gap: 0.75rem;
     width: 100%;
     min-width: 0;
@@ -612,15 +685,15 @@
   }
 
   /*
-   * The card size is fixed through `--cv-card-size`. The `flex: 0 0`
-   * triple is the contract that keeps a card from being squeezed by
-   * the flex row (`flex-grow: 0`, `flex-shrink: 0`) while still
-   * respecting the explicit width. Without the `0 0` a card would
-   * shrink to fit the row and the squares would become rectangles.
+   * Each grid column and card share the same fixed size so a long
+   * page can scroll horizontally without squeezing cards into
+   * rectangles or adding a second row.
    */
   .rail :global(.card) {
-    flex: 0 0 var(--cv-card-size);
     width: var(--cv-card-size);
+    min-width: var(--cv-card-size);
+    max-width: var(--cv-card-size);
+    height: var(--cv-card-size);
     scroll-snap-align: start;
   }
 

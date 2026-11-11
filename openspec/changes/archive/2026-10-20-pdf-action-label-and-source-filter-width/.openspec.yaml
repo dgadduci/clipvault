@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-20
+goal: Mostrar la acción de exportación PDF como texto rojo y reducir el ancho
+  del filtro de aplicación fuente un 10%

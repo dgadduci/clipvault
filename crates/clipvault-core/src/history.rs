@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use thiserror::Error;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use clipvault_db::{
     ContentType, EntryOutcome, EntryRepository, EntryRepositoryError, NewEntry, SourceAppFilter,
@@ -38,6 +38,7 @@ use crate::image_capture_diagnostic::{
     log_image_capture_diagnostic, ColorProfileKind, ImageCaptureDiagnostic, ImageSource,
     RepresentationSource,
 };
+use crate::image_file_import::{decode_image_file_with_progress, ImageFileImportError};
 use crate::privacy::{CaptureDecision, PrivacyGate};
 use crate::rich_text::{canonical_rich_text_hash, RichTextAssetStore};
 
@@ -55,6 +56,15 @@ pub enum HistoryOutcome {
     /// The clipboard backend or the repository returned an error.
     /// `message` is a human-readable, non-sensitive description.
     Failed { message: String },
+}
+
+/// Numeric-only progress snapshot for an ordered local image import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageImportProgress {
+    pub bytes_read: u64,
+    pub total_bytes: u64,
+    pub completed: usize,
+    pub total: usize,
 }
 
 impl HistoryOutcome {
@@ -79,8 +89,28 @@ impl HistoryOutcome {
 pub enum HistoryServiceError {
     #[error("entry repository error: {0}")]
     Repository(#[from] EntryRepositoryError),
+    #[error("clipboard image asset error: {0}")]
+    ImageAsset(#[from] crate::clipboard_assets::AssetError),
+    #[error("clipboard image asset store is unavailable")]
+    ImageAssetStoreUnavailable,
     #[error("invalid card title: {0}")]
     InvalidTitle(#[from] TitleValidationError),
+}
+
+/// Direction applied by [`TextHistoryService::rotate_image_capture`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageRotationDirection {
+    Clockwise,
+    Counterclockwise,
+}
+
+/// Outcome of [`TextHistoryService::rotate_image_capture`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RotateImageOutcome {
+    Updated { record: clipvault_db::EntryRecord },
+    NotFound,
+    NotImage,
 }
 
 /// Maximum length of a user-defined card title. The repository stores
@@ -115,8 +145,8 @@ pub enum UpdateTextHistoryOutcome {
     Noop { record: clipvault_db::EntryRecord },
     /// The target entry does not exist.
     NotFound,
-    /// The target entry is an image or carries rich-text metadata
-    /// the editor must not touch.
+    /// The target entry is an image, or a rich-text row reached the
+    /// plain-text edit operation instead of the explicit conversion.
     NotEditable,
     /// The trimmed input is empty.
     EmptyContent,
@@ -241,6 +271,118 @@ impl TextHistoryService {
         self.asset_store.as_ref()
     }
 
+    /// Rotate one persisted image entry by 90° and save the transformed PNG
+    /// as the entry's new content-addressed asset. The entry ID and its
+    /// unrelated metadata stay stable. The old asset is collected only after
+    /// SQLite commits and confirms which references remain live.
+    pub fn rotate_image_capture(
+        &self,
+        context: &AppContext,
+        id: i64,
+        direction: ImageRotationDirection,
+    ) -> Result<RotateImageOutcome, HistoryServiceError> {
+        let Some(store) = self.asset_store.as_ref() else {
+            return Err(HistoryServiceError::ImageAssetStoreUnavailable);
+        };
+
+        let entry = {
+            let mut db = context.database().lock();
+            let repo = EntryRepository::new(db.connection_mut());
+            repo.find_by_id(id)?
+        };
+        let Some(entry) = entry else {
+            return Ok(RotateImageOutcome::NotFound);
+        };
+        if entry.content_type != ContentType::Image || !entry.is_renderable_image() {
+            return Ok(RotateImageOutcome::NotImage);
+        }
+        let Some(old_asset_ref) = entry.asset_ref.filter(|asset_ref| !asset_ref.is_empty()) else {
+            return Ok(RotateImageOutcome::NotImage);
+        };
+
+        let source_bytes = store.read_bytes(&old_asset_ref)?;
+        let source = crate::clipboard_assets::decode_png(&source_bytes)?;
+        let source_width = source.width();
+        let source_height = source.height();
+        let output_width = source_height;
+        let output_height = source_width;
+        let mut output_rgba = vec![0; source.rgba().len()];
+
+        // Pixel coordinates are mapped directly so the two directions are
+        // unambiguous and alpha/color bytes are preserved exactly.
+        for y in 0..source_height {
+            for x in 0..source_width {
+                let (output_x, output_y) = match direction {
+                    ImageRotationDirection::Clockwise => (source_height - 1 - y, x),
+                    ImageRotationDirection::Counterclockwise => (y, source_width - 1 - x),
+                };
+                let source_offset = ((y as usize * source_width as usize) + x as usize) * 4;
+                let output_offset =
+                    ((output_y as usize * output_width as usize) + output_x as usize) * 4;
+                output_rgba[output_offset..output_offset + 4]
+                    .copy_from_slice(&source.rgba()[source_offset..source_offset + 4]);
+            }
+        }
+        let rotated =
+            ClipboardImage::new(output_rgba, output_width, output_height).map_err(|_| {
+                crate::clipboard_assets::AssetError::InvalidDimensions {
+                    width: output_width,
+                    height: output_height,
+                }
+            })?;
+        let normalized = crate::clipboard_assets::normalize_image_preserving_visual_metadata(
+            &rotated,
+            &source_bytes,
+        )?;
+
+        // Keep the shared asset mutation lock through the write, conditional
+        // database update and old-asset collection. This matches the image
+        // capture pipeline's lock order and protects shared/deduplicated PNGs.
+        let asset_mutation_guard = store.lock_mutations();
+        let stored = store.store_image_with_guard(&normalized, &asset_mutation_guard)?;
+        let (updated_entry, old_asset_is_unreferenced) = {
+            let mut db = context.database().lock();
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let updated = repo.replace_image_asset(
+                id,
+                &old_asset_ref,
+                normalized.hash(),
+                stored.asset_ref(),
+                normalized.byte_len() as i64,
+                normalized.width(),
+                normalized.height(),
+                self.clock.now(),
+            )?;
+            let old_is_unreferenced = if updated.is_some() {
+                match repo.count_asset_references(&old_asset_ref) {
+                    Ok(count) => Some(count == 0),
+                    Err(_) => {
+                        tracing::warn!("could not count image asset references after rotation");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            (updated, old_is_unreferenced)
+        };
+
+        let Some(record) = updated_entry else {
+            return Ok(RotateImageOutcome::NotFound);
+        };
+        if old_asset_is_unreferenced == Some(true) {
+            if let Err(error) =
+                store.delete_if_present_with_guard(&old_asset_ref, &asset_mutation_guard)
+            {
+                tracing::warn!(
+                    reason = error.kind_str(),
+                    "image asset cleanup failed after rotation"
+                );
+            }
+        }
+        Ok(RotateImageOutcome::Updated { record })
+    }
+
     /// The configured rich-text asset store, if any.
     pub fn rich_asset_store(&self) -> Option<&RichTextAssetStore> {
         self.rich_asset_store.as_ref()
@@ -277,6 +419,179 @@ impl TextHistoryService {
         };
 
         self.record_payload(context, text, source_app)
+    }
+
+    /// Read and persist a direct text capture, then add its active local
+    /// collection membership when the capture produced or reused an entry.
+    /// A stale or ineligible destination does not change the successful
+    /// Historial outcome.
+    pub fn record_text_with_collection(
+        &self,
+        context: &AppContext,
+        source_app: Option<&str>,
+        collection_id: Option<i64>,
+    ) -> HistoryOutcome {
+        let outcome = self.record_text(context, source_app);
+        self.add_outcome_to_local_collection(context, &outcome, collection_id);
+        outcome
+    }
+
+    /// Import a local raster image into History and add it to the selected
+    /// local collection when one is active. Decode failures are metadata-only
+    /// and never include the source path or image bytes.
+    pub fn import_image_file(
+        &self,
+        context: &AppContext,
+        path: &std::path::Path,
+        collection_id: Option<i64>,
+    ) -> HistoryOutcome {
+        self.import_image_file_with_created_at(context, path, collection_id, None)
+    }
+
+    /// Import an ordered batch of local images. Timestamps descend by one
+    /// nanosecond per input position so the newest-first History query renders
+    /// newly created captures in the same order as `paths`. Processing stays
+    /// forward, which also means the first occurrence of a duplicate within
+    /// the batch is the one that creates the shared capture.
+    pub fn import_image_files_in_order(
+        &self,
+        context: &AppContext,
+        paths: &[std::path::PathBuf],
+        collection_id: Option<i64>,
+    ) -> Vec<HistoryOutcome> {
+        self.import_image_files_in_order_with_progress(context, paths, collection_id, |_, _| {})
+    }
+
+    /// Import an ordered image batch and report the number of files processed
+    /// after each outcome. The callback receives only numeric counters, so
+    /// callers can surface progress without exposing paths or image content.
+    pub fn import_image_files_in_order_with_progress<F>(
+        &self,
+        context: &AppContext,
+        paths: &[std::path::PathBuf],
+        collection_id: Option<i64>,
+        mut on_progress: F,
+    ) -> Vec<HistoryOutcome>
+    where
+        F: FnMut(usize, usize),
+    {
+        self.import_image_files_in_order_with_byte_progress(
+            context,
+            paths,
+            collection_id,
+            |progress| on_progress(progress.completed, progress.total),
+        )
+    }
+
+    /// Import an ordered image batch and report cumulative encoded bytes read
+    /// during decoding plus the number of completed files. Progress snapshots
+    /// contain no path, filename or image content.
+    pub fn import_image_files_in_order_with_byte_progress<F>(
+        &self,
+        context: &AppContext,
+        paths: &[std::path::PathBuf],
+        collection_id: Option<i64>,
+        mut on_progress: F,
+    ) -> Vec<HistoryOutcome>
+    where
+        F: FnMut(ImageImportProgress),
+    {
+        let batch_time = self.clock.now();
+        // Keep one nonzero final nanosecond digit across the batch. The
+        // repository sorts RFC3339 strings, so equal fractional precision is
+        // needed for lexical order to match timestamp order.
+        let batch_time = batch_time
+            .replace_nanosecond((batch_time.nanosecond() / 10 * 10) + 5)
+            .unwrap_or(batch_time);
+        let total_bytes = paths.iter().fold(0_u64, |total, path| {
+            total.saturating_add(
+                std::fs::metadata(path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0),
+            )
+        });
+        let mut bytes_read_before_file = 0_u64;
+        let mut outcomes = Vec::with_capacity(paths.len());
+
+        for (index, path) in paths.iter().enumerate() {
+            let file_size = std::fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let mut current_file_bytes_read = 0_u64;
+            let offset = time::Duration::nanoseconds(index as i64 * 10);
+            let outcome = self.import_image_file_with_created_at_and_progress(
+                context,
+                path,
+                collection_id,
+                Some(batch_time - offset),
+                |file_bytes_read| {
+                    current_file_bytes_read = file_bytes_read.min(file_size);
+                    on_progress(ImageImportProgress {
+                        bytes_read: bytes_read_before_file.saturating_add(current_file_bytes_read),
+                        total_bytes,
+                        completed: index,
+                        total: paths.len(),
+                    });
+                },
+            );
+            bytes_read_before_file = bytes_read_before_file.saturating_add(current_file_bytes_read);
+            on_progress(ImageImportProgress {
+                bytes_read: bytes_read_before_file,
+                total_bytes,
+                completed: index + 1,
+                total: paths.len(),
+            });
+            outcomes.push(outcome);
+        }
+
+        outcomes
+    }
+
+    fn import_image_file_with_created_at(
+        &self,
+        context: &AppContext,
+        path: &std::path::Path,
+        collection_id: Option<i64>,
+        created_at: Option<time::OffsetDateTime>,
+    ) -> HistoryOutcome {
+        self.import_image_file_with_created_at_and_progress(
+            context,
+            path,
+            collection_id,
+            created_at,
+            |_| {},
+        )
+    }
+
+    fn import_image_file_with_created_at_and_progress<F>(
+        &self,
+        context: &AppContext,
+        path: &std::path::Path,
+        collection_id: Option<i64>,
+        created_at: Option<time::OffsetDateTime>,
+        on_bytes_read: F,
+    ) -> HistoryOutcome
+    where
+        F: FnMut(u64),
+    {
+        let image = match decode_image_file_with_progress(path, on_bytes_read) {
+            Ok(image) => image,
+            Err(error) => {
+                let reason = match error {
+                    ImageFileImportError::Open => "open_failed",
+                    ImageFileImportError::UnsupportedFormat => "unsupported_format",
+                    ImageFileImportError::Decode => "decode_failed",
+                    ImageFileImportError::TooLarge => "image_limit_exceeded",
+                };
+                warn!(reason, "local image import skipped");
+                return HistoryOutcome::Failed {
+                    message: "image_import_failed".to_string(),
+                };
+            }
+        };
+        let outcome = self.persist_image(context, &image, None, created_at);
+        self.add_outcome_to_local_collection(context, &outcome, collection_id);
+        outcome
     }
 
     /// Persist a textual payload that has already been read from the
@@ -418,7 +733,7 @@ impl TextHistoryService {
                 outcome
             }
             ClipboardPayload::Image(image) => {
-                let outcome = self.persist_image(context, &image, source_app);
+                let outcome = self.persist_image(context, &image, source_app, None);
                 emit_persistence_event(context, correlation_id, &outcome, started.elapsed());
                 outcome
             }
@@ -558,6 +873,7 @@ impl TextHistoryService {
         context: &AppContext,
         image: &ClipboardImage,
         source_app: Option<String>,
+        created_at: Option<time::OffsetDateTime>,
     ) -> HistoryOutcome {
         let Some(store) = self.asset_store.as_ref() else {
             return HistoryOutcome::Failed {
@@ -639,7 +955,7 @@ impl TextHistoryService {
             // Dedupe key: the hash of the normalized PNG.
             content_hash: normalized.hash().to_string(),
             source_app: source_app.clone(),
-            created_at: now,
+            created_at: created_at.unwrap_or(now),
             last_seen_at: now,
             asset_ref: Some(outcome.asset_ref().to_string()),
             mime_type: Some(IMAGE_MIME_PNG.to_string()),
@@ -749,6 +1065,17 @@ impl TextHistoryService {
         Ok(repo.recent(limit)?)
     }
 
+    /// Fetch one history entry by its local identifier.
+    pub fn entry_by_id(
+        &self,
+        context: &AppContext,
+        entry_id: i64,
+    ) -> Result<Option<clipvault_db::EntryRecord>, HistoryServiceError> {
+        let mut db = context.database().lock();
+        let repo = EntryRepository::new(db.connection_mut());
+        Ok(repo.find_by_id(entry_id)?)
+    }
+
     /// Same as [`Self::recent_entries`] but optionally restricted to
     /// the entries that belong to `collection_id` (when supplied)
     /// and/or carry every tag in `tag_ids` (AND semantics).
@@ -796,10 +1123,42 @@ impl TextHistoryService {
         content_type: Option<ContentType>,
         limit: usize,
     ) -> Result<Vec<clipvault_db::EntryRecord>, HistoryServiceError> {
+        self.recent_entries_with_content_type_filter_and_unassigned(
+            context,
+            collection_id,
+            tag_ids,
+            source_app,
+            content_type,
+            false,
+            limit,
+        )
+    }
+
+    /// Same filtered recents query, optionally restricting History to entries
+    /// without membership in any user-defined collection.
+    pub fn recent_entries_with_content_type_filter_and_unassigned(
+        &self,
+        context: &AppContext,
+        collection_id: Option<i64>,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+        unassigned_only: bool,
+        limit: usize,
+    ) -> Result<Vec<clipvault_db::EntryRecord>, HistoryServiceError> {
         let records = {
             let mut db = context.database().lock();
             let repo = EntryRepository::new(db.connection_mut());
-            repo.entries_filtered_by_content_type(collection_id, tag_ids, source_app, content_type)?
+            if unassigned_only {
+                repo.unassigned_entries_filtered_by_content_type(tag_ids, source_app, content_type)?
+            } else {
+                repo.entries_filtered_by_content_type(
+                    collection_id,
+                    tag_ids,
+                    source_app,
+                    content_type,
+                )?
+            }
         };
         // `entries_filtered` already enforces the ordering contract.
         // Truncate to the requested limit so the rail stays
@@ -807,10 +1166,111 @@ impl TextHistoryService {
         Ok(records.into_iter().take(limit).collect())
     }
 
+    /// Fetch one SQL-paginated page of filtered entries. `offset` is applied
+    /// after every scope/facet predicate and the repository's stable newest-
+    /// first ordering.
+    pub fn recent_entries_page_with_content_type_filter_and_unassigned(
+        &self,
+        context: &AppContext,
+        collection_id: Option<i64>,
+        tag_ids: &[i64],
+        source_app: &SourceAppFilter,
+        content_type: Option<ContentType>,
+        unassigned_only: bool,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<clipvault_db::EntryRecord>, HistoryServiceError> {
+        let mut db = context.database().lock();
+        let repo = EntryRepository::new(db.connection_mut());
+        if unassigned_only {
+            Ok(repo.unassigned_entries_page_filtered_by_content_type(
+                tag_ids,
+                source_app,
+                content_type,
+                limit,
+                offset,
+            )?)
+        } else {
+            Ok(repo.entries_page_filtered_by_content_type(
+                collection_id,
+                tag_ids,
+                source_app,
+                content_type,
+                limit,
+                offset,
+            )?)
+        }
+    }
+
+    /// Return the supported content types present in the active collection
+    /// scope. The repository query is distinct and independent of the rail
+    /// page limit, so older entries can still contribute an option.
+    pub fn available_content_types(
+        &self,
+        context: &AppContext,
+        collection_id: Option<i64>,
+    ) -> Result<Vec<ContentType>, HistoryServiceError> {
+        self.available_content_types_with_unassigned(context, collection_id, false)
+    }
+
+    /// Return supported content types in a collection scope or, when
+    /// `unassigned_only` is true, among History entries without user
+    /// collection memberships.
+    pub fn available_content_types_with_unassigned(
+        &self,
+        context: &AppContext,
+        collection_id: Option<i64>,
+        unassigned_only: bool,
+    ) -> Result<Vec<ContentType>, HistoryServiceError> {
+        let mut db = context.database().lock();
+        let repo = EntryRepository::new(db.connection_mut());
+        if unassigned_only {
+            Ok(repo.distinct_unassigned_content_types()?)
+        } else {
+            Ok(repo.distinct_content_types(collection_id)?)
+        }
+    }
+
     pub fn history_count(&self, context: &AppContext) -> Result<i64, HistoryServiceError> {
         let mut db = context.database().lock();
         let repo = EntryRepository::new(db.connection_mut());
         Ok(repo.count()?)
+    }
+
+    /// Add an existing captured entry to a local collection without
+    /// replacing its other memberships. The repository validates the
+    /// collection again at write time so a stale or peer-bound selection
+    /// cannot redirect local captures.
+    pub fn add_entry_to_local_collection(
+        &self,
+        context: &AppContext,
+        entry_id: i64,
+        collection_id: i64,
+    ) -> Result<(), HistoryServiceError> {
+        let mut db = context.database().lock();
+        let mut repo = EntryRepository::new(db.connection_mut());
+        repo.add_entry_to_local_collection(entry_id, collection_id, self.clock.now())?;
+        Ok(())
+    }
+
+    /// Add the supplied collection to a successful capture outcome. Other
+    /// memberships remain intact, and assignment failures remain non-fatal
+    /// because the capture is already committed to Historial.
+    pub fn add_outcome_to_local_collection(
+        &self,
+        context: &AppContext,
+        outcome: &HistoryOutcome,
+        collection_id: Option<i64>,
+    ) {
+        let (Some(entry_id), Some(collection_id)) = (outcome.id(), collection_id) else {
+            return;
+        };
+        if self
+            .add_entry_to_local_collection(context, entry_id, collection_id)
+            .is_err()
+        {
+            debug!("capture was kept in Historial; active collection assignment was skipped");
+        }
     }
 
     /// Validate the user-supplied title before the GUI persists it.
@@ -890,6 +1350,65 @@ impl TextHistoryService {
             let mut repo = EntryRepository::new(db.connection_mut());
             repo.update_text(id, &text, &hash, content_type, size, now)?
         };
+        Ok(match outcome {
+            UpdateTextOutcome::Updated { record } => UpdateTextHistoryOutcome::Updated { record },
+            UpdateTextOutcome::Noop { record } => UpdateTextHistoryOutcome::Noop { record },
+            UpdateTextOutcome::NotFound => UpdateTextHistoryOutcome::NotFound,
+            UpdateTextOutcome::NotEditable => UpdateTextHistoryOutcome::NotEditable,
+            UpdateTextOutcome::EmptyContent => UpdateTextHistoryOutcome::EmptyContent,
+            UpdateTextOutcome::DuplicateContent => UpdateTextHistoryOutcome::DuplicateContent,
+        })
+    }
+
+    /// Convert a rich-text history entry to plain text in place.
+    /// Eligibility is rechecked by the repository inside the same
+    /// transaction that clears the rich references and writes the
+    /// edited content. Rich assets are collected only after a
+    /// successful commit and only from a trustworthy live-reference
+    /// query; collection failures do not roll back the saved edit.
+    pub fn convert_rich_text_to_plain(
+        &self,
+        context: &AppContext,
+        id: i64,
+        text: String,
+    ) -> Result<UpdateTextHistoryOutcome, HistoryServiceError> {
+        if text.is_empty() {
+            return Ok(UpdateTextHistoryOutcome::EmptyContent);
+        }
+        let hash = hash_content(&text);
+        let content_type = detect_content_type(&text);
+        let size = text.len() as i64;
+        let now = self.clock.now();
+
+        let mut rich_refs_to_keep = None;
+        let outcome = {
+            let mut db = context.database().lock();
+            let mut repo = EntryRepository::new(db.connection_mut());
+            let outcome =
+                repo.convert_rich_text_to_plain(id, &text, &hash, content_type, size, now)?;
+            if matches!(&outcome, UpdateTextOutcome::Updated { .. }) {
+                match repo.referenced_rich_asset_refs() {
+                    Ok(refs) => rich_refs_to_keep = Some(refs),
+                    Err(_) => warn!(
+                        error_kind = "rich_asset_reference_query_failed",
+                        "rich asset collection skipped after text conversion; assets preserved"
+                    ),
+                }
+            }
+            outcome
+        };
+
+        if let (Some(store), Some(references)) =
+            (self.rich_asset_store.as_ref(), rich_refs_to_keep.as_ref())
+        {
+            if let Err(error) = store.collect_unreferenced(references) {
+                warn!(
+                    reason = error.kind_str(),
+                    "rich asset collection failed after text conversion; orphans remain"
+                );
+            }
+        }
+
         Ok(match outcome {
             UpdateTextOutcome::Updated { record } => UpdateTextHistoryOutcome::Updated { record },
             UpdateTextOutcome::Noop { record } => UpdateTextHistoryOutcome::Noop { record },
@@ -1222,6 +1741,63 @@ mod tests {
     }
 
     #[test]
+    fn ordered_image_import_reports_progress_after_each_file() {
+        let (context, service) = isolated_service();
+        let paths = [
+            std::path::PathBuf::from("missing-first-image.png"),
+            std::path::PathBuf::from("missing-second-image.png"),
+            std::path::PathBuf::from("missing-third-image.png"),
+        ];
+        let mut progress = Vec::new();
+
+        let outcomes = service.import_image_files_in_order_with_progress(
+            &context,
+            &paths,
+            None,
+            |completed, total| progress.push((completed, total)),
+        );
+
+        assert_eq!(progress, [(1, 3), (2, 3), (3, 3)]);
+        assert!(outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, HistoryOutcome::Failed { .. })));
+    }
+
+    #[test]
+    fn ordered_image_import_reports_encoded_bytes_read() {
+        let (context, service) = isolated_service();
+        let source_dir = tempfile::tempdir().expect("temporary image source directory");
+        let image_path = source_dir.path().join("progress-image.png");
+        image::RgbaImage::from_pixel(128, 96, image::Rgba([40, 80, 120, 255]))
+            .save(&image_path)
+            .expect("write temporary PNG");
+        let expected_total_bytes = std::fs::metadata(&image_path)
+            .expect("image metadata")
+            .len();
+        let mut progress = Vec::new();
+
+        let outcomes = service.import_image_files_in_order_with_byte_progress(
+            &context,
+            std::slice::from_ref(&image_path),
+            None,
+            |snapshot| progress.push(snapshot),
+        );
+
+        assert!(matches!(
+            outcomes.as_slice(),
+            [HistoryOutcome::Failed { .. }]
+        ));
+        assert!(progress
+            .iter()
+            .any(|snapshot| snapshot.bytes_read > 0 && snapshot.completed == 0));
+        let final_progress = progress.last().expect("final progress snapshot");
+        assert_eq!(final_progress.total_bytes, expected_total_bytes);
+        assert_eq!(final_progress.bytes_read, expected_total_bytes);
+        assert_eq!(final_progress.completed, 1);
+        assert_eq!(final_progress.total, 1);
+    }
+
+    #[test]
     fn validate_title_trims_whitespace() {
         assert_eq!(
             TextHistoryService::validate_title("  hello  ").unwrap(),
@@ -1296,6 +1872,79 @@ mod tests {
     }
 
     #[test]
+    fn entry_by_id_returns_the_requested_capture_or_none() {
+        let (context, service) = isolated_service();
+        let entry_id = insert_text(&context, "preview lookup");
+
+        let entry = service
+            .entry_by_id(&context, entry_id)
+            .expect("entry lookup")
+            .expect("existing capture");
+        assert_eq!(entry.id, entry_id);
+        assert_eq!(entry.content, "preview lookup");
+        assert!(service
+            .entry_by_id(&context, entry_id + 1)
+            .expect("missing entry lookup")
+            .is_none());
+    }
+
+    #[test]
+    fn recent_unassigned_filter_keeps_history_only_entries() {
+        let (context, service) = isolated_service();
+        let unassigned_id = insert_text(&context, "history only");
+        let assigned_id = insert_text(&context, "in a collection");
+        let collection_id = create_user_collection(&context, "Trabajo");
+        context
+            .organization()
+            .replace_entry_collections(&context, assigned_id, &[collection_id])
+            .expect("assign capture");
+
+        let filtered = service
+            .recent_entries_with_content_type_filter_and_unassigned(
+                &context,
+                None,
+                &[],
+                &SourceAppFilter::default(),
+                None,
+                true,
+                50,
+            )
+            .expect("unassigned recent entries");
+        assert_eq!(
+            filtered.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            vec![unassigned_id],
+        );
+        assert_eq!(
+            service
+                .available_content_types_with_unassigned(&context, None, true)
+                .expect("unassigned content types"),
+            vec![ContentType::Text],
+        );
+    }
+
+    fn insert_rich_text(context: &AppContext, content: &str) -> i64 {
+        let now = time::OffsetDateTime::UNIX_EPOCH;
+        let mut entry = clipvault_db::NewEntry::text(
+            content.to_string(),
+            clipvault_db::ContentType::Text,
+            content.len() as i64,
+            hash_content(content),
+            None,
+            now,
+            now,
+        );
+        entry.rich_text_hash = Some("test-rich-hash".to_string());
+        entry.rich_html_ref = Some("rich-text/test-rich-hash.html".to_string());
+        entry.rich_preview_ref = Some("rich-text/test-rich-hash.preview.html".to_string());
+        let mut db = context.database().lock();
+        let mut repo = clipvault_db::EntryRepository::new(db.connection_mut());
+        repo.insert_or_touch(entry)
+            .expect("insert rich text")
+            .record()
+            .id
+    }
+
+    #[test]
     fn create_manual_text_preserves_multiline_and_attaches_history_and_collection() {
         let (context, service) = isolated_service();
         let collection_id = create_user_collection(&context, "Manual local");
@@ -1358,6 +2007,46 @@ mod tests {
                 .expect("memberships")
         };
         assert!(memberships.contains(&collection_id));
+    }
+
+    #[test]
+    fn direct_text_capture_adds_selected_collection_for_new_and_duplicate_rows() {
+        let (context, _) = isolated_service();
+        let clipboard = Arc::new(crate::FakeClipboard::with_text("direct capture"));
+        let clock: Arc<dyn Clock> =
+            Arc::new(crate::FixedClock::new(time::OffsetDateTime::UNIX_EPOCH));
+        let service = TextHistoryService::new(
+            clipboard.clone() as Arc<dyn Clipboard>,
+            clock,
+            Arc::new(crate::FakeApplicationMetadataProvider::default())
+                as Arc<dyn clipvault_platform::ApplicationMetadataProvider>,
+        );
+        let first_collection_id = create_user_collection(&context, "First collection");
+        let second_collection_id = create_user_collection(&context, "Second collection");
+
+        let stored = service.record_text_with_collection(&context, None, Some(first_collection_id));
+        let HistoryOutcome::Stored { id } = stored else {
+            panic!("expected stored capture, got {stored:?}");
+        };
+
+        clipboard.set_text("direct capture");
+        assert_eq!(
+            service.record_text_with_collection(&context, None, Some(second_collection_id)),
+            HistoryOutcome::Duplicate { id }
+        );
+
+        let memberships = context
+            .organization()
+            .entry_collection_ids(&context, id)
+            .expect("capture memberships");
+        let history_id = context
+            .organization()
+            .history_collection_id(&context)
+            .expect("history collection");
+        assert!(memberships.contains(&history_id));
+        assert!(memberships.contains(&first_collection_id));
+        assert!(memberships.contains(&second_collection_id));
+        assert_eq!(memberships.len(), 3);
     }
 
     #[test]
@@ -1429,6 +2118,42 @@ mod tests {
             }
             other => panic!("expected Updated, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn convert_rich_text_to_plain_recomputes_text_metadata_and_clears_rich_fields() {
+        let (context, service) = isolated_service();
+        let id = insert_rich_text(&context, "styled note");
+        let edited = "https://example.com/edited";
+
+        let outcome = service
+            .convert_rich_text_to_plain(&context, id, edited.to_string())
+            .expect("convert rich text");
+        let UpdateTextHistoryOutcome::Updated { record } = outcome else {
+            panic!("expected Updated, got {outcome:?}");
+        };
+
+        assert_eq!(record.id, id);
+        assert_eq!(record.content, edited);
+        assert_eq!(record.content_hash, hash_content(edited));
+        assert_eq!(record.content_size, edited.len() as i64);
+        assert_eq!(record.content_type, ContentType::Url);
+        assert!(record.rich_text_hash.is_none());
+        assert!(record.rich_html_ref.is_none());
+        assert!(record.rich_rtf_ref.is_none());
+        assert!(record.rich_preview_ref.is_none());
+        assert!(record.rich_html_size.is_none());
+        assert!(record.rich_rtf_size.is_none());
+
+        let stored = {
+            let mut db = context.database().lock();
+            let repo = clipvault_db::EntryRepository::new(db.connection_mut());
+            repo.find_by_id(id)
+                .expect("read entry")
+                .expect("entry exists")
+        };
+        assert_eq!(stored.content, edited);
+        assert!(!stored.has_rich_text());
     }
 
     #[test]

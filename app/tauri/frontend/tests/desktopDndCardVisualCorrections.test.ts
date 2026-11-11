@@ -331,7 +331,7 @@ test("OrganizationSidebar collection row has a local CSS transition for the drag
   assert.match(source, /box-shadow\s+[\d.]+s\s+ease-out/);
   // The drag-over state must still change background, border and
   // shadow so the highlight is perceptible.
-  assert.match(source, /\.collection-row\.drop-target\.drag-over\s*\{[^}]*background:/s);
+  assert.match(source, /\.collection-row\.drop-target\.drag-over\s*\{[^}]*background(?:-color)?:/s);
   assert.match(source, /\.collection-row\.drop-target\.drag-over\s*\{[^}]*box-shadow:/s);
 });
 
@@ -368,7 +368,7 @@ test("OrganizationSidebar flags the system collection so the highlight never lie
   );
   assert.match(
     source,
-    /\.collection-row\.drop-target\.system-collection\.drag-over\s*\{[^}]*background:\s*transparent/s,
+    /\.collection-row\.drop-target\.system-collection\.drag-over\s*\{[^}]*background-color:\s*var\(--collection-row-tint/s,
   );
 });
 
@@ -1241,7 +1241,7 @@ test("OrganizationSidebar renders the collection delete icon at 18x18 (≈130% o
     source,
     /aria-label=\{\$t\("collections\.delete", \{ name: collection\.name \}\)\}/,
   );
-  assert.match(source, /\.icon-only\.danger\.delete-icon\s*\{[^}]*color:/s);
+  assert.match(source, /\.collection-action-menu-item\.danger\.delete-icon\s*\{[^}]*color:/s);
 });
 
 // ---------------------------------------------------------------------------

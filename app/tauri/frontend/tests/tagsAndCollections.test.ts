@@ -31,6 +31,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  collectionTagFilterIdsCommand,
   entryCollectionsCommand,
   entryTagsCommand,
   entryTagsSetCommand,
@@ -73,6 +74,35 @@ function makeTag(overrides: Partial<Tag> = {}): Tag {
     ...overrides,
   };
 }
+
+test("collectionTagFilterIdsCommand forwards the full-scope filter arguments", async () => {
+  const calls = installInvoke(async (cmd) => {
+    if (cmd === "clipvault_tag_filter_ids") return [3, 8];
+    throw new Error(`unexpected command ${cmd}`);
+  });
+
+  const collectionTagIds = await collectionTagFilterIdsCommand({
+    collectionId: 12,
+    unassignedOnly: false,
+  });
+  const unassignedTagIds = await collectionTagFilterIdsCommand({
+    collectionId: null,
+    unassignedOnly: true,
+  });
+
+  assert.deepEqual(collectionTagIds, [3, 8]);
+  assert.deepEqual(unassignedTagIds, [3, 8]);
+  assert.deepEqual(calls, [
+    {
+      cmd: "clipvault_tag_filter_ids",
+      args: { collectionId: 12, unassignedOnly: false },
+    },
+    {
+      cmd: "clipvault_tag_filter_ids",
+      args: { collectionId: null, unassignedOnly: true },
+    },
+  ]);
+});
 
 test("entryUpsertTagCommand forwards name and entryId verbatim", async () => {
   const calls = installInvoke(async (cmd) => {

@@ -2,6 +2,7 @@
 //! `clipvault-core` and forwards the typed outcome to the frontend.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[cfg(all(
     feature = "local-peer-pairing-tls",
@@ -14,19 +15,21 @@ use clipvault_core::{
 use clipvault_core::{
     ActiveAppDiagnostics, Capabilities, ClearOutcome, ClipboardAssetStore,
     CodeLanguageServiceError, ContextualDesktopSetupDismissals, CopyOutcome, DeleteOutcome,
-    DesktopSetupIntegration, HotkeySpec, IgnoredAppEntry, IgnoredAppError, LocalSettingsReader,
-    ManualTextCreationOutcome, PasteMode, PasteOutcome, PickAndAddOutcome, PlatformGuidance,
-    PlatformGuidanceId, PlatformSettingsTarget, RetentionOutcome, RetentionPolicy,
-    RetentionPreview, RichTextAssetStore, SetFavoriteResult, SetTitleOutcome, Settings,
-    SettingsNavigator, SettingsOpenOutcome, SettingsServiceError, SettingsUpdate,
-    TitleValidationError, UpdateTextHistoryOutcome, ValidationCode, ValidationError,
-    WatchTickOutcome,
+    DesktopSetupIntegration, HistoryOutcome, HotkeySpec, IgnoredAppEntry, IgnoredAppError,
+    ImageImportProgress, LocalSettingsReader, ManualTextCreationOutcome, PasteMode, PasteOutcome,
+    PdfExportService, PickAndAddOutcome, PlatformGuidance, PlatformGuidanceId,
+    PlatformSettingsTarget, RetentionOutcome, RetentionPolicy, RetentionPreview,
+    RichTextAssetStore, SetFavoriteResult, SetTitleOutcome, Settings, SettingsNavigator,
+    SettingsOpenOutcome, SettingsServiceError, SettingsUpdate, TitleValidationError,
+    UpdateTextHistoryOutcome, ValidationCode, ValidationError, WatchTickOutcome,
 };
 use clipvault_platform::{
     read_icon_bytes, read_source_app_icon_bytes, ActiveAppError, IconReadError,
 };
 use serde::Serialize;
+use tauri::WebviewWindow;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use tauri_plugin_dialog::DialogExt;
 use tracing::warn;
 
 use crate::state::SharedState;
@@ -57,9 +60,16 @@ fn sync_linux_picker_gnome_runtime_state(_state: &SharedState) {}
 /// surfaces as a frontend test failure instead of silently dropping
 /// the notification.
 pub const ORGANIZATION_UPDATED_EVENT: &str = "clipvault://organization-updated";
+pub const IMAGE_IMPORT_PROGRESS_EVENT: &str = "clipvault://image-import-progress";
+pub const PDF_EXPORT_GENERATION_COMPLETE_EVENT: &str = "clipvault://pdf-export-generation-complete";
 pub const CAPTURE_CONTROL_CHANGED_EVENT: &str = "clipvault://capture-control-changed";
 pub const CAPTURE_CONTROL_ERROR_EVENT: &str = "clipvault://capture-control-error";
 pub const LANGUAGE_CHANGED_EVENT: &str = "clipvault://language-changed";
+
+const IMAGE_IMPORT_PICKER_EXTENSIONS: &[&str] = &[
+    "png", "PNG", "jpg", "JPG", "jpeg", "JPEG", "webp", "WEBP", "gif", "GIF", "bmp", "BMP", "tif",
+    "TIF", "tiff", "TIFF",
+];
 
 #[derive(Debug, Clone, Serialize)]
 struct CaptureControlChanged {
@@ -155,6 +165,230 @@ impl CommandError {
             message: message.into(),
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfExportSaveResult {
+    Saved,
+    Cancelled,
+}
+
+/// Generate one PDF from the ordered local selection and save it through the
+/// native file dialog. The command only adapts the core service to Tauri's
+/// dialog and filesystem APIs; capture content never crosses the webview.
+#[tauri::command]
+pub async fn clipvault_export_pdf(
+    window: WebviewWindow,
+    state: State<'_, SharedState>,
+    entry_ids: Vec<i64>,
+    dialog_title: String,
+    filter_name: String,
+    suggested_file_name: String,
+) -> Result<PdfExportSaveResult, CommandError> {
+    let context = state.context();
+    let pdf = PdfExportService::generate(context, &entry_ids)
+        .map_err(|_| CommandError::new("pdf_export_error", "PDF export failed"))?;
+
+    let _ = window.emit_to(window.label(), PDF_EXPORT_GENERATION_COMPLETE_EVENT, ());
+
+    let Some(file_path) = window
+        .dialog()
+        .file()
+        .add_filter(filter_name, &["pdf"])
+        .set_title(dialog_title)
+        .set_file_name(suggested_file_name)
+        .blocking_save_file()
+    else {
+        return Ok(PdfExportSaveResult::Cancelled);
+    };
+    let mut path = file_path
+        .into_path()
+        .map_err(|_| CommandError::new("pdf_export_error", "PDF export failed"))?;
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+    {
+        path.set_extension("pdf");
+    }
+    std::fs::write(path, pdf)
+        .map_err(|_| CommandError::new("pdf_export_error", "PDF export failed"))?;
+
+    Ok(PdfExportSaveResult::Saved)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImageImportPreparation {
+    Cancelled,
+    Prepared {
+        session_id: u64,
+        files: Vec<crate::state::PendingImageImportFilePreview>,
+    },
+    Completed {
+        imported: usize,
+        duplicates: usize,
+        skipped: usize,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImageImportResult {
+    Completed {
+        imported: usize,
+        duplicates: usize,
+        skipped: usize,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ImageImportProgressEvent {
+    session_id: u64,
+    bytes_read: u64,
+    total_bytes: u64,
+    completed: usize,
+    total: usize,
+}
+
+/// Open the native multi-file picker and retain selected source paths in
+/// process-local state while the user reviews the final order. Only opaque IDs
+/// and basename labels cross the WebView boundary.
+#[tauri::command]
+pub async fn clipvault_prepare_image_import(
+    window: WebviewWindow,
+    state: State<'_, SharedState>,
+    dialog_title: String,
+    filter_name: String,
+) -> Result<ImageImportPreparation, CommandError> {
+    let Some(file_paths) = window
+        .dialog()
+        .file()
+        .add_filter(filter_name, IMAGE_IMPORT_PICKER_EXTENSIONS)
+        .set_title(dialog_title)
+        .blocking_pick_files()
+    else {
+        return Ok(ImageImportPreparation::Cancelled);
+    };
+
+    let mut skipped = 0;
+    let mut paths = Vec::with_capacity(file_paths.len());
+
+    for file_path in file_paths {
+        match file_path.into_path() {
+            Ok(path) => paths.push(path),
+            Err(_) => skipped += 1,
+        }
+    }
+
+    if paths.is_empty() {
+        return Ok(ImageImportPreparation::Completed {
+            imported: 0,
+            duplicates: 0,
+            skipped,
+        });
+    }
+    let preview = state.begin_image_import(paths, skipped);
+    Ok(ImageImportPreparation::Prepared {
+        session_id: preview.session_id,
+        files: preview.files,
+    })
+}
+
+/// Complete an image import in the order confirmed by the user. The core keeps
+/// processing forward and assigns timestamps that preserve that order in the
+/// History rail's newest-first ordering.
+#[tauri::command]
+pub async fn clipvault_complete_image_import(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, SharedState>,
+    session_id: u64,
+    ordered_file_ids: Vec<u32>,
+) -> Result<ImageImportResult, CommandError> {
+    let (paths, mut skipped) = state
+        .take_ordered_image_import(session_id, &ordered_file_ids)
+        .map_err(|error| match error {
+            crate::state::PendingImageImportError::MissingOrExpired => CommandError::new(
+                "image_import_session_expired",
+                "Image import selection expired",
+            ),
+            crate::state::PendingImageImportError::InvalidOrder => CommandError::new(
+                "image_import_invalid_order",
+                "Image import order is invalid",
+            ),
+        })?;
+
+    let context = state.context();
+    let collection_id = state.active_capture_collection_id();
+    let mut imported = 0;
+    let mut duplicates = 0;
+
+    let mut last_progress_event = Instant::now();
+    let mut last_emitted_bytes = 0_u64;
+    let mut last_emitted_completed = 0_usize;
+    for outcome in context
+        .history()
+        .import_image_files_in_order_with_byte_progress(
+            context,
+            &paths,
+            collection_id,
+            |progress: ImageImportProgress| {
+                let file_completed = progress.completed != last_emitted_completed;
+                let enough_bytes_read =
+                    progress.bytes_read.saturating_sub(last_emitted_bytes) >= 256 * 1024;
+                let throttle_elapsed = last_progress_event.elapsed() >= Duration::from_millis(100);
+                let batch_finished = progress.total > 0 && progress.completed >= progress.total;
+                if !file_completed && !enough_bytes_read && !throttle_elapsed && !batch_finished {
+                    return;
+                }
+
+                if let Err(error) = app.emit_to(
+                    window.label(),
+                    IMAGE_IMPORT_PROGRESS_EVENT,
+                    ImageImportProgressEvent {
+                        session_id,
+                        bytes_read: progress.bytes_read,
+                        total_bytes: progress.total_bytes,
+                        completed: progress.completed,
+                        total: progress.total,
+                    },
+                ) {
+                    warn!(error = %error, "failed to emit image import progress");
+                }
+                last_emitted_bytes = progress.bytes_read;
+                last_emitted_completed = progress.completed;
+                last_progress_event = Instant::now();
+            },
+        )
+    {
+        match outcome {
+            HistoryOutcome::Stored { .. } => imported += 1,
+            HistoryOutcome::Duplicate { .. } => duplicates += 1,
+            HistoryOutcome::Ignored | HistoryOutcome::Failed { .. } => skipped += 1,
+        }
+    }
+
+    if imported + duplicates > 0 {
+        emit_history_updated(&app);
+        emit_organization_updated(&app);
+    }
+
+    Ok(ImageImportResult::Completed {
+        imported,
+        duplicates,
+        skipped,
+    })
+}
+
+/// Release the pending source paths when the user cancels order review.
+#[tauri::command]
+pub async fn clipvault_cancel_image_import(
+    state: State<'_, SharedState>,
+    session_id: u64,
+) -> Result<(), CommandError> {
+    state.cancel_image_import(session_id);
+    Ok(())
 }
 
 impl From<clipvault_core::BootstrapError> for CommandError {
@@ -473,15 +707,25 @@ pub fn clipvault_capture_text(
 ) -> Result<CaptureResponse, CommandError> {
     let _ = source_app;
     let Some(outcome) = state.with_capture_enabled(|| {
+        let active_collection_id = state.active_capture_collection_id();
         let identifier = crate::bootstrap::resolved_source_identifier(state.context());
-        state
-            .context()
-            .history()
-            .record_text(state.context(), identifier.as_deref())
+        let history = state.context().history();
+        history.record_text_with_collection(
+            state.context(),
+            identifier.as_deref(),
+            active_collection_id,
+        )
     }) else {
         return Ok(CaptureResponse::paused());
     };
     Ok(CaptureResponse::from_outcome(outcome))
+}
+
+/// Set or clear the process-local collection destination used by clipboard
+/// captures. The core validates the collection again when assigning an entry.
+#[tauri::command]
+pub fn clipvault_capture_collection_set(state: State<'_, SharedState>, collection_id: Option<i64>) {
+    state.set_active_capture_collection_id(collection_id);
 }
 
 #[tauri::command]
@@ -498,6 +742,22 @@ pub fn clipvault_recent_entries(
     Ok(records)
 }
 
+/// Load one local capture for the standalone image-preview window.
+#[tauri::command]
+pub fn clipvault_entry_by_id(
+    state: State<'_, SharedState>,
+    entry_id: i64,
+) -> Result<Option<clipvault_db::EntryRecord>, CommandError> {
+    if entry_id <= 0 {
+        return Ok(None);
+    }
+    state
+        .context()
+        .history()
+        .entry_by_id(state.context(), entry_id)
+        .map_err(|err| CommandError::new("history_error", err.to_string()))
+}
+
 /// Recent entries restricted by collection and/or tags. The arguments
 /// mirror the search filter shape: `collection_id == None` and an
 /// empty `tag_ids` reproduce the unfiltered "Historial" view. The
@@ -510,10 +770,12 @@ pub fn clipvault_recent_entries(
 pub fn clipvault_recent_entries_filtered(
     state: State<'_, SharedState>,
     limit: Option<usize>,
+    offset: Option<usize>,
     collection_id: Option<i64>,
     tag_ids: Option<Vec<i64>>,
     source_app: Option<clipvault_core::SourceAppFilter>,
     content_type: Option<clipvault_db::ContentType>,
+    unassigned_only: Option<bool>,
 ) -> Result<Vec<clipvault_db::EntryRecord>, CommandError> {
     let limit = limit.unwrap_or(50).min(500);
     let tag_ids = tag_ids.unwrap_or_default();
@@ -521,16 +783,38 @@ pub fn clipvault_recent_entries_filtered(
     let records = state
         .context()
         .history()
-        .recent_entries_with_content_type_filter(
+        .recent_entries_page_with_content_type_filter_and_unassigned(
             state.context(),
             collection_id,
             &tag_ids,
             &source_app,
             content_type,
+            unassigned_only.unwrap_or(false),
             limit,
+            offset.unwrap_or(0),
         )
         .map_err(|err| CommandError::new("history_error", err.to_string()))?;
     Ok(records)
+}
+
+/// List the supported capture types present in Historial or one local
+/// collection. This metadata-only query is not limited to the current rail
+/// page, so the toolbar can offer every type available in the active scope.
+#[tauri::command]
+pub fn clipvault_content_types(
+    state: State<'_, SharedState>,
+    collection_id: Option<i64>,
+    unassigned_only: Option<bool>,
+) -> Result<Vec<clipvault_db::ContentType>, CommandError> {
+    state
+        .context()
+        .history()
+        .available_content_types_with_unassigned(
+            state.context(),
+            collection_id,
+            unassigned_only.unwrap_or(false),
+        )
+        .map_err(|err| CommandError::new("history_error", err.to_string()))
 }
 
 /// Response of [`clipvault_search_entries`]. Mirrors the service
@@ -557,10 +841,12 @@ pub fn clipvault_search_entries(
     state: State<'_, SharedState>,
     query: String,
     limit: Option<usize>,
+    offset: Option<usize>,
     collection_id: Option<i64>,
     tag_ids: Option<Vec<i64>>,
     source_app: Option<clipvault_core::SourceAppFilter>,
     content_type: Option<clipvault_db::ContentType>,
+    unassigned_only: Option<bool>,
 ) -> Result<SearchResponse, CommandError> {
     let limit = limit.unwrap_or(clipvault_core::SEARCH_DEFAULT_LIMIT);
     let engine_query = clipvault_core::SearchQuery { text: query, limit };
@@ -572,7 +858,14 @@ pub fn clipvault_search_entries(
     let outcome = state
         .context()
         .search()
-        .search_with_content_type_filter(state.context(), &engine_query, &filter, content_type)
+        .search_with_content_type_filter_and_unassigned_page(
+            state.context(),
+            &engine_query,
+            &filter,
+            content_type,
+            unassigned_only.unwrap_or(false),
+            offset.unwrap_or(0),
+        )
         .map_err(|err| CommandError::new("history_error", err.to_string()))?;
     Ok(SearchResponse {
         note: outcome.note,
@@ -1099,6 +1392,7 @@ impl ValidationCommandError {
             ValidationCode::InvalidPeerDisplayName => "validation_error",
             ValidationCode::PeerDisplayNameTooLong => "validation_error",
             ValidationCode::InvalidLanguage => "validation_error",
+            ValidationCode::InvalidPreviewPageSize => "validation_error",
         };
         Self {
             kind,
@@ -1871,6 +2165,47 @@ pub fn clipvault_update_text_entry_for_test(
     Ok(outcome.into())
 }
 
+/// Convert a rich-text history entry to plain text in place. This
+/// separate command makes the user's explicit conversion intent
+/// visible to the backend, which validates the live row before
+/// clearing its rich references. Only a successful commit emits the
+/// existing metadata-only history update event.
+#[tauri::command]
+pub fn clipvault_convert_rich_text_to_plain(
+    state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
+    entry_id: i64,
+    content: String,
+) -> Result<UpdateTextEntryResponse, CommandError> {
+    let outcome = state
+        .context()
+        .history()
+        .convert_rich_text_to_plain(state.context(), entry_id, content)
+        .map_err(|err| CommandError::new("history_error", err.to_string()))?;
+    if matches!(outcome, UpdateTextHistoryOutcome::Updated { .. }) {
+        if let Err(error) = handle.emit(crate::bootstrap::HISTORY_UPDATED_EVENT, ()) {
+            warn!(error = %error, "failed to emit history-updated event");
+        }
+    }
+    Ok(outcome.into())
+}
+
+/// Test-friendly handle for the rich-to-plain conversion command.
+/// It exercises the same service validation without a Tauri runtime
+/// and intentionally does not emit the shell refresh event.
+#[allow(dead_code)]
+pub fn clipvault_convert_rich_text_to_plain_for_test(
+    context: &clipvault_core::AppContext,
+    entry_id: i64,
+    content: String,
+) -> Result<UpdateTextEntryResponse, CommandError> {
+    let outcome = context
+        .history()
+        .convert_rich_text_to_plain(context, entry_id, content)
+        .map_err(|err| CommandError::new("history_error", err.to_string()))?;
+    Ok(outcome.into())
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CreateManualTextResponse {
@@ -2055,6 +2390,40 @@ pub fn clipvault_clipboard_asset(
     read_clipboard_asset(&data_dir, &asset_ref)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RotateImageCaptureResponse {
+    Updated { entry: clipvault_db::EntryRecord },
+    NotFound,
+    NotImage,
+}
+
+/// Persist a quarter-turn rotation for one local image capture. The core owns
+/// image decoding, transformation, asset storage and the conditional SQLite
+/// update; this command only forwards the typed result and refresh event.
+#[tauri::command]
+pub fn clipvault_rotate_image_capture(
+    state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
+    entry_id: i64,
+    direction: clipvault_core::ImageRotationDirection,
+) -> Result<RotateImageCaptureResponse, CommandError> {
+    let context = state.context();
+    let outcome = context
+        .history()
+        .rotate_image_capture(context, entry_id, direction)
+        .map_err(|_| CommandError::new("image_rotation_error", "image rotation failed"))?;
+    let response = match outcome {
+        clipvault_core::RotateImageOutcome::Updated { record } => {
+            emit_history_updated(&handle);
+            RotateImageCaptureResponse::Updated { entry: record }
+        }
+        clipvault_core::RotateImageOutcome::NotFound => RotateImageCaptureResponse::NotFound,
+        clipvault_core::RotateImageOutcome::NotImage => RotateImageCaptureResponse::NotImage,
+    };
+    Ok(response)
+}
+
 /// Test-friendly handle for [`clipvault_clipboard_asset`]. Lets the
 /// integration suite drive the exact validation pipeline the command
 /// runs by passing `data_dir` explicitly instead of reaching into the
@@ -2136,6 +2505,9 @@ fn organization_command_error(error: OrganizationServiceError) -> CommandError {
             clipvault_db::OrganizationError::TagNameTooLong(_) => "tag_name_too_long",
             clipvault_db::OrganizationError::TagNameTaken(_) => "tag_name_taken",
             clipvault_db::OrganizationError::CollectionNotFound(_) => "collection_not_found",
+            clipvault_db::OrganizationError::InvalidCollectionParent(_) => {
+                "invalid_collection_parent"
+            }
             clipvault_db::OrganizationError::TagNotFound(_) => "tag_not_found",
             clipvault_db::OrganizationError::EntryNotFound(_) => "entry_not_found",
             clipvault_db::OrganizationError::SystemCollectionProtected(_) => {
@@ -2176,6 +2548,22 @@ pub fn clipvault_collections_create(
         .context()
         .organization()
         .create_collection(state.context(), &name)
+        .map_err(organization_command_error)?;
+    emit_organization_updated(&handle);
+    Ok(collection)
+}
+
+#[tauri::command]
+pub fn clipvault_collections_create_subcollection(
+    state: State<'_, SharedState>,
+    handle: AppHandle<tauri::Wry>,
+    parent_id: i64,
+    name: String,
+) -> Result<Collection, CommandError> {
+    let collection = state
+        .context()
+        .organization()
+        .create_subcollection(state.context(), parent_id, &name)
         .map_err(organization_command_error)?;
     emit_organization_updated(&handle);
     Ok(collection)
@@ -2289,7 +2677,7 @@ pub fn clipvault_collections_clear_preview(
     state
         .context()
         .management()
-        .preview_collection_deletion(state.context(), collection_id)
+        .preview_collection_clear(state.context(), collection_id)
         .map_err(management_command_error)
 }
 
@@ -2387,6 +2775,20 @@ pub fn clipvault_entry_tags(
         .context()
         .organization()
         .entry_tag_ids(state.context(), entry_id)
+        .map_err(organization_command_error)
+}
+
+#[tauri::command]
+pub fn clipvault_tag_filter_ids(
+    state: State<'_, SharedState>,
+    collection_id: Option<i64>,
+    unassigned_only: bool,
+) -> Result<Vec<i64>, CommandError> {
+    // Read-only aggregation across the full collection scope; never emits.
+    state
+        .context()
+        .organization()
+        .tag_ids_in_scope(state.context(), collection_id, unassigned_only)
         .map_err(organization_command_error)
 }
 
@@ -2574,6 +2976,17 @@ pub fn clipvault_code_language_set_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_import_picker_includes_lowercase_and_uppercase_extensions() {
+        assert_eq!(
+            IMAGE_IMPORT_PICKER_EXTENSIONS,
+            &[
+                "png", "PNG", "jpg", "JPG", "jpeg", "JPEG", "webp", "WEBP", "gif", "GIF", "bmp",
+                "BMP", "tif", "TIF", "tiff", "TIFF",
+            ],
+        );
+    }
 
     /// Pin the metadata-only event channel identifier so an accidental
     /// rename surfaces as a unit-test failure on the backend instead
